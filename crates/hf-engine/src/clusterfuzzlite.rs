@@ -1,4 +1,4 @@
-//! ClusterFuzzLite engine adapter stub.
+//! `ClusterFuzzLite` engine adapter stub.
 
 use async_trait::async_trait;
 use hf_core::coverage::CoverageReport;
@@ -9,7 +9,7 @@ use hf_core::harness::Harness;
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetLanguage};
 
-/// ClusterFuzzLite adapter (stub).
+/// `ClusterFuzzLite` adapter (stub).
 pub struct ClusterFuzzLite;
 
 #[async_trait]

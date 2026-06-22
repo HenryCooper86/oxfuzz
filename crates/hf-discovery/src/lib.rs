@@ -2,8 +2,8 @@
 //!
 //! See `docs/design/target-discovery-design.md`.
 
-#![allow(dead_code)]
-
+pub mod ranking;
 pub mod scanner;
 
+pub use ranking::rank;
 pub use scanner::discover;

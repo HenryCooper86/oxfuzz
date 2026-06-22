@@ -2,6 +2,10 @@
 //!
 //! Implements the `LlmProvider` and `ProviderPool` traits from `hf-core`.
 
+pub mod http;
+pub mod openai_compat;
 pub mod pool;
 
+pub use http::HttpSender;
+pub use openai_compat::{OpenAiCompatProvider, ProviderConfig};
 pub use pool::DefaultProviderPool;

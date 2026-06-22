@@ -1,7 +1,8 @@
-//! hf-skills: Skill registry, versioning, experience capture
+//! hf-skills: Skill registry, versioning, experience capture.
 //!
-//! Status: scaffold. Implementation pending per TODO.md.
+//! See `docs/standards/SKILLS_STANDARD.md` (to be written) and the bundled
+//! skills in `skills/`.
 
-#![allow(dead_code)]
+pub mod registry;
 
-pub mod stub;
+pub use registry::FileSkillRegistry;

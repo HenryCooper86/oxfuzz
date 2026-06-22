@@ -10,7 +10,7 @@ pub struct ShellExec;
 
 #[async_trait]
 impl Tool for ShellExec {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "ShellExec"
     }
 

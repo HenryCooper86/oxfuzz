@@ -1,0 +1,240 @@
+//! Tests for harness generation.
+
+use hf_core::engine::EngineKind;
+use hf_core::error::ClassifiedError;
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
+use hf_core::provider::{LlmProvider, LlmResponse};
+use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
+use hf_core::target::{
+    InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+};
+use hf_core::types::{Message, TokenUsage};
+use hf_harness::{compile, draft, smoke_fuzz};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+struct MockLlm {
+    response: String,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for MockLlm {
+    fn id(&self) -> &str {
+        "mock"
+    }
+    async fn complete(&self, _messages: Vec<Message>) -> Result<LlmResponse, ClassifiedError> {
+        Ok(LlmResponse {
+            content: self.response.clone(),
+            usage: TokenUsage::default(),
+            model: "mock".to_owned(),
+        })
+    }
+    async fn stream(
+        &self,
+        _messages: Vec<Message>,
+    ) -> Result<
+        Box<dyn futures::Stream<Item = Result<String, ClassifiedError>> + Send + Unpin>,
+        ClassifiedError,
+    > {
+        Err(ClassifiedError::Provider("no stream".to_owned()))
+    }
+}
+
+struct MockRuntime {
+    exit_code: i32,
+    stdout: String,
+}
+
+#[async_trait::async_trait]
+impl RuntimeAdapter for MockRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        Ok(CommandResult {
+            exit_code: self.exit_code,
+            stdout: self.stdout.clone(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+        })
+    }
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+fn target() -> TargetCandidate {
+    TargetCandidate {
+        id: Uuid::new_v4(),
+        project_root: PathBuf::from("/p"),
+        language: TargetLanguage::C,
+        symbol: "parse_value".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: PathBuf::from("src/json.c"),
+            line: 42,
+            col: 1,
+        },
+        signature: Some("int parse_value(const char *buf, size_t len);".to_owned()),
+        input_surface: InputSurface::Bytes,
+        complexity: 10,
+        fit_score: 0.9,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn draft_extracts_code_block_from_llm_response() {
+    let llm = MockLlm {
+        response: r#"Here is the harness:
+```c
+#include <stdint.h>
+#include <stddef.h>
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    parse_value((const char *)data, size, 0);
+    return 0;
+}
+```
+That's it."#
+            .to_owned(),
+    };
+    let draft = draft(&target(), EngineKind::LibFuzzer, Box::new(llm))
+        .await
+        .expect("draft should succeed");
+    assert!(draft.source.contains("LLVMFuzzerTestOneInput"));
+    assert!(draft.source.contains("parse_value"));
+    assert!(
+        !draft.source.contains("```"),
+        "fenced code block markers should be stripped"
+    );
+}
+
+#[tokio::test]
+async fn compile_transitions_status_on_success() {
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: String::new(),
+    };
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: "int LLVMFuzzerTestOneInput() {}".to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec!["-fsanitize=fuzzer".to_owned()],
+            output: PathBuf::from("fuzz_parse_value"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Draft,
+        smoke_run: None,
+    };
+    let compiled = compile(harness, &rt, &PathBuf::from("/work"))
+        .await
+        .expect("compile should succeed");
+    assert_eq!(compiled.status, HarnessStatus::Compiled);
+}
+
+#[tokio::test]
+async fn compile_returns_error_on_failure() {
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: String::new(),
+    };
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: "bad code".to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Draft,
+        smoke_run: None,
+    };
+    let result = compile(harness, &rt, &PathBuf::from("/work")).await;
+    assert!(result.is_err(), "compile should fail on exit code 1");
+}
+
+#[tokio::test]
+async fn smoke_fuzz_passes_with_positive_execs() {
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: "INFO: Loaded 1 module   (1): 1 inline 8-bit counters.\nINFO: 1024 edges covered.\nstats: 5000 execs/sec\n".to_owned(),
+    };
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let smoked = smoke_fuzz(harness, &rt, &PathBuf::from("/work"))
+        .await
+        .expect("smoke should succeed");
+    assert_eq!(smoked.status, HarnessStatus::SmokePassed);
+    let sr = smoked.smoke_run.expect("smoke run summary should be set");
+    assert!(sr.passed);
+    assert!(sr.execs_per_sec > 0.0);
+}
+
+#[tokio::test]
+async fn smoke_fuzz_fails_on_zero_execs() {
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: "no execs here\n".to_owned(),
+    };
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let result = smoke_fuzz(harness, &rt, &PathBuf::from("/work")).await;
+    assert!(result.is_err(), "smoke should fail with 0 execs/sec");
+}
+
+#[test]
+fn build_command_for_libfuzzer_has_fuzzer_flag() {
+    let cmd =
+        hf_harness::build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_parse_value");
+    assert!(cmd.args.contains(&"-fsanitize=fuzzer".to_owned()));
+}
+
+#[test]
+fn build_command_for_afl_uses_afl_compiler() {
+    let cmd = hf_harness::build_command(
+        EngineKind::AflPlusPlus,
+        TargetLanguage::C,
+        "fuzz_parse_value",
+    );
+    assert!(cmd.compiler.contains("afl"));
+}
