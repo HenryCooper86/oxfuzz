@@ -1,0 +1,51 @@
+# ==============================================================================
+# hobot_fuzz -- LLM Provider Pool Configuration
+# ==============================================================================
+
+# Freeze duration before retrying a failed provider (seconds).
+default_freeze_duration_secs = 60
+max_freeze_duration_secs = 3600
+health_check_interval_secs = 30
+
+# ==============================================================================
+# Provider Definitions
+#
+# Same format as y-agent. Set `api_key` directly or use `api_key_env`.
+# ==============================================================================
+
+[[providers]]
+id = "openai-main"
+provider_type = "openai"
+model = "gpt-4o"
+tags = ["reasoning", "general", "code"]
+max_concurrency = 3
+context_window = 128000
+# api_key_env = "OPENAI_API_KEY"
+
+# [[providers]]
+# id = "anthropic-main"
+# provider_type = "anthropic"
+# model = "claude-3-5-sonnet-20241022"
+# tags = ["reasoning", "code"]
+# max_concurrency = 3
+# context_window = 200000
+# api_key_env = "ANTHROPIC_API_KEY"
+
+# [[providers]]
+# id = "deepseek-main"
+# provider_type = "deepseek"
+# model = "deepseek-chat"
+# tags = ["reasoning", "code", "general"]
+# max_concurrency = 3
+# context_window = 65536
+# api_key_env = "DEEPSEEK_API_KEY"
+# base_url = "https://api.deepseek.com/v1"
+
+# [[providers]]
+# id = "ollama-local"
+# provider_type = "ollama"
+# model = "llama3.1:8b"
+# tags = ["local", "fast", "free"]
+# max_concurrency = 3
+# context_window = 32768
+# api_key = "not-needed"

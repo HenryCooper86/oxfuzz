@@ -1,0 +1,24 @@
+[package]
+name = "hf-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "REST API + SSE streaming"
+
+[dependencies]
+hf-core = { workspace = true }
+hf-service = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+[lints]
+workspace = true

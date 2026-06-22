@@ -1,0 +1,9 @@
+# ==============================================================================
+# hobot_fuzz -- Storage Configuration
+# ==============================================================================
+
+# SQLite database path. Override with HF_DB_PATH.
+db_path = "data/hobot_fuzz.db"
+
+# Transcript directory.
+transcript_dir = "data/transcripts"

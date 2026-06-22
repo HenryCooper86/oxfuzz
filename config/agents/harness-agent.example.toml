@@ -1,0 +1,13 @@
+# ==============================================================================
+# hobot_fuzz -- Harness Agent
+# ==============================================================================
+# Sub-agent that owns harness draft/iterate. See AGENT_AUTONOMY.md.
+
+[agent]
+id = "harness-agent"
+model_tags = ["reasoning", "code"]
+autonomy = "Draft"
+max_iterations = 3
+
+[agent.tools]
+enabled = ["FileRead", "FileWrite", "HarnessBuild", "ShellExec", "KnowledgeSearch"]

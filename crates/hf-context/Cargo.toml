@@ -1,0 +1,20 @@
+[package]
+name = "hf-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Token-budget-aware prompt assembly pipeline"
+
+[dependencies]
+hf-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

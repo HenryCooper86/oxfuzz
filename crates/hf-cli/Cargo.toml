@@ -1,0 +1,33 @@
+[package]
+name = "hf-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI + TUI for hobot_fuzz"
+
+[[bin]]
+name = "hobot-fuzz"
+path = "src/main.rs"
+
+[dependencies]
+hf-core = { workspace = true }
+hf-service = { workspace = true }
+hf-provider = { workspace = true }
+hf-discovery = { workspace = true }
+hf-harness = { workspace = true }
+hf-engine = { workspace = true }
+hf-crash = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

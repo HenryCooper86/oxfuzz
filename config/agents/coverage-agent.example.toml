@@ -1,0 +1,13 @@
+# ==============================================================================
+# hobot_fuzz -- Coverage Agent
+# ==============================================================================
+# Sub-agent that owns stagnation detection and harness proposals.
+
+[agent]
+id = "coverage-agent"
+model_tags = ["reasoning"]
+autonomy = "Assist"
+max_iterations = 3
+
+[agent.tools]
+enabled = ["FileRead", "KnowledgeSearch"]

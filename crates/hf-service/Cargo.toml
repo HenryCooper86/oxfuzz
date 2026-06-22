@@ -1,0 +1,35 @@
+[package]
+name = "hf-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Business logic orchestrating discovery, harness, engine, crash, corpus, coverage"
+
+[dependencies]
+hf-core = { workspace = true }
+hf-discovery = { workspace = true }
+hf-harness = { workspace = true }
+hf-engine = { workspace = true }
+hf-crash = { workspace = true }
+hf-corpus = { workspace = true }
+hf-coverage = { workspace = true }
+hf-provider = { workspace = true }
+hf-session = { workspace = true }
+hf-storage = { workspace = true }
+hf-runtime = { workspace = true }
+hf-knowledge = { workspace = true }
+hf-skills = { workspace = true }
+hf-guardrails = { workspace = true }
+hf-journal = { workspace = true }
+hf-tools = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

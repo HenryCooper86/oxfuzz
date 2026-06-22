@@ -1,0 +1,22 @@
+[package]
+name = "hf-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Target discovery: static analysis, semantic ranking, Target Inventory"
+
+[dependencies]
+hf-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+
+[lints]
+workspace = true

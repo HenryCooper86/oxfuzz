@@ -1,0 +1,22 @@
+[package]
+name = "hf-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLM provider pool with tag routing and failover"
+
+[dependencies]
+hf-core = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+
+[lints]
+workspace = true
