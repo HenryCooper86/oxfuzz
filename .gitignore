@@ -1,0 +1,78 @@
+### General OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+*.bak
+*.orig
+.idea/
+.vscode/
+*.code-workspace
+
+### Git / Patch helpers
+*.patch
+*.rej
+
+### Docs
+docs/plan
+docs/research
+*.pdf
+
+### Rust / Cargo
+target/
+debug/
+**/*.rs.bk
+
+### Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+### Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+### Build / Dist Artifacts
+dist/
+build/
+out/
+coverage/
+
+### Environment / Secrets
+.env
+.env.*
+!.env.example
+
+### Tooling / Misc
+.cache/
+.direnv/
+.tox/
+.cursor/
+.claude/
+.opencode/
+.turbo/
+
+### Fuzzing runtime artifacts
+corpus/
+crashes/
+fuzz_workspace/
+*.fuzz
+*.crash
+work/
+output/
+queue/
+fuzz-out/
+
+### Runtime Data
+data/
+*.db
+*.db-shm
+*.db-wal

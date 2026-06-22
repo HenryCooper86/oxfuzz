@@ -1,0 +1,166 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hf-core",
+    "crates/hf-provider",
+    "crates/hf-session",
+    "crates/hf-context",
+    "crates/hf-hooks",
+    "crates/hf-tools",
+    "crates/hf-mcp",
+    "crates/hf-skills",
+    "crates/hf-prompt",
+    "crates/hf-storage",
+    "crates/hf-runtime",
+    "crates/hf-scheduler",
+    "crates/hf-knowledge",
+    "crates/hf-diagnostics",
+    "crates/hf-guardrails",
+    "crates/hf-journal",
+    "crates/hf-discovery",
+    "crates/hf-harness",
+    "crates/hf-engine",
+    "crates/hf-crash",
+    "crates/hf-corpus",
+    "crates/hf-coverage",
+    "crates/hf-service",
+    "crates/hf-agent",
+    "crates/hf-bot",
+    "crates/hf-web",
+    "crates/hf-cli",
+    "crates/hf-test-utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hobot/hobot_fuzz"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Identifiers
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Hashing / Crypto
+sha2 = "0.10"
+hex = "0.4"
+regex = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+croner = "2"
+
+# Database
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "sqlite",
+    "uuid",
+    "chrono",
+    "json",
+] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "socks"] }
+
+# Web API
+axum = { version = "0.8", features = ["multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# Unix process management
+nix = { version = "0.29", features = ["signal", "process"] }
+
+# Encoding
+base64 = "0.22"
+
+# JSON Schema validation
+jsonschema = "0.28"
+
+# File search
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+dialoguer = "0.11"
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3"
+
+# Markdown rendering
+pulldown-cmark = { version = "0.12", default-features = false, features = ["simd"] }
+
+# TUI
+ratatui = "0.28"
+crossterm = "0.28"
+tui-textarea = "0.6"
+unicode-width = "0.2"
+
+# Internal crates
+hf-core = { path = "crates/hf-core" }
+hf-provider = { path = "crates/hf-provider" }
+hf-session = { path = "crates/hf-session" }
+hf-context = { path = "crates/hf-context" }
+hf-hooks = { path = "crates/hf-hooks" }
+hf-tools = { path = "crates/hf-tools" }
+hf-mcp = { path = "crates/hf-mcp" }
+hf-skills = { path = "crates/hf-skills" }
+hf-prompt = { path = "crates/hf-prompt" }
+hf-storage = { path = "crates/hf-storage" }
+hf-runtime = { path = "crates/hf-runtime" }
+hf-scheduler = { path = "crates/hf-scheduler" }
+hf-knowledge = { path = "crates/hf-knowledge" }
+hf-diagnostics = { path = "crates/hf-diagnostics" }
+hf-guardrails = { path = "crates/hf-guardrails" }
+hf-journal = { path = "crates/hf-journal" }
+hf-discovery = { path = "crates/hf-discovery" }
+hf-harness = { path = "crates/hf-harness" }
+hf-engine = { path = "crates/hf-engine" }
+hf-crash = { path = "crates/hf-crash" }
+hf-corpus = { path = "crates/hf-corpus" }
+hf-coverage = { path = "crates/hf-coverage" }
+hf-service = { path = "crates/hf-service" }
+hf-agent = { path = "crates/hf-agent" }
+hf-bot = { path = "crates/hf-bot" }
+hf-web = { path = "crates/hf-web" }
+hf-cli = { path = "crates/hf-cli" }
+hf-test-utils = { path = "crates/hf-test-utils" }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+struct_field_names = "allow"
+too_many_arguments = "allow"
+undocumented_unsafe_blocks = "deny"
+
+[workspace.lints.rust]
+unused_assignments = "allow"

@@ -1,0 +1,21 @@
+[package]
+name = "hf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core abstractions and traits for hobot_fuzz"
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

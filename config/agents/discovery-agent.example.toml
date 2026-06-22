@@ -1,0 +1,13 @@
+# ==============================================================================
+# hobot_fuzz -- Discovery Agent
+# ==============================================================================
+# Sub-agent that owns target ranking. See AGENT_AUTONOMY.md.
+
+[agent]
+id = "discovery-agent"
+model_tags = ["reasoning", "code"]
+autonomy = "Assist"
+max_iterations = 5
+
+[agent.tools]
+enabled = ["ProjectScan", "FileRead", "KnowledgeSearch", "ShellExec"]

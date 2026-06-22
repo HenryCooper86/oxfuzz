@@ -1,0 +1,19 @@
+[skill]
+name = "harness-author"
+version = "0.1.0"
+description = "Write a fuzzing harness for a target"
+author = "hobot_fuzz"
+source_format = "markdown"
+
+[skill.classification]
+type = "llm_reasoning"
+domain = ["fuzzing", "harness-generation", "code-generation"]
+atomic = true
+
+[skill.constraints]
+max_input_tokens = 16000
+max_output_tokens = 4000
+
+[skill.root]
+path = "root.md"
+token_count = 520

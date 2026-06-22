@@ -1,0 +1,46 @@
+# ==============================================================================
+# hobot_fuzz -- Fuzzing Engine Registry
+# ==============================================================================
+#
+# Each [[engines]] entry defines how to invoke one fuzzing engine.
+# Adapters live in crates/hf-engine.
+# ==============================================================================
+
+[[engines]]
+kind = "afl++"
+enabled = true
+# Path to afl-fuzz. Auto-detected if unset.
+# fuzz_bin = "/usr/bin/afl-fuzz"
+# compiler = "afl-clang-fast"
+default_duration_secs = 3600
+default_mem_mb = 2048
+default_cpus = 1
+supports = ["c", "cpp"]
+
+[[engines]]
+kind = "honggfuzz"
+enabled = true
+# fuzz_bin = "/usr/bin/honggfuzz"
+# compiler = "hfuzz-cc"
+default_duration_secs = 3600
+default_mem_mb = 2048
+default_cpus = 1
+supports = ["c", "cpp"]
+
+[[engines]]
+kind = "libfuzzer"
+enabled = true
+# Uses clang -fsanitize=fuzzer; no separate fuzz_bin.
+default_duration_secs = 3600
+default_mem_mb = 2048
+default_cpus = 1
+supports = ["c", "cpp", "rust"]
+
+[[engines]]
+kind = "clusterfuzzlite"
+enabled = false
+# path = "/path/to/ClusterFuzzLite"
+default_duration_secs = 3600
+default_mem_mb = 2048
+default_cpus = 1
+supports = ["c", "cpp", "rust", "go", "python"]

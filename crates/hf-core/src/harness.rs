@@ -1,0 +1,60 @@
+//! Fuzzing harness model.
+//!
+//! See `docs/standards/HARNESS_STANDARD.md`.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use uuid::Uuid;
+
+use crate::engine::EngineKind;
+use crate::target::{Sanitizer, TargetLanguage};
+
+/// The status of a harness in the generation pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HarnessStatus {
+    Draft,
+    Compiled,
+    SmokePassed,
+    Promoted,
+    Failed,
+}
+
+/// A build command for a harness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildCommand {
+    pub compiler: String,
+    pub args: Vec<String>,
+    pub output: PathBuf,
+}
+
+/// Summary of a smoke fuzz run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmokeRunSummary {
+    pub duration_secs: u64,
+    pub execs_per_sec: f64,
+    pub crashes: u32,
+    pub passed: bool,
+}
+
+/// A generated fuzzing harness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Harness {
+    pub id: Uuid,
+    pub target_id: Uuid,
+    pub engine: EngineKind,
+    pub source: String,
+    pub language: TargetLanguage,
+    pub build_cmd: BuildCommand,
+    pub sanitizer: Sanitizer,
+    pub status: HarnessStatus,
+    pub smoke_run: Option<SmokeRunSummary>,
+}
+
+/// An in-progress harness draft before compilation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessDraft {
+    pub target_id: Uuid,
+    pub engine: EngineKind,
+    pub source: String,
+    pub rationale: String,
+}
