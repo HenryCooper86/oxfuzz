@@ -1,7 +1,8 @@
-//! hf-prompt: Prompt templates for discovery, harness, triage
+//! hf-prompt: Prompt templates for discovery, harness, and triage.
 //!
-//! Status: scaffold. Implementation pending per TODO.md.
+//! Templates are embedded in code for now; loading from TOML is a future
+//! enhancement (see `config/prompts/prompts.example.toml`).
 
-#![allow(dead_code)]
+pub mod render;
 
-pub mod stub;
+pub use render::{render_discovery_prompt, render_harness_prompt};

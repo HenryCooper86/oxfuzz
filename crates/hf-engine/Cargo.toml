@@ -16,5 +16,10 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+futures = { workspace = true }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

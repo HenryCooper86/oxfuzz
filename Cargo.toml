@@ -105,6 +105,14 @@ grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
 
+# Parsing (target discovery)
+tree-sitter = "0.26"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+
+# Docker (sandbox runtime)
+bollard = "0.21"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

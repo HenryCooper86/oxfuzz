@@ -1,4 +1,4 @@
-//! hf-storage: SQLite storage and transcript persistence
+//! hf-storage: `SQLite` storage and transcript persistence
 //!
 //! Status: scaffold. Implementation pending per TODO.md.
 

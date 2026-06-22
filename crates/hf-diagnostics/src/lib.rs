@@ -1,7 +1,9 @@
-//! hf-diagnostics: Span-based tracing, cost intelligence, run metrics
+//! hf-diagnostics: Cost intelligence and run replay.
 //!
-//! Status: scaffold. Implementation pending per TODO.md.
+//! See `docs/design/` and AGENTS.md section on observability.
 
-#![allow(dead_code)]
+pub mod cost;
+pub mod journal;
 
-pub mod stub;
+pub use cost::{CostSummary, CostTracker, ProviderCost};
+pub use journal::{RunEvent, RunJournal};

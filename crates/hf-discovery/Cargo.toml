@@ -7,6 +7,8 @@ description = "Target discovery: static analysis, semantic ranking, Target Inven
 
 [dependencies]
 hf-core = { workspace = true }
+hf-provider = { workspace = true }
+hf-prompt = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -17,6 +19,13 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 ignore = { workspace = true }
 globset = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-c = { workspace = true }
+tree-sitter-cpp = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+futures = { workspace = true }
 
 [lints]
 workspace = true

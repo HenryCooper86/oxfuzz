@@ -1,6 +1,6 @@
-//! hf-core: Core abstractions and traits for hobot_fuzz.
+//! hf-core: Core abstractions and traits for `hobot_fuzz`.
 //!
-//! This crate defines the contracts between all other hobot_fuzz crates.
+//! This crate defines the contracts between all other `hobot_fuzz` crates.
 //! Every cross-boundary interaction is mediated by a trait defined here.
 //!
 //! # Module Overview

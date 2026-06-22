@@ -15,8 +15,11 @@ hf-service = { workspace = true }
 hf-provider = { workspace = true }
 hf-discovery = { workspace = true }
 hf-harness = { workspace = true }
+hf-runtime = { workspace = true }
 hf-engine = { workspace = true }
 hf-crash = { workspace = true }
+hf-corpus = { workspace = true }
+hf-web = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,6 +31,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true }
 
 [lints]
 workspace = true
