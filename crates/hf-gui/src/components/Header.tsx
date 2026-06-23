@@ -1,13 +1,15 @@
 import { Moon, Sun } from "lucide-react";
+import type { ReactNode } from "react";
 
 interface HeaderProps {
   title: string;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
   theme: "dark" | "light";
   onToggleTheme: () => void;
+  actions?: ReactNode;
 }
 
-export function Header({ title, icon, theme, onToggleTheme }: HeaderProps) {
+export function Header({ title, icon, theme, onToggleTheme, actions }: HeaderProps) {
   return (
     <header
       className="flex items-center justify-between flex-shrink-0 select-none"
@@ -34,6 +36,7 @@ export function Header({ title, icon, theme, onToggleTheme }: HeaderProps) {
         </span>
       </div>
       <div className="flex items-center gap-1">
+        {actions}
         <button
           onClick={onToggleTheme}
           className="flex items-center justify-center rounded-md transition-all duration-150"
