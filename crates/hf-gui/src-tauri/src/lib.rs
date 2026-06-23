@@ -29,7 +29,7 @@ pub fn run() {
             system_status,
             show_window,
         ])
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(debug_assertions)]
             {
                 use tauri::Manager;
