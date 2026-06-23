@@ -1,13 +1,24 @@
 import { useState } from "react";
-import { getTransport } from "../lib";
+import { getTransport, pickFolder } from "../lib";
 import type { TargetInventory, TargetCandidate } from "../types";
-import { Crosshair, Search, Loader2 } from "lucide-react";
+import { Crosshair, Search, Loader2, FolderOpen } from "lucide-react";
 
 export function DiscoverView() {
   const [project, setProject] = useState("");
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [loading, setLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  async function browse() {
+    setScanning(true);
+    try {
+      const path = await pickFolder();
+      if (path) setProject(path);
+    } finally {
+      setScanning(false);
+    }
+  }
 
   async function discover() {
     if (!project) return;
@@ -45,6 +56,14 @@ export function DiscoverView() {
           className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
           style={{ fontFamily: "var(--font-mono)" }}
         />
+        <button
+          onClick={browse}
+          disabled={scanning}
+          className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+          title="Browse for folder"
+        >
+          {scanning ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
+        </button>
         <button
           onClick={discover}
           disabled={loading || !project}

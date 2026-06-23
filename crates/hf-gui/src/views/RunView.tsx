@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { getTransport } from "../lib";
-import { Play, Loader2, Activity, AlertTriangle } from "lucide-react";
+import { getTransport, pickFolder } from "../lib";
+import { Play, Loader2, Activity, AlertTriangle, FolderOpen } from "lucide-react";
 
 export function RunView() {
   const [project, setProject] = useState("");
@@ -10,6 +10,11 @@ export function RunView() {
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [summary, setSummary] = useState<{ edges: number; crashes: number; execs: number } | null>(null);
+
+  async function browse() {
+    const path = await pickFolder();
+    if (path) setProject(path);
+  }
 
   async function run() {
     if (!project || !target) return;
@@ -51,14 +56,23 @@ export function RunView() {
           <label className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.05em", fontWeight: 600 }}>
             Project
           </label>
-          <input
-            type="text"
-            placeholder="/path/to/project"
-            value={project}
-            onChange={(e) => setProject(e.target.value)}
-            className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-            style={{ fontFamily: "var(--font-mono)" }}
-          />
+          <div className="flex gap-1">
+            <input
+              type="text"
+              placeholder="/path/to/project"
+              value={project}
+              onChange={(e) => setProject(e.target.value)}
+              className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
+              style={{ fontFamily: "var(--font-mono)" }}
+            />
+            <button
+              onClick={browse}
+              className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary"
+              title="Browse for folder"
+            >
+              <FolderOpen size={14} />
+            </button>
+          </div>
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.05em", fontWeight: 600 }}>
@@ -127,11 +141,11 @@ export function RunView() {
 
       {log.length > 0 && (
         <div
-          className="surface-card max-h-96 overflow-auto font-mono text-xs"
+          className="surface-card max-h-96 overflow-auto"
           style={{ padding: "var(--space-md)", fontFamily: "var(--font-mono)" }}
         >
           {log.map((line, i) => (
-            <div key={i} className="text-text-secondary" style={{ lineHeight: 1.6 }}>
+            <div key={i} className="text-xs text-text-secondary" style={{ lineHeight: 1.6 }}>
               {line}
             </div>
           ))}

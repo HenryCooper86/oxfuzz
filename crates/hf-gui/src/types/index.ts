@@ -1,6 +1,6 @@
 // Shared types for hobot_fuzz GUI.
 
-export type ViewType = "discover" | "harness" | "run" | "triage" | "corpus" | "settings";
+export type ViewType = "discover" | "harness" | "run" | "triage" | "corpus" | "settings" | "chat";
 
 export interface TargetCandidate {
   id: string;
