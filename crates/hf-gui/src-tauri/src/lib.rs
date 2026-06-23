@@ -6,8 +6,8 @@
 mod commands;
 
 use commands::{
-    corpus_grow, corpus_list, corpus_prune, corpus_seed, discover, show_window, system_status,
-    triage,
+    corpus_grow, corpus_list, corpus_prune, corpus_seed, discover, open_folder_dialog, show_window,
+    system_status, triage,
 };
 use tauri::Manager;
 
@@ -22,6 +22,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             discover,
+            open_folder_dialog,
             corpus_list,
             corpus_seed,
             corpus_grow,

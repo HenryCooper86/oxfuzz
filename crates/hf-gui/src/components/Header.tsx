@@ -1,11 +1,13 @@
 import { Moon, Sun } from "lucide-react";
 
 interface HeaderProps {
+  title: string;
+  icon?: React.ReactNode;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }
 
-export function Header({ theme, onToggleTheme }: HeaderProps) {
+export function Header({ title, icon, theme, onToggleTheme }: HeaderProps) {
   return (
     <header
       className="flex items-center justify-between flex-shrink-0 select-none"
@@ -16,18 +18,21 @@ export function Header({ theme, onToggleTheme }: HeaderProps) {
         borderBottom: "1px solid var(--border)",
       }}
     >
-      <span
-        style={{
-          fontFamily: "var(--font-display)",
-          fontSize: "17px",
-          fontWeight: 400,
-          fontStyle: "italic",
-          letterSpacing: "0.01em",
-          opacity: 0.9,
-        }}
-      >
-        hobot_fuzz
-      </span>
+      <div className="flex items-center gap-2">
+        {icon && <span style={{ color: "var(--accent)" }}>{icon}</span>}
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: "17px",
+            fontWeight: 400,
+            fontStyle: "italic",
+            letterSpacing: "0.01em",
+            opacity: 0.9,
+          }}
+        >
+          {title}
+        </span>
+      </div>
       <div className="flex items-center gap-1">
         <button
           onClick={onToggleTheme}

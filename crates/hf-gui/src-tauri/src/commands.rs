@@ -32,6 +32,17 @@ pub async fn discover(args: DiscoverArgs) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+pub async fn open_folder_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let result = app
+        .dialog()
+        .file()
+        .set_title("Select a project folder")
+        .blocking_pick_folder();
+    Ok(result.map(|f| f.to_string()))
+}
+
+#[tauri::command]
 pub async fn corpus_list(_project: String, _target: String) -> Result<serde_json::Value, String> {
     let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
     let corpus_dir = workspace.join("corpus");
