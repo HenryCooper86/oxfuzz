@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdio.h>
 
 static const char *skip_ws(const char *p, const char *end) {
     while (p < end && isspace((unsigned char)*p)) {

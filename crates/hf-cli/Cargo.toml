@@ -32,6 +32,8 @@ chrono = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 
 [lints]
 workspace = true

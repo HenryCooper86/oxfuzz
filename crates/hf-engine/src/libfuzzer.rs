@@ -15,6 +15,9 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     if duration > 0 {
         args.push(format!("-max_total_time={duration}"));
     }
+    // Disable leak detection so the fuzzer can run long enough to find
+    // coverage (leaks are reported separately via ASan logs).
+    args.push("-detect_leaks=0".to_owned());
     // libFuzzer writes crashes to the corpus dir by default; use -artifact_prefix
     // to direct them to the out dir.
     args.push(format!("-artifact_prefix={out}"));
