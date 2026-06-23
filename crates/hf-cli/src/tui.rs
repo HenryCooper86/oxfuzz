@@ -80,16 +80,16 @@ impl Tui {
                             }
                         }
                         KeyCode::Down
-                            if app.active_panel == 0 && !app.inventory.candidates.is_empty() => {
-                                app.selected =
-                                    (app.selected + 1).min(app.inventory.candidates.len() - 1);
-                                app.list_state.select(Some(app.selected));
-                            }
-                        KeyCode::Up
-                            if app.active_panel == 0 && app.selected > 0 => {
-                                app.selected -= 1;
-                                app.list_state.select(Some(app.selected));
-                            }
+                            if app.active_panel == 0 && !app.inventory.candidates.is_empty() =>
+                        {
+                            app.selected =
+                                (app.selected + 1).min(app.inventory.candidates.len() - 1);
+                            app.list_state.select(Some(app.selected));
+                        }
+                        KeyCode::Up if app.active_panel == 0 && app.selected > 0 => {
+                            app.selected -= 1;
+                            app.list_state.select(Some(app.selected));
+                        }
                         _ => {}
                     }
                 }

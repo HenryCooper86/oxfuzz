@@ -1,0 +1,55 @@
+// Shared types for hobot_fuzz GUI.
+
+export type ViewType = "discover" | "harness" | "run" | "triage" | "corpus" | "settings";
+
+export interface TargetCandidate {
+  id: string;
+  project_root: string;
+  language: string;
+  symbol: string;
+  kind: string;
+  location: { file: string; line: number; col: number };
+  signature: string | null;
+  input_surface: string;
+  complexity: number;
+  fit_score: number;
+  sanitizers: string[];
+  rationale: string;
+}
+
+export interface TargetInventory {
+  project_root: string;
+  candidates: TargetCandidate[];
+}
+
+export interface CorpusEntry {
+  path: string;
+  sha256: string;
+  size: number;
+  source: string;
+  coverage_hash: string | null;
+}
+
+export interface Crash {
+  id: string;
+  run_id: string;
+  target_id: string;
+  input_path: string;
+  stack_signature: string;
+  kind: string;
+  summary: string;
+  minimized: boolean;
+  bug_report: { title: string; summary: string; repro_steps: string; stack: string; severity_guess: string } | null;
+}
+
+export interface FuzzProgress {
+  type: string;
+  data: unknown;
+}
+
+export interface SystemStatus {
+  docker: boolean;
+  clang: boolean;
+  afl: boolean;
+  honggfuzz: boolean;
+}

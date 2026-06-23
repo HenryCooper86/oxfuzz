@@ -1,0 +1,43 @@
+[package]
+name = "hf-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri v2 desktop GUI for hobot_fuzz"
+
+[lib]
+name = "hf_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2.11", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Identifiers
+uuid = { workspace = true }
+
+# Internal crates
+hf-core = { workspace = true }
+hf-discovery = { workspace = true }
+hf-harness = { workspace = true }
+hf-engine = { workspace = true }
+hf-crash = { workspace = true }
+hf-corpus = { workspace = true }
+
+[lints]
+workspace = true

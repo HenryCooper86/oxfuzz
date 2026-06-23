@@ -29,6 +29,7 @@ members = [
     "crates/hf-web",
     "crates/hf-cli",
     "crates/hf-test-utils",
+    "crates/hf-gui/src-tauri",
 ]
 
 [workspace.package]
