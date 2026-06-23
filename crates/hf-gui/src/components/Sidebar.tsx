@@ -1,5 +1,5 @@
 import type { ViewType } from "../types";
-import { Bug, Database, MessageSquare, Play, Settings, Target } from "lucide-react";
+import { Bug, Database, FileCode, MessageSquare, Play, Settings, Target } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -9,6 +9,7 @@ interface SidebarProps {
 const NAV_ITEMS: { view: ViewType; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
   { view: "chat", label: "AI Chat", icon: MessageSquare },
   { view: "discover", label: "Discover", icon: Target },
+  { view: "harness", label: "Harness", icon: FileCode },
   { view: "run", label: "Run", icon: Play },
   { view: "triage", label: "Triage", icon: Bug },
   { view: "corpus", label: "Corpus", icon: Database },

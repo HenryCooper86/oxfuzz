@@ -127,7 +127,7 @@ export function ChatView() {
               Ask me to discover fuzzing targets, generate harnesses, run fuzzers, triage crashes, or manage your corpus.
             </p>
             <div className="flex flex-wrap gap-2 mt-4 justify-center max-w-lg">
-              {["Discover targets", "Run a fuzzer", "Triage crashes", "Manage corpus"].map((s) => (
+              {["Discover targets", "Generate harness", "Run a fuzzer", "Triage crashes", "Manage corpus"].map((s) => (
                 <button
                   key={s}
                   onClick={() => setInput(s)}
