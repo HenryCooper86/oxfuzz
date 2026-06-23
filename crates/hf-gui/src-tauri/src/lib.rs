@@ -9,6 +9,7 @@ use commands::{
     corpus_grow, corpus_list, corpus_prune, corpus_seed, discover, show_window, system_status,
     triage,
 };
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Run the Tauri GUI application.
@@ -29,14 +30,9 @@ pub fn run() {
             system_status,
             show_window,
         ])
-        .setup(|_app| {
-            #[cfg(debug_assertions)]
-            {
-                use tauri::Manager;
-                if let Some(win) = app.get_webview_window("main") {
-                    win.show().ok();
-                }
-            }
+        .setup(|app| {
+            let main_window = app.get_webview_window("main").expect("no main window");
+            main_window.show().expect("failed to show window");
             Ok(())
         })
         .run(tauri::generate_context!())
