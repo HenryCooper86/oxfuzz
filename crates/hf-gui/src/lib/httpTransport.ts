@@ -7,6 +7,9 @@ const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8081";
 
 const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   discover: { method: "POST", path: "/discover" },
+  harness_draft: { method: "POST", path: "/harness/draft" },
+  harness_compile: { method: "POST", path: "/harness/compile" },
+  generate_seeds: { method: "POST", path: "/seeds/generate" },
   corpus_list: { method: "POST", path: "/corpus/list" },
   corpus_seed: { method: "POST", path: "/corpus/seed" },
   corpus_grow: { method: "POST", path: "/corpus/grow" },

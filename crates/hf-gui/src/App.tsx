@@ -5,11 +5,12 @@ import { Header } from "./components/Header";
 import { StatusBar } from "./components/StatusBar";
 import { ChatView } from "./views/ChatView";
 import { DiscoverView } from "./views/DiscoverView";
+import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
 import { TriageView } from "./views/TriageView";
 import { CorpusView } from "./views/CorpusView";
 import { SettingsView } from "./views/SettingsView";
-import { MessageSquare, Target, Play, Bug, Database, Settings, Crosshair } from "lucide-react";
+import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode } from "lucide-react";
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewType>("chat");
@@ -34,6 +35,11 @@ export default function App() {
           {activeView === "discover" && (
             <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
               <DiscoverView />
+            </div>
+          )}
+          {activeView === "harness" && (
+            <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+              <HarnessView />
             </div>
           )}
           {activeView === "run" && (
@@ -66,7 +72,7 @@ export default function App() {
 const viewTitles: Record<ViewType, string> = {
   chat: "AI Assistant",
   discover: "Target Discovery",
-  harness: "Harness",
+  harness: "Harness Generation",
   run: "Fuzz Run",
   triage: "Crash Triage",
   corpus: "Corpus Management",
@@ -76,7 +82,7 @@ const viewTitles: Record<ViewType, string> = {
 const viewIcons: Record<ViewType, React.ReactNode> = {
   chat: <MessageSquare size={18} />,
   discover: <Target size={18} />,
-  harness: <Crosshair size={18} />,
+  harness: <FileCode size={18} />,
   run: <Play size={18} />,
   triage: <Bug size={18} />,
   corpus: <Database size={18} />,
