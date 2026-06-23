@@ -29,6 +29,18 @@ fn parse_libfuzzer_edges_line() {
 }
 
 #[test]
+fn parse_libfuzzer_cov_line() {
+    let events = parse_progress("#2\tINITED cov: 10 ft: 11 corp: 1/3b exec/s: 0 rss: 32Mb\n");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            FuzzProgress::EdgesCovered(n) if *n == 10
+        )),
+        "should find 10 edges from libFuzzer cov: {events:?}"
+    );
+}
+
+#[test]
 fn parse_afl_cov_line() {
     // AFL++ output: "cov: 1234"
     let events = parse_progress("cov: 1234");

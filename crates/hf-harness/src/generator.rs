@@ -49,13 +49,32 @@ pub async fn compile(
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
 ) -> Result<Harness, ClassifiedError> {
+    // Write the harness source to the host workspace (the Docker mount
+    // makes it visible inside the container at container_workspace).
     let src_path = workspace.join("harness.c");
     rt.write_file(&src_path, &harness.source).await?;
-    let mut cmd = vec![harness.build_cmd.compiler.clone()];
-    cmd.extend(harness.build_cmd.args.clone());
-    cmd.push(src_path.to_string_lossy().to_string());
-    cmd.push("-o".to_owned());
-    cmd.push(harness.build_cmd.output.to_string_lossy().to_string());
+
+    // Build the compile command using container-internal paths.
+    // The DockerRuntime mounts `workspace` at `/work`, so all file
+    // references must use `/work/...` paths.
+    // Use bash -c to compile to /tmp (some Docker volumes don't support
+    // direct linker output) then copy to /work in a single container.
+    let container_ws = "/work";
+    let output_name = harness
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let compile_script = format!(
+        "clang {} -I{container_ws} /{container_ws}/harness.c {extra_sources} -o /tmp/{output_name} && cp /tmp/{output_name} {container_ws}/{output_name} && chmod +x {container_ws}/{output_name}",
+        harness.build_cmd.args.join(" "),
+        container_ws = container_ws,
+        output_name = output_name,
+        extra_sources = list_c_files(workspace, container_ws),
+    );
+    let cmd = vec!["bash".to_owned(), "-c".to_owned(), compile_script];
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: 4096,
         max_cpus: 2,
@@ -69,6 +88,9 @@ pub async fn compile(
             result.exit_code, result.stderr
         )));
     }
+    // Update the output path to the host workspace path so the binary
+    // can be referenced by subsequent run steps.
+    harness.build_cmd.output = workspace.join(output_name);
     harness.status = HarnessStatus::Compiled;
     Ok(harness)
 }
@@ -208,3 +230,22 @@ fn parse_crashes(stdout: &str) -> u32 {
 
 #[allow(dead_code)]
 fn _ensure_uuid_used(_u: Uuid) {}
+
+/// List all .c files in the workspace (excluding harness.c) as
+/// container-internal paths.
+fn list_c_files(workspace: &Path, container_ws: &str) -> String {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(workspace) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                if ext == "c" && entry.file_name() != "harness.c" {
+                    files.push(format!(
+                        "{container_ws}/{}",
+                        entry.file_name().to_string_lossy()
+                    ));
+                }
+            }
+        }
+    }
+    files.join(" ")
+}

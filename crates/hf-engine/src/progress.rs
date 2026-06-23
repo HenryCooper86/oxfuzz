@@ -10,17 +10,19 @@ use uuid::Uuid;
 #[must_use]
 pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
     let lower = line.to_ascii_lowercase();
-    if lower.contains("execs/sec") || lower.contains("exec/s") {
-        if let Some(eps) = parse_number_near(line, "execs") {
-            return Some(FuzzProgress::ExecsPerSec(eps as f64));
+    // Check coverage first (libFuzzer lines contain both "cov:" and "exec/s").
+    if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
+        if let Some(edges) =
+            parse_number_near(line, "cov").or_else(|| parse_number_near(line, "edges"))
+        {
+            return Some(FuzzProgress::EdgesCovered(edges));
         }
     }
-    if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
-        if let Some(edges) = parse_number_near(line, "cov") {
-            return Some(FuzzProgress::EdgesCovered(edges));
-        }
-        if let Some(edges) = parse_number_near(line, "edges") {
-            return Some(FuzzProgress::EdgesCovered(edges));
+    if lower.contains("execs/sec") || lower.contains("exec/s") || lower.contains("execs:") {
+        if let Some(eps) =
+            parse_number_near(line, "execs").or_else(|| parse_number_near(line, "exec"))
+        {
+            return Some(FuzzProgress::ExecsPerSec(eps as f64));
         }
     }
     if lower.contains("crash")
@@ -73,14 +75,14 @@ pub fn parse_coverage(stdout: &str, run_id: Uuid) -> CoverageReport {
 fn parse_number_near(line: &str, keyword: &str) -> Option<u64> {
     let lower = line.to_ascii_lowercase();
     let pos = lower.find(keyword)?;
-    // Search before the keyword first.
-    let before = &line[..pos];
-    if let Some(n) = last_number(before) {
+    // Search after the keyword first (most common: "cov: 10").
+    let after = &line[pos + keyword.len()..];
+    if let Some(n) = first_number(after) {
         return Some(n);
     }
-    // Then after.
-    let after = &line[pos + keyword.len()..];
-    first_number(after)
+    // Then before.
+    let before = &line[..pos];
+    last_number(before)
 }
 
 fn last_number(s: &str) -> Option<u64> {

@@ -8,10 +8,12 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Install clang, build tools, AFL++, libFuzzer dev, and clang runtime (asan/fuzzer).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     llvm \
     lld \
+    libclang-rt-18-dev \
     make \
     cmake \
     ninja-build \
@@ -19,14 +21,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     ca-certificates \
     python3 \
-    AFL++ \
-    honggfuzz \
+    afl++ \
+    libfuzzer-18-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build honggfuzz from source (not in Ubuntu repos).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libbfd-dev \
+    libunwind-dev \
+    && git clone --depth=1 https://github.com/google/honggfuzz.git /tmp/honggfuzz \
+    && cd /tmp/honggfuzz && make && make install \
+    && rm -rf /tmp/honggfuzz \
     && rm -rf /var/lib/apt/lists/*
 
 # Verify tools are present.
-RUN clang --version && afl-fuzz --version || true && honggfuzz --version || true
+RUN clang --version && afl-fuzz --version && honggfuzz --version 2>&1 || true
 
 WORKDIR /work
 
-# Default entrypoint: do nothing, the runtime execs commands directly.
 CMD ["true"]

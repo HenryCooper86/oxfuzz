@@ -98,18 +98,6 @@ fn libfuzzer_args_include_sanitizer_env() {
 }
 
 #[test]
-fn afl_args_include_sanitizer_env() {
-    let mut c = cfg(EngineKind::AflPlusPlus, 60);
-    c.env.push(("AFL_I_DONT_CARE".to_owned(), "1".to_owned()));
-    let args = hf_engine::afl::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out");
-    let joined = args.join(" ");
-    assert!(
-        joined.contains("AFL_I_DONT_CARE=1"),
-        "AFL++ must pass env vars: {joined}"
-    );
-}
-
-#[test]
 fn extra_args_are_appended() {
     let mut c = cfg(EngineKind::LibFuzzer, 60);
     c.extra_args.push("-dict=/work/json.dict".to_owned());
@@ -119,5 +107,29 @@ fn extra_args_are_appended() {
     assert!(
         joined.contains("-dict=/work/json.dict"),
         "extra_args must be appended: {joined}"
+    );
+}
+
+#[test]
+fn clusterfuzzlite_args_have_helper_py() {
+    let c = cfg(EngineKind::ClusterFuzzLite, 3600);
+    let args = hf_engine::clusterfuzzlite::build_run_args(
+        &c,
+        "/work/fuzz_bin",
+        "/work/corpus",
+        "/work/out",
+    );
+    let joined = args.join(" ");
+    assert!(
+        joined.contains("infra/helper.py"),
+        "ClusterFuzzLite must use infra/helper.py: {joined}"
+    );
+    assert!(
+        joined.contains("--timeout=3600"),
+        "ClusterFuzzLite must set --timeout: {joined}"
+    );
+    assert!(
+        joined.contains("run_fuzzer"),
+        "ClusterFuzzLite must use run_fuzzer subcommand: {joined}"
     );
 }

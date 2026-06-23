@@ -57,9 +57,7 @@ impl EngineRunner {
             EngineKind::AflPlusPlus => crate::afl::build_run_args(cfg, binary, corpus, out),
             EngineKind::Honggfuzz => crate::honggfuzz::build_run_args(cfg, binary, corpus, out),
             EngineKind::ClusterFuzzLite => {
-                return Err(ClassifiedError::Engine(
-                    "ClusterFuzzLite: not yet supported".to_owned(),
-                ));
+                crate::clusterfuzzlite::build_run_args(cfg, binary, corpus, out)
             }
         };
         let limits = hf_core::runtime::ResourceLimits {
@@ -69,16 +67,24 @@ impl EngineRunner {
             env: cfg.env.iter().cloned().collect(),
         };
         let result = rt.run_command(&args, workspace, &limits).await?;
-        if result.exit_code != 0 && !result.stdout.contains("DONE") {
+        // libFuzzer writes progress to stderr; AFL++ to stdout. Parse both.
+        let combined = format!("{}\n{}", result.stdout, result.stderr);
+        // libFuzzer exit codes: 0 = clean exit, 77 = crash/leak found,
+        // 76 = OOM, 1 = error. 0 and 77 are valid fuzzing outcomes.
+        let is_valid_outcome = result.exit_code == 0
+            || result.exit_code == 77
+            || combined.contains("DONE")
+            || combined.contains("SUMMARY");
+        if !is_valid_outcome {
             return Err(ClassifiedError::Engine(format!(
                 "fuzz run exited {} : {}",
                 result.exit_code,
                 result.stderr.chars().take(500).collect::<String>()
             )));
         }
-        let progress = parse_progress(&result.stdout);
+        let progress = parse_progress(&combined);
         let run_id = Uuid::new_v4();
-        let coverage = parse_coverage(&result.stdout, run_id);
+        let coverage = parse_coverage(&combined, run_id);
         Ok(RunResult { progress, coverage })
     }
 }

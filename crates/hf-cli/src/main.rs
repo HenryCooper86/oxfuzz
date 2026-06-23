@@ -1,5 +1,7 @@
 //! hobot-fuzz CLI entry point.
 
+mod tui;
+
 use clap::{Parser, Subcommand};
 use hf_core::engine::EngineKind;
 use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
@@ -83,6 +85,11 @@ enum Commands {
         #[arg(long, default_value = "8081")]
         port: u16,
     },
+    /// Launch the TUI (terminal user interface).
+    Tui {
+        /// Project root path.
+        project: PathBuf,
+    },
 }
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
@@ -164,6 +171,132 @@ fn which_docker() -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
+}
+
+/// Copy C/C++ source and header files from a project into the workspace
+/// so the sandbox can compile the harness + target together.
+fn copy_project_sources(project: &std::path::Path, workspace: &std::path::Path) {
+    let exts = ["c", "h", "cc", "cpp", "cxx", "hpp"];
+    if let Ok(entries) = std::fs::read_dir(project) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if exts.contains(&ext) {
+                    let dest = workspace.join(entry.file_name());
+                    let _ = std::fs::copy(&path, &dest);
+                }
+            }
+        }
+    }
+}
+
+/// Handle the `run` subcommand: discover -> draft harness -> compile -> run engine.
+async fn run_command(
+    project: &std::path::Path,
+    target: &str,
+    engine: &str,
+    duration: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let engine_kind = parse_engine(engine)?;
+    let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
+    let inv = hf_discovery::discover(project, TargetLanguage::C).await?;
+    let candidate = inv
+        .candidates
+        .iter()
+        .find(|c| c.symbol == target)
+        .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in project"))?
+        .clone();
+    let provider = provider_from_env().ok_or_else(|| {
+        anyhow::anyhow!("no LLM provider configured; set HF_PROVIDER_API_KEY to generate a harness")
+    })?;
+    let draft = hf_harness::draft(&candidate, engine_kind, Box::new(provider)).await?;
+    let build_cmd =
+        hf_harness::build_command(engine_kind, candidate.language, &format!("fuzz_{target}"));
+    let harness = Harness {
+        id: uuid::Uuid::new_v4(),
+        target_id: candidate.id,
+        engine: engine_kind,
+        source: draft.source,
+        language: candidate.language,
+        build_cmd,
+        sanitizer: hf_core::target::Sanitizer::Address,
+        status: HarnessStatus::Draft,
+        smoke_run: None,
+    };
+    let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let corpus_dir = workspace.join("corpus");
+    let out_dir = workspace.join("out");
+    std::fs::create_dir_all(&corpus_dir)?;
+    std::fs::create_dir_all(&out_dir)?;
+    std::fs::write(corpus_dir.join("seed_empty"), b"{}")?;
+    std::fs::write(corpus_dir.join("seed_array"), b"[1,2,3]")?;
+    std::fs::write(corpus_dir.join("seed_string"), b"\"hello\"")?;
+    copy_project_sources(project, &workspace);
+    let rt = build_runtime(&workspace);
+    println!("--- Compiling harness in sandbox ---");
+    let compiled = hf_harness::compile(harness, rt.as_ref(), &workspace).await?;
+    println!("compile: status={:?}", compiled.status);
+    let binary_name = compiled
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let binary = format!("/work/{binary_name}");
+    let run_cfg = hf_core::engine::FuzzRunConfig {
+        harness_id: compiled.id,
+        engine: engine_kind,
+        duration: Some(std::time::Duration::from_secs(duration_secs)),
+        max_mem_mb: 2048,
+        max_cpus: 1,
+        seed_corpus: Some(corpus_dir.clone()),
+        sanitizer: hf_core::target::Sanitizer::Address,
+        env: Vec::new(),
+        extra_args: Vec::new(),
+    };
+    println!("\n--- Running {engine} for {duration_secs}s ---");
+    let runner = hf_engine::runner::EngineRunner::new();
+    match runner
+        .run(
+            engine_kind,
+            &run_cfg,
+            &binary,
+            "/work/corpus",
+            "/work/out",
+            rt.as_ref(),
+            &workspace,
+        )
+        .await
+    {
+        Ok(result) => {
+            println!("\n--- Run summary ---");
+            let execs: Vec<f64> = result
+                .progress
+                .iter()
+                .filter_map(|p| match p {
+                    hf_core::engine::FuzzProgress::ExecsPerSec(e) => Some(*e),
+                    _ => None,
+                })
+                .collect();
+            let crashes = result
+                .progress
+                .iter()
+                .filter(|p| matches!(p, hf_core::engine::FuzzProgress::CrashesFound(_)))
+                .count();
+            if let Some(last) = execs.last() {
+                println!("  execs/sec: {last:.0}");
+            }
+            println!("  crashes detected: {crashes}");
+            println!("  edges covered: {}", result.coverage.edges);
+        }
+        Err(e) => eprintln!("run failed: {e}"),
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -262,103 +395,7 @@ async fn main() -> anyhow::Result<()> {
             engine,
             duration,
         } => {
-            let engine_kind = parse_engine(&engine)?;
-            let duration_secs = duration
-                .as_deref()
-                .map(parse_duration)
-                .transpose()?
-                .unwrap_or(3600);
-            // Discover to find the target.
-            let inv = hf_discovery::discover(&project, TargetLanguage::C).await?;
-            let candidate = inv
-                .candidates
-                .iter()
-                .find(|c| c.symbol == target)
-                .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in project"))?
-                .clone();
-            // Draft + compile the harness.
-            let provider = provider_from_env().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no LLM provider configured; set HF_PROVIDER_API_KEY to generate a harness"
-                )
-            })?;
-            let draft = hf_harness::draft(&candidate, engine_kind, Box::new(provider)).await?;
-            let build_cmd = hf_harness::build_command(
-                engine_kind,
-                candidate.language,
-                &format!("fuzz_{target}"),
-            );
-            let harness = Harness {
-                id: uuid::Uuid::new_v4(),
-                target_id: candidate.id,
-                engine: engine_kind,
-                source: draft.source,
-                language: candidate.language,
-                build_cmd,
-                sanitizer: hf_core::target::Sanitizer::Address,
-                status: HarnessStatus::Draft,
-                smoke_run: None,
-            };
-            let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
-            std::fs::create_dir_all(&workspace)?;
-            let corpus_dir = workspace.join("corpus");
-            let out_dir = workspace.join("out");
-            std::fs::create_dir_all(&corpus_dir)?;
-            std::fs::create_dir_all(&out_dir)?;
-            // Build the sandbox runtime.
-            let rt = build_runtime(&workspace);
-            println!("--- Compiling harness in sandbox ---");
-            let compiled = hf_harness::compile(harness, rt.as_ref(), &workspace).await?;
-            println!("compile: status={:?}", compiled.status);
-            let binary = compiled.build_cmd.output.to_string_lossy().to_string();
-            let run_cfg = hf_core::engine::FuzzRunConfig {
-                harness_id: compiled.id,
-                engine: engine_kind,
-                duration: Some(std::time::Duration::from_secs(duration_secs)),
-                max_mem_mb: 2048,
-                max_cpus: 1,
-                seed_corpus: Some(corpus_dir.clone()),
-                sanitizer: hf_core::target::Sanitizer::Address,
-                env: Vec::new(),
-                extra_args: Vec::new(),
-            };
-            println!("\n--- Running {engine} for {duration_secs}s ---");
-            let runner = hf_engine::runner::EngineRunner::new();
-            match runner
-                .run(
-                    engine_kind,
-                    &run_cfg,
-                    &binary,
-                    &corpus_dir.to_string_lossy(),
-                    &out_dir.to_string_lossy(),
-                    rt.as_ref(),
-                    &workspace,
-                )
-                .await
-            {
-                Ok(result) => {
-                    println!("\n--- Run summary ---");
-                    let execs: Vec<f64> = result
-                        .progress
-                        .iter()
-                        .filter_map(|p| match p {
-                            hf_core::engine::FuzzProgress::ExecsPerSec(e) => Some(*e),
-                            _ => None,
-                        })
-                        .collect();
-                    let crashes = result
-                        .progress
-                        .iter()
-                        .filter(|p| matches!(p, hf_core::engine::FuzzProgress::CrashesFound(_)))
-                        .count();
-                    if let Some(last) = execs.last() {
-                        println!("  execs/sec: {last:.0}");
-                    }
-                    println!("  crashes detected: {crashes}");
-                    println!("  edges covered: {}", result.coverage.edges);
-                }
-                Err(e) => eprintln!("run failed: {e}"),
-            }
+            run_command(&project, &target, &engine, duration.as_deref()).await?;
         }
         Commands::Triage { project, target } => {
             let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
@@ -464,6 +501,9 @@ async fn main() -> anyhow::Result<()> {
             println!("hobot-fuzz web server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             axum::serve(listener, app).await?;
+        }
+        Commands::Tui { project } => {
+            tui::Tui::run(&project).await?;
         }
     }
     Ok(())
