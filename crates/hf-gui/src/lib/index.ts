@@ -19,3 +19,4 @@ export function getTransport(): Transport {
 
 export { isTauriEnvironment };
 export type { Transport, UnlistenFn } from "./transport";
+export { pickFolder } from "./platform";

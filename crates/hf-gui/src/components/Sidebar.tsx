@@ -1,5 +1,5 @@
 import type { ViewType } from "../types";
-import { Bug, Database, Play, Settings, Target } from "lucide-react";
+import { Bug, Database, MessageSquare, Play, Settings, Target } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -7,6 +7,7 @@ interface SidebarProps {
 }
 
 const NAV_ITEMS: { view: ViewType; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
+  { view: "chat", label: "AI Chat", icon: MessageSquare },
   { view: "discover", label: "Discover", icon: Target },
   { view: "run", label: "Run", icon: Play },
   { view: "triage", label: "Triage", icon: Bug },
@@ -29,7 +30,7 @@ export function Sidebar({ activeView, onNavigate }: SidebarProps) {
           className="text-xs font-semibold uppercase mb-1"
           style={{ color: "var(--text-muted)", letterSpacing: "0.08em", padding: "7px 10px" }}
         >
-          Fuzzing
+          Workspace
         </div>
         {NAV_ITEMS.map(({ view, label, icon: Icon }) => (
           <button
