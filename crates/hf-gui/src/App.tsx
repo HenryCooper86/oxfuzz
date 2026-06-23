@@ -8,13 +8,14 @@ import { ToastProvider } from "./components/ui/Toast";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
 import { ObservabilityPanel } from "./components/observation/ObservabilityPanel";
 import { InfoPanel } from "./components/observation/InfoPanel";
+import { SetupWizard } from "./components/wizard/SetupWizard";
+import { SettingsView } from "./components/settings/SettingsView";
 import { ChatView } from "./views/ChatView";
 import { DiscoverView } from "./views/DiscoverView";
 import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
 import { TriageView } from "./views/TriageView";
 import { CorpusView } from "./views/CorpusView";
-import { SettingsView } from "./views/SettingsView";
 import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info } from "lucide-react";
 
 export default function App() {
@@ -23,10 +24,15 @@ export default function App() {
   const [showDiag, setShowDiag] = useState(false);
   const [showObs, setShowObs] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
+  const [setupDone, setSetupDone] = useState(localStorage.getItem("hf_setup_completed") === "true");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  if (!setupDone) {
+    return <SetupWizard onComplete={() => setSetupDone(true)} />;
+  }
 
   return (
     <TooltipProvider>
