@@ -537,6 +537,98 @@ pub async fn knowledge_summary(
     })
 }
 
+/// The AI agent's identity: configured model, guardrail mode, and the tools it
+/// can call. Powers the Agents view.
+#[derive(Debug, Serialize)]
+pub struct AgentInfo {
+    pub model: String,
+    pub provider_type: String,
+    pub guardrails: String,
+    pub tools: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+pub fn agent_info() -> AgentInfo {
+    let models = list_models();
+    let first = models.first();
+    let model = first.map_or_else(|| "(none configured)".to_owned(), |m| m.model.clone());
+    let provider_type = first.map(|m| m.provider_type.clone()).unwrap_or_default();
+    // permissive (default) auto-approves with audit; strict requires approval.
+    let guardrails = match std::env::var("HF_GUARDRAILS").as_deref() {
+        Ok("strict") => "strict (approval required)".to_owned(),
+        _ => "permissive (audited)".to_owned(),
+    };
+    let tools = hf_agent::TOOL_SPECS
+        .iter()
+        .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
+        .collect();
+    AgentInfo {
+        model,
+        provider_type,
+        guardrails,
+        tools,
+    }
+}
+
+/// One bundled skill's metadata from `skills/<name>/skill.toml`.
+#[derive(Debug, Serialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub domain: Vec<String>,
+}
+
+/// List the bundled, file-backed skills from the repo's `skills/` directory.
+#[tauri::command]
+pub fn list_skills() -> Vec<SkillInfo> {
+    let skills_dir = hf_service::repo_root()
+        .map_or_else(|| std::path::PathBuf::from("skills"), |r| r.join("skills"));
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&skills_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let toml_path = entry.path().join("skill.toml");
+        let Ok(text) = std::fs::read_to_string(&toml_path) else {
+            continue;
+        };
+        let Ok(parsed) = toml::from_str::<toml::Value>(&text) else {
+            continue;
+        };
+        let skill = parsed.get("skill");
+        let get = |k: &str| {
+            skill
+                .and_then(|s| s.get(k))
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let domain = skill
+            .and_then(|s| s.get("classification"))
+            .and_then(|c| c.get("domain"))
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let name = get("name");
+        if name.is_empty() {
+            continue;
+        }
+        out.push(SkillInfo {
+            name,
+            description: get("description"),
+            version: get("version"),
+            domain,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// Create a new persistent conversation session and return its id.
 ///
 /// Returns `None` when no database is configured (chat still works, but turns

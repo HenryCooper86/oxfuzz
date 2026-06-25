@@ -8,6 +8,19 @@ use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 use serde_json::Value;
 
+/// The agent's tools as `(name, description)` pairs -- the authoritative roster
+/// the agent can call. Presentation layers render this for the Agents view.
+pub const TOOL_SPECS: &[(&str, &str)] = &[
+    ("discover", "Scan the project and rank fuzzable targets"),
+    (
+        "harness",
+        "Draft + compile a harness for a target in the sandbox",
+    ),
+    ("run", "Drive a fuzzing engine against a compiled harness"),
+    ("triage", "Reproduce, classify, and deduplicate crashes"),
+    ("corpus", "Seed, grow, prune, or list the corpus"),
+];
+
 /// The tool catalog injected into the system prompt. Kept terse to stay within
 /// the token budget (AGENTS.md 2.4).
 pub const TOOL_CATALOG: &str = r#"Available tools (call one per step):

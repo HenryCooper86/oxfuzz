@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
-pub use tools::TOOL_CATALOG;
+pub use tools::{TOOL_CATALOG, TOOL_SPECS};
 
 /// Routing tags used when requesting completions from the provider pool.
 const ROUTE_TAGS: &[&str] = &["general", "reasoning", "code"];

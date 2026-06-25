@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, Square } from "lucide-react";
+import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, Square, Bot, Shield, Database } from "lucide-react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -62,22 +62,66 @@ function Card({ icon, title, subtitle }: { icon: ReactNode; title: string; subti
 // Agents
 // ---------------------------------------------------------------------------
 
-const AGENTS = [
-  { icon: <Target size={16} />, title: "Discovery", subtitle: "Scans projects and ranks fuzzing targets." },
-  { icon: <FileCode size={16} />, title: "Harness", subtitle: "Authors and compiles harnesses per target." },
-  { icon: <Activity size={16} />, title: "Coverage", subtitle: "Grows corpora and tracks coverage deltas." },
-  { icon: <Bug size={16} />, title: "Triage", subtitle: "Dedupes crashes and drafts bug reports." },
-];
+interface AgentInfo {
+  model: string;
+  provider_type: string;
+  guardrails: string;
+  tools: { name: string; description: string }[];
+}
+
+const TOOL_ICONS: Record<string, ReactNode> = {
+  discover: <Crosshair size={16} />,
+  harness: <FileCode size={16} />,
+  run: <Play size={16} />,
+  triage: <Bug size={16} />,
+  corpus: <Database size={16} />,
+};
 
 export function AgentsView() {
+  const [info, setInfo] = useState<AgentInfo | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getTransport()
+      .invoke<AgentInfo>("agent_info")
+      .then((d) => !cancelled && setInfo(d))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Agents" description="Specialized sub-agents that discover targets, write harnesses, and triage crashes." />
-      <div className="grid grid-cols-2 gap-3">
-        {AGENTS.map((a) => (
-          <Card key={a.title} icon={a.icon} title={a.title} subtitle={a.subtitle} />
-        ))}
-      </div>
+      <ViewHeader title="Agent" description="The autonomous fuzzing agent — its model, safety policy, and the tools it calls to drive the pipeline." />
+      {info && (
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            <Tile icon={<Bot size={16} />} label="Model" value={info.model} />
+            <Tile icon={<Activity size={16} />} label="Provider" value={info.provider_type || "—"} />
+            <Tile icon={<Shield size={16} />} label="Guardrails" value={info.guardrails} />
+          </div>
+          <div className="text-xs text-text-muted uppercase mt-1" style={{ letterSpacing: "0.08em" }}>
+            Tools ({info.tools.length})
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {info.tools.map((t) => (
+              <Card key={t.name} icon={TOOL_ICONS[t.name] ?? <Target size={16} />} title={t.name} subtitle={t.description} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Tile({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+  return (
+    <div className="surface-card flex flex-col gap-1" style={{ padding: "var(--space-md)" }}>
+      <span className="flex items-center gap-1.5 text-xs text-text-muted">
+        <span style={{ color: "var(--accent)" }}>{icon}</span>
+        {label}
+      </span>
+      <span className="text-sm font-medium font-mono truncate" title={value}>{value}</span>
     </div>
   );
 }
@@ -86,19 +130,57 @@ export function AgentsView() {
 // Skills
 // ---------------------------------------------------------------------------
 
-const SKILLS = [
-  { title: "harness-author", subtitle: "Generates compile-validated fuzz harnesses for a target." },
-  { title: "crash-triage", subtitle: "Classifies and minimizes crashes by stack signature." },
-  { title: "target-triage", subtitle: "Heuristics for ranking functions worth fuzzing." },
-];
+interface SkillInfo {
+  name: string;
+  description: string;
+  version: string;
+  domain: string[];
+}
 
 export function SkillsView() {
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getTransport()
+      .invoke<SkillInfo[]>("list_skills")
+      .then((s) => !cancelled && setSkills(s))
+      .catch(() => {})
+      .finally(() => !cancelled && setLoaded(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Skills" description="Reusable, self-evolving skills the agent applies across runs." />
+      <ViewHeader title="Skills" description="Reusable, file-backed skills the agent applies across runs (from the skills/ registry)." />
+      {loaded && skills.length === 0 && (
+        <EmptyState icon={<Puzzle size={20} />} hint="No skills found in the skills/ directory." />
+      )}
       <div className="flex flex-col gap-2">
-        {SKILLS.map((s) => (
-          <Card key={s.title} icon={<Puzzle size={16} />} title={s.title} subtitle={s.subtitle} />
+        {skills.map((s) => (
+          <div key={s.name} className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
+            <div className="flex items-center justify-center shrink-0 rounded-md" style={{ width: "34px", height: "34px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}>
+              <span style={{ color: "var(--accent)" }}><Puzzle size={16} /></span>
+            </div>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="text-sm font-medium flex items-center gap-2">
+                {s.name}
+                <span className="text-xs text-text-muted font-mono">v{s.version}</span>
+              </span>
+              <span className="text-xs text-text-secondary mt-0.5">{s.description}</span>
+              {s.domain.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {s.domain.map((d) => (
+                    <span key={d} className="text-xs px-1.5 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}>
+                      {d}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         ))}
       </div>
     </div>
