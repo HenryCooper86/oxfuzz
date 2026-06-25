@@ -563,63 +563,11 @@ pub fn agent_info() -> AgentInfo {
     }
 }
 
-/// One bundled skill's metadata from `skills/<name>/skill.toml`.
-#[derive(Debug, Serialize)]
-pub struct SkillInfo {
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    pub domain: Vec<String>,
-}
-
-/// List the bundled, file-backed skills from the repo's `skills/` directory.
+/// List all skills -- built-in fuzzing skills plus any user-authored ones.
 #[tauri::command]
-pub fn list_skills() -> Vec<SkillInfo> {
-    let skills_dir = hf_service::repo_root()
-        .map_or_else(|| std::path::PathBuf::from("skills"), |r| r.join("skills"));
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&skills_dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let toml_path = entry.path().join("skill.toml");
-        let Ok(text) = std::fs::read_to_string(&toml_path) else {
-            continue;
-        };
-        let Ok(parsed) = toml::from_str::<toml::Value>(&text) else {
-            continue;
-        };
-        let skill = parsed.get("skill");
-        let get = |k: &str| {
-            skill
-                .and_then(|s| s.get(k))
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        let domain = skill
-            .and_then(|s| s.get("classification"))
-            .and_then(|c| c.get("domain"))
-            .and_then(toml::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let name = get("name");
-        if name.is_empty() {
-            continue;
-        }
-        out.push(SkillInfo {
-            name,
-            description: get("description"),
-            version: get("version"),
-            domain,
-        });
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+#[must_use]
+pub fn list_skills() -> Vec<hf_skills::SkillDefinition> {
+    hf_skills::SkillRegistry::with_user_dir(skills_dir()).list()
 }
 
 /// Validate a file-backed entity name: alphanumeric, dash, underscore only
@@ -647,61 +595,28 @@ fn agents_dir() -> std::path::PathBuf {
     )
 }
 
-// -- Skills CRUD ------------------------------------------------------------
+// -- Skills (registry-backed) -----------------------------------------------
+//
+// A skill is an `hf_skills::SkillDefinition`: a versioned instruction playbook
+// (`root.md` body) plus metadata. Built-in fuzzing skills are embedded in the
+// binary; user skills (and overrides) live under `skills/<name>/`. Agents
+// reference skills by name and the runtime injects their bodies into context.
 
-/// A skill's full content for editing: metadata + the root.md markdown body.
-#[derive(Debug, Default, Serialize)]
-pub struct SkillDetail {
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    pub domain: Vec<String>,
-    pub content: String,
+/// Read a single skill (built-in or user) for editing.
+#[tauri::command]
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn read_skill(name: String) -> Option<hf_skills::SkillDefinition> {
+    hf_skills::SkillRegistry::with_user_dir(skills_dir())
+        .get(&name)
+        .cloned()
 }
 
-/// Read a skill's metadata + root.md content for editing.
+/// Create or update a user skill (writes `skills/<name>/{skill.toml,root.md}`).
+/// Overriding a built-in name shadows it until reset via `delete_skill`.
 #[tauri::command]
-pub async fn read_skill(name: String) -> Result<SkillDetail, String> {
-    let name = safe_name(&name)?;
-    let dir = skills_dir().join(&name);
-    let text = std::fs::read_to_string(dir.join("skill.toml")).map_err(|e| e.to_string())?;
-    let parsed: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
-    let skill = parsed.get("skill");
-    let get = |k: &str| {
-        skill
-            .and_then(|s| s.get(k))
-            .and_then(toml::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    let domain = skill
-        .and_then(|s| s.get("classification"))
-        .and_then(|c| c.get("domain"))
-        .and_then(toml::Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    let root_rel = skill
-        .and_then(|s| s.get("root"))
-        .and_then(|r| r.get("path"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("root.md");
-    let content = std::fs::read_to_string(dir.join(root_rel)).unwrap_or_default();
-    Ok(SkillDetail {
-        name,
-        description: get("description"),
-        version: get("version"),
-        domain,
-        content,
-    })
-}
-
-/// Create or update a skill: writes `skills/<name>/skill.toml` + `root.md`.
-#[tauri::command]
-pub async fn save_skill(
+#[allow(clippy::needless_pass_by_value)]
+pub fn save_skill(
     name: String,
     description: String,
     version: String,
@@ -709,72 +624,30 @@ pub async fn save_skill(
     content: String,
 ) -> Result<(), String> {
     let name = safe_name(&name)?;
-    let dir = skills_dir().join(&name);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
     let version = if version.trim().is_empty() {
         "0.1.0".to_owned()
     } else {
         version
     };
-    let doc = SkillFileOut {
-        skill: SkillInnerOut {
-            name: name.clone(),
-            version,
-            description,
-            author: "hobot_fuzz".to_owned(),
-            source_format: "markdown".to_owned(),
-            classification: SkillClassOut {
-                kind: "llm_reasoning".to_owned(),
-                domain,
-                atomic: true,
-            },
-            root: SkillRootOut {
-                path: "root.md".to_owned(),
-            },
-        },
+    let def = hf_skills::SkillDefinition {
+        name,
+        version,
+        description,
+        domain,
+        body: content,
+        max_input_tokens: 0,
+        trust_tier: hf_skills::TrustTier::UserDefined,
     };
-    let toml_str = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("skill.toml"), toml_str).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("root.md"), content).map_err(|e| e.to_string())?;
-    Ok(())
+    let mut reg = hf_skills::SkillRegistry::with_user_dir(skills_dir());
+    reg.save(def).map_err(|e| e.to_string())
 }
 
-#[derive(Serialize)]
-struct SkillFileOut {
-    skill: SkillInnerOut,
-}
-#[derive(Serialize)]
-struct SkillInnerOut {
-    name: String,
-    version: String,
-    description: String,
-    author: String,
-    source_format: String,
-    classification: SkillClassOut,
-    root: SkillRootOut,
-}
-#[derive(Serialize)]
-struct SkillClassOut {
-    #[serde(rename = "type")]
-    kind: String,
-    domain: Vec<String>,
-    atomic: bool,
-}
-#[derive(Serialize)]
-struct SkillRootOut {
-    path: String,
-}
-
-/// Delete a skill directory.
+/// Delete a user skill, or reset a built-in override to its shipped version.
 #[tauri::command]
-pub async fn delete_skill(name: String) -> Result<(), String> {
-    let name = safe_name(&name)?;
-    let dir = skills_dir().join(&name);
-    if dir.is_dir() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+#[allow(clippy::needless_pass_by_value)]
+pub fn delete_skill(name: String) -> Result<(), String> {
+    let mut reg = hf_skills::SkillRegistry::with_user_dir(skills_dir());
+    reg.delete(&name).map_err(|e| e.to_string())
 }
 
 // -- Agents (registry-backed) -----------------------------------------------

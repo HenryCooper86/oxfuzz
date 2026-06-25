@@ -4,6 +4,7 @@ description = "Seeds, grows, prunes, and keeps the fuzzing corpus healthy."
 role = "corpus"
 icon = "database"
 allowed_tools = ["corpus"]
+skills = ["corpus-curation"]
 model_tags = ["reasoning"]
 temperature = 0.3
 max_iterations = 6

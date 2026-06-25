@@ -4,6 +4,7 @@ description = "Drives a full fuzzing campaign end to end: discover, harness, run
 role = "orchestrator"
 icon = "compass"
 allowed_tools = ["discover", "harness", "run", "triage", "corpus"]
+skills = ["target-triage", "harness-author", "crash-triage", "corpus-curation", "coverage-analysis"]
 model_tags = ["general", "reasoning", "code"]
 temperature = 0.4
 max_iterations = 16
