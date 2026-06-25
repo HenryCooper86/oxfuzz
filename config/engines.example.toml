@@ -44,3 +44,16 @@ default_duration_secs = 3600
 default_mem_mb = 2048
 default_cpus = 1
 supports = ["c", "cpp", "rust", "go", "python"]
+
+[[engines]]
+kind = "syzkaller"
+enabled = false
+# Google's coverage-guided OS kernel fuzzer (fuzzes syscall sequences).
+# Requires a KCOV-enabled kernel image, a VM (qemu/GCE), and a syz-manager
+# config. See https://github.com/google/syzkaller/blob/master/docs/linux/setup.md
+# manager_bin = "/path/to/syzkaller/bin/syz-manager"
+# manager_config = "/path/to/manager.cfg"
+default_duration_secs = 3600
+default_mem_mb = 4096
+default_cpus = 2
+supports = ["c"]

@@ -16,6 +16,16 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   corpus_prune: { method: "POST", path: "/corpus/prune" },
   triage: { method: "POST", path: "/triage" },
   system_status: { method: "GET", path: "/health" },
+  system_status_cmd: { method: "GET", path: "/health" },
+  chat_send: { method: "POST", path: "/chat/send" },
+  list_models: { method: "GET", path: "/config/models" },
+  list_configs: { method: "GET", path: "/config/sections" },
+  read_config: { method: "POST", path: "/config/read" },
+  write_config: { method: "POST", path: "/config/write" },
+  get_providers: { method: "GET", path: "/config/providers" },
+  set_providers: { method: "POST", path: "/config/providers" },
+  app_paths: { method: "GET", path: "/system/paths" },
+  host_arch: { method: "GET", path: "/system/arch" },
 };
 
 export function createHttpTransport(): Transport {
@@ -25,7 +35,7 @@ export function createHttpTransport(): Transport {
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "ensure_docker", "run_fuzzer", "run_syzkaller"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {

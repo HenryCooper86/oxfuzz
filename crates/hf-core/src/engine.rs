@@ -21,6 +21,8 @@ pub enum EngineKind {
     Honggfuzz,
     LibFuzzer,
     ClusterFuzzLite,
+    /// Google's coverage-guided OS kernel fuzzer (syscall sequences).
+    Syzkaller,
 }
 
 /// A compiled harness binary.

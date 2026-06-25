@@ -106,7 +106,7 @@ impl RuntimeAdapter for DockerRuntime {
             }
         }
 
-        let mut docker = Command::new("docker");
+        let mut docker = Command::new(crate::docker_bin());
         docker.args(&args);
         for (k, v) in &limits.env {
             docker.env(k, v);

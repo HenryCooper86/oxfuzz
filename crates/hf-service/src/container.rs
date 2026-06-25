@@ -1,0 +1,947 @@
+//! Central dependency container -- shared by all presentation layers.
+//!
+//! Mirrors the `y-service::ServiceContainer` pattern: the GUI, CLI, and
+//! web API all construct one container and call service methods through it.
+//! This keeps business logic out of presentation crates (AGENTS.md 2.9) and
+//! ensures every build / fuzz run goes through `hf-runtime` sandboxing
+//! (AGENTS.md 2.12).
+
+use std::fmt::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use chrono::Utc;
+use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
+use hf_core::error::ClassifiedError;
+use hf_core::harness::{BuildCommand, Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
+use hf_core::provider::ProviderPool;
+use hf_core::runtime::RuntimeAdapter;
+use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
+use hf_provider::{DefaultProviderPool, OpenAiCompatProvider, ProviderConfig};
+use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
+use hf_storage::{RunRecord, RunStatus, Store};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Workspace resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a per-project/per-target workspace directory so multiple projects
+/// do not collide in a single temp dir.
+///
+/// `hobot_fuzz_workspace/<project_name>/<target>`
+#[must_use]
+pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
+    let name = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("default");
+    std::env::temp_dir()
+        .join("hobot_fuzz_workspace")
+        .join(name)
+        .join(target)
+}
+
+/// Resolve a per-project workspace directory (target-independent).
+#[must_use]
+pub fn project_workspace_dir(project: &Path) -> PathBuf {
+    let _ = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("default");
+    std::env::temp_dir().join("hobot_fuzz_workspace")
+}
+
+// ---------------------------------------------------------------------------
+// Seed generation
+// ---------------------------------------------------------------------------
+
+/// Generate target-aware seed inputs for a corpus.
+#[must_use]
+pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {
+    let lower = target.to_ascii_lowercase();
+    if lower.contains("json") || lower.contains("parse") {
+        vec![
+            (b"{}".to_vec(), "seed_empty_obj".to_owned()),
+            (b"[]".to_vec(), "seed_empty_arr".to_owned()),
+            (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
+            (b"\"hello\"".to_vec(), "seed_string".to_owned()),
+            (b"true".to_vec(), "seed_bool".to_owned()),
+            (b"null".to_vec(), "seed_null".to_owned()),
+            (b"42".to_vec(), "seed_number".to_owned()),
+            (b"{\"key\":\"value\"}".to_vec(), "seed_object".to_owned()),
+            (b"{\"nested\":{\"a\":1}}".to_vec(), "seed_nested".to_owned()),
+            (b"\"".to_vec(), "seed_truncated_string".to_owned()),
+            (b"[".to_vec(), "seed_truncated_array".to_owned()),
+            (b"{".to_vec(), "seed_truncated_object".to_owned()),
+        ]
+    } else if lower.contains("xml") {
+        vec![
+            (b"<root/>".to_vec(), "seed_empty_xml".to_owned()),
+            (b"<root>text</root>".to_vec(), "seed_simple_xml".to_owned()),
+            (b"<a><b/></a>".to_vec(), "seed_nested_xml".to_owned()),
+        ]
+    } else if lower.contains("csv") {
+        vec![
+            (b"a,b,c\n1,2,3\n".to_vec(), "seed_simple_csv".to_owned()),
+            (
+                b"\"quoted\",\"fields\"\n".to_vec(),
+                "seed_quoted_csv".to_owned(),
+            ),
+        ]
+    } else {
+        vec![
+            (b"\x00".to_vec(), "seed_null_byte".to_owned()),
+            (b"\xff".to_vec(), "seed_high_byte".to_owned()),
+            (b"AAAA".to_vec(), "seed_repeated".to_owned()),
+            ("".as_bytes().to_vec(), "seed_empty".to_owned()),
+            (b"test".to_vec(), "seed_ascii".to_owned()),
+        ]
+    }
+}
+
+/// Copy C/C++ source and header files from a project into the workspace
+/// so the sandbox can compile the harness + target together.
+pub fn copy_project_sources(project: &Path, workspace: &Path) {
+    let exts = ["c", "h", "cc", "cpp", "cxx", "hpp"];
+    if let Ok(entries) = std::fs::read_dir(project) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if exts.contains(&ext) {
+                    let dest = workspace.join(entry.file_name());
+                    let _ = std::fs::copy(&path, &dest);
+                }
+            }
+        }
+    }
+}
+
+/// Build the sandbox image from the repo's Dockerfile for a given platform.
+///
+/// # Errors
+/// Returns `ClassifiedError::Internal` if the `docker build` command fails.
+pub fn build_sandbox_image(root: &Path, platform: &str) -> Result<(), ClassifiedError> {
+    let status = std::process::Command::new(hf_runtime::docker_bin())
+        .current_dir(root)
+        .args([
+            "build",
+            "--platform",
+            platform,
+            "-t",
+            SANDBOX_IMAGE,
+            "-f",
+            "docker/sandbox/Dockerfile",
+            ".",
+        ])
+        .status()
+        .map_err(|e| ClassifiedError::Internal(format!("docker build: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ClassifiedError::Internal("docker build failed".to_owned()))
+    }
+}
+
+/// Walk up from the current dir and the executable path looking for the repo
+/// root (the directory that contains `docker/sandbox/Dockerfile`).
+pub fn repo_root() -> Option<PathBuf> {
+    let mut starts: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::current_dir() {
+        starts.push(dir);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        starts.push(exe);
+    }
+    for start in starts {
+        let mut cur: Option<&Path> = Some(start.as_path());
+        while let Some(p) = cur {
+            if p.join("Cargo.toml").is_file() && p.join("config").is_dir() {
+                return Some(p.to_path_buf());
+            }
+            cur = p.parent();
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// ServiceContainer
+// ---------------------------------------------------------------------------
+
+/// All wired application services, constructed from a runtime + optional
+/// provider pool.
+///
+/// The container is `Clone` (it wraps `Arc`) so Tauri commands can capture
+/// it by value.
+#[derive(Clone)]
+pub struct ServiceContainer {
+    runtime: Arc<dyn RuntimeAdapter>,
+    provider_pool: Option<Arc<dyn ProviderPool>>,
+    runtime_config: RuntimeConfig,
+    store: Option<Arc<Store>>,
+}
+
+impl ServiceContainer {
+    /// Create a new `ServiceContainer` without persistence.
+    #[must_use]
+    pub fn new(
+        runtime: Arc<dyn RuntimeAdapter>,
+        provider_pool: Option<Arc<dyn ProviderPool>>,
+    ) -> Self {
+        let runtime_config = RuntimeConfig::default();
+        Self {
+            runtime,
+            provider_pool,
+            runtime_config,
+            store: None,
+        }
+    }
+
+    /// Attach a persistence store, returning the updated container.
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Construct the canonical container used by every presentation layer
+    /// (CLI, web, GUI): a Docker (or stub) runtime, an LLM provider pool from
+    /// the environment, and the persistence store from `HF_DB_PATH`.
+    ///
+    /// Storage and the provider pool are optional: when unavailable the
+    /// container still serves every non-persistent, non-LLM operation, so a
+    /// missing database or API key degrades gracefully instead of failing.
+    pub async fn bootstrap() -> Self {
+        let runtime = runtime_from_env();
+        let provider_pool = provider_pool_from_env();
+        let store = match Store::connect_from_env().await {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                tracing::warn!("persistence disabled: {e}");
+                None
+            }
+        };
+        Self {
+            runtime,
+            provider_pool,
+            runtime_config: RuntimeConfig::default(),
+            store,
+        }
+    }
+
+    /// The runtime adapter (for direct `run_command` access).
+    #[must_use]
+    pub fn runtime(&self) -> &dyn RuntimeAdapter {
+        self.runtime.as_ref()
+    }
+
+    /// The runtime config.
+    #[must_use]
+    pub fn runtime_config(&self) -> &RuntimeConfig {
+        &self.runtime_config
+    }
+
+    /// The provider pool (if an LLM is configured).
+    #[must_use]
+    pub fn provider_pool(&self) -> Option<&dyn ProviderPool> {
+        self.provider_pool.as_deref()
+    }
+
+    /// The persistence store (if a database is configured).
+    #[must_use]
+    pub fn store(&self) -> Option<&Arc<Store>> {
+        self.store.as_ref()
+    }
+
+    // -- Discovery --------------------------------------------------------
+
+    /// Discover fuzzing targets in a project.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the project root cannot be read.
+    pub async fn discover(
+        &self,
+        project: &Path,
+        lang: TargetLanguage,
+    ) -> Result<TargetInventory, ClassifiedError> {
+        let inv = hf_discovery::discover(project, lang).await?;
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_inventory(&inv, Utc::now()).await {
+                tracing::warn!("failed to persist target inventory: {e}");
+            }
+        }
+        Ok(inv)
+    }
+
+    /// Re-rank a target inventory using the configured LLM provider pool.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Provider` if no provider is configured, or the
+    /// underlying ranking error if the LLM call fails.
+    pub async fn rank(
+        &self,
+        inventory: TargetInventory,
+    ) -> Result<TargetInventory, ClassifiedError> {
+        let pool = self.provider_pool.as_ref().ok_or_else(|| {
+            ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
+        })?;
+        let bridge = LlmProviderBridge {
+            pool: Arc::clone(pool),
+        };
+        let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_inventory(&ranked, Utc::now()).await {
+                tracing::warn!("failed to persist ranked inventory: {e}");
+            }
+        }
+        Ok(ranked)
+    }
+
+    // -- Harness ----------------------------------------------------------
+
+    /// Draft a harness for a target using the LLM provider pool.
+    ///
+    /// Falls back to a heuristic template when no provider is configured so
+    /// the GUI still produces a draft without an API key.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the LLM call fails or the target is not
+    /// found.
+    pub async fn harness_draft(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+    ) -> Result<HarnessDraft, ClassifiedError> {
+        let inv = self.discover(project, lang).await?;
+        let candidate = inv
+            .candidates
+            .iter()
+            .find(|c| c.symbol == target)
+            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
+            .clone();
+
+        if let Some(pool) = &self.provider_pool {
+            let provider = LlmProviderBridge {
+                pool: Arc::clone(pool),
+            };
+            hf_harness::draft(&candidate, engine, Box::new(provider)).await
+        } else {
+            // No LLM configured: generate a heuristic draft so the GUI still
+            // produces something useful.
+            Ok(heuristic_draft(&candidate, engine))
+        }
+    }
+
+    /// Compile a harness in the sandbox via `hf-runtime`.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the build command fails.
+    pub async fn harness_compile(
+        &self,
+        source: String,
+        project: &Path,
+        engine: EngineKind,
+        target: &str,
+        lang: TargetLanguage,
+    ) -> Result<CompileOutcome, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
+        let harness_path = workspace.join("harness.c");
+        std::fs::write(&harness_path, &source)
+            .map_err(|e| ClassifiedError::Internal(format!("write harness: {e}")))?;
+        copy_project_sources(project, &workspace);
+
+        let build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{target}"));
+        let harness = Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::nil(),
+            engine,
+            source,
+            language: lang,
+            build_cmd,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Draft,
+            smoke_run: None,
+        };
+        let compiled = hf_harness::compile(harness, self.runtime.as_ref(), &workspace).await?;
+        Ok(CompileOutcome {
+            status: compiled.status,
+            binary_name: compiled
+                .build_cmd
+                .output
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(target)
+                .to_string(),
+            workspace,
+        })
+    }
+
+    /// Run a 60-second smoke fuzz on an already-compiled harness binary in the
+    /// per-target workspace.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the binary is missing or the smoke run
+    /// finds zero execs/sec.
+    pub async fn harness_smoke(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+    ) -> Result<SmokeRunSummary, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let bin = format!("fuzz_{target}");
+        let mut build_cmd = hf_harness::build_command(engine, lang, &bin);
+        build_cmd.output = workspace.join(&bin);
+        let harness = Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::nil(),
+            engine,
+            source: String::new(),
+            language: lang,
+            build_cmd,
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Compiled,
+            smoke_run: None,
+        };
+        let smoked = hf_harness::smoke_fuzz(harness, self.runtime.as_ref(), &workspace).await?;
+        smoked
+            .smoke_run
+            .ok_or_else(|| ClassifiedError::Harness("smoke run produced no summary".to_owned()))
+    }
+
+    // -- Seeds ------------------------------------------------------------
+
+    /// Generate seed corpus inputs for a target.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if files cannot be written.
+    pub fn generate_seeds(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<Vec<SeedEntry>, ClassifiedError> {
+        use sha2::{Digest, Sha256};
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        std::fs::create_dir_all(&corpus_dir)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
+        let seeds = generate_target_seeds(target);
+        let mut entries = Vec::new();
+        for (data, name) in seeds {
+            let path = corpus_dir.join(&name);
+            std::fs::write(&path, &data)
+                .map_err(|e| ClassifiedError::Internal(format!("write seed: {e}")))?;
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let sha = format!("{:x}", hasher.finalize());
+            entries.push(SeedEntry {
+                name,
+                size: data.len(),
+                sha256: sha,
+            });
+        }
+        Ok(entries)
+    }
+
+    // -- Run --------------------------------------------------------------
+
+    /// Run a fuzz campaign via `hf-engine::runner::EngineRunner`.
+    ///
+    /// `on_progress` is called for each parsed `FuzzProgress` event so the
+    /// caller can stream it to the UI.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the engine is not supported or the
+    /// sandboxed command returns a non-zero exit code.
+    pub async fn run_fuzzer(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        duration_secs: u64,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let out_dir = workspace.join("out");
+        std::fs::create_dir_all(&corpus_dir)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir out: {e}")))?;
+
+        let bin = format!("fuzz_{target}");
+        let binary = workspace.join(&bin);
+        if !binary.exists() {
+            return Err(ClassifiedError::Validation(format!(
+                "Compiled harness '{bin}' not found -- compile the harness first."
+            )));
+        }
+        let binary_str = format!("/work/{bin}");
+
+        let run_cfg = FuzzRunConfig {
+            harness_id: Uuid::new_v4(),
+            engine,
+            duration: Some(std::time::Duration::from_secs(duration_secs)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: Some(corpus_dir.clone()),
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+        };
+        // Record the run so campaigns survive restarts (best-effort).
+        let run_record = self.store.as_ref().map(|_| {
+            let mut rec = RunRecord::new(
+                project.to_string_lossy().to_string(),
+                engine,
+                Some(run_cfg.clone()),
+                Utc::now(),
+            );
+            rec.status = RunStatus::Running;
+            rec
+        });
+        if let (Some(store), Some(rec)) = (&self.store, &run_record) {
+            if let Err(e) = store.insert_run(rec).await {
+                tracing::warn!("failed to record run start: {e}");
+            }
+        }
+
+        let runner = hf_engine::runner::EngineRunner::new();
+        let run_result = runner
+            .run(
+                engine,
+                &run_cfg,
+                &binary_str,
+                "/work/corpus",
+                "/work/out",
+                self.runtime.as_ref(),
+                &workspace,
+            )
+            .await;
+        if let (Some(store), Some(rec)) = (&self.store, &run_record) {
+            let status = if run_result.is_ok() {
+                RunStatus::Done
+            } else {
+                RunStatus::Failed
+            };
+            if let Err(e) = store.set_run_status(rec.id, status, Some(Utc::now())).await {
+                tracing::warn!("failed to record run end: {e}");
+            }
+        }
+        let result = run_result?;
+        let mut edges = 0u64;
+        let mut execs = 0.0_f64;
+        let mut crashes = 0u32;
+        for p in &result.progress {
+            match p {
+                FuzzProgress::EdgesCovered(v) => edges = edges.max(*v),
+                FuzzProgress::ExecsPerSec(v) => execs = *v,
+                FuzzProgress::CrashesFound(n) => crashes += n,
+                FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
+            }
+            on_progress(p.clone());
+        }
+        Ok(RunSummary {
+            edges,
+            execs,
+            crashes: u64::from(crashes),
+        })
+    }
+
+    // -- Triage -----------------------------------------------------------
+
+    /// Ingest and deduplicate crash artifacts from the output directory.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the output directory cannot be read.
+    pub async fn triage(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let out_dir = workspace.join("out");
+        let target_id = self
+            .discover(project, TargetLanguage::C)
+            .await
+            .ok()
+            .and_then(|inv| {
+                inv.candidates
+                    .iter()
+                    .find(|c| c.symbol == target)
+                    .map(|c| c.id)
+            })
+            .unwrap_or_default();
+        let run_id = Uuid::new_v4();
+        let crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
+        let deduped = hf_crash::dedup(crashes);
+        if let Some(store) = &self.store {
+            for crash in &deduped {
+                if let Err(e) = store.upsert_crash(crash).await {
+                    tracing::warn!("failed to persist crash {}: {e}", crash.id);
+                }
+            }
+        }
+        Ok(deduped)
+    }
+
+    // -- Corpus -----------------------------------------------------------
+
+    /// List corpus entries for a project/target.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the corpus directory cannot be read.
+    pub fn corpus_list(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<hf_core::corpus::Corpus, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        hf_corpus::list(&corpus_dir)
+    }
+
+    /// Seed the corpus with default inputs.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if files cannot be written.
+    pub async fn corpus_seed(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<usize, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        std::fs::create_dir_all(&corpus_dir)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
+        let seeds = vec![
+            (b"{}".to_vec(), "seed_empty".to_owned()),
+            (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
+        ];
+        let corpus = hf_corpus::seed(Uuid::new_v4(), &corpus_dir, seeds).await?;
+        Ok(corpus.entries.len())
+    }
+
+    /// Grow the corpus from engine output.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the directories cannot be read.
+    pub fn corpus_grow(&self, project: &Path, target: &str) -> Result<usize, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let out_dir = workspace.join("out");
+        let corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
+        Ok(corpus.entries.len())
+    }
+
+    /// Prune duplicate-coverage entries from the corpus.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if files cannot be removed.
+    pub fn corpus_prune(&self, project: &Path, target: &str) -> Result<usize, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let corpus = hf_corpus::list(&corpus_dir)?;
+        let pruned = hf_corpus::prune(corpus)?;
+        Ok(pruned.entries.len())
+    }
+
+    // -- Chat -------------------------------------------------------------
+
+    /// Send a chat message to the LLM provider pool.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if no provider is configured or the LLM
+    /// call fails.
+    pub async fn chat_send(&self, message: &str) -> Result<String, ClassifiedError> {
+        use hf_core::types::{Message, Role};
+        let pool = self
+            .provider_pool
+            .as_deref()
+            .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
+        let system = Message {
+            role: Role::System,
+            content: "You are hobot_fuzz, an AI fuzzing assistant. You help users discover fuzzing targets, generate harnesses, run fuzzing engines, triage crashes, and manage corpora. Be concise and actionable.".to_owned(),
+        };
+        let user = Message {
+            role: Role::User,
+            content: message.to_owned(),
+        };
+        let resp = pool
+            .complete(&["general", "reasoning", "code"], vec![system, user])
+            .await?;
+        Ok(resp.content)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Environment-driven construction
+// ---------------------------------------------------------------------------
+
+/// Build the sandbox runtime from the environment: a Docker runtime when the
+/// daemon is reachable (and `HF_USE_DOCKER` is not disabled), else the stub.
+#[must_use]
+pub fn runtime_from_env() -> Arc<dyn RuntimeAdapter> {
+    let use_docker = std::env::var("HF_USE_DOCKER").map_or(true, |v| v != "0" && v != "false");
+    if use_docker && hf_runtime::docker_daemon_ready() {
+        let cfg = RuntimeConfig::default();
+        Arc::new(hf_runtime::docker::DockerRuntime::new(cfg, Path::new(".")))
+    } else {
+        Arc::new(hf_runtime::StubRuntime)
+    }
+}
+
+/// Build an LLM provider pool from `HF_PROVIDER_*` env vars, or `None` when no
+/// API key is configured.
+#[must_use]
+pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
+    let api_key = std::env::var("HF_PROVIDER_API_KEY").ok()?;
+    let model = std::env::var("HF_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
+    let base_url = std::env::var("HF_PROVIDER_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+    let cfg = ProviderConfig {
+        id: "default".to_owned(),
+        model,
+        api_key,
+        base_url,
+        tags: vec![
+            "general".to_owned(),
+            "reasoning".to_owned(),
+            "code".to_owned(),
+        ],
+        max_concurrency: 4,
+        context_window: 128_000,
+    };
+    let provider = OpenAiCompatProvider::new(cfg.clone());
+    let pool = DefaultProviderPool::with_configs(vec![Box::new(provider)], vec![cfg]);
+    Some(Arc::new(pool))
+}
+
+// ---------------------------------------------------------------------------
+// Outcome types
+// ---------------------------------------------------------------------------
+
+/// The result of a harness compile.
+#[derive(Debug, Clone)]
+pub struct CompileOutcome {
+    pub status: HarnessStatus,
+    pub binary_name: String,
+    pub workspace: PathBuf,
+}
+
+/// A generated seed entry.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SeedEntry {
+    pub name: String,
+    pub size: usize,
+    pub sha256: String,
+}
+
+/// A fuzz run summary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunSummary {
+    pub edges: u64,
+    pub execs: f64,
+    pub crashes: u64,
+}
+
+// ---------------------------------------------------------------------------
+// LLM provider bridge: wraps a ProviderPool as a single LlmProvider
+// ---------------------------------------------------------------------------
+
+struct LlmProviderBridge {
+    pool: Arc<dyn ProviderPool>,
+}
+
+#[async_trait::async_trait]
+impl hf_core::provider::LlmProvider for LlmProviderBridge {
+    fn id(&self) -> &'static str {
+        "pool"
+    }
+
+    async fn complete(
+        &self,
+        messages: Vec<hf_core::types::Message>,
+    ) -> Result<hf_core::provider::LlmResponse, ClassifiedError> {
+        let resp = self.pool.complete(&[], messages).await?;
+        Ok(hf_core::provider::LlmResponse {
+            content: resp.content,
+            usage: resp.usage,
+            model: resp.model,
+        })
+    }
+
+    async fn stream(
+        &self,
+        messages: Vec<hf_core::types::Message>,
+    ) -> Result<
+        Box<dyn futures::Stream<Item = Result<String, ClassifiedError>> + Send + Unpin>,
+        ClassifiedError,
+    > {
+        // The pool does not support streaming; fall back to complete + yield.
+        let resp = self.pool.complete(&[], messages).await?;
+        let chunk = resp.content;
+        let stream = futures::stream::iter(vec![Ok(chunk)]);
+        Ok(Box::new(stream))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Heuristic harness draft (no-LLM fallback)
+// ---------------------------------------------------------------------------
+
+/// Generate a heuristic harness draft when no LLM provider is configured.
+fn heuristic_draft(candidate: &TargetCandidate, engine: EngineKind) -> HarnessDraft {
+    let includes = generate_includes(candidate);
+    let forward_decl = generate_forward_decl(&candidate.symbol, candidate.signature.as_deref());
+    let body = generate_harness_body(&candidate.symbol, candidate.signature.as_deref());
+    let source = format!(
+        r"// Auto-generated harness for {symbol}
+// Engine: {engine}
+// Target: {file}:{line}
+#include <stdint.h>
+#include <stddef.h>
+{includes}
+{forward_decl}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
+    // Target signature: {sig}
+{body}
+    return 0;
+}}
+",
+        symbol = candidate.symbol,
+        engine = engine_label(engine),
+        file = candidate.location.file.display(),
+        line = candidate.location.line,
+        includes = includes,
+        forward_decl = forward_decl,
+        sig = candidate.signature.as_deref().unwrap_or("(unknown)"),
+        body = body,
+    );
+    HarnessDraft {
+        target_id: candidate.id,
+        engine,
+        source,
+        rationale: String::new(),
+    }
+}
+
+fn engine_label(engine: EngineKind) -> &'static str {
+    match engine {
+        EngineKind::LibFuzzer => "libFuzzer",
+        EngineKind::AflPlusPlus => "AFL++",
+        EngineKind::Honggfuzz => "honggfuzz",
+        EngineKind::ClusterFuzzLite => "ClusterFuzzLite",
+        EngineKind::Syzkaller => "syzkaller",
+    }
+}
+
+/// Build the `#include` line for a target's header.
+fn generate_includes(candidate: &TargetCandidate) -> String {
+    let file = &candidate.location.file;
+    let stem = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("target");
+    format!("#include \"{stem}.h\"")
+}
+
+/// Build a forward declaration for the target function so the harness
+/// compiles even when the header does not export the symbol.
+///
+/// Uses the signature captured by the scanner (the declarator portion of the
+/// function definition).  We prepend the return type that the scanner strips
+/// out (best-effort: assume `int` when unknown) and terminate with `;`.
+fn generate_forward_decl(symbol: &str, signature: Option<&str>) -> String {
+    let Some(sig) = signature else {
+        return format!("int {symbol}();");
+    };
+    // The scanner stores the declarator, e.g. "parse_value_inner(const char
+    // *buf, size_t len, value_t *out, int *err)".  Use it verbatim and append
+    // `;` to form a prototype.  When the return type is not visible we
+    // declare it as `int` (C default) so the compiler has a prototype.
+    let trimmed = sig.trim();
+    if trimmed.is_empty() {
+        return format!("int {symbol}();");
+    }
+    // If the declarator already has a return type prefix, keep it; otherwise
+    // assume int.
+    let has_return_type = trimmed.split_whitespace().next().is_some_and(|first_word| {
+        // If the first token contains the function name (starts with the
+        // symbol or has no space before the opening paren) there is no
+        // explicit return type in the declarator.
+        !first_word.starts_with(symbol) && first_word != symbol
+    });
+    if has_return_type {
+        format!("{trimmed};")
+    } else {
+        format!("int {trimmed};")
+    }
+}
+
+/// Build the body of `LLVMFuzzerTestOneInput` for a target.
+fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
+    let fallback = format!("    {symbol}((const char *)data, size);");
+    let Some(sig) = signature else {
+        return fallback;
+    };
+    let (Some(open), Some(close)) = (sig.find('('), sig.rfind(')')) else {
+        return fallback;
+    };
+    let params_str = &sig[open + 1..close];
+    let params: Vec<&str> = params_str
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && *p != "void")
+        .collect();
+    if params.is_empty() {
+        return fallback;
+    }
+
+    let mut decls: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut buffer_used = false;
+
+    for (i, param) in params.iter().enumerate() {
+        let star_count = param.matches('*').count();
+        let is_char_like =
+            param.contains("char") || param.contains("uint8") || param.contains("void");
+        if star_count == 1 && is_char_like && !buffer_used {
+            args.push("(const char *)data".to_string());
+            buffer_used = true;
+        } else if star_count >= 1 {
+            let base = param[..param.find('*').unwrap_or(param.len())]
+                .trim()
+                .trim_start_matches("const ")
+                .trim();
+            let base = if base.is_empty() { "char" } else { base };
+            decls.push(format!("    {base} _arg{i} = {{0}};"));
+            args.push(format!("&_arg{i}"));
+        } else {
+            args.push("size".to_string());
+        }
+    }
+
+    let mut body = String::new();
+    for d in &decls {
+        body.push_str(d);
+        body.push('\n');
+    }
+    let _ = write!(body, "    {symbol}({});", args.join(", "));
+    body
+}
+
+// Keep BuildCommand referenced so unused-import lints don't fire when the
+// type is only used in a conditional path.
+#[allow(dead_code)]
+fn _ensure_build_command_used(_b: BuildCommand) {}

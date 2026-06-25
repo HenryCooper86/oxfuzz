@@ -8,10 +8,14 @@ description = "REST API + SSE streaming"
 [dependencies]
 hf-core = { workspace = true }
 hf-service = { workspace = true }
+hf-runtime = { workspace = true }
+hf-harness = { workspace = true }
 hf-discovery = { workspace = true }
 hf-corpus = { workspace = true }
 hf-crash = { workspace = true }
 async-trait = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

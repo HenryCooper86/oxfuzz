@@ -1,4 +1,4 @@
-//! Tests for the EngineRunner that orchestrates build + run + progress.
+//! Tests for the `EngineRunner` that orchestrates build + run + progress.
 
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
