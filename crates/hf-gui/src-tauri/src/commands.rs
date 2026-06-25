@@ -477,6 +477,66 @@ pub async fn chat_answer_permission(
     Ok(state.pending_approvals.resolve(uid, approved).await)
 }
 
+/// Everything `hobot_fuzz` has learned about your projects, read from the
+/// `SQLite` store: discovered targets, fuzz runs, and crashes found. Powers the
+/// Knowledge view. Returns empty lists when no database is configured.
+#[derive(Debug, Default, Serialize)]
+pub struct KnowledgeSummary {
+    pub db_configured: bool,
+    pub targets: Vec<serde_json::Value>,
+    pub runs: Vec<serde_json::Value>,
+    pub crashes: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+pub async fn knowledge_summary(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<KnowledgeSummary, String> {
+    let Some(store) = state.container.store() else {
+        return Ok(KnowledgeSummary::default());
+    };
+    let targets = store.list_all_targets().await.map_err(|e| e.to_string())?;
+    let runs = store.list_runs(None).await.map_err(|e| e.to_string())?;
+    let crashes = store.list_all_crashes().await.map_err(|e| e.to_string())?;
+    Ok(KnowledgeSummary {
+        db_configured: true,
+        targets: targets
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "symbol": t.symbol,
+                    "kind": format!("{:?}", t.kind),
+                    "fit_score": t.fit_score,
+                    "project": t.project_root.to_string_lossy(),
+                    "location": format!("{}:{}", t.location.file.display(), t.location.line),
+                })
+            })
+            .collect(),
+        runs: runs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id.to_string(),
+                    "project": r.project_root,
+                    "engine": format!("{:?}", r.engine),
+                    "status": format!("{:?}", r.status),
+                    "started_at": r.started_at.to_rfc3339(),
+                })
+            })
+            .collect(),
+        crashes: crashes
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "kind": format!("{:?}", c.kind),
+                    "summary": c.summary,
+                    "signature": c.stack_signature,
+                })
+            })
+            .collect(),
+    })
+}
+
 /// Create a new persistent conversation session and return its id.
 ///
 /// Returns `None` when no database is configured (chat still works, but turns

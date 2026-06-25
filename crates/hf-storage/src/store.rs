@@ -295,6 +295,17 @@ impl Store {
             .collect()
     }
 
+    /// List every persisted target across all projects, highest fit first.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn list_all_targets(&self) -> Result<Vec<TargetCandidate>, StorageError> {
+        let rows = sqlx::query("SELECT data_json FROM targets ORDER BY fit_score DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| json_col(r, "data_json")).collect()
+    }
+
     // -- harnesses ----------------------------------------------------------
 
     /// Insert or replace a harness.
@@ -391,6 +402,17 @@ impl Store {
         rows.into_iter()
             .map(|r| json_col(&r, "data_json"))
             .collect()
+    }
+
+    /// List every persisted crash across all runs, newest-first by id order.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn list_all_crashes(&self) -> Result<Vec<Crash>, StorageError> {
+        let rows = sqlx::query("SELECT data_json FROM crashes")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| json_col(r, "data_json")).collect()
     }
 
     // -- corpus -------------------------------------------------------------
