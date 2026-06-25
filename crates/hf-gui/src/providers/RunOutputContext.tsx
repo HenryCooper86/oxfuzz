@@ -111,6 +111,11 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
           duration: p.duration,
           arch: p.arch,
         });
+        // Web mode has no run_fuzzer endpoint and resolves to undefined.
+        if (!result) {
+          appendLog(`[${now()}] Fuzzing is not available in web mode.`);
+          return 0;
+        }
         setSummary({ edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) });
         appendLog(`[${now()}] Run complete (exit ${result.exit_code ?? "?"})`);
         return result.crashes;
@@ -133,6 +138,11 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       setLog([`[${now()}] Starting syzkaller campaign`]);
       try {
         const result = await getTransport().invoke<RunResult>("run_syzkaller", { opts });
+        // Web mode has no run_syzkaller endpoint and resolves to undefined.
+        if (!result) {
+          appendLog(`[${now()}] Syzkaller is not available in web mode.`);
+          return 0;
+        }
         setSummary({ edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) });
         appendLog(`[${now()}] Campaign step complete (exit ${result.exit_code ?? "?"})`);
         return result.crashes;

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Bug, Crosshair, Play, Database, FolderPlus, FolderOpen, ChevronDown, Mic, X } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -8,7 +8,6 @@ interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
-  actions?: { label: string; icon: string }[];
 }
 
 interface ModelInfo {
@@ -209,13 +208,6 @@ export function ChatView() {
     }
   }
 
-  const actionIcons: Record<string, React.ReactNode> = {
-    crosshair: <Crosshair size={12} />,
-    play: <Play size={12} />,
-    bug: <Bug size={12} />,
-    database: <Database size={12} />,
-  };
-
   const hasText = input.trim().length > 0;
 
   return (
@@ -318,19 +310,6 @@ export function ChatView() {
                       {m.content}
                     </p>
                   </div>
-                  {m.actions && (
-                    <div className="flex gap-1 flex-wrap mt-1">
-                      {m.actions.map((a, j) => (
-                        <button
-                          key={j}
-                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
-                        >
-                          {actionIcons[a.icon]}
-                          {a.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
                   <span className="text-xs text-text-muted" style={{ fontSize: "10px" }}>
                     {m.timestamp}
                   </span>
@@ -370,8 +349,8 @@ export function ChatView() {
             </button>
             <button
               onClick={() => answerPermission(true)}
-              className="text-xs px-3 py-1.5 rounded-md text-black"
-              style={{ background: "var(--accent)" }}
+              className="text-xs px-3 py-1.5 rounded-md"
+              style={{ background: "var(--accent)", color: "var(--accent-contrast)" }}
             >
               Approve
             </button>
@@ -461,9 +440,9 @@ export function ChatView() {
                 </span>
               )}
               <button
-                onClick={hasText ? send : undefined}
-                disabled={busy}
-                title={hasText ? "Send" : "Voice input"}
+                onClick={send}
+                disabled={busy || !hasText}
+                title="Send"
                 className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"
                 style={{
                   width: "30px",
@@ -471,16 +450,10 @@ export function ChatView() {
                   background: hasText ? "var(--accent)" : "transparent",
                   color: hasText ? "var(--accent-contrast)" : "var(--text-secondary)",
                   border: "none",
-                  cursor: busy ? "default" : "pointer",
+                  cursor: busy || !hasText ? "default" : "pointer",
                 }}
               >
-                {busy ? (
-                  <Loader2 size={15} className="animate-spin" />
-                ) : hasText ? (
-                  <Send size={15} />
-                ) : (
-                  <Mic size={17} />
-                )}
+                {busy ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
               </button>
             </div>
           </div>

@@ -31,12 +31,6 @@ function EmptyState({ icon, hint }: { icon: ReactNode; hint: string }) {
         <span style={{ color: "var(--accent)" }}>{icon}</span>
       </div>
       <p className="text-sm text-text-secondary max-w-sm">{hint}</p>
-      <span
-        className="text-xs mt-3 px-2 py-0.5 rounded-sm"
-        style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}
-      >
-        Coming soon
-      </span>
     </div>
   );
 }

@@ -63,7 +63,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [project]);
+  }, [project, lang, setSelectedTarget]);
 
   async function generateHarness(target: string) {
     setHarnessStatus("loading");
