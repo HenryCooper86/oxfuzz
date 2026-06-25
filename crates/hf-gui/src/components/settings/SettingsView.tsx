@@ -1,18 +1,24 @@
-// Full-window Settings takeover, modeled after y-agent's SettingsPanel:
-// a left sub-nav (with Back) and a right pane whose action bar carries the
-// italic section title, a FORM/RAW toggle, and a gold Save Changes button.
+// Full-window Settings takeover, modeled after y-agent's SettingsPanel.
+//
+// This is the orchestrator. For the ACTIVE config-backed section it owns the
+// single source of truth: the parsed `value` (object / provider array), the
+// `raw` TOML text, the `mode` (form | raw), and a `dirty` flag. FORM and RAW
+// are two lossless views of the SAME file -- switching between them serializes
+// or parses in memory, no disk round-trip. ONE header "Save Changes" button
+// persists whichever view is active and clears dirty.
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Server, HardDrive, Crosshair, Shield, Database, Info, SlidersHorizontal, MessageSquare, Wrench } from "lucide-react";
 import { getTransport } from "../../lib";
 import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
 import { GeneralTab } from "./GeneralTab";
-import { ProvidersTab } from "./ProvidersTab";
+import { ProvidersTab, type Provider } from "./ProvidersTab";
 import { RuntimeTab } from "./RuntimeTab";
 import { EnginesTab } from "./EnginesTab";
 import { GuardrailsTab } from "./GuardrailsTab";
 import { StorageTab } from "./StorageTab";
+import { ObjectForm } from "./ObjectForm";
 import { AboutTab } from "./AboutTab";
 
 type SectionId =
@@ -32,21 +38,21 @@ interface Section {
   icon: React.ComponentType<{ size?: number }>;
   /** Raw config section name, or null when the section has no config file. */
   config: string | null;
-  /** Whether the section has a dedicated form view (else it is raw-only). */
-  form: boolean;
 }
 
 const SECTIONS: Section[] = [
-  { id: "general", label: "General", icon: SlidersHorizontal, config: null, form: true },
-  { id: "providers", label: "Providers", icon: Server, config: "providers", form: true },
-  { id: "session", label: "Session", icon: MessageSquare, config: "session", form: false },
-  { id: "runtime", label: "Runtime", icon: HardDrive, config: "runtime", form: true },
-  { id: "engines", label: "Engines", icon: Crosshair, config: "engines", form: true },
-  { id: "tools", label: "Tools", icon: Wrench, config: "tools", form: false },
-  { id: "guardrails", label: "Guardrails", icon: Shield, config: "guardrails", form: true },
-  { id: "storage", label: "Storage", icon: Database, config: "storage", form: true },
-  { id: "about", label: "About", icon: Info, config: null, form: true },
+  { id: "general", label: "General", icon: SlidersHorizontal, config: null },
+  { id: "providers", label: "Providers", icon: Server, config: "providers" },
+  { id: "session", label: "Session", icon: MessageSquare, config: "session" },
+  { id: "runtime", label: "Runtime", icon: HardDrive, config: "runtime" },
+  { id: "engines", label: "Engines", icon: Crosshair, config: "engines" },
+  { id: "tools", label: "Tools", icon: Wrench, config: "tools" },
+  { id: "guardrails", label: "Guardrails", icon: Shield, config: "guardrails" },
+  { id: "storage", label: "Storage", icon: Database, config: "storage" },
+  { id: "about", label: "About", icon: Info, config: null },
 ];
+
+type Cfg = Record<string, unknown>;
 
 function FormRawToggle({ mode, onChange }: { mode: "form" | "raw"; onChange: (m: "form" | "raw") => void }) {
   return (
@@ -83,84 +89,153 @@ function FormRawToggle({ mode, onChange }: { mode: "form" | "raw"; onChange: (m:
   );
 }
 
-function renderForm(id: SectionId, onRunWizard?: () => void) {
-  switch (id) {
-    case "general":
-      return <GeneralTab onRunWizard={onRunWizard} />;
-    case "providers":
-      return <ProvidersTab />;
-    case "runtime":
-      return <RuntimeTab />;
-    case "engines":
-      return <EnginesTab />;
-    case "guardrails":
-      return <GuardrailsTab />;
-    case "storage":
-      return <StorageTab />;
-    case "about":
-      return <AboutTab />;
-    default:
-      return null;
-  }
-}
-
 export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onRunWizard?: () => void }) {
   const [active, setActive] = useState<SectionId>("general");
   const [mode, setMode] = useState<"form" | "raw">("form");
+  // The single source of truth for the active config-backed section.
+  const [value, setValue] = useState<unknown>(null);
   const [raw, setRaw] = useState("");
-  const [rawDirty, setRawDirty] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const { toast } = useToast();
 
   const section = SECTIONS.find((s) => s.id === active)!;
   const hasConfig = section.config !== null;
-  const hasForm = section.form;
-  // Raw-only sections (config present but no form) always show the editor.
-  const showRaw = hasConfig && (!hasForm || mode === "raw");
+  const showRaw = hasConfig && mode === "raw";
 
-  // Load the raw TOML for a section. Called from the user actions that can
-  // reveal the raw editor (toggling to RAW, or switching section while in
-  // RAW) -- no effect needed since it is purely event-driven.
-  async function loadRaw(configName: string) {
-    setLoading(true);
-    setRawDirty(false);
+  // Load a section's config from disk into both `value` (form) and `raw` (text).
+  // Providers use the structured get_providers backend; everything else parses
+  // its TOML via config_toml_to_value.
+  const load = useCallback(
+    async (s: Section) => {
+      if (s.config === null) {
+        setValue(null);
+        setRaw("");
+        setDirty(false);
+        return;
+      }
+      setLoading(true);
+      try {
+        const T = getTransport();
+        if (s.id === "providers") {
+          const list = await T.invoke<Provider[]>("get_providers");
+          setValue(list);
+          setRaw(await T.invoke<string>("config_value_to_toml", { value: { providers: list } }));
+        } else {
+          const text = await T.invoke<string>("read_config", { name: s.config });
+          setRaw(text);
+          setValue(await T.invoke<Cfg>("config_toml_to_value", { content: text }));
+        }
+        setDirty(false);
+      } catch (e) {
+        toast({ title: "Failed to load config", description: String(e), variant: "error" });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [toast],
+  );
+
+  // Reload whenever the selected section changes (mode is reset to FORM by the
+  // nav handler / initial state, so the effect only synchronizes with disk).
+  useEffect(() => {
+    // `load` sets loading state as it synchronizes the form with disk.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load(section);
+  }, [section, load]);
+
+  // Serialize the current form `value` to TOML text (provider arrays are wrapped
+  // back into the [[providers]] table shape).
+  async function serializeValue(v: unknown): Promise<string> {
+    const T = getTransport();
+    if (active === "providers") {
+      return T.invoke<string>("config_value_to_toml", { value: { providers: v ?? [] } });
+    }
+    return T.invoke<string>("config_value_to_toml", { value: (v as Cfg) ?? {} });
+  }
+
+  // Parse raw TOML text back into a form `value`.
+  async function parseToValue(text: string): Promise<unknown> {
+    const T = getTransport();
+    const parsed = await T.invoke<Cfg>("config_toml_to_value", { content: text });
+    if (active === "providers") {
+      const arr = (parsed as { providers?: Provider[] })?.providers;
+      return Array.isArray(arr) ? arr : [];
+    }
+    return parsed ?? {};
+  }
+
+  // Lossless FORM <-> RAW switch: convert in memory, preserving unsaved edits.
+  async function changeMode(m: "form" | "raw") {
+    if (m === mode) return;
     try {
-      setRaw(await getTransport().invoke<string>("read_config", { name: configName }));
+      if (m === "raw") {
+        setRaw(await serializeValue(value));
+      } else {
+        setValue(await parseToValue(raw));
+      }
+      setMode(m);
     } catch (e) {
-      toast({ title: "Failed to load config", description: String(e), variant: "error" });
-    } finally {
-      setLoading(false);
+      toast({ title: "Conversion failed", description: String(e), variant: "error" });
     }
   }
 
-  function changeMode(m: "form" | "raw") {
-    setMode(m);
-    if (m === "raw" && section.config) void loadRaw(section.config);
-  }
-
-  async function saveRaw() {
-    if (!section.config) return;
-    try {
-      await getTransport().invoke("write_config", { name: section.config, content: raw });
-      setRawDirty(false);
-      toast({ title: "Saved", description: `${section.label} config written`, variant: "success" });
-    } catch (e) {
-      toast({ title: "Save failed", description: String(e), variant: "error" });
-    }
+  function onFormChange(next: unknown) {
+    setValue(next);
+    setDirty(true);
   }
 
   function selectSection(id: SectionId) {
+    if (id === active) return;
+    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    setMode("form");
     setActive(id);
-    const next = SECTIONS.find((s) => s.id === id);
-    if (!next) return;
-    if (next.config === null) {
-      // Form-only section (no config file).
-      setMode("form");
-    } else if (!next.form) {
-      // Raw-only section -- load its TOML immediately.
-      void loadRaw(next.config);
-    } else if (mode === "raw") {
-      void loadRaw(next.config);
+  }
+
+  async function save() {
+    if (!section.config) return;
+    setSaving(true);
+    try {
+      const T = getTransport();
+      if (section.id === "providers") {
+        const list = mode === "raw" ? await parseToValue(raw) : value;
+        await T.invoke("set_providers", { providers: (list as Provider[]) ?? [] });
+      } else {
+        const content = mode === "raw" ? raw : await serializeValue(value);
+        await T.invoke("write_config", { name: section.config, content });
+      }
+      toast({ title: "Settings saved", description: `${section.label} configuration written`, variant: "success" });
+      await load(section);
+    } catch (e) {
+      toast({ title: "Save failed", description: String(e), variant: "error" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function renderForm() {
+    const obj = value && typeof value === "object" && !Array.isArray(value) ? (value as Cfg) : {};
+    switch (active) {
+      case "general":
+        return <GeneralTab onRunWizard={onRunWizard} />;
+      case "about":
+        return <AboutTab />;
+      case "providers":
+        return <ProvidersTab value={Array.isArray(value) ? (value as Provider[]) : []} onChange={onFormChange} />;
+      case "runtime":
+        return <RuntimeTab value={obj} onChange={onFormChange} />;
+      case "engines":
+        return <EnginesTab value={obj} onChange={onFormChange} />;
+      case "guardrails":
+        return <GuardrailsTab value={obj} onChange={onFormChange} />;
+      case "storage":
+        return <StorageTab value={obj} onChange={onFormChange} />;
+      case "session":
+      case "tools":
+        return <ObjectForm value={obj} onChange={onFormChange} />;
+      default:
+        return null;
     }
   }
 
@@ -222,9 +297,9 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
             {section.label}
           </span>
           <div className="flex items-center gap-4">
-            {hasForm && hasConfig && <FormRawToggle mode={mode} onChange={changeMode} />}
-            {showRaw && (
-              <Button variant="primary" size="sm" onClick={saveRaw} disabled={!rawDirty}>
+            {hasConfig && <FormRawToggle mode={mode} onChange={changeMode} />}
+            {hasConfig && (
+              <Button variant="primary" size="sm" onClick={save} disabled={!dirty || saving} loading={saving}>
                 Save Changes
               </Button>
             )}
@@ -232,38 +307,38 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         </header>
 
         <div className="flex-1 overflow-y-auto" style={{ padding: "var(--space-lg)" }}>
-          {showRaw ? (
+          {!hasConfig ? (
+            renderForm()
+          ) : loading ? (
+            <div className="text-text-muted text-sm" style={{ padding: "var(--space-md)" }}>
+              Loading…
+            </div>
+          ) : showRaw ? (
             <div className="flex flex-col h-full">
-              {loading ? (
-                <div className="text-text-muted text-sm" style={{ padding: "var(--space-md)" }}>
-                  Loading…
-                </div>
-              ) : (
-                <textarea
-                  value={raw}
-                  onChange={(e) => {
-                    setRaw(e.target.value);
-                    setRawDirty(true);
-                  }}
-                  spellCheck={false}
-                  className="flex-1 w-full outline-none resize-none"
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: "12px",
-                    lineHeight: 1.6,
-                    color: "var(--text-primary)",
-                    background: "var(--surface-code)",
-                    border: "1px solid var(--border)",
-                    borderRadius: "var(--radius-md)",
-                    padding: "var(--space-md)",
-                    minHeight: "320px",
-                    tabSize: 2,
-                  }}
-                />
-              )}
+              <textarea
+                value={raw}
+                onChange={(e) => {
+                  setRaw(e.target.value);
+                  setDirty(true);
+                }}
+                spellCheck={false}
+                className="flex-1 w-full outline-none resize-none"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "12px",
+                  lineHeight: 1.6,
+                  color: "var(--text-primary)",
+                  background: "var(--surface-code)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-md)",
+                  padding: "var(--space-md)",
+                  minHeight: "320px",
+                  tabSize: 2,
+                }}
+              />
             </div>
           ) : (
-            renderForm(active, onRunWizard)
+            renderForm()
           )}
         </div>
       </div>
