@@ -866,8 +866,11 @@ pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
         } else {
             String::new()
         };
-        if api_key.is_empty() {
-            continue; // no usable key -> not a working provider
+        // Usable if it has a key, or an explicit endpoint (local/no-auth
+        // OpenAI-compatible servers like Ollama need no key). A blank template
+        // entry (no key, no base_url) is skipped.
+        if api_key.is_empty() && entry.base_url.is_empty() {
+            continue;
         }
         let base_url = if entry.base_url.is_empty() {
             default_base_url(&entry.provider_type)
