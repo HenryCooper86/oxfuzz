@@ -25,7 +25,7 @@
 | --- | --- |
 | **Target Discovery** | Semantic + static-analysis scan of a project producing a ranked Target Inventory. |
 | **Harness Generation** | LLM-authored, compile-validated, smoke-fuzzed harnesses per target. |
-| **Engine Integration** | AFL++, honggfuzz, libFuzzer, oss-fuzz/ClusterFuzzLite behind one `FuzzEngine` trait. |
+| **Engine Integration** | AFL++, honggfuzz, libFuzzer, oss-fuzz/ClusterFuzzLite behind one `EngineAdapter` trait. |
 | **Crash Triage** | Dedup by stack signature, minimize, draft bug reports under HITL review. |
 | **Corpus & Coverage** | Grow, prune, and seed corpora; monitor coverage deltas; propose new harnesses. |
 | **Multi-Provider LLM Pool** | Tag-based routing, automatic failover, provider freeze/thaw. |
@@ -170,7 +170,7 @@ See `config/*.example.toml` for full reference. Key files:
 
 | Crate | Role |
 | --- | --- |
-| `hf-core` | Core traits: `LlmProvider`, `Tool`, `FuzzEngine`, `TargetCandidate`, `Harness`, `Crash`. |
+| `hf-core` | Core types: `LlmProvider`, `Tool`, `TargetCandidate`, `Harness`, `Crash` (the `EngineAdapter` trait lives in `hf-engine`). |
 | `hf-provider` | LLM provider pool with tag routing and failover. |
 | `hf-session` | Session tree, parent/child delegation, compaction. |
 | `hf-context` | Token-budget-aware prompt assembly pipeline. |
@@ -188,7 +188,7 @@ See `config/*.example.toml` for full reference. Key files:
 | `hf-journal` | WAL-based run journaling and replay. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, Target Inventory. |
 | `hf-harness` | Harness generation, compile validation, smoke fuzz. |
-| `hf-engine` | `FuzzEngine` adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite. |
+| `hf-engine` | `EngineAdapter` adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller. |
 | `hf-crash` | Crash ingestion, dedup, minimization, bug report drafting. |
 | `hf-corpus` | Corpus management: seed, grow, prune, merge. |
 | `hf-coverage` | Coverage delta tracking, stagnation detection. |
