@@ -17,6 +17,15 @@ interface ModelInfo {
   model: string;
 }
 
+// Mirrors hf_agent::AgentEvent (serde tag = "type", snake_case).
+type AgentEvent =
+  | { type: "started" }
+  | { type: "thinking"; text: string }
+  | { type: "tool_call"; name: string; args: unknown }
+  | { type: "tool_result"; name: string; summary: string }
+  | { type: "complete"; content: string }
+  | { type: "error"; message: string };
+
 export function ChatView() {
   const { activeProject, recentProjects, setActiveProject } = useProject();
   const { sendOnEnter } = usePrefs();
@@ -79,31 +88,63 @@ export function ChatView() {
     const text = input.trim();
     if (!text || busy) return;
 
-    const msg: ChatMessage = {
-      role: "user",
-      content: text,
-      timestamp: new Date().toLocaleTimeString(),
-    };
+    const now = () => new Date().toLocaleTimeString();
+    const msg: ChatMessage = { role: "user", content: text, timestamp: now() };
+    // Snapshot prior turns as agent history before appending the new message.
+    const history = messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content }));
     setMessages((m) => [...m, msg]);
     setInput("");
     setBusy(true);
 
+    const transport = getTransport();
+    let unlisten: (() => void) | undefined;
     try {
-      const responseText = await getTransport().invoke<string>("chat_send", { message: text });
-      const response: ChatMessage = {
-        role: "assistant",
-        content: responseText || "I couldn't generate a response. Make sure a provider is configured in Settings.",
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages((m) => [...m, response]);
-    } catch {
-      const response: ChatMessage = {
-        role: "assistant",
-        content: "I'm a fuzzing assistant -- try asking me to \"discover targets\", \"run a fuzzer\", \"triage crashes\", or \"manage corpus\". You can also use the sidebar panels for direct access. (Note: configure a provider in Settings for AI-powered responses.)",
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages((m) => [...m, response]);
+      // Stream live tool activity from the autonomous agent as system lines.
+      unlisten = await transport.listen<AgentEvent>("chat:event", (ev) => {
+        const e = ev.payload;
+        if (e.type === "tool_call") {
+          setMessages((m) => [
+            ...m,
+            { role: "system", content: `Calling tool: ${e.name}(${JSON.stringify(e.args)})`, timestamp: now() },
+          ]);
+        } else if (e.type === "tool_result") {
+          setMessages((m) => [
+            ...m,
+            { role: "system", content: `${e.name} -> ${e.summary}`, timestamp: now() },
+          ]);
+        } else if (e.type === "thinking" && e.text) {
+          setMessages((m) => [...m, { role: "system", content: e.text, timestamp: now() }]);
+        }
+      });
+
+      const responseText = await transport.invoke<string>("chat_agent", {
+        message: text,
+        project: activeProject || null,
+        history,
+      });
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          content:
+            responseText ||
+            "I couldn't generate a response. Make sure a provider is configured in Settings.",
+          timestamp: now(),
+        },
+      ]);
+    } catch (err) {
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          content: `I hit an error: ${err instanceof Error ? err.message : String(err)}. Configure a provider in Settings, and pick a project folder so I can run tools.`,
+          timestamp: now(),
+        },
+      ]);
     } finally {
+      if (unlisten) unlisten();
       setBusy(false);
     }
   }
