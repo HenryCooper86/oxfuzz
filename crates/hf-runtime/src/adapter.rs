@@ -7,7 +7,7 @@ use std::path::Path;
 
 /// A stub runtime that executes commands on the host (development only).
 ///
-/// Production uses `DockerRuntime` (to be implemented).
+/// Production uses [`DockerRuntime`](crate::docker::DockerRuntime).
 pub struct StubRuntime;
 
 #[async_trait]

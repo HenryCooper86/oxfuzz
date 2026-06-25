@@ -13,7 +13,7 @@ pub fn build_minimize_args(
     output: &str,
 ) -> Option<Vec<String>> {
     match engine {
-        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => Some(vec![
+        EngineKind::LibFuzzer => Some(vec![
             binary.to_owned(),
             "-minimize_crash=1".to_owned(),
             format!("-exact_artifact_path={crash_input}"),
@@ -26,8 +26,14 @@ pub fn build_minimize_args(
             "-o".to_owned(),
             output.to_owned(),
         ]),
-        // honggfuzz has no inline minimizer; syzkaller uses `syz-repro` on the
-        // crash log, which is driven separately from a harness binary.
-        EngineKind::Honggfuzz | EngineKind::Syzkaller => None,
+        // No built-in raw-binary minimizer for these engines:
+        // - ClusterFuzzLite is driven through `infra/helper.py` (see
+        //   `hf_engine::clusterfuzzlite`), not a raw libFuzzer binary, so the
+        //   `binary -minimize_crash=1` form does not apply; minimization goes
+        //   through oss-fuzz tooling (`helper.py reproduce`).
+        // - honggfuzz has no inline minimizer.
+        // - syzkaller uses `syz-repro` on the crash log, driven separately from
+        //   a harness binary.
+        EngineKind::ClusterFuzzLite | EngineKind::Honggfuzz | EngineKind::Syzkaller => None,
     }
 }

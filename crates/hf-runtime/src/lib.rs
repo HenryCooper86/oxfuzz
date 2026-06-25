@@ -1,7 +1,7 @@
 //! hf-runtime: Sandboxed runtime for harness builds and fuzz runs.
 //!
 //! Implements `RuntimeAdapter` from `hf-core`. Two backends:
-//! - `DockerRuntime` (default, isolation via bollard).
+//! - `DockerRuntime` (default, isolation by shelling out to the `docker` CLI).
 //! - `StubRuntime` (development only, returns errors).
 //!
 //! See `docs/design/runtime-design.md` (to be written) and

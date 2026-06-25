@@ -34,7 +34,7 @@ pub fn ingest(
             continue;
         }
         if is_crash_artifact(&name) {
-            let log = find_log_for(run_dir, &name);
+            let log = find_sanitizer_log(&path, run_dir, &name);
             let (kind, sig, summary) = log
                 .as_deref()
                 .map_or((CrashKind::Other, String::new(), String::new()), classify);
@@ -59,11 +59,19 @@ pub fn ingest(
             .map_err(|e| ClassifiedError::Internal(format!("read crashes dir: {e}")))?;
         for entry in entries {
             let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
+            let name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
             if !path.is_file() {
                 continue;
             }
-            let (kind, sig, summary) = (CrashKind::Other, String::new(), String::new());
+            // AFL++ does not embed a sanitizer trace in the crash file itself,
+            // but a sibling report may exist (e.g. when the harness was built
+            // with ASan). Classify from it when present; otherwise leave the
+            // crash unclassified for the service-layer replay pass.
+            let log = find_sanitizer_log(&path, &afl_crashes, &name);
+            let (kind, sig, summary) = log
+                .as_deref()
+                .map_or((CrashKind::Other, String::new(), String::new()), classify);
             crashes.push(Crash {
                 id: Uuid::new_v4(),
                 run_id,
@@ -88,14 +96,74 @@ fn is_crash_artifact(name: &str) -> bool {
         || name.starts_with("oom-")
 }
 
-fn find_log_for(run_dir: &Path, crash_name: &str) -> Option<String> {
-    // libFuzzer may write a log file alongside the crash.
+/// Find a sanitizer report to classify a crash artifact from.
+///
+/// Tries, in order:
+/// 1. The libFuzzer `log-<stem>.txt` convention next to the artifact.
+/// 2. Any sibling `.txt`/`.log` file (in the artifact's directory or the run
+///    directory) whose contents look like a sanitizer/UBSan trace.
+///
+/// Read failures are logged rather than silently swallowed, so a real I/O
+/// error (e.g. permissions) is visible instead of masquerading as "no log".
+fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Option<String> {
+    // 1. libFuzzer convention: log-<stem>.txt alongside the crash.
     let stem = crash_name.split('-').nth(1).unwrap_or(crash_name);
-    let log_name = format!("log-{stem}.txt");
-    let log_path = run_dir.join(&log_name);
-    if log_path.is_file() {
-        std::fs::read_to_string(&log_path).ok()
-    } else {
-        None
+    let conventional = run_dir.join(format!("log-{stem}.txt"));
+    if conventional.is_file() {
+        match std::fs::read_to_string(&conventional) {
+            Ok(s) => return Some(s),
+            Err(e) => {
+                tracing::warn!(path = %conventional.display(), error = %e, "failed to read crash log");
+            }
+        }
     }
+
+    // 2. Any sibling .txt/.log carrying a sanitizer trace. Look both next to the
+    // artifact and in the run directory (AFL++ keeps crashes in a subdir).
+    let mut dirs = vec![run_dir.to_path_buf()];
+    if let Some(parent) = crash_path.parent() {
+        if parent != run_dir {
+            dirs.push(parent.to_path_buf());
+        }
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path == *crash_path {
+                continue;
+            }
+            let is_text = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e == "txt" || e == "log");
+            if !is_text {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(s) if looks_like_sanitizer_report(&s) => return Some(s),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to read crash log");
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether a file's contents resemble a sanitizer/engine crash report worth
+/// classifying (rather than, say, a stats or README file).
+fn looks_like_sanitizer_report(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    lower.contains("addresssanitizer")
+        || lower.contains("undefinedbehaviorsanitizer")
+        || lower.contains("leaksanitizer")
+        || lower.contains("sanitizer")
+        || lower.contains("runtime error")
+        || lower.contains("summary:")
+        || lower.contains("asan")
+        || lower.contains("ubsan")
 }
