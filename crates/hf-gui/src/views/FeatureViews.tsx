@@ -124,6 +124,7 @@ interface AgentDefinition {
   autonomy: Autonomy;
   capabilities: string[];
   user_callable: boolean;
+  skills: string[];
   trust_tier: TrustTier;
 }
 
@@ -141,6 +142,7 @@ interface AgentDraft {
   autonomy: Autonomy;
   capabilities: string[];
   user_callable: boolean;
+  skills: string[];
   icon: string | null;
   isNew: boolean;
 }
@@ -186,6 +188,7 @@ function emptyDraft(): AgentDraft {
     autonomy: "assist",
     capabilities: [],
     user_callable: true,
+    skills: [],
     icon: null,
     isNew: true,
   };
@@ -206,6 +209,7 @@ function draftFrom(a: AgentDefinition, opts: { duplicate?: boolean } = {}): Agen
     autonomy: a.autonomy,
     capabilities: [...a.capabilities],
     user_callable: a.user_callable,
+    skills: [...a.skills],
     icon: a.icon,
     isNew: dup,
   };
@@ -215,6 +219,7 @@ export function AgentsView() {
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [tools, setTools] = useState<{ name: string; description: string }[]>([]);
+  const [skills, setSkills] = useState<SkillDefinition[]>([]);
   const [draft, setDraft] = useState<AgentDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -225,6 +230,7 @@ export function AgentsView() {
     getTransport().invoke<AgentInfo>("agent_info").then((d) => !cancelled && setInfo(d)).catch(() => {});
     getTransport().invoke<AgentDefinition[]>("list_agents").then((d) => !cancelled && setAgents(d)).catch(() => {});
     getTransport().invoke<{ name: string; description: string }[]>("agent_tools").then((d) => !cancelled && setTools(d)).catch(() => {});
+    getTransport().invoke<SkillDefinition[]>("list_skills").then((d) => !cancelled && setSkills(d)).catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -251,6 +257,13 @@ export function AgentsView() {
       if (!d) return d;
       const has = d.allowed_tools.includes(name);
       return { ...d, allowed_tools: has ? d.allowed_tools.filter((t) => t !== name) : [...d.allowed_tools, name] };
+    });
+  }
+  function toggleSkill(name: string) {
+    setDraft((d) => {
+      if (!d) return d;
+      const has = d.skills.includes(name);
+      return { ...d, skills: has ? d.skills.filter((s) => s !== name) : [...d.skills, name] };
     });
   }
 
@@ -293,6 +306,7 @@ export function AgentsView() {
       autonomy: draft.autonomy,
       capabilities: draft.capabilities,
       user_callable: draft.user_callable,
+      skills: draft.skills,
     };
     setBusy(true);
     setError(null);
@@ -346,10 +360,12 @@ export function AgentsView() {
         <AgentEditor
           draft={draft}
           tools={tools}
+          skills={skills}
           busy={busy}
           error={error}
           onField={setField}
           onToggleTool={toggleTool}
+          onToggleSkill={toggleSkill}
           onCancel={() => { setDraft(null); setError(null); }}
           onSave={save}
         />
@@ -384,6 +400,7 @@ function AgentRow({ agent, onEdit, onDuplicate, onDelete }: { agent: AgentDefini
         <span className="text-xs text-text-secondary mt-0.5">{agent.description}</span>
         <span className="text-xs text-text-muted font-mono mt-1">
           {agent.role} · {agent.autonomy} · {agent.allowed_tools.length ? agent.allowed_tools.join(", ") : "no tools"}
+          {agent.skills.length > 0 && ` · ${agent.skills.length} skill${agent.skills.length === 1 ? "" : "s"}`}
         </span>
       </div>
       <div className="flex items-center shrink-0">
@@ -402,19 +419,23 @@ function AgentRow({ agent, onEdit, onDuplicate, onDelete }: { agent: AgentDefini
 function AgentEditor({
   draft,
   tools,
+  skills,
   busy,
   error,
   onField,
   onToggleTool,
+  onToggleSkill,
   onCancel,
   onSave,
 }: {
   draft: AgentDraft;
   tools: { name: string; description: string }[];
+  skills: SkillDefinition[];
   busy: boolean;
   error: string | null;
   onField: <K extends keyof AgentDraft>(key: K, value: AgentDraft[K]) => void;
   onToggleTool: (name: string) => void;
+  onToggleSkill: (name: string) => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
@@ -506,6 +527,35 @@ function AgentEditor({
         )}
       </Field>
 
+      <Field label="Skills" hint="playbooks injected when the agent references them">
+        {skills.length === 0 ? (
+          <span className="text-xs text-text-muted">No skills available.</span>
+        ) : (
+          <div className="grid grid-cols-2 gap-1.5">
+            {skills.map((s) => {
+              const checked = draft.skills.includes(s.name);
+              return (
+                <label
+                  key={s.name}
+                  className="flex items-start gap-2 rounded-md px-2 py-1.5 cursor-pointer border"
+                  style={{ borderColor: checked ? "var(--accent)" : "var(--border)", background: checked ? "var(--accent-subtle)" : "var(--surface-primary)" }}
+                  title={s.description}
+                >
+                  <input type="checkbox" checked={checked} onChange={() => onToggleSkill(s.name)} className="mt-0.5" />
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span style={{ color: "var(--accent)" }}><Puzzle size={14} /></span>
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-xs font-medium">{s.name}</span>
+                      <span className="text-xs text-text-muted truncate">{s.description}</span>
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </Field>
+
       <div className="grid grid-cols-3 gap-3">
         <Field label="Model tags" hint="comma-separated">
           <input className={INPUT_CLS} value={draft.model_tags} placeholder="reasoning, code" onChange={(e) => onField("model_tags", e.target.value)} />
@@ -542,33 +592,49 @@ function Tile({ icon, label, value }: { icon: ReactNode; label: string; value: s
 // Skills (editable)
 // ---------------------------------------------------------------------------
 
-interface SkillInfo {
+interface SkillDefinition {
   name: string;
-  description: string;
   version: string;
+  description: string;
   domain: string[];
+  body: string;
+  max_input_tokens: number;
+  trust_tier: TrustTier;
 }
+// Editable form state. The markdown body is bound here and sent as `content` on save.
 interface SkillDraft {
   name: string;
   description: string;
   version: string;
-  domain: string;
-  content: string;
-  isNew: boolean;
+  domain: string; // comma-separated while editing
+  body: string;
+  isNew: boolean; // creating a brand-new user skill (name not yet locked)
+}
+
+function skillDraftFrom(s: SkillDefinition, opts: { duplicate?: boolean } = {}): SkillDraft {
+  const dup = !!opts.duplicate;
+  return {
+    name: dup ? slugify(`${s.name}-copy`) : s.name,
+    description: s.description,
+    version: s.version,
+    domain: s.domain.join(", "),
+    body: s.body,
+    isNew: dup,
+  };
 }
 
 export function SkillsView() {
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [skills, setSkills] = useState<SkillDefinition[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState<SkillDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = () => getTransport().invoke<SkillInfo[]>("list_skills").then(setSkills).catch(() => {});
+  const reload = () => getTransport().invoke<SkillDefinition[]>("list_skills").then(setSkills).catch(() => {});
   useEffect(() => {
     let cancelled = false;
     getTransport()
-      .invoke<SkillInfo[]>("list_skills")
+      .invoke<SkillDefinition[]>("list_skills")
       .then((s) => {
         if (!cancelled) {
           setSkills(s);
@@ -583,22 +649,34 @@ export function SkillsView() {
 
   function startNew() {
     setError(null);
-    setDraft({ name: "", description: "", version: "0.1.0", domain: "fuzzing", content: "# new-skill\n\nDescribe when to use this skill and the procedure to follow.\n", isNew: true });
+    setDraft({ name: "", description: "", version: "0.1.0", domain: "fuzzing", body: "# new-skill\n\nDescribe when to use this skill and the procedure to follow.\n", isNew: true });
   }
   async function startEdit(name: string) {
     setError(null);
     try {
-      const d = await getTransport().invoke<SkillDraft & { domain: string[] }>("read_skill", { name });
-      setDraft({ name: d.name, description: d.description, version: d.version, domain: (d.domain as unknown as string[]).join(", "), content: d.content, isNew: false });
+      const s = await getTransport().invoke<SkillDefinition | null>("read_skill", { name });
+      if (!s) {
+        setError(`Skill "${name}" not found.`);
+        return;
+      }
+      setDraft(skillDraftFrom(s));
     } catch (e) {
       setError(String(e));
     }
   }
+  function startDuplicate(s: SkillDefinition) {
+    setError(null);
+    setDraft(skillDraftFrom(s, { duplicate: true }));
+  }
   async function save() {
     if (!draft) return;
-    const name = draft.name.trim();
+    const name = draft.isNew ? slugify(draft.name.trim()) : draft.name;
     if (!name) {
       setError("Skill name is required.");
+      return;
+    }
+    if (draft.isNew && !isSafeSlug(name)) {
+      setError("Name must be a safe slug (lowercase letters, digits, '-' or '_').");
       return;
     }
     setBusy(true);
@@ -608,8 +686,8 @@ export function SkillsView() {
         name,
         description: draft.description,
         version: draft.version,
-        domain: draft.domain.split(",").map((x) => x.trim()).filter(Boolean),
-        content: draft.content,
+        domain: splitList(draft.domain),
+        content: draft.body,
       });
       setDraft(null);
       reload();
@@ -619,10 +697,14 @@ export function SkillsView() {
       setBusy(false);
     }
   }
-  async function del(name: string) {
-    if (!window.confirm(`Delete skill "${name}"? This removes skills/${name}/.`)) return;
+  async function del(s: SkillDefinition) {
+    const builtIn = s.trust_tier === "built-in";
+    const prompt = builtIn
+      ? `Reset built-in skill "${s.name}" to its shipped version?`
+      : `Delete skill "${s.name}"?`;
+    if (!window.confirm(prompt)) return;
     try {
-      await getTransport().invoke("delete_skill", { name });
+      await getTransport().invoke("delete_skill", { name: s.name });
       reload();
     } catch (e) {
       setError(String(e));
@@ -631,8 +713,12 @@ export function SkillsView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <div className="flex items-center justify-between">
-        <ViewHeader title="Skills" description="Reusable, file-backed skills the agent applies across runs (skills/ registry) — add, edit, or remove them." />
+      <ViewHeader title="Skills" description="Reusable playbooks injected into an agent's context when the agent references them. Built-ins ship with hobot_fuzz; add your own." />
+
+      <div className="flex items-center justify-between mt-1">
+        <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
+          Skills ({skills.length})
+        </span>
         {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>New skill</PrimaryBtn>}
       </div>
 
@@ -642,7 +728,7 @@ export function SkillsView() {
         <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
           {error && <ErrorBanner message={error} />}
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Name" hint="letters, digits, -, _">
+            <Field label="Name" hint={draft.isNew ? "letters, digits, -, _" : "locked"}>
               <input className={INPUT_CLS} value={draft.name} disabled={!draft.isNew} placeholder="my-skill" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             </Field>
             <Field label="Version">
@@ -655,8 +741,8 @@ export function SkillsView() {
           <Field label="Domain" hint="comma-separated tags">
             <input className={INPUT_CLS} value={draft.domain} placeholder="fuzzing, harness-generation" onChange={(e) => setDraft({ ...draft, domain: e.target.value })} />
           </Field>
-          <Field label="Content (root.md)">
-            <textarea className={`${INPUT_CLS} resize-y`} rows={12} value={draft.content} onChange={(e) => setDraft({ ...draft, content: e.target.value })} />
+          <Field label="Body (root.md)" hint="the playbook injected into the agent's context">
+            <textarea className={`${INPUT_CLS} resize-y`} rows={16} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
           </Field>
           <div className="flex gap-2 justify-end">
             <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>Cancel</GhostBtn>
@@ -664,39 +750,54 @@ export function SkillsView() {
           </div>
         </div>
       ) : (
-        <>
+        <div className="flex flex-col gap-2">
           {loaded && skills.length === 0 && (
-            <EmptyState icon={<Puzzle size={20} />} hint="No skills yet. Click 'New skill' to author one — it's written to skills/<name>/." />
+            <EmptyState icon={<Puzzle size={20} />} hint="No skills yet. Click 'New skill' to author a reusable playbook." />
           )}
-          <div className="flex flex-col gap-2">
-            {skills.map((s) => (
-              <div key={s.name} className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
-                <div className="flex items-center justify-center shrink-0 rounded-md" style={{ width: "34px", height: "34px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}>
-                  <span style={{ color: "var(--accent)" }}><Puzzle size={16} /></span>
-                </div>
-                <div className="flex flex-col min-w-0 flex-1">
-                  <span className="text-sm font-medium flex items-center gap-2">
-                    {s.name}
-                    <span className="text-xs text-text-muted font-mono">v{s.version}</span>
-                  </span>
-                  <span className="text-xs text-text-secondary mt-0.5">{s.description}</span>
-                  {s.domain.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {s.domain.map((d) => (
-                        <span key={d} className="text-xs px-1.5 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}>
-                          {d}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <IconBtn onClick={() => startEdit(s.name)} icon={<Pencil size={14} />} title="Edit" />
-                <IconBtn onClick={() => del(s.name)} icon={<Trash2 size={14} />} danger title="Delete" />
-              </div>
+          {skills.map((s) => (
+            <SkillRow key={s.name} skill={s} onEdit={() => startEdit(s.name)} onDuplicate={() => startDuplicate(s)} onDelete={() => del(s)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SkillRow({ skill, onEdit, onDuplicate, onDelete }: { skill: SkillDefinition; onEdit: () => void; onDuplicate: () => void; onDelete: () => void }) {
+  const builtIn = skill.trust_tier === "built-in";
+  return (
+    <div className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
+      <div className="flex items-center justify-center shrink-0 rounded-md" style={{ width: "34px", height: "34px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}>
+        <span style={{ color: "var(--accent)" }}><Puzzle size={16} /></span>
+      </div>
+      <div className="flex flex-col min-w-0 flex-1">
+        <span className="text-sm font-medium flex items-center gap-2">
+          {skill.name}
+          <span className="text-xs text-text-muted font-mono">v{skill.version}</span>
+          <span className="text-xs px-1.5 py-0.5 rounded-sm" style={builtIn ? { background: "var(--accent-subtle)", color: "var(--accent)" } : { background: "var(--surface-active)", color: "var(--text-muted)" }}>
+            {builtIn ? "Built-in" : "Custom"}
+          </span>
+        </span>
+        <span className="text-xs text-text-secondary mt-0.5">{skill.description}</span>
+        {skill.domain.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {skill.domain.map((d) => (
+              <span key={d} className="text-xs px-1.5 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}>
+                {d}
+              </span>
             ))}
           </div>
-        </>
-      )}
+        )}
+      </div>
+      <div className="flex items-center shrink-0">
+        <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title="Edit" />
+        <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title="Duplicate into a new skill" />
+        {builtIn ? (
+          <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title="Reset to shipped version" />
+        ) : (
+          <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title="Delete" />
+        )}
+      </div>
     </div>
   );
 }
