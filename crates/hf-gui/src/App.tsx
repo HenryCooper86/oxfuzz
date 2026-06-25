@@ -23,6 +23,7 @@ import { ProjectProvider } from "./providers/ProjectContext";
 import { PipelineProvider, usePipeline } from "./providers/PipelineContext";
 import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
 import { RunStatusProvider } from "./providers/RunStatusContext";
+import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider, useTarget } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment } from "./lib";
@@ -192,7 +193,9 @@ export default function App() {
         <TargetProvider>
           <PipelineProvider>
             <RunStatusProvider>
-              <AppInner />
+              <RunOutputProvider>
+                <AppInner />
+              </RunOutputProvider>
             </RunStatusProvider>
           </PipelineProvider>
         </TargetProvider>
