@@ -20,6 +20,12 @@ export function RunView() {
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [summary, setSummary] = useState<{ edges: number; crashes: number; execs: number } | null>(null);
+  // Live stats updated in place from run:progress events while fuzzing.
+  const [liveStats, setLiveStats] = useState<{ execs: number; edges: number; crashes: number }>({
+    execs: 0,
+    edges: 0,
+    crashes: 0,
+  });
 
   // syzkaller (kernel fuzzing) campaign artifacts.
   const [kernelImage, setKernelImage] = useState("");
@@ -53,6 +59,7 @@ export function RunView() {
     setActiveEngine(engine);
     setLog([]);
     setSummary(null);
+    setLiveStats({ execs: 0, edges: 0, crashes: 0 });
     const transport = getTransport();
     let unlisten: (() => void) | undefined;
     try {
@@ -61,13 +68,22 @@ export function RunView() {
         `[${new Date().toLocaleTimeString()}] Starting ${engine}${isSyz ? "" : ` on ${target}`} for ${duration}s`,
       ]);
 
-      // Subscribe to live progress streamed by the run command.
+      // Subscribe to live progress streamed by the run command. Structured
+      // stats update the live bar in place; raw fuzzer lines fill the log.
       unlisten = await transport.listen<{ type: string; data: unknown }>("run:progress", (ev) => {
         const p = ev.payload;
-        if (p?.type === "ExecsPerSec") setLog((l) => [...l, `  execs: ${p.data}`]);
-        else if (p?.type === "EdgesCovered") setLog((l) => [...l, `  coverage: ${p.data}`]);
-        else if (p?.type === "CrashesFound") setLog((l) => [...l, `  ⚠ CRASH DETECTED`]);
-        else if (p?.type === "LogLine") setLog((l) => [...l, `  ${p.data}`]);
+        if (p?.type === "ExecsPerSec") {
+          const v = Number(p.data) || 0;
+          setLiveStats((s) => ({ ...s, execs: Math.max(s.execs, v) }));
+        } else if (p?.type === "EdgesCovered") {
+          const v = Number(p.data) || 0;
+          setLiveStats((s) => ({ ...s, edges: Math.max(s.edges, v) }));
+        } else if (p?.type === "CrashesFound") {
+          setLiveStats((s) => ({ ...s, crashes: s.crashes + 1 }));
+          setLog((l) => [...l, `  ⚠ CRASH DETECTED`]);
+        } else if (p?.type === "LogLine") {
+          setLog((l) => (l.length > 500 ? [...l.slice(-500), `  ${p.data}`] : [...l, `  ${p.data}`]));
+        }
       });
 
       type RunResult = { edges: number; crashes: number; execs: number; exit_code: number | null };
@@ -220,7 +236,16 @@ export function RunView() {
         {running ? "Running..." : isSyz ? "Launch Campaign" : "Run Fuzzer"}
       </button>
 
-      {summary && (
+      {/* Live stats while fuzzing (updates in place from streamed events). */}
+      {running && !isSyz && (
+        <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
+          <StatCard icon={<Activity size={16} />} label="Edges Covered" value={liveStats.edges} color="var(--success)" />
+          <StatCard icon={<AlertTriangle size={16} />} label="Crashes" value={liveStats.crashes} color="var(--error)" />
+          <StatCard icon={<Play size={16} />} label="Execs/sec (peak)" value={liveStats.execs} color="var(--accent)" />
+        </div>
+      )}
+
+      {summary && !running && (
         <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
           <StatCard icon={<Activity size={16} />} label={isSyz ? "Coverage" : "Edges Covered"} value={summary.edges} color="var(--success)" />
           <StatCard icon={<AlertTriangle size={16} />} label="Crashes" value={summary.crashes} color="var(--error)" />
