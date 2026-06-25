@@ -13,6 +13,10 @@ use uuid::Uuid;
 
 use crate::progress::{parse_coverage, parse_progress};
 
+/// Extra wall-clock seconds the sandbox is allowed beyond the fuzzer's own
+/// `-max_total_time`, covering corpus loading and sanitizer shutdown.
+const SANDBOX_TIMEOUT_HEADROOM_SECS: u64 = 60;
+
 /// The result of a fuzz run.
 pub struct RunResult {
     pub progress: Vec<FuzzProgress>,
@@ -53,10 +57,17 @@ impl EngineRunner {
         workspace: &Path,
     ) -> Result<RunResult, ClassifiedError> {
         let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out);
+        // The sandbox wall-clock timeout must exceed the fuzzer's own run time:
+        // a libFuzzer `-max_total_time=N` campaign also spends time loading the
+        // corpus and running ASan leak detection at exit, so without headroom
+        // the container is killed as "command timed out" right at the finish.
+        let max_duration_secs = cfg.duration.map_or(3600, |d| {
+            d.as_secs().saturating_add(SANDBOX_TIMEOUT_HEADROOM_SECS)
+        });
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: cfg.max_mem_mb,
             max_cpus: cfg.max_cpus,
-            max_duration_secs: cfg.duration.map_or(3600, |d| d.as_secs()),
+            max_duration_secs,
             env: cfg.env.iter().cloned().collect(),
         };
         let result = rt.run_command(&args, workspace, &limits).await?;
