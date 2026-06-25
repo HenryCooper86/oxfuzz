@@ -1,15 +1,21 @@
 //! `hobot_fuzz` GUI -- Tauri v2 desktop app.
 //!
-//! Thin Tauri command wrappers around hf-discovery, hf-harness, hf-engine,
-//! hf-crash, hf-corpus. No domain logic here (AGENTS.md 2.9).
+//! Thin Tauri command wrappers around `hf-service::ServiceContainer`. No
+//! domain logic here (AGENTS.md 2.9). All builds and fuzz runs go through
+//! `hf-runtime` sandboxing (AGENTS.md 2.12).
 
 mod commands;
+mod state;
+
+use state::AppState;
+use tauri::Manager;
 
 use commands::{
-    corpus_grow, corpus_list, corpus_prune, corpus_seed, discover, generate_seeds, harness_compile,
-    harness_draft, open_folder_dialog, show_window, system_status, triage,
+    app_paths, chat_send, corpus_grow, corpus_list, corpus_prune, corpus_seed, discover,
+    ensure_docker, generate_seeds, get_providers, harness_compile, harness_draft, host_arch,
+    list_configs, list_models, open_file_dialog, open_folder_dialog, read_config, run_fuzzer,
+    run_syzkaller, set_providers, show_window, system_status_cmd, triage, write_config,
 };
-use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Run the Tauri GUI application.
@@ -20,9 +26,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(build_app_state())
         .invoke_handler(tauri::generate_handler![
             discover,
             open_folder_dialog,
+            open_file_dialog,
             harness_draft,
             harness_compile,
             generate_seeds,
@@ -31,14 +39,64 @@ pub fn run() {
             corpus_grow,
             corpus_prune,
             triage,
-            system_status,
+            system_status_cmd,
+            ensure_docker,
+            app_paths,
+            host_arch,
             show_window,
+            list_configs,
+            list_models,
+            get_providers,
+            set_providers,
+            read_config,
+            write_config,
+            run_fuzzer,
+            run_syzkaller,
+            chat_send,
         ])
         .setup(|app| {
             let main_window = app.get_webview_window("main").expect("no main window");
+
+            // macOS: apply native frosted-glass vibrancy (Apple-style layered
+            // chrome) behind the transparent webview. Requires the
+            // `macos-private-api` feature and a transparent app background in CSS.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::utils::config::WindowEffectsConfig;
+                use tauri::utils::{WindowEffect, WindowEffectState};
+
+                let effects = WindowEffectsConfig {
+                    effects: vec![WindowEffect::Sidebar],
+                    state: Some(WindowEffectState::FollowsWindowActiveState),
+                    radius: None,
+                    color: None,
+                };
+                if let Err(e) = main_window.set_effects(Some(effects)) {
+                    eprintln!("Failed to apply vibrancy effects: {e}");
+                }
+            }
+
             main_window.show().expect("failed to show window");
+
+            // On launch, bring Docker up and ensure the sandbox image is loaded
+            // in the background so the first compile/run "just works". Progress
+            // is reported to the UI via `docker:status` events.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = commands::ensure_docker_ready(&handle, None).await;
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running hobot_fuzz GUI");
+}
+
+/// Build the `AppState` from the canonical [`hf_service::ServiceContainer::bootstrap`]:
+/// a Docker (or stub) runtime, an LLM provider pool from the environment, and
+/// the `HF_DB_PATH` persistence store -- the same construction the CLI and web
+/// API use.
+fn build_app_state() -> AppState {
+    let container = tauri::async_runtime::block_on(hf_service::ServiceContainer::bootstrap());
+    AppState::new(container)
 }

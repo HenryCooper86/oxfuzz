@@ -62,7 +62,7 @@ async fn discover_skips_no_arg_functions() {
 }
 
 #[tokio::test]
-async fn discover_complexity_parse_array_greater_than_skip_ws() {
+async fn discover_complexity_json_dump_greater_than_parse_value() {
     let inv = hf_discovery::discover(&fixture_root(), TargetLanguage::C)
         .await
         .expect("discover should succeed");
@@ -72,12 +72,35 @@ async fn discover_complexity_parse_array_greater_than_skip_ws() {
             .find(|c| c.symbol == n)
             .unwrap_or_else(|| panic!("{n} must be present"))
     };
-    let arr = by_name("parse_array");
-    let ws = by_name("skip_ws");
+    let dump = by_name("json_dump");
+    let pv = by_name("parse_value");
     assert!(
-        arr.complexity > ws.complexity,
-        "parse_array complexity ({}) should exceed skip_ws complexity ({})",
-        arr.complexity,
-        ws.complexity
+        dump.complexity > pv.complexity,
+        "json_dump complexity ({}) should exceed parse_value complexity ({})",
+        dump.complexity,
+        pv.complexity
+    );
+}
+
+#[tokio::test]
+async fn discover_skips_static_functions() {
+    let inv = hf_discovery::discover(&fixture_root(), TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    let names: Vec<&str> = inv.candidates.iter().map(|c| c.symbol.as_str()).collect();
+    // These are `static` in json.c -- they have internal linkage and cannot
+    // be called from a separately-compiled harness, so the scanner must skip
+    // them.
+    assert!(
+        !names.contains(&"parse_value_inner"),
+        "static function parse_value_inner must not be a candidate; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"skip_ws"),
+        "static function skip_ws must not be a candidate; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"parse_array"),
+        "static function parse_array must not be a candidate; got {names:?}"
     );
 }

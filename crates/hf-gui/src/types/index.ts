@@ -1,6 +1,19 @@
 // Shared types for hobot_fuzz GUI.
 
-export type ViewType = "discover" | "harness" | "run" | "triage" | "corpus" | "settings" | "chat";
+export type ViewType =
+  | "discover"
+  | "harness"
+  | "run"
+  | "triage"
+  | "corpus"
+  | "settings"
+  | "chat"
+  | "projects"
+  | "artifacts"
+  | "agents"
+  | "skills"
+  | "knowledge"
+  | "automation";
 
 export interface TargetCandidate {
   id: string;
@@ -49,7 +62,13 @@ export interface FuzzProgress {
 
 export interface SystemStatus {
   docker: boolean;
-  clang: boolean;
-  afl: boolean;
+  sandbox_image: boolean;
+  libfuzzer: boolean;
+  aflplusplus: boolean;
   honggfuzz: boolean;
+  clusterfuzzlite: boolean;
+  syzkaller: boolean;
 }
+
+/** Engine identifiers used across the Run view and status bar. */
+export type EngineId = "libfuzzer" | "afl++" | "honggfuzz" | "clusterfuzzlite" | "syzkaller";

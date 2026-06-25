@@ -6,24 +6,24 @@ use std::fs;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const ASAN_LOG: &str = r#"==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000034
+const ASAN_LOG: &str = r"==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000034
 READ of size 1 at 0x602000000034 thread T0
     #0 0x4f2a80 in parse_string src/json.c:14:20
     #1 0x4f3c10 in parse_value_inner src/json.c:58:12
     #2 0x4f4a20 in parse_value src/json.c:150:5
     #3 0x4f5a30 in LLVMFuzzerTestOneInput fuzz_parse_value.c:8:5
     #4 0x7f8a2b3c4d5e in main
-"#;
+";
 
-const SEGV_LOG: &str = r#"==99999==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
+const SEGV_LOG: &str = r"==99999==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
 PC: 0x4f2a80 bp: 0x7ffd sp: 0x7ffd
     #0 0x4f2a80 in parse_value src/json.c:150:5
     #1 0x4f5a30 in LLVMFuzzerTestOneInput fuzz_parse_value.c:8:5
-"#;
+";
 
-const TIMEOUT_LOG: &str = r#"ALARM: working on the last Unit for 1200 seconds
+const TIMEOUT_LOG: &str = r"ALARM: working on the last Unit for 1200 seconds
        timeout: 1200
-"#;
+";
 
 #[test]
 fn classify_asan_log() {

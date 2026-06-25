@@ -59,6 +59,7 @@ impl EngineRunner {
             EngineKind::ClusterFuzzLite => {
                 crate::clusterfuzzlite::build_run_args(cfg, binary, corpus, out)
             }
+            EngineKind::Syzkaller => crate::syzkaller::build_run_args(cfg, binary, corpus, out),
         };
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: cfg.max_mem_mb,

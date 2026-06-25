@@ -41,6 +41,25 @@ pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
     None
 }
 
+/// Parse a `syz-manager` status line into `(cover, executed, crashes)`.
+///
+/// syz-manager periodically logs a status line of the form:
+/// `VMs 2, executed 12345, cover 6789, signal 5432, crashes 0, repro 0`.
+/// Returns `None` for lines that are not a status line. Unlike
+/// [`parse_progress_line`], this does not treat the literal `crashes 0` token
+/// as a crash event -- it reports the absolute crash count instead.
+#[must_use]
+pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
+    let lower = line.to_ascii_lowercase();
+    if !(lower.contains("executed") && lower.contains("cover")) {
+        return None;
+    }
+    let cover = parse_number_near(line, "cover")?;
+    let executed = parse_number_near(line, "executed")?;
+    let crashes = parse_number_near(line, "crashes").unwrap_or(0);
+    Some((cover, executed, crashes))
+}
+
 /// Parse a full stdout buffer into a list of progress events.
 #[must_use]
 pub fn parse_progress(stdout: &str) -> Vec<FuzzProgress> {
@@ -96,4 +115,27 @@ fn first_number(s: &str) -> Option<u64> {
     s.split(|c: char| !c.is_ascii_digit())
         .find(|t| !t.is_empty())
         .and_then(|t| t.parse::<u64>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_syzkaller_status;
+
+    #[test]
+    fn parses_syz_manager_status_line() {
+        let line = "2024/01/02 03:04:05 VMs 2, executed 12345, cover 6789, signal 5432, crashes 3, repro 0";
+        assert_eq!(parse_syzkaller_status(line), Some((6789, 12345, 3)));
+    }
+
+    #[test]
+    fn status_line_with_zero_crashes_is_not_a_crash() {
+        let line = "VMs 4, executed 100, cover 50, signal 40, crashes 0, repro 0";
+        assert_eq!(parse_syzkaller_status(line), Some((50, 100, 0)));
+    }
+
+    #[test]
+    fn non_status_lines_return_none() {
+        assert_eq!(parse_syzkaller_status("booting test machines..."), None);
+        assert_eq!(parse_syzkaller_status("cover: 10 exec/s: 5"), None);
+    }
 }

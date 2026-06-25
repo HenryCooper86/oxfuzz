@@ -161,6 +161,13 @@ pub fn build_command(engine: EngineKind, _lang: TargetLanguage, output_name: &st
             args: vec!["-fsanitize=address".to_owned(), "-g".to_owned()],
             output: PathBuf::from(output_name),
         },
+        // syzkaller fuzzes a kernel built with coverage instrumentation rather
+        // than a per-function harness binary; this represents the kernel build.
+        EngineKind::Syzkaller => BuildCommand {
+            compiler: "make".to_owned(),
+            args: vec!["CONFIG_KCOV=y".to_owned(), "CONFIG_DEBUG_INFO=y".to_owned()],
+            output: PathBuf::from(output_name),
+        },
     }
 }
 

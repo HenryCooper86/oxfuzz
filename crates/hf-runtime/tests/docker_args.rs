@@ -24,7 +24,7 @@ fn build_exec_args_includes_image_and_command() {
     let args = hf_runtime::docker::build_exec_args(
         &cfg,
         &["clang".to_owned(), "--version".to_owned()],
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     );
     // Must contain the image and the command tokens.
     let joined = args.join(" ");

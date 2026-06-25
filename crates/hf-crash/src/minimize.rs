@@ -26,6 +26,8 @@ pub fn build_minimize_args(
             "-o".to_owned(),
             output.to_owned(),
         ]),
-        EngineKind::Honggfuzz => None,
+        // honggfuzz has no inline minimizer; syzkaller uses `syz-repro` on the
+        // crash log, which is driven separately from a harness binary.
+        EngineKind::Honggfuzz | EngineKind::Syzkaller => None,
     }
 }
