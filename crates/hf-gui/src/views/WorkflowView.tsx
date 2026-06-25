@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Minus, Target, FileCode, Play, Bug, Database } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Minus, Target, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
+import { pickFolder } from "../lib";
+import { useProject } from "../providers/ProjectContext";
 import { usePipeline, type StageId } from "../providers/PipelineContext";
 import { DiscoverView } from "./DiscoverView";
 import { HarnessView } from "./HarnessView";
@@ -7,34 +9,33 @@ import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
 import { CorpusView } from "./CorpusView";
 
-// A unified, connected fuzzing flow: Discover -> Harness -> Run -> Triage ->
-// Corpus presented as one stacked accordion rather than separate sidebar views.
-// The stages share state through the existing contexts (project/target/run
-// output/pipeline), so picking a target in Discover flows into Harness and Run
-// without "jumping" between pages. The active stage auto-expands and scrolls
-// into view as the pipeline advances.
+// A unified, connected fuzzing flow: choose a project, then Discover -> Harness
+// -> Run -> Triage as one stacked accordion (no jumping between sidebar pages).
+// Corpus is a continuous resource (seeded during Harness, grown across runs), so
+// it sits below the linear flow as an ongoing tool rather than a final "step".
+// Stages share the existing contexts, so a target picked in Discover flows into
+// Harness and Run, and a run's crashes flow into Triage.
 
-type WorkflowStageId = "discover" | "harness" | "run" | "triage" | "corpus";
+type CoreStageId = "discover" | "harness" | "run" | "triage";
 
-interface WorkflowStage {
-  id: WorkflowStageId;
+interface CoreStage {
+  id: CoreStageId;
   n: number;
   label: string;
   hint: string;
   icon: React.ComponentType<{ size?: number }>;
-  Component: React.ComponentType;
+  Component: React.ComponentType<{ embedded?: boolean }>;
 }
 
-const STAGES: WorkflowStage[] = [
+const CORE_STAGES: CoreStage[] = [
   { id: "discover", n: 1, label: "Discover Targets", hint: "Scan the project for fuzzable functions", icon: Target, Component: DiscoverView },
   { id: "harness", n: 2, label: "Generate Harness", hint: "Draft, compile, and seed a harness", icon: FileCode, Component: HarnessView },
   { id: "run", n: 3, label: "Run Fuzzer", hint: "Drive the engine and watch live progress", icon: Play, Component: RunView },
-  { id: "triage", n: 4, label: "Triage Crashes", hint: "Ingest and classify any crashes", icon: Bug, Component: TriageView },
-  { id: "corpus", n: 5, label: "Corpus", hint: "Seed, grow, and prune the corpus", icon: Database, Component: CorpusView },
+  { id: "triage", n: 4, label: "Triage Crashes", hint: "Reproduce, classify, and dedup crashes", icon: Bug, Component: TriageView },
 ];
 
-/** Map the granular pipeline stage to the user-facing workflow stage. */
-function viewForStage(stage: StageId | null): WorkflowStageId | null {
+/** Map the granular pipeline stage to the user-facing core stage. */
+function viewForStage(stage: StageId | null): CoreStageId | null {
   switch (stage) {
     case "discover":
       return "discover";
@@ -47,33 +48,39 @@ function viewForStage(stage: StageId | null): WorkflowStageId | null {
     case "triage":
       return "triage";
     default:
-      return null; // all granular stages done
+      return null;
   }
 }
 
-export function WorkflowView() {
-  const { isDone, isSkipped, currentStage } = usePipeline();
-  const activeStage = viewForStage(currentStage) ?? "corpus";
-  const [expanded, setExpanded] = useState<WorkflowStageId | null>(activeStage);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const sectionRefs = useRef<Partial<Record<WorkflowStageId, HTMLElement | null>>>({});
+type SectionId = CoreStageId | "corpus";
 
-  // Follow the pipeline: when the active stage advances, auto-expand it. This
-  // is the React "adjust state during render" pattern (no syncing effect).
+export function WorkflowView() {
+  const { activeProject, recentProjects, setActiveProject } = useProject();
+  const { isDone, isSkipped, currentStage } = usePipeline();
+  const activeStage: CoreStageId = viewForStage(currentStage) ?? "triage";
+  const [expanded, setExpanded] = useState<SectionId | null>(activeStage);
+  const sectionRefs = useRef<Partial<Record<SectionId, HTMLElement | null>>>({});
+  const gated = !activeProject;
+
+  // Auto-expand the active stage as the pipeline advances (adjust-during-render).
   const [prevActive, setPrevActive] = useState(activeStage);
-  if (activeStage !== prevActive) {
+  if (!gated && activeStage !== prevActive) {
     setPrevActive(activeStage);
     setExpanded(activeStage);
   }
 
-  // Scroll the expanded stage into view so progress is always visible.
   useEffect(() => {
     if (expanded) {
       sectionRefs.current[expanded]?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [expanded]);
 
-  const stageDone = (id: WorkflowStageId): boolean => {
+  async function chooseProject() {
+    const path = await pickFolder();
+    if (path) setActiveProject(path);
+  }
+
+  const stageDone = (id: CoreStageId): boolean => {
     switch (id) {
       case "discover":
         return isDone("discover");
@@ -83,26 +90,64 @@ export function WorkflowView() {
         return isDone("run");
       case "triage":
         return isDone("triage");
-      case "corpus":
-        return false; // optional, no required completion
     }
   };
-  const stageSkipped = (id: WorkflowStageId): boolean => id === "triage" && isSkipped("triage");
+
+  const projectName = activeProject ? activeProject.split("/").filter(Boolean).pop() : null;
 
   return (
-    <div ref={containerRef} className="flex flex-col gap-3" style={{ animation: "fadeIn 0.2s ease" }}>
+    <div className="flex flex-col gap-3" style={{ animation: "fadeIn 0.2s ease" }}>
       <div>
         <h1 className="text-xl font-semibold">Fuzzing Workflow</h1>
         <p className="text-sm text-text-secondary mt-0.5">
-          One connected flow: discover a target, generate a harness, run the fuzzer, then triage crashes and manage the corpus.
+          One connected flow: choose a project, discover a target, generate a harness, run the fuzzer, then triage crashes.
         </p>
       </div>
 
-      {STAGES.map(({ id, n, label, hint, icon: Icon, Component }) => {
+      {/* Project gate -- everything below runs in the chosen project's workspace. */}
+      <section className="surface-card" style={{ padding: "12px 14px", borderLeft: `3px solid ${activeProject ? "var(--success)" : "var(--accent)"}` }}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <FolderOpen size={16} style={{ color: activeProject ? "var(--success)" : "var(--accent)" }} />
+            <div className="flex flex-col min-w-0">
+              <span className="text-sm font-medium">{projectName ?? "No project selected"}</span>
+              <span className="text-xs text-text-muted truncate" style={{ fontFamily: activeProject ? "var(--font-mono)" : undefined }}>
+                {activeProject || "Choose a project folder to begin — every stage runs in its workspace."}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={chooseProject}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md"
+            style={{ background: activeProject ? "var(--surface-primary)" : "var(--accent)", color: activeProject ? "var(--text-secondary)" : "var(--accent-contrast)", border: activeProject ? "1px solid var(--border)" : "none" }}
+          >
+            <FolderOpen size={13} />
+            {activeProject ? "Change" : "Choose Folder…"}
+          </button>
+        </div>
+        {gated && recentProjects.length > 0 && (
+          <div className="mt-3 flex flex-col gap-1">
+            <span className="text-xs text-text-muted">Recent projects</span>
+            {recentProjects.slice(0, 5).map((p) => (
+              <button
+                key={p}
+                onClick={() => setActiveProject(p)}
+                className="text-left text-xs px-2 py-1.5 rounded-md text-text-secondary hover:bg-surface-hover hover:text-text-primary truncate"
+                style={{ fontFamily: "var(--font-mono)" }}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Core linear stages */}
+      {CORE_STAGES.map(({ id, n, label, hint, icon: Icon, Component }) => {
         const done = stageDone(id);
-        const skipped = stageSkipped(id);
-        const current = activeStage === id;
-        const open = expanded === id;
+        const skipped = id === "triage" && isSkipped("triage");
+        const current = !gated && activeStage === id;
+        const open = !gated && expanded === id;
         return (
           <section
             key={id}
@@ -112,13 +157,15 @@ export function WorkflowView() {
             className="surface-card"
             style={{
               overflow: "hidden",
+              opacity: gated ? 0.5 : 1,
               borderLeft: `3px solid ${current ? "var(--accent)" : done ? "var(--success)" : "var(--border)"}`,
             }}
           >
             <button
-              onClick={() => setExpanded(open ? null : id)}
+              onClick={() => !gated && setExpanded(open ? null : id)}
+              disabled={gated}
               className="flex items-center justify-between w-full text-left"
-              style={{ padding: "12px 14px", background: "transparent", border: "none", cursor: "pointer", color: "var(--text-primary)" }}
+              style={{ padding: "12px 14px", background: "transparent", border: "none", cursor: gated ? "not-allowed" : "pointer", color: "var(--text-primary)" }}
             >
               <span className="flex items-center gap-3">
                 <StatusBadge n={n} done={done} skipped={skipped} current={current} />
@@ -136,13 +183,50 @@ export function WorkflowView() {
             {open && (
               <div style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
                 <div style={{ paddingTop: "14px" }}>
-                  <Component />
+                  <Component embedded />
                 </div>
               </div>
             )}
           </section>
         );
       })}
+
+      {/* Corpus -- an ongoing resource, not a numbered step. */}
+      <div className="mt-1 mb-1 text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
+        Ongoing
+      </div>
+      <section
+        ref={(el) => {
+          sectionRefs.current.corpus = el;
+        }}
+        className="surface-card"
+        style={{ overflow: "hidden", opacity: gated ? 0.5 : 1, borderLeft: "3px solid var(--border)" }}
+      >
+        <button
+          onClick={() => !gated && setExpanded(expanded === "corpus" ? null : "corpus")}
+          disabled={gated}
+          className="flex items-center justify-between w-full text-left"
+          style={{ padding: "12px 14px", background: "transparent", border: "none", cursor: gated ? "not-allowed" : "pointer", color: "var(--text-primary)" }}
+        >
+          <span className="flex items-center gap-3">
+            <span className="flex items-center justify-center rounded-full shrink-0" style={{ width: "22px", height: "22px", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+              <Database size={12} />
+            </span>
+            <span className="flex flex-col">
+              <span className="text-sm font-medium">Corpus</span>
+              <span className="text-xs text-text-muted">Seed, grow, and prune — used throughout the loop, not a final step</span>
+            </span>
+          </span>
+          {expanded === "corpus" ? <ChevronDown size={16} className="text-text-muted" /> : <ChevronRight size={16} className="text-text-muted" />}
+        </button>
+        {!gated && expanded === "corpus" && (
+          <div style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
+            <div style={{ paddingTop: "14px" }}>
+              <CorpusView embedded />
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

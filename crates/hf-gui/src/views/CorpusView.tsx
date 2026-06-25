@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import type { CorpusEntry } from "../types";
 import { Database, Loader2, Plus, Scissors, Eye } from "lucide-react";
 
-export function CorpusView() {
+export function CorpusView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject } = useProject();
   const [entries, setEntries] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState<string | null>(null);
@@ -37,12 +37,16 @@ export function CorpusView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Corpus Management</h1>
-          <p className="text-sm text-text-secondary mt-0.5">
-            Seed, grow, prune, and inspect the fuzzing corpus.
-          </p>
-        </div>
+        {embedded ? (
+          <span />
+        ) : (
+          <div>
+            <h1 className="text-xl font-semibold">Corpus Management</h1>
+            <p className="text-sm text-text-secondary mt-0.5">
+              Seed, grow, prune, and inspect the fuzzing corpus.
+            </p>
+          </div>
+        )}
         <div className="flex gap-2">
           <ActionButton icon={<Plus size={14} />} label="Seed" loading={loading === "corpus_seed"} onClick={() => action("corpus_seed")} />
           <ActionButton icon={<Eye size={14} />} label="Grow" loading={loading === "corpus_grow"} onClick={() => action("corpus_grow")} />

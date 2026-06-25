@@ -6,7 +6,7 @@ import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash } from "../types";
 import { Bug, Loader2, ChevronRight } from "lucide-react";
 
-export function TriageView() {
+export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   // The target + crash count from the most recent run, so triage scans the
@@ -39,12 +39,16 @@ export function TriageView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Crash Triage</h1>
-          <p className="text-sm text-text-secondary mt-0.5">
-            Ingest, classify, and deduplicate crash artifacts from fuzz runs.
-          </p>
-        </div>
+        {embedded ? (
+          <span />
+        ) : (
+          <div>
+            <h1 className="text-xl font-semibold">Crash Triage</h1>
+            <p className="text-sm text-text-secondary mt-0.5">
+              Ingest, classify, and deduplicate crash artifacts from fuzz runs.
+            </p>
+          </div>
+        )}
         <button
           onClick={triage}
           disabled={loading}
