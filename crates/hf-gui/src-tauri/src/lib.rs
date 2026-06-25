@@ -13,9 +13,9 @@ use tauri::Manager;
 use commands::{
     app_paths, chat_agent, chat_answer_permission, chat_send, corpus_grow, corpus_list,
     corpus_prune, corpus_seed, create_session, discover, ensure_docker, generate_seeds,
-    get_providers, harness_compile, harness_draft, host_arch, list_configs, list_models,
-    open_file_dialog, open_folder_dialog, read_config, run_fuzzer, run_syzkaller, set_providers,
-    show_window, system_status_cmd, triage, write_config,
+    get_providers, harness_compile, harness_draft, host_arch, knowledge_summary, list_configs,
+    list_models, open_file_dialog, open_folder_dialog, read_config, run_fuzzer, run_syzkaller,
+    set_providers, show_window, system_status_cmd, triage, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -57,6 +57,7 @@ pub fn run() {
             chat_agent,
             create_session,
             chat_answer_permission,
+            knowledge_summary,
         ])
         .setup(|app| {
             let main_window = app.get_webview_window("main").expect("no main window");
