@@ -131,3 +131,29 @@ async fn missing_provider_errors() {
     let sink = CollectingSink::new();
     assert!(agent.run_turn(vec![], "hi", &sink).await.is_err());
 }
+
+#[tokio::test]
+async fn loop_guard_aborts_redundant_tool_calls() {
+    // The model repeats the same tool with identical args. The loop guard
+    // (redundant-tool threshold 3) must abort the turn before max_iterations,
+    // emitting an Error event with a clear reason.
+    let repeated = r#"{"thought":"again","tool":"bogus","args":{"a":1}}"#;
+    let agent = agent_with(
+        vec![repeated, repeated, repeated, repeated, repeated],
+        Some(std::env::temp_dir()),
+    )
+    .with_max_iterations(8);
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "go", &sink).await.unwrap();
+    assert!(
+        out.contains("runaway") && out.contains("redundant"),
+        "expected a runaway-loop abort message, got: {out}"
+    );
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("runaway"))),
+        "expected an Error event for the detected loop"
+    );
+}

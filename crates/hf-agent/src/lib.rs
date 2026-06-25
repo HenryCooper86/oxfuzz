@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use hf_core::error::ClassifiedError;
 use hf_core::types::{Message, Role};
+use hf_guardrails::{LoopGuard, StepRecord};
 use hf_service::ServiceContainer;
 use serde::Deserialize;
 use serde_json::Value;
@@ -110,6 +111,11 @@ you receive its result and continue until you can give a final answer."
             content: user_message.to_owned(),
         });
 
+        // Runaway-loop detection. `max_iterations` below is the hard backstop;
+        // the guard catches stuck repetition/oscillation/redundant-call patterns
+        // before the full step budget is spent.
+        let mut loop_guard = LoopGuard::with_defaults();
+
         for _ in 0..self.max_iterations {
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
@@ -170,6 +176,23 @@ you receive its result and continue until you can give a final answer."
                 summary: truncate(&result, 400),
             })
             .await;
+
+            // Feed the loop guard the (tool, normalized-args) signature. A
+            // detected runaway pattern aborts the turn early with a clear reason.
+            if let Some(detection) =
+                loop_guard.record(StepRecord::tool(tool.clone(), args.to_string()))
+            {
+                let message = format!(
+                    "Stopping: detected a runaway {} loop -- {}.",
+                    detection.pattern.as_str(),
+                    detection.reason
+                );
+                sink.emit(AgentEvent::Error {
+                    message: message.clone(),
+                })
+                .await;
+                return Ok(message);
+            }
 
             // Record the model's action and the tool result, then continue.
             messages.push(Message {

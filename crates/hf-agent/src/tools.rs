@@ -156,7 +156,7 @@ pub async fn dispatch(
                 ),
                 "grow" => format!(
                     "corpus now {} entries",
-                    container.corpus_grow(project, target)?
+                    container.corpus_grow(project, target).await?
                 ),
                 "prune" => format!(
                     "pruned to {} entries",

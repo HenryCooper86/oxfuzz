@@ -9,6 +9,7 @@
 
 mod action;
 mod hitl;
+mod loop_guard;
 
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ use thiserror::Error;
 
 pub use action::{Action, RiskTier};
 pub use hitl::{ApprovalGate, AutoApprove, DenyAll, EnvApprovalGate};
+pub use loop_guard::{LoopDetection, LoopGuard, LoopGuardConfig, LoopPattern, StepRecord};
 
 /// The outcome of evaluating an action against a policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,14 +146,20 @@ impl Guardrails {
         Self::new(GuardrailPolicy::default(), Arc::new(EnvApprovalGate))
     }
 
-    /// Construct from the environment: `HF_GUARDRAILS=strict` selects the
-    /// env-gated policy; anything else (the default) is permissive-with-audit
-    /// so existing local workflows are not interrupted.
+    /// Construct from the environment. The default is the safe env-gated policy:
+    /// high-risk actions (harness compile/run, fuzzer execution) require explicit
+    /// consent via `HF_AUTO_APPROVE=1`. `HF_GUARDRAILS=permissive` opts out into
+    /// auto-approve-with-audit for trusted local loops; `strict` is an alias for
+    /// the default and remains accepted for compatibility.
+    ///
+    /// This is the safety boundary for untrusted execution (AGENTS.md 2.5/2.12):
+    /// `bootstrap()` constructs guardrails here, so a generated harness never
+    /// runs on the host without an explicit opt-in.
     #[must_use]
     pub fn from_env() -> Self {
         match std::env::var("HF_GUARDRAILS").as_deref() {
-            Ok("strict") => Self::env_gated(),
-            _ => Self::permissive(),
+            Ok("permissive") => Self::permissive(),
+            _ => Self::env_gated(),
         }
     }
 
