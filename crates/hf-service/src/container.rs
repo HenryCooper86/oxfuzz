@@ -610,7 +610,24 @@ impl ServiceContainer {
             .unwrap_or_default();
         let run_id = Uuid::new_v4();
         let crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
-        let deduped = hf_crash::dedup(crashes);
+        let mut deduped = hf_crash::dedup(crashes);
+
+        // Draft an LLM bug report for each unique crash when a provider is
+        // configured. The crash's own summary is the best available log text
+        // (the raw sanitizer trace is not retained on the model).
+        if let Some(pool) = &self.provider_pool {
+            for crash in &mut deduped {
+                let bridge = LlmProviderBridge {
+                    pool: Arc::clone(pool),
+                };
+                let log = crash.summary.clone();
+                match hf_crash::draft_report(crash, &log, Box::new(bridge)).await {
+                    Ok(report) => crash.bug_report = Some(report),
+                    Err(e) => tracing::warn!("bug report drafting failed for {}: {e}", crash.id),
+                }
+            }
+        }
+
         if let Some(store) = &self.store {
             for crash in &deduped {
                 if let Err(e) = store.upsert_crash(crash).await {
