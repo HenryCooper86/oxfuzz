@@ -980,10 +980,13 @@ pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
     )))
 }
 
-/// Default API base URL for a provider type.
+/// Default API base URL for a provider type. Only the OpenAI-compatible wire
+/// format is supported; cloud/remote endpoints should set `base_url` explicitly.
 fn default_base_url(provider_type: &str) -> String {
     match provider_type {
-        // Note: only OpenAI-compatible wire format is supported today.
+        // Local Ollama's OpenAI-compatible endpoint. Ollama Cloud users must
+        // set base_url = https://ollama.com/v1 explicitly.
+        "ollama" => "http://localhost:11434/v1".to_owned(),
         "anthropic" => "https://api.anthropic.com/v1".to_owned(),
         _ => "https://api.openai.com/v1".to_owned(),
     }
