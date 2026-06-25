@@ -102,6 +102,28 @@ async fn non_json_reply_is_treated_as_final() {
 }
 
 #[tokio::test]
+async fn tolerates_trailing_junk_in_tool_call() {
+    // Some models emit a stray extra '}' (or code fences) after the object.
+    // The agent must still parse the tool call, not give up and echo the JSON.
+    let agent = agent_with(
+        vec![
+            r#"{"thought":"x","tool":"bogus","args":{"a":1}}}"#,
+            r#"```json
+{"thought":"done","final":"all set"}
+```"#,
+        ],
+        Some(std::env::temp_dir()),
+    );
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "go", &sink).await.unwrap();
+    assert_eq!(out, "all set");
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "bogus")));
+}
+
+#[tokio::test]
 async fn missing_provider_errors() {
     let runtime = Arc::new(hf_runtime::StubRuntime);
     let container = ServiceContainer::new(runtime, None);
