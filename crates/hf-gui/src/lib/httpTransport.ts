@@ -17,7 +17,9 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   triage: { method: "POST", path: "/triage" },
   system_status: { method: "GET", path: "/health" },
   system_status_cmd: { method: "GET", path: "/health" },
-  chat_send: { method: "POST", path: "/chat/send" },
+  // ChatView invokes `chat_agent`; the web router exposes the chat handler at
+  // POST /chat/send (it ignores the extra agent fields it doesn't deserialize).
+  chat_agent: { method: "POST", path: "/chat/send" },
   list_models: { method: "GET", path: "/config/models" },
   list_configs: { method: "GET", path: "/config/sections" },
   read_config: { method: "POST", path: "/config/read" },
@@ -56,6 +58,10 @@ export function createHttpTransport(): Transport {
           }
           return undefined as T;
         }
+        // Agent/session/skills/knowledge commands (chat_agent aside) have no
+        // hf-web endpoint yet. Fail loudly so callers fall back gracefully
+        // instead of silently mapping to the wrong route. Their UI callers
+        // already `.catch()` this and degrade to an empty/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
       const url = `${BASE_URL}${endpoint.path}`;

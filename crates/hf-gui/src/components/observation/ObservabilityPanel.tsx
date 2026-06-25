@@ -1,16 +1,20 @@
-// Observability panel -- shows provider stats + active fuzz runs.
+// Observability panel -- shows live fuzz-run progress plus provider stats.
+//
+// Active runs are driven from the shared RunOutput context (the same live
+// stats the Run view streams). Provider-level metrics (token/cost/concurrency)
+// have no backend feed yet, so that section shows an honest empty state rather
+// than fabricated numbers.
 
 import { Gauge, Container, Cpu } from "lucide-react";
 import { Badge } from "../ui/Badge";
+import { useRunOutput } from "../../providers/RunOutputContext";
 
 export function ObservabilityPanel() {
-  const providers = [
-    { id: "openai", model: "gpt-4o", concurrency: 1, max: 3, requests: 5, errors: 0, tokens: 1850, cost: 0.034 },
-  ];
+  const { running, stats, summary, lastTarget, lastEngine } = useRunOutput();
 
-  const activeRuns = [
-    { target: "parse_value", engine: "libFuzzer", execs: 5000, edges: 35, crashes: 0, duration: "12s" },
-  ];
+  // Show a card while a run streams, and keep the last completed run visible.
+  const hasRun = running || summary !== null;
+  const liveStats = running ? stats : summary ?? stats;
 
   return (
     <div className="flex flex-col h-full" style={{ background: "var(--surface-secondary)" }}>
@@ -20,31 +24,12 @@ export function ObservabilityPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
-        {/* Provider Stats */}
+        {/* Provider Stats -- no live feed yet */}
         <div>
           <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Providers</div>
-          {providers.map((p) => (
-            <div key={p.id} className="surface-card p-2 mb-1">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-mono text-text-primary">{p.id}</span>
-                <Badge variant="success">active</Badge>
-              </div>
-              <div className="text-xs text-text-muted mb-1">{p.model}</div>
-              {/* Concurrency bar */}
-              <div className="flex items-center gap-1 mb-1">
-                <span className="text-xs text-text-muted">concurrency</span>
-                <div className="flex-1 rounded-sm overflow-hidden" style={{ height: "4px", background: "var(--surface-active)" }}>
-                  <div style={{ width: `${(p.concurrency / p.max) * 100}%`, height: "100%", background: "var(--accent)" }} />
-                </div>
-                <span className="text-xs text-text-muted">{p.concurrency}/{p.max}</span>
-              </div>
-              <div className="flex justify-between text-xs text-text-muted">
-                <span>req: {p.requests}</span>
-                <span>tok: {p.tokens.toLocaleString()}</span>
-                <span>cost: ${p.cost.toFixed(3)}</span>
-              </div>
-            </div>
-          ))}
+          <div className="surface-card p-2 text-xs text-text-muted">
+            Provider metrics are not instrumented yet.
+          </div>
         </div>
 
         {/* Active Fuzz Runs */}
@@ -52,26 +37,30 @@ export function ObservabilityPanel() {
           <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
             <Cpu size={11} /> Active Runs
           </div>
-          {activeRuns.map((r, i) => (
-            <div key={i} className="surface-card p-2 mb-1">
+          {hasRun ? (
+            <div className="surface-card p-2 mb-1">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-mono text-text-primary">{r.target}</span>
-                <Badge variant="accent">{r.engine}</Badge>
+                <span className="text-xs font-mono text-text-primary">{lastTarget || "—"}</span>
+                <Badge variant={running ? "success" : "default"}>{lastEngine || "fuzzer"}</Badge>
               </div>
               <div className="flex items-center gap-1 mb-1">
                 <Container size={9} className="text-text-muted" />
                 <div className="flex-1 rounded-sm overflow-hidden" style={{ height: "4px", background: "var(--surface-active)" }}>
-                  <div style={{ width: "60%", height: "100%", background: "var(--success)" }} />
+                  <div style={{ width: "100%", height: "100%", background: running ? "var(--success)" : "var(--text-muted)" }} />
                 </div>
-                <span className="text-xs text-text-muted">{r.duration}</span>
+                <span className="text-xs text-text-muted">{running ? "running" : "done"}</span>
               </div>
               <div className="flex justify-between text-xs text-text-muted">
-                <span>execs/s: {r.execs}</span>
-                <span>edges: {r.edges}</span>
-                <span style={{ color: r.crashes > 0 ? "var(--error)" : "var(--text-muted)" }}>crashes: {r.crashes}</span>
+                <span>execs/s: {liveStats.execs}</span>
+                <span>edges: {liveStats.edges}</span>
+                <span style={{ color: liveStats.crashes > 0 ? "var(--error)" : "var(--text-muted)" }}>crashes: {liveStats.crashes}</span>
               </div>
             </div>
-          ))}
+          ) : (
+            <div className="surface-card p-2 text-xs text-text-muted">
+              No active runs. Start a campaign in the Run view.
+            </div>
+          )}
         </div>
       </div>
     </div>
