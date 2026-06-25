@@ -288,7 +288,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => {
-            println!("init: not implemented");
+            let report = hf_service::init_workspace().await?;
+            println!("Initialized hobot_fuzz workspace.");
+            println!("  config dir: {}", report.config_dir.display());
+            if report.created_configs.is_empty() {
+                println!("  config: all files already present");
+            } else {
+                println!("  created: {}", report.created_configs.join(", "));
+            }
+            println!("  database: {}", report.db_path.display());
         }
         Commands::Discover {
             project,
