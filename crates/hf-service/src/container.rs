@@ -13,7 +13,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
-use hf_core::harness::{BuildCommand, Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
+use hf_core::harness::{Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
 use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
@@ -42,16 +42,6 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
         .join("hobot_fuzz_workspace")
         .join(name)
         .join(target)
-}
-
-/// Resolve a per-project workspace directory (target-independent).
-#[must_use]
-pub fn project_workspace_dir(project: &Path) -> PathBuf {
-    let _ = project
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("default");
-    std::env::temp_dir().join("hobot_fuzz_workspace")
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +119,14 @@ pub fn copy_project_sources(project: &Path, workspace: &Path) {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if exts.contains(&ext) {
                     let dest = workspace.join(entry.file_name());
-                    let _ = std::fs::copy(&path, &dest);
+                    if let Err(e) = std::fs::copy(&path, &dest) {
+                        // Not fatal on its own, but a missing source surfaces
+                        // later as a confusing compile error -- surface it here.
+                        tracing::warn!(
+                            "failed to copy source {} into workspace: {e}",
+                            path.display()
+                        );
+                    }
                 }
             }
         }
@@ -197,7 +194,6 @@ pub fn repo_root() -> Option<PathBuf> {
 pub struct ServiceContainer {
     runtime: Arc<dyn RuntimeAdapter>,
     provider_pool: Option<Arc<dyn ProviderPool>>,
-    runtime_config: RuntimeConfig,
     store: Option<Arc<Store>>,
     session_store: Option<SqliteSessionStore>,
     guardrails: Guardrails,
@@ -210,11 +206,9 @@ impl ServiceContainer {
         runtime: Arc<dyn RuntimeAdapter>,
         provider_pool: Option<Arc<dyn ProviderPool>>,
     ) -> Self {
-        let runtime_config = RuntimeConfig::default();
         Self {
             runtime,
             provider_pool,
-            runtime_config,
             store: None,
             session_store: None,
             guardrails: Guardrails::permissive(),
@@ -283,23 +277,10 @@ impl ServiceContainer {
         Self {
             runtime,
             provider_pool,
-            runtime_config: RuntimeConfig::default(),
             store,
             session_store,
             guardrails: Guardrails::from_env(),
         }
-    }
-
-    /// The runtime adapter (for direct `run_command` access).
-    #[must_use]
-    pub fn runtime(&self) -> &dyn RuntimeAdapter {
-        self.runtime.as_ref()
-    }
-
-    /// The runtime config.
-    #[must_use]
-    pub fn runtime_config(&self) -> &RuntimeConfig {
-        &self.runtime_config
     }
 
     /// The provider pool (if an LLM is configured).
@@ -395,6 +376,33 @@ impl ServiceContainer {
         }
     }
 
+    /// Resolve a target symbol to its discovered candidate id, falling back to
+    /// the nil UUID when discovery fails or the symbol is unknown. Shared by
+    /// harness compilation and triage so persisted records key off the same id.
+    async fn resolve_target_id(&self, project: &Path, target: &str, lang: TargetLanguage) -> Uuid {
+        self.discover(project, lang)
+            .await
+            .ok()
+            .and_then(|inv| {
+                inv.candidates
+                    .iter()
+                    .find(|c| c.symbol == target)
+                    .map(|c| c.id)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Persist corpus entries for a target so the Corpus view and later runs
+    /// survive restarts (best-effort; a store failure only logs).
+    async fn persist_corpus(&self, target_id: Uuid, corpus: &hf_core::corpus::Corpus) {
+        let Some(store) = &self.store else { return };
+        for entry in &corpus.entries {
+            if let Err(e) = store.upsert_corpus_entry(target_id, entry).await {
+                tracing::warn!("failed to persist corpus entry {}: {e}", entry.sha256);
+            }
+        }
+    }
+
     /// Compile a harness in the sandbox via `hf-runtime`.
     ///
     /// # Errors
@@ -419,7 +427,7 @@ impl ServiceContainer {
         let build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{target}"));
         let harness = Harness {
             id: Uuid::new_v4(),
-            target_id: Uuid::nil(),
+            target_id: self.resolve_target_id(project, target, lang).await,
             engine,
             source,
             language: lang,
@@ -429,6 +437,13 @@ impl ServiceContainer {
             smoke_run: None,
         };
         let compiled = hf_harness::compile(harness, self.runtime.as_ref(), &workspace).await?;
+        // Persist the compiled harness so it survives restarts and the
+        // Harness/list views can show it (best-effort).
+        if let Some(store) = &self.store {
+            if let Err(e) = store.upsert_harness(&compiled).await {
+                tracing::warn!("failed to persist harness {}: {e}", compiled.id);
+            }
+        }
         Ok(CompileOutcome {
             status: compiled.status,
             binary_name: compiled
@@ -641,17 +656,21 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let out_dir = workspace.join("out");
         let target_id = self
-            .discover(project, TargetLanguage::C)
-            .await
-            .ok()
-            .and_then(|inv| {
-                inv.candidates
-                    .iter()
-                    .find(|c| c.symbol == target)
-                    .map(|c| c.id)
-            })
-            .unwrap_or_default();
-        let run_id = Uuid::new_v4();
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        // Link crashes to the run that produced them. The most recent run for
+        // this project is the one whose `out` dir we are triaging; using a fresh
+        // UUID here would orphan every crash (crashes.run_id is NOT NULL and
+        // indexed for `list_crashes_by_run`, which could then never match).
+        let run_id = match &self.store {
+            Some(store) => store
+                .list_runs(Some(&project.to_string_lossy()))
+                .await
+                .ok()
+                .and_then(|runs| runs.into_iter().next())
+                .map_or_else(Uuid::new_v4, |run| run.id),
+            None => Uuid::new_v4(),
+        };
         let mut crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
 
         // Reproduce each crash by replaying its input through the harness binary
@@ -768,7 +787,11 @@ impl ServiceContainer {
             (b"{}".to_vec(), "seed_empty".to_owned()),
             (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
         ];
-        let corpus = hf_corpus::seed(Uuid::new_v4(), &corpus_dir, seeds).await?;
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
+        self.persist_corpus(target_id, &corpus).await;
         Ok(corpus.entries.len())
     }
 
@@ -776,11 +799,20 @@ impl ServiceContainer {
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the directories cannot be read.
-    pub fn corpus_grow(&self, project: &Path, target: &str) -> Result<usize, ClassifiedError> {
+    pub async fn corpus_grow(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let out_dir = workspace.join("out");
-        let corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
+        let mut corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        corpus.target_id = target_id;
+        self.persist_corpus(target_id, &corpus).await;
         Ok(corpus.entries.len())
     }
 
@@ -1206,8 +1238,3 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     let _ = write!(body, "    {symbol}({});", args.join(", "));
     body
 }
-
-// Keep BuildCommand referenced so unused-import lints don't fire when the
-// type is only used in a conditional path.
-#[allow(dead_code)]
-fn _ensure_build_command_used(_b: BuildCommand) {}

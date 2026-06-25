@@ -8,12 +8,13 @@
 //! business logic out of presentation crates (AGENTS.md 2.9) and routing every
 //! build/run through `hf-runtime` sandboxing (AGENTS.md 2.12).
 
+pub mod config;
 pub mod container;
 pub mod init;
 
 pub use container::{
-    build_sandbox_image, copy_project_sources, generate_target_seeds, project_workspace_dir,
-    provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,
-    CompileOutcome, RunSummary, SeedEntry, ServiceContainer,
+    build_sandbox_image, copy_project_sources, generate_target_seeds, provider_pool_from_config,
+    provider_pool_from_env, repo_root, runtime_from_env, workspace_dir, CompileOutcome, RunSummary,
+    SeedEntry, ServiceContainer,
 };
 pub use init::{init_at, init_workspace, InitReport};
