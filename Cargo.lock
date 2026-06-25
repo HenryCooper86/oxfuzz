@@ -1960,6 +1960,7 @@ dependencies = [
  "hf-guardrails",
  "hf-runtime",
  "hf-service",
+ "hf-skills",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2171,6 +2172,7 @@ dependencies = [
  "hf-provider",
  "hf-runtime",
  "hf-service",
+ "hf-skills",
  "serde",
  "serde_json",
  "sha2",
@@ -2374,17 +2376,10 @@ dependencies = [
 name = "hf-skills"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "chrono",
- "hf-core",
  "serde",
- "serde_json",
- "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "toml 0.8.2",
  "tracing",
- "uuid",
 ]
 
 [[package]]

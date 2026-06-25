@@ -1,8 +1,10 @@
-//! hf-skills: Skill registry, versioning, experience capture.
+//! hf-skills: the fuzzing skill registry.
 //!
-//! See `docs/standards/SKILLS_STANDARD.md` (to be written) and the bundled
-//! skills in `skills/`.
+//! A skill is a versioned instruction playbook (`root.md`) plus a `skill.toml`
+//! manifest. Built-in fuzzing skills are embedded in the binary; user skills
+//! live under `skills/<name>/`. Agents reference skills by name, and the
+//! registry renders the referenced playbooks into the agent's prompt.
 
-pub mod registry;
+mod registry;
 
-pub use registry::FileSkillRegistry;
+pub use registry::{SkillDefinition, SkillError, SkillRegistry, TrustTier};

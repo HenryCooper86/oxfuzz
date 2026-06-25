@@ -4,6 +4,7 @@ description = "Configures and runs a fuzzing engine against a compiled harness."
 role = "run-operator"
 icon = "play"
 allowed_tools = ["discover", "run"]
+skills = ["coverage-analysis"]
 model_tags = ["reasoning"]
 temperature = 0.3
 max_iterations = 6

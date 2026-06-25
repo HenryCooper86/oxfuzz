@@ -4,6 +4,7 @@ description = "Watches coverage and stagnation and proposes how to push deeper."
 role = "coverage"
 icon = "activity"
 allowed_tools = ["discover", "run"]
+skills = ["coverage-analysis"]
 model_tags = ["reasoning"]
 temperature = 0.3
 max_iterations = 6
