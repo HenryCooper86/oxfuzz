@@ -47,6 +47,7 @@ hf-runtime = { workspace = true }
 hf-service = { workspace = true }
 hf-provider = { workspace = true }
 hf-agent = { workspace = true }
+hf-guardrails = { workspace = true }
 
 [lints]
 workspace = true

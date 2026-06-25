@@ -17,6 +17,13 @@ interface ModelInfo {
   model: string;
 }
 
+// A pending guardrail approval request (mirrors the backend payload).
+interface PermissionRequest {
+  id: string;
+  action: string;
+  reason: string;
+}
+
 // Mirrors hf_agent::AgentEvent (serde tag = "type", snake_case).
 type AgentEvent =
   | { type: "started" }
@@ -36,7 +43,29 @@ export function ChatView() {
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [permission, setPermission] = useState<PermissionRequest | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Listen for guardrail approval requests from the agent (high-risk actions
+  // like running a fuzzer) and surface an approve/deny prompt.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getTransport()
+      .listen<PermissionRequest>("chat:permission_request", (ev) => setPermission(ev.payload))
+      .then((u) => {
+        unlisten = u;
+      });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  async function answerPermission(approved: boolean) {
+    const req = permission;
+    if (!req) return;
+    setPermission(null);
+    await getTransport().invoke("chat_answer_permission", { id: req.id, approved });
+  }
 
   // Create a persistent conversation session once (server-side memory). Falls
   // back to frontend-replayed history when no database is configured.
@@ -320,6 +349,34 @@ export function ChatView() {
           </div>
         )}
       </div>
+
+      {/* Guardrail approval prompt (HITL) */}
+      {permission && (
+        <div
+          className="flex items-center justify-between gap-3 mx-4 mb-2 px-3 py-2 rounded-md border"
+          style={{ borderColor: "var(--accent)", background: "var(--surface-secondary)" }}
+        >
+          <div className="text-sm">
+            <span style={{ color: "var(--accent)" }}>Approval required:</span> {permission.action}
+            <span className="text-text-secondary"> — {permission.reason}</span>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <button
+              onClick={() => answerPermission(false)}
+              className="text-xs px-3 py-1.5 rounded-md border border-border text-text-secondary hover:bg-surface-hover"
+            >
+              Deny
+            </button>
+            <button
+              onClick={() => answerPermission(true)}
+              className="text-xs px-3 py-1.5 rounded-md text-black"
+              style={{ background: "var(--accent)" }}
+            >
+              Approve
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Composer */}
       <div style={{ padding: "var(--space-sm) var(--space-md) var(--space-md)" }}>
