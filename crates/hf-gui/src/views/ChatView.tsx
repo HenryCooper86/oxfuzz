@@ -84,8 +84,10 @@ export function ChatView() {
     };
   }, []);
 
-  // Populate the model selector from the configured provider pool, preferring
-  // the model the user picked during setup.
+  // Populate the model selector from the actually-configured provider pool
+  // (config/providers.toml). The chat uses that config, so the dropdown must
+  // reflect it -- a stale setup-wizard choice is only honored if it's still a
+  // configured model; otherwise we show the configured provider's model.
   useEffect(() => {
     let cancelled = false;
     const chosen = (localStorage.getItem("hf_provider_model") ?? "").trim();
@@ -93,11 +95,10 @@ export function ChatView() {
       .invoke<ModelInfo[]>("list_models")
       .then((list) => {
         if (cancelled) return;
-        const names = Array.from(
-          new Set([...(chosen ? [chosen] : []), ...list.map((m) => m.model)].filter(Boolean)),
-        );
+        const configured = Array.from(new Set(list.map((m) => m.model).filter(Boolean)));
+        const names = configured.length ? configured : chosen ? [chosen] : [];
         setModels(names);
-        setModel(chosen || names[0] || "");
+        setModel(configured.includes(chosen) ? chosen : names[0] ?? "");
       })
       .catch(() => {
         if (cancelled) return;
