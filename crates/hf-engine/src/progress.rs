@@ -25,14 +25,7 @@ pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
             return Some(FuzzProgress::ExecsPerSec(eps as f64));
         }
     }
-    if lower.contains("crash")
-        || lower.contains("asan")
-        || lower.contains("addresssanitizer")
-        || lower.contains("ubsan")
-        || lower.contains("sigsegv")
-        || lower.contains("sigabrt")
-        || (lower.contains("sum") && lower.contains("bug"))
-    {
+    if is_finding_signal(&lower) {
         return Some(FuzzProgress::CrashesFound(1));
     }
     if lower.contains("done") || lower.contains("finished") {
@@ -81,18 +74,30 @@ pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
             events.push(FuzzProgress::ExecsPerSec(eps as f64));
         }
     }
-    // A real crash artifact line, not the literal "crashes 0" status token.
-    if (lower.contains("crash")
-        || lower.contains("addresssanitizer")
-        || lower.contains("ubsan")
-        || lower.contains("sigsegv")
-        || lower.contains("sigabrt"))
-        && !lower.contains("crashes 0")
-        && !lower.contains("crashes: 0")
-    {
+    if is_finding_signal(&lower) {
         events.push(FuzzProgress::CrashesFound(1));
     }
     events
+}
+
+/// Whether a (lowercased) line signals a fuzzer finding -- a crash, OOM, leak,
+/// or timeout. Covers libFuzzer's "Test unit written to <artifact>" save line
+/// (one per saved finding of any type) plus the common sanitizer/summary
+/// phrasings, while excluding the benign "crashes 0" status token.
+fn is_finding_signal(lower: &str) -> bool {
+    let positive = lower.contains("crash")
+        || lower.contains("addresssanitizer")
+        || lower.contains("asan")
+        || lower.contains("ubsan")
+        || lower.contains("sigsegv")
+        || lower.contains("segv")
+        || lower.contains("sigabrt")
+        || lower.contains("out-of-memory")
+        || lower.contains("leaksanitizer")
+        || lower.contains("detected memory leak")
+        || lower.contains("deadly signal")
+        || lower.contains("test unit written");
+    positive && !lower.contains("crashes 0") && !lower.contains("crashes: 0")
 }
 
 /// Parse a full stdout buffer into a list of progress events.
@@ -176,15 +181,23 @@ mod tests {
 
     #[test]
     fn crash_line_is_detected_but_not_zero_status() {
-        assert!(
-            parse_progress_events("SUMMARY: AddressSanitizer: heap-buffer-overflow")
+        let finding = |line: &str| {
+            parse_progress_events(line)
                 .iter()
                 .any(|e| matches!(e, FuzzProgress::CrashesFound(_)))
-        );
+        };
+        // Crashes, OOM, leaks, timeouts, and the artifact-save line are findings.
+        assert!(finding("SUMMARY: AddressSanitizer: heap-buffer-overflow"));
+        assert!(finding("==1== SUMMARY: libFuzzer: out-of-memory"));
+        assert!(finding("SUMMARY: AddressSanitizer: detected memory leaks"));
+        assert!(finding("Test unit written to /work/out/oom-da39a3ee"));
+        assert!(finding(
+            "artifact_prefix='/work/out/'; Test unit written to /work/out/crash-abc"
+        ));
         // The literal "crashes 0" status token is not a crash event.
-        assert!(!parse_progress_events("VMs 4, executed 100, crashes 0")
-            .iter()
-            .any(|e| matches!(e, FuzzProgress::CrashesFound(_))));
+        assert!(!finding("VMs 4, executed 100, crashes 0"));
+        // A normal libFuzzer pulse line is not a finding.
+        assert!(!finding("#131072 pulse cov: 58 exec/s: 43690 rss: 546Mb"));
     }
 
     #[test]
