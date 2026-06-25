@@ -1,6 +1,7 @@
 // Shared types for hobot_fuzz GUI.
 
 export type ViewType =
+  | "workflow"
   | "discover"
   | "harness"
   | "run"
