@@ -5,8 +5,10 @@ Status legend: [x] done - [~] partial - [ ] not started.
 ## Phase 1: Foundation
 
 - [x] hf-core: `FuzzEngine`, `TargetCandidate`, `Harness`, `Crash`, `Corpus` traits.
-- [~] hf-provider: LLM provider pool (OpenAI-compatible). Multi-provider
-  (Anthropic/Gemini/Ollama), freeze/health/lease not yet ported.
+- [~] hf-provider: LLM provider pool (OpenAI-compatible). Freeze/thaw failover
+  + error classification ported from y-agent (rate-limit/auth/5xx no longer
+  kills a campaign). Multi-provider backends (Anthropic/Gemini/Ollama), lease,
+  and token streaming not yet ported.
 - [x] hf-storage: SQLite schema for runs, targets, harnesses, crashes, corpora.
 - [x] hf-runtime: Docker sandbox adapter for isolated builds and fuzz runs.
 - [x] hf-cli: `init`, `discover`, `harness`, `run`, `triage` subcommands (a thin
@@ -39,7 +41,9 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] hf-service: single `ServiceContainer` spine; CLI/web/GUI route through
   `bootstrap()`; persists runs/targets/crashes via hf-storage.
 - [x] hf-guardrails: action risk tiers, policy, HITL approval gates; enforced at
-  every untrusted-execution point (compile/run/triage).
+  every untrusted-execution point (compile/run/triage). Safe-by-default
+  (`from_env` -> env-gated; `HF_GUARDRAILS=permissive` opts out). 4-pattern
+  loop-detection guard (`loop_guard`) ported from y-agent + wired into the agent.
 - [x] hf-agent: autonomous reason/act loop dispatching the fuzzing tools.
 - [x] hf-gui: chat wired to the streaming agent (`chat_agent` + `chat:event`).
 - [x] hf-web: REST API + SSE for run progress.
