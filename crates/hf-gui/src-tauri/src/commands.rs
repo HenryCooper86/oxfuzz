@@ -545,10 +545,11 @@ pub fn agent_info() -> AgentInfo {
     let first = models.first();
     let model = first.map_or_else(|| "(none configured)".to_owned(), |m| m.model.clone());
     let provider_type = first.map(|m| m.provider_type.clone()).unwrap_or_default();
-    // permissive (default) auto-approves with audit; strict requires approval.
+    // Default is env-gated (high-risk actions need approval/HF_AUTO_APPROVE);
+    // HF_GUARDRAILS=permissive opts into auto-approve-with-audit.
     let guardrails = match std::env::var("HF_GUARDRAILS").as_deref() {
-        Ok("strict") => "strict (approval required)".to_owned(),
-        _ => "permissive (audited)".to_owned(),
+        Ok("permissive") => "permissive (audited)".to_owned(),
+        _ => "approval required".to_owned(),
     };
     let tools = hf_agent::TOOL_SPECS
         .iter()
@@ -776,132 +777,55 @@ pub async fn delete_skill(name: String) -> Result<(), String> {
     Ok(())
 }
 
-// -- Agent profiles CRUD ----------------------------------------------------
+// -- Agents (registry-backed) -----------------------------------------------
+//
+// An "agent" is an `hf_agent::AgentDefinition`: a flat-TOML profile that fully
+// determines the runtime agent's system prompt, callable tools, model routing,
+// and iteration budget. Built-in fuzzing agents are embedded in the binary;
+// user agents (and overrides) live in `config/agents/*.toml`.
 
-/// An agent profile from `config/agents/<id>.toml`.
-#[derive(Debug, Default, Serialize)]
-pub struct AgentProfile {
-    pub id: String,
-    pub model_tags: Vec<String>,
-    pub autonomy: String,
-    pub max_iterations: u32,
-    pub tools: Vec<String>,
-}
-
-/// List the live agent profiles (the editable `*.toml`, not `*.example.toml`).
+/// List all agents -- built-in fuzzing agents plus any user-authored ones.
 #[tauri::command]
-pub fn list_agents() -> Vec<AgentProfile> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(agents_dir()) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let is_toml = std::path::Path::new(&name)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
-        if !is_toml || name.ends_with(".example.toml") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(parsed) = toml::from_str::<toml::Value>(&text) else {
-            continue;
-        };
-        let agent = parsed.get("agent");
-        let id = agent
-            .and_then(|a| a.get("id"))
-            .and_then(toml::Value::as_str)
-            .map_or_else(|| name.trim_end_matches(".toml").to_owned(), str::to_owned);
-        let arr = |v: Option<&toml::Value>| {
-            v.and_then(toml::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        out.push(AgentProfile {
-            id,
-            model_tags: arr(agent.and_then(|a| a.get("model_tags"))),
-            autonomy: agent
-                .and_then(|a| a.get("autonomy"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or("Assist")
-                .to_owned(),
-            max_iterations: agent
-                .and_then(|a| a.get("max_iterations"))
-                .and_then(toml::Value::as_integer)
-                .unwrap_or(5) as u32,
-            tools: arr(agent
-                .and_then(|a| a.get("tools"))
-                .and_then(|t| t.get("enabled"))),
-        });
-    }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+#[must_use]
+pub fn list_agents() -> Vec<hf_agent::AgentDefinition> {
+    hf_agent::AgentRegistry::with_user_dir(agents_dir()).list()
 }
 
-/// Create or update an agent profile at `config/agents/<id>.toml`.
+/// Fetch a single agent definition by id.
 #[tauri::command]
-pub async fn save_agent(
-    id: String,
-    model_tags: Vec<String>,
-    autonomy: String,
-    max_iterations: u32,
-    tools: Vec<String>,
-) -> Result<(), String> {
-    let id = safe_name(&id)?;
-    let dir = agents_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let autonomy = if autonomy.trim().is_empty() {
-        "Assist".to_owned()
-    } else {
-        autonomy
-    };
-    let doc = AgentFileOut {
-        agent: AgentInnerOut {
-            id: id.clone(),
-            model_tags,
-            autonomy,
-            max_iterations: max_iterations.clamp(1, 50),
-            tools: AgentToolsOut { enabled: tools },
-        },
-    };
-    let toml_str = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(format!("{id}.toml")), toml_str).map_err(|e| e.to_string())?;
-    Ok(())
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn get_agent(id: String) -> Option<hf_agent::AgentDefinition> {
+    hf_agent::AgentRegistry::with_user_dir(agents_dir())
+        .get(&id)
+        .cloned()
 }
 
-#[derive(Serialize)]
-struct AgentFileOut {
-    agent: AgentInnerOut,
-}
-#[derive(Serialize)]
-struct AgentInnerOut {
-    id: String,
-    model_tags: Vec<String>,
-    autonomy: String,
-    max_iterations: u32,
-    tools: AgentToolsOut,
-}
-#[derive(Serialize)]
-struct AgentToolsOut {
-    enabled: Vec<String>,
-}
-
-/// Delete an agent profile.
+/// The runtime tool roster an agent may be granted, for the editor checklist.
 #[tauri::command]
-pub async fn delete_agent(id: String) -> Result<(), String> {
-    let id = safe_name(&id)?;
-    let path = agents_dir().join(format!("{id}.toml"));
-    if path.is_file() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+#[must_use]
+pub fn agent_tools() -> Vec<serde_json::Value> {
+    hf_agent::TOOL_SPECS
+        .iter()
+        .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
+        .collect()
+}
+
+/// Create or update a user agent (writes `config/agents/<id>.toml`). Overriding
+/// a built-in id shadows it until deleted.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn save_agent(def: hf_agent::AgentDefinition) -> Result<(), String> {
+    let mut reg = hf_agent::AgentRegistry::with_user_dir(agents_dir());
+    reg.save(def).map_err(|e| e.to_string())
+}
+
+/// Delete a user agent, or reset a built-in override to its shipped version.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn delete_agent(id: String) -> Result<(), String> {
+    let mut reg = hf_agent::AgentRegistry::with_user_dir(agents_dir());
+    reg.delete(&id).map_err(|e| e.to_string())
 }
 
 /// Create a new persistent conversation session and return its id.
@@ -937,6 +861,7 @@ pub async fn chat_agent(
     project: Option<String>,
     history: Option<Vec<ChatTurn>>,
     session_id: Option<String>,
+    agent_id: Option<String>,
 ) -> Result<String, String> {
     use hf_core::session::SessionStore;
     let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
@@ -971,7 +896,15 @@ pub async fn chat_agent(
         hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
     let container = container_with_provider(&state).with_guardrails(guardrails);
 
-    let agent = hf_agent::Agent::new(container, project);
+    // Drive the chat with the chosen agent (default: orchestrator). Its
+    // definition sets the system prompt, the callable tools, model routing, and
+    // the iteration budget.
+    let registry = hf_agent::AgentRegistry::with_user_dir(agents_dir());
+    let definition = agent_id
+        .filter(|s| !s.is_empty())
+        .and_then(|id| registry.get(&id).cloned())
+        .unwrap_or_else(|| registry.default_agent());
+    let agent = hf_agent::Agent::with_definition(container, project, definition);
     let sink = TauriEventSink { app };
     let answer = agent
         .run_turn(history, &message, &sink)
