@@ -17,5 +17,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
+[dev-dependencies]
+hf-runtime = { workspace = true }
+async-trait = { workspace = true }
+
 [lints]
 workspace = true

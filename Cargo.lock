@@ -1956,6 +1956,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hf-core",
+ "hf-runtime",
  "hf-service",
  "serde",
  "serde_json",
