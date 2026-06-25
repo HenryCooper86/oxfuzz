@@ -24,6 +24,9 @@ pub struct CommandResult {
     pub workspace: PathBuf,
 }
 
+/// A callback invoked with each output line as a streamed command runs.
+pub type LineSink<'a> = dyn Fn(&str) + Send + Sync + 'a;
+
 /// A sandboxed runtime for building harnesses and running fuzzers.
 #[async_trait]
 pub trait RuntimeAdapter: Send + Sync {
@@ -33,6 +36,29 @@ pub trait RuntimeAdapter: Send + Sync {
         cwd: &std::path::Path,
         limits: &ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError>;
+
+    /// Run a command, delivering each stdout/stderr line to `on_line` as it
+    /// arrives, for live progress.
+    ///
+    /// The default implementation runs the command to completion and replays
+    /// the captured output line-by-line (no live streaming); adapters that can
+    /// stream (e.g. Docker) override this.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the command fails to run.
+    async fn run_command_streaming(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &ResourceLimits,
+        on_line: &LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        let result = self.run_command(cmd, cwd, limits).await?;
+        for line in result.stdout.lines().chain(result.stderr.lines()) {
+            on_line(line);
+        }
+        Ok(result)
+    }
 
     async fn write_file(
         &self,

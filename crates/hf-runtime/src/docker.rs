@@ -125,6 +125,103 @@ impl RuntimeAdapter for DockerRuntime {
         })
     }
 
+    async fn run_command_streaming(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command;
+
+        let timeout = Duration::from_secs(limits.max_duration_secs);
+        let mut args = build_exec_args(&self.cfg, cmd, timeout);
+        let placeholder = "/tmp/hobot_fuzz_workspace";
+        for a in &mut args {
+            if a == &format!("{placeholder}:{}", self.cfg.container_workspace) {
+                *a = format!("{}:{}", cwd.display(), self.cfg.container_workspace);
+            }
+        }
+
+        let mut docker = Command::new(crate::docker_bin());
+        docker
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        for (k, v) in &limits.env {
+            docker.env(k, v);
+        }
+
+        let mut child = docker
+            .spawn()
+            .map_err(|e| ClassifiedError::Sandbox(format!("docker spawn: {e}")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ClassifiedError::Sandbox("no stdout pipe".to_owned()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ClassifiedError::Sandbox("no stderr pipe".to_owned()))?;
+
+        let mut out_lines = BufReader::new(stdout).lines();
+        let mut err_lines = BufReader::new(stderr).lines();
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
+        let mut out_done = false;
+        let mut err_done = false;
+
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+
+        // Read both pipes line-by-line as the fuzzer runs. libFuzzer writes its
+        // progress to stderr (unbuffered in C), so this surfaces live activity.
+        let timed_out = loop {
+            if out_done && err_done {
+                break false;
+            }
+            tokio::select! {
+                () = &mut deadline => break true,
+                line = out_lines.next_line(), if !out_done => match line {
+                    Ok(Some(l)) => {
+                        on_line(l.as_str());
+                        stdout_buf.push_str(&l);
+                        stdout_buf.push('\n');
+                    }
+                    _ => out_done = true,
+                },
+                line = err_lines.next_line(), if !err_done => match line {
+                    Ok(Some(l)) => {
+                        on_line(l.as_str());
+                        stderr_buf.push_str(&l);
+                        stderr_buf.push('\n');
+                    }
+                    _ => err_done = true,
+                },
+            }
+        };
+
+        // A fuzzer reaching its time limit self-exits; a hard deadline kill is
+        // also a normal outcome (we keep whatever output we streamed).
+        let exit_code = if timed_out {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            0
+        } else {
+            child.wait().await.map_or(-1, |s| s.code().unwrap_or(0))
+        };
+
+        Ok(CommandResult {
+            exit_code,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+            workspace: cwd.to_path_buf(),
+        })
+    }
+
     async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
         // Write on the host within the workspace; the container mounts it.
         if let Some(parent) = path.parent() {
