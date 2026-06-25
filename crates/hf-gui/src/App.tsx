@@ -11,6 +11,7 @@ import { InfoPanel } from "./components/observation/InfoPanel";
 import { SetupWizard } from "./components/wizard/SetupWizard";
 import { SettingsView } from "./components/settings/SettingsView";
 import { ChatView } from "./views/ChatView";
+import { WorkflowView } from "./views/WorkflowView";
 import { DiscoverView } from "./views/DiscoverView";
 import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
@@ -111,6 +112,11 @@ function AppInner() {
             <div className="flex flex-1 overflow-hidden">
               <main className="flex-1 overflow-hidden flex flex-col">
                 {activeView === "chat" && <ChatView key={chatResetKey} />}
+                {activeView === "workflow" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <WorkflowView />
+                  </div>
+                )}
                 {activeView === "discover" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
                     <DiscoverView />
@@ -236,6 +242,7 @@ function HeaderToggle({ active, onClick, icon, label }: { active: boolean; onCli
 }
 
 const viewTitles: Record<ViewType, string> = {
+  workflow: "Fuzzing Workflow",
   chat: "AI Assistant",
   discover: "Target Discovery",
   harness: "Harness Generation",
@@ -252,6 +259,7 @@ const viewTitles: Record<ViewType, string> = {
 };
 
 const viewIcons: Record<ViewType, React.ReactNode> = {
+  workflow: <ListChecks size={18} />,
   chat: <MessageSquare size={18} />,
   discover: <Target size={18} />,
   harness: <FileCode size={18} />,

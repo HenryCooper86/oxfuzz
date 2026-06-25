@@ -1,5 +1,5 @@
 import type { ViewType } from "../types";
-import { Bot, BookOpen, Bug, Boxes, Database, FileCode, FolderOpen, MessageSquare, Play, Plus, Puzzle, Settings, SquarePen, Target, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, Database, FileCode, FolderOpen, MessageSquare, Play, Plus, Puzzle, Settings, SquarePen, Target, Workflow, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -19,6 +19,7 @@ const TOP_ITEMS: NavItem[] = [
 ];
 
 const NAV_ITEMS: NavItem[] = [
+  { view: "workflow", label: "Fuzzing Workflow", icon: Workflow },
   { view: "chat", label: "AI Chat", icon: MessageSquare },
   { view: "discover", label: "Discover", icon: Target },
   { view: "harness", label: "Harness", icon: FileCode },

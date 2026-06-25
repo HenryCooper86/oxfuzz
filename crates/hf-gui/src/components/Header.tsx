@@ -15,6 +15,7 @@ interface HeaderProps {
 export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSidebar, reserveLeftInset }: HeaderProps) {
   return (
     <header
+      data-tauri-drag-region
       className="flex items-center justify-between flex-shrink-0 select-none"
       style={{
         height: "52px",
@@ -26,7 +27,7 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
         borderBottom: "1px solid var(--border)",
       }}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" data-tauri-drag-region>
         {onToggleSidebar && (
           <button
             onClick={onToggleSidebar}
@@ -52,8 +53,13 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
             <PanelLeft size={18} />
           </button>
         )}
-        {icon && <span style={{ color: "var(--accent)" }}>{icon}</span>}
+        {icon && (
+          <span data-tauri-drag-region style={{ color: "var(--accent)" }}>
+            {icon}
+          </span>
+        )}
         <span
+          data-tauri-drag-region
           style={{
             fontFamily: "var(--font-display)",
             fontSize: "17px",
