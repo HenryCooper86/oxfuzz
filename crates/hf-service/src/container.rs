@@ -230,6 +230,15 @@ impl ServiceContainer {
         self
     }
 
+    /// Attach (or replace) the LLM provider pool, returning the updated
+    /// container. Lets a command pick up a freshly-configured provider without
+    /// an app restart.
+    #[must_use]
+    pub fn with_provider_pool(mut self, pool: Arc<dyn ProviderPool>) -> Self {
+        self.provider_pool = Some(pool);
+        self
+    }
+
     /// The active guardrail engine.
     #[must_use]
     pub fn guardrails(&self) -> &Guardrails {
@@ -245,7 +254,8 @@ impl ServiceContainer {
     /// missing database or API key degrades gracefully instead of failing.
     pub async fn bootstrap() -> Self {
         let runtime = runtime_from_env();
-        let provider_pool = provider_pool_from_env();
+        // Prefer the GUI-managed config/providers.toml; fall back to env vars.
+        let provider_pool = provider_pool_from_config().or_else(provider_pool_from_env);
         let store = match Store::connect_from_env().await {
             Ok(s) => Some(Arc::new(s)),
             Err(e) => {
@@ -787,6 +797,125 @@ pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
     let provider = OpenAiCompatProvider::new(cfg.clone());
     let pool = DefaultProviderPool::with_configs(vec![Box::new(provider)], vec![cfg]);
     Some(Arc::new(pool))
+}
+
+/// One `[[providers]]` entry in `config/providers.toml` (the GUI-managed
+/// provider config). Only the fields the pool needs are deserialized.
+#[derive(serde::Deserialize)]
+struct ProviderEntry {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    provider_type: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    api_key_env: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default = "default_concurrency")]
+    max_concurrency: u32,
+    #[serde(default = "default_context_window")]
+    context_window: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct ProvidersFile {
+    #[serde(default)]
+    providers: Vec<ProviderEntry>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_concurrency() -> u32 {
+    3
+}
+fn default_context_window() -> u64 {
+    128_000
+}
+
+/// Build an LLM provider pool from `config/providers.toml` (the file the GUI
+/// Settings -> Providers tab writes). Returns `None` if the file is missing,
+/// unparsable, or contains no enabled provider with a usable API key.
+///
+/// An entry's key comes from `api_key`, or from the env var named by
+/// `api_key_env`. The base URL defaults by `provider_type` when not set.
+#[must_use]
+pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
+    let path = crate::init::config_dir().join("providers.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let parsed: ProvidersFile = toml::from_str(&text).ok()?;
+
+    let mut providers: Vec<Box<dyn hf_core::provider::LlmProvider>> = Vec::new();
+    let mut configs: Vec<ProviderConfig> = Vec::new();
+    for entry in parsed.providers {
+        if !entry.enabled {
+            continue;
+        }
+        let api_key = if !entry.api_key.is_empty() {
+            entry.api_key.clone()
+        } else if !entry.api_key_env.is_empty() {
+            std::env::var(&entry.api_key_env).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if api_key.is_empty() {
+            continue; // no usable key -> not a working provider
+        }
+        let base_url = if entry.base_url.is_empty() {
+            default_base_url(&entry.provider_type)
+        } else {
+            entry.base_url.clone()
+        };
+        let model = if entry.model.is_empty() {
+            "gpt-4o".to_owned()
+        } else {
+            entry.model.clone()
+        };
+        let tags = if entry.tags.is_empty() {
+            vec![
+                "general".to_owned(),
+                "reasoning".to_owned(),
+                "code".to_owned(),
+            ]
+        } else {
+            entry.tags.clone()
+        };
+        let cfg = ProviderConfig {
+            id: entry.id.clone(),
+            model,
+            api_key,
+            base_url,
+            tags,
+            max_concurrency: entry.max_concurrency.max(1),
+            context_window: entry.context_window,
+        };
+        providers.push(Box::new(OpenAiCompatProvider::new(cfg.clone())));
+        configs.push(cfg);
+    }
+
+    if providers.is_empty() {
+        return None;
+    }
+    Some(Arc::new(DefaultProviderPool::with_configs(
+        providers, configs,
+    )))
+}
+
+/// Default API base URL for a provider type.
+fn default_base_url(provider_type: &str) -> String {
+    match provider_type {
+        // Note: only OpenAI-compatible wire format is supported today.
+        "anthropic" => "https://api.anthropic.com/v1".to_owned(),
+        _ => "https://api.openai.com/v1".to_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------
