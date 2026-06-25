@@ -168,6 +168,29 @@ pub fn read_config(name: &str) -> Result<String, String> {
     }
 }
 
+/// Parse raw TOML into a JSON value, for driving structured settings forms.
+/// Empty content yields an empty object.
+///
+/// # Errors
+/// Returns an error string if the content is not valid TOML.
+pub fn toml_to_json(content: &str) -> Result<serde_json::Value, String> {
+    if content.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let value: toml::Value = toml::from_str(content).map_err(|e| format!("invalid TOML: {e}"))?;
+    serde_json::to_value(value).map_err(|e| e.to_string())
+}
+
+/// Serialize a JSON value (from a settings form) back into TOML text.
+///
+/// # Errors
+/// Returns an error string if the value cannot be represented as TOML.
+pub fn json_to_toml(value: &serde_json::Value) -> Result<String, String> {
+    let toml_value: toml::Value =
+        serde_json::from_value(value.clone()).map_err(|e| format!("not representable: {e}"))?;
+    toml::to_string_pretty(&toml_value).map_err(|e| e.to_string())
+}
+
 /// Write a config section's raw TOML to its live file (validated first).
 ///
 /// # Errors
@@ -333,4 +356,38 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("providers.toml"), content).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toml_json_round_trip_preserves_values() {
+        let src = "\
+name = \"runtime\"\n\
+max_mem_mb = 2048\n\
+network = false\n\
+tags = [\"a\", \"b\"]\n\n\
+[sandbox]\n\
+image = \"hobot\"\n\
+cpus = 2\n";
+        let value = toml_to_json(src).expect("parse");
+        assert_eq!(value["max_mem_mb"], 2048);
+        assert_eq!(value["network"], false);
+        assert_eq!(value["sandbox"]["image"], "hobot");
+
+        // Re-serialize and re-parse: the structured values survive the trip.
+        let back = json_to_toml(&value).expect("serialize");
+        let reparsed = toml_to_json(&back).expect("reparse");
+        assert_eq!(reparsed, value);
+    }
+
+    #[test]
+    fn toml_to_json_empty_is_object() {
+        assert_eq!(
+            toml_to_json("   ").expect("empty"),
+            serde_json::Value::Object(serde_json::Map::new())
+        );
+    }
 }

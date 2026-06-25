@@ -1242,3 +1242,17 @@ pub fn read_config(name: String) -> Result<String, String> {
 pub fn write_config(name: String, content: String) -> Result<(), String> {
     hf_service::config::write_config(&name, &content)
 }
+
+/// Parse raw TOML into a JSON value, for driving a structured settings form.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn config_toml_to_value(content: String) -> Result<serde_json::Value, String> {
+    hf_service::config::toml_to_json(&content)
+}
+
+/// Serialize a settings form's JSON value back into TOML text.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> {
+    hf_service::config::json_to_toml(&value)
+}
