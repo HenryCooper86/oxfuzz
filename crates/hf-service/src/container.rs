@@ -20,6 +20,7 @@ use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguag
 use hf_guardrails::{Action, Guardrails};
 use hf_provider::{DefaultProviderPool, OpenAiCompatProvider, ProviderConfig};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
+use hf_session::SqliteSessionStore;
 use hf_storage::{RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
@@ -184,6 +185,7 @@ pub struct ServiceContainer {
     provider_pool: Option<Arc<dyn ProviderPool>>,
     runtime_config: RuntimeConfig,
     store: Option<Arc<Store>>,
+    session_store: Option<SqliteSessionStore>,
     guardrails: Guardrails,
 }
 
@@ -200,15 +202,24 @@ impl ServiceContainer {
             provider_pool,
             runtime_config,
             store: None,
+            session_store: None,
             guardrails: Guardrails::permissive(),
         }
     }
 
-    /// Attach a persistence store, returning the updated container.
+    /// Attach a persistence store (and a session store derived from it),
+    /// returning the updated container.
     #[must_use]
     pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.session_store = Some(SqliteSessionStore::new(Arc::clone(&store)));
         self.store = Some(store);
         self
+    }
+
+    /// The conversation session store (if a database is configured).
+    #[must_use]
+    pub fn session_store(&self) -> Option<&SqliteSessionStore> {
+        self.session_store.as_ref()
     }
 
     /// Replace the guardrail engine (e.g. install an interactive HITL gate),
@@ -242,11 +253,15 @@ impl ServiceContainer {
                 None
             }
         };
+        let session_store = store
+            .as_ref()
+            .map(|s| SqliteSessionStore::new(Arc::clone(s)));
         Self {
             runtime,
             provider_pool,
             runtime_config: RuntimeConfig::default(),
             store,
+            session_store,
             guardrails: Guardrails::from_env(),
         }
     }
