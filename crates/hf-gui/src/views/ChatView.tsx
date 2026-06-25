@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -15,6 +15,15 @@ interface ModelInfo {
   provider_type: string;
   model: string;
 }
+
+// A user-callable agent the chat can be routed to.
+interface CallableAgent {
+  id: string;
+  name: string;
+  user_callable?: boolean;
+}
+
+const ACTIVE_AGENT_KEY = "hf_active_agent";
 
 // A pending guardrail approval request (mirrors the backend payload).
 interface PermissionRequest {
@@ -43,6 +52,8 @@ export function ChatView() {
   const [model, setModel] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
+  const [agents, setAgents] = useState<CallableAgent[]>([]);
+  const [agentId, setAgentId] = useState<string>(() => localStorage.getItem(ACTIVE_AGENT_KEY) || "orchestrator");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Listen for guardrail approval requests from the agent (high-risk actions
@@ -111,6 +122,35 @@ export function ChatView() {
     };
   }, []);
 
+  // Load the roster of user-callable agents so the chat can be routed to one.
+  // Defaults to the orchestrator; falls back to the first available agent.
+  useEffect(() => {
+    let cancelled = false;
+    getTransport()
+      .invoke<CallableAgent[]>("list_agents")
+      .then((list) => {
+        if (cancelled) return;
+        const callable = list.filter((a) => a.user_callable !== false);
+        setAgents(callable);
+        setAgentId((cur) => {
+          if (callable.some((a) => a.id === cur)) return cur;
+          if (callable.some((a) => a.id === "orchestrator")) return "orchestrator";
+          return callable[0]?.id ?? cur;
+        });
+      })
+      .catch(() => {
+        /* agents view will surface errors; chat still works with the default id */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist the active-agent choice across sessions.
+  useEffect(() => {
+    localStorage.setItem(ACTIVE_AGENT_KEY, agentId);
+  }, [agentId]);
+
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
       if (scrollRef.current) {
@@ -171,6 +211,7 @@ export function ChatView() {
         project: activeProject || null,
         history,
         sessionId,
+        agentId,
       });
       setMessages((m) => [
         ...m,
@@ -426,6 +467,9 @@ export function ChatView() {
                 title="Attach project folder"
                 onClick={attachProjectFolder}
               />
+              {agents.length > 0 && (
+                <AgentDropdown agents={agents} value={agentId} onSelect={setAgentId} />
+              )}
             </div>
             <div className="flex items-center gap-2">
               {models.length > 0 ? (
@@ -580,6 +624,83 @@ function ToolbarIconButton({
     >
       {icon}
     </button>
+  );
+}
+
+function AgentDropdown({
+  agents,
+  value,
+  onSelect,
+}: {
+  agents: CallableAgent[];
+  value: string;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const active = agents.find((a) => a.id === value);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title="Active agent"
+        className="inline-flex items-center gap-1 rounded-md transition-all duration-150"
+        style={{
+          padding: "5px 8px",
+          fontSize: "13px",
+          fontWeight: 500,
+          background: "transparent",
+          color: "var(--text-secondary)",
+          border: "none",
+          cursor: "pointer",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
+        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+      >
+        <Bot size={14} style={{ color: "var(--accent)" }} />
+        <span>{active?.name ?? value}</span>
+        <ChevronDown size={14} style={{ opacity: 0.7 }} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => setOpen(false)} />
+          <div
+            className="absolute bottom-full mb-1 min-w-[180px] rounded-lg overflow-hidden"
+            style={{
+              left: 0,
+              background: "var(--surface-primary)",
+              border: "1px solid var(--border)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+              zIndex: 50,
+            }}
+          >
+            {agents.map((a) => (
+              <button
+                key={a.id}
+                onClick={() => {
+                  onSelect(a.id);
+                  setOpen(false);
+                }}
+                className="flex items-center w-full text-left transition-colors duration-150"
+                style={{
+                  padding: "8px 12px",
+                  fontSize: "13px",
+                  background: a.id === value ? "var(--surface-active)" : "transparent",
+                  color: a.id === value ? "var(--text-primary)" : "var(--text-secondary)",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
+                onMouseLeave={(e) =>
+                  (e.currentTarget.style.background = a.id === value ? "var(--surface-active)" : "transparent")
+                }
+              >
+                {a.name}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
