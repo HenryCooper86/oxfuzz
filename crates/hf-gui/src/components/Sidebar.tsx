@@ -1,15 +1,34 @@
 import type { ViewType } from "../types";
-import { Bot, BookOpen, Bug, Boxes, Database, FileCode, FolderOpen, MessageSquare, Play, Plus, Puzzle, Settings, SquarePen, Target, Workflow, Zap } from "lucide-react";
+import { useProject } from "../providers/ProjectContext";
+import { useTarget } from "../providers/TargetContext";
+import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FolderOpen, MessageSquare, Play, Plus, Puzzle, Settings, Target, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
   onNavigate: (view: ViewType) => void;
-  onNewTask: () => void;
+  /** Pick a project folder and start a fresh fuzzing target. */
+  onNewTarget: () => void;
+  /** Make an existing project the active fuzzing target. */
+  onSelectTarget: (path: string) => void;
 }
 
 type NavItem = { view: ViewType; label: string; icon: React.ComponentType<{ size?: number }> };
 
-const TOP_ITEMS: NavItem[] = [
+// The pipeline tools that operate on the active target, in fuzzing-workflow
+// order: chat drives the agent, then discover -> harness -> run -> triage ->
+// corpus mirrors a campaign's lifecycle.
+const PIPELINE_ITEMS: NavItem[] = [
+  { view: "chat", label: "AI Assistant", icon: MessageSquare },
+  { view: "workflow", label: "Fuzzing Workflow", icon: Workflow },
+  { view: "discover", label: "Discover", icon: Target },
+  { view: "harness", label: "Harness", icon: FileCode },
+  { view: "run", label: "Run", icon: Play },
+  { view: "triage", label: "Triage", icon: Bug },
+  { view: "corpus", label: "Corpus", icon: Database },
+];
+
+// Cross-cutting resources, not tied to a single target.
+const LIBRARY_ITEMS: NavItem[] = [
   { view: "projects", label: "Projects", icon: FolderOpen },
   { view: "artifacts", label: "Artifacts", icon: Boxes },
   { view: "agents", label: "Agents", icon: Bot },
@@ -18,15 +37,20 @@ const TOP_ITEMS: NavItem[] = [
   { view: "automation", label: "Automation", icon: Zap },
 ];
 
-const NAV_ITEMS: NavItem[] = [
-  { view: "workflow", label: "Fuzzing Workflow", icon: Workflow },
-  { view: "chat", label: "AI Chat", icon: MessageSquare },
-  { view: "discover", label: "Discover", icon: Target },
-  { view: "harness", label: "Harness", icon: FileCode },
-  { view: "run", label: "Run", icon: Play },
-  { view: "triage", label: "Triage", icon: Bug },
-  { view: "corpus", label: "Corpus", icon: Database },
-];
+function basename(path: string): string {
+  return path.split("/").filter(Boolean).pop() || path;
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="text-xs font-semibold uppercase mb-1"
+      style={{ color: "var(--text-muted)", letterSpacing: "0.08em", padding: "7px 10px 2px" }}
+    >
+      {children}
+    </div>
+  );
+}
 
 function NavButton({
   item,
@@ -56,33 +80,71 @@ function NavButton({
   );
 }
 
-/** Prominent "start a new task" row -- clears the chat + progress, opens AI Chat. */
-function NewTaskButton({ onNewTask }: { onNewTask: () => void }) {
+/** Prominent row that opens a folder picker to begin a new fuzzing target. */
+function NewTargetButton({ onNewTarget }: { onNewTarget: () => void }) {
+  return (
+    <button
+      onClick={onNewTarget}
+      className="flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none bg-transparent border border-transparent text-text-primary hover:bg-accent-subtle"
+      style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 600, marginBottom: "2px" }}
+    >
+      <Plus size={18} style={{ color: "var(--accent)" }} />
+      <span>New fuzzing target</span>
+    </button>
+  );
+}
+
+/** One entry in the TARGETS quick-switcher. */
+function TargetRow({
+  path,
+  active,
+  activeTarget,
+  onSelect,
+  onRemove,
+}: {
+  path: string;
+  active: boolean;
+  activeTarget: string;
+  onSelect: (path: string) => void;
+  onRemove: (path: string) => void;
+}) {
+  const name = basename(path);
+  const label = active && activeTarget ? `${name} / ${activeTarget}` : name;
   return (
     <div className="flex items-center" style={{ marginBottom: "2px" }}>
       <button
-        onClick={onNewTask}
-        className="flex items-center gap-2 flex-1 text-left rounded-md transition-all duration-150 outline-none bg-transparent border border-transparent text-text-primary hover:bg-accent-subtle"
+        onClick={() => onSelect(path)}
+        title={path}
+        className={`flex items-center gap-2 flex-1 min-w-0 text-left rounded-md transition-all duration-150 outline-none ${
+          active
+            ? "bg-surface-active text-text-primary border border-border"
+            : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
+        }`}
         style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500 }}
       >
-        <Plus size={18} style={{ color: "var(--text-secondary)" }} />
-        <span>New task</span>
+        <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex", flexShrink: 0 }}>
+          <Crosshair size={16} />
+        </span>
+        <span className="truncate">{label}</span>
       </button>
       <button
-        onClick={onNewTask}
+        onClick={() => onRemove(path)}
         className="flex items-center justify-center rounded-md transition-colors duration-150 bg-transparent border-none"
-        style={{ width: "30px", height: "30px", color: "var(--text-muted)", cursor: "pointer" }}
-        title="New task"
+        style={{ width: "26px", height: "26px", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+        title="Remove from targets"
         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
-        <SquarePen size={15} />
+        <X size={13} />
       </button>
     </div>
   );
 }
 
-export function Sidebar({ activeView, onNavigate, onNewTask }: SidebarProps) {
+export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }: SidebarProps) {
+  const { activeProject, recentProjects, removeRecent } = useProject();
+  const { target } = useTarget();
+
   return (
     <nav
       className="flex flex-col h-full bg-surface-secondary border-r border-border flex-shrink-0 select-none"
@@ -91,23 +153,38 @@ export function Sidebar({ activeView, onNavigate, onNewTask }: SidebarProps) {
       {/* Drag region / macOS traffic-light safe area */}
       <div style={{ height: "28px", flexShrink: 0 }} />
 
-      {/* Top: New task + cross-cutting sections */}
-      <div style={{ padding: "6px 8px 0 8px" }}>
-        <NewTaskButton onNewTask={onNewTask} />
-        {TOP_ITEMS.map((item) => (
+      {/* Working area: new target + the targets you are fuzzing + the pipeline. */}
+      <div className="flex-1 overflow-y-auto" style={{ padding: "6px 8px 0 8px" }}>
+        <NewTargetButton onNewTarget={onNewTarget} />
+
+        <SectionLabel>Targets</SectionLabel>
+        {recentProjects.length === 0 ? (
+          <div
+            className="text-xs text-text-muted"
+            style={{ padding: "2px 10px 6px", lineHeight: 1.5 }}
+          >
+            No targets yet. Add a project folder to start fuzzing.
+          </div>
+        ) : (
+          recentProjects.map((path) => (
+            <TargetRow
+              key={path}
+              path={path}
+              active={path === activeProject}
+              activeTarget={target}
+              onSelect={onSelectTarget}
+              onRemove={removeRecent}
+            />
+          ))
+        )}
+
+        <SectionLabel>Pipeline</SectionLabel>
+        {PIPELINE_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
-      </div>
 
-      {/* Primary nav */}
-      <div className="flex-1 overflow-y-auto" style={{ padding: "6px 8px 0 8px" }}>
-        <div
-          className="text-xs font-semibold uppercase mb-1"
-          style={{ color: "var(--text-muted)", letterSpacing: "0.08em", padding: "7px 10px" }}
-        >
-          Workspace
-        </div>
-        {NAV_ITEMS.map((item) => (
+        <SectionLabel>Library</SectionLabel>
+        {LIBRARY_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
       </div>
