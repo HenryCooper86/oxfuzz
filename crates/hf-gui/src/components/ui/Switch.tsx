@@ -8,29 +8,28 @@ export function Switch({ checked, onChange, label }: SwitchProps) {
   return (
     <button
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2 cursor-pointer"
-      style={{ background: "transparent", border: "none" }}
+      className="flex items-center gap-2 cursor-pointer outline-none focus-visible:[&>span]:outline-2 focus-visible:[&>span]:outline focus-visible:[&>span]:outline-[var(--accent)] focus-visible:[&>span]:outline-offset-2"
+      style={{ background: "transparent", border: "none", padding: 0 }}
     >
-      <div
-        className="rounded-full transition-colors duration-150"
+      <span
+        className="rounded-full border border-solid transition-all duration-200 relative inline-block"
         style={{
-          width: "32px",
-          height: "18px",
-          background: checked ? "var(--accent)" : "var(--surface-active)",
-          position: "relative",
+          width: "36px",
+          height: "20px",
+          borderColor: "var(--border)",
+          background: checked ? "var(--accent)" : "var(--surface-tertiary)",
         }}
       >
-        <div
-          className="rounded-full bg-white transition-all duration-150"
+        <span
+          className="rounded-full bg-white transition-all duration-200 absolute"
           style={{
             width: "14px",
             height: "14px",
-            position: "absolute",
             top: "2px",
-            left: checked ? "16px" : "2px",
+            left: checked ? "18px" : "2px",
           }}
         />
-      </div>
+      </span>
       {label && <span className="text-xs text-text-secondary">{label}</span>}
     </button>
   );

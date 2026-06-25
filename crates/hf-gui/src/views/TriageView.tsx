@@ -1,9 +1,13 @@
 import { useState } from "react";
 import { getTransport } from "../lib";
+import { useProject } from "../providers/ProjectContext";
+import { usePipeline } from "../providers/PipelineContext";
 import type { Crash } from "../types";
 import { Bug, Loader2, ChevronRight } from "lucide-react";
 
 export function TriageView() {
+  const { activeProject } = useProject();
+  const { markDone } = usePipeline();
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
@@ -12,10 +16,11 @@ export function TriageView() {
     setLoading(true);
     try {
       const result = await getTransport().invoke<Crash[]>("triage", {
-        project: ".",
+        project: activeProject || ".",
         target: "",
       });
       setCrashes(result);
+      if (result.length > 0) markDone("triage");
     } catch {
       setCrashes([]);
     } finally {

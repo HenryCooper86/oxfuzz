@@ -16,14 +16,10 @@ export function RuntimeTab() {
   const [networkFuzz, setNetworkFuzz] = useState(false);
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-base font-semibold">Runtime / Sandbox</h2>
-        <p className="text-xs text-text-secondary mt-0.5">Configure the sandbox for harness compilation and fuzz execution. Safety-first: all builds and runs are isolated.</p>
-      </div>
-
-      <SettingsGroup title="Backend">
-        <div className="flex gap-2 mb-3">
+    <div>
+      <SettingsGroup title="Backend" description="Configure the sandbox for harness compilation and fuzz execution. Safety-first: all builds and runs are isolated.">
+        <div className="settings-item" style={{ padding: "10px 14px" }}>
+        <div className="flex gap-2">
           <button
             onClick={() => setBackend("docker")}
             className="flex items-center gap-2 px-3 py-2 rounded-md transition-all duration-150"
@@ -50,38 +46,39 @@ export function RuntimeTab() {
             <span className="text-xs font-medium">Native (dev only)</span>
           </button>
         </div>
-        <SettingsItem label="Docker Image">
-          <Input value={image} onChange={(e) => setImage(e.target.value)} mono />
+        </div>
+        <SettingsItem title="Docker Image">
+          <div style={{ width: 220 }}>
+            <Input value={image} onChange={(e) => setImage(e.target.value)} mono />
+          </div>
         </SettingsItem>
       </SettingsGroup>
 
       <SettingsGroup title="Resource Limits">
-        <SettingsItem label="Max Memory (MB)">
-          <Input type="number" value={maxMem} onChange={(e) => setMaxMem(parseInt(e.target.value) || 4096)} />
+        <SettingsItem title="Max Memory (MB)">
+          <div style={{ width: 120 }}>
+            <Input type="number" value={maxMem} onChange={(e) => setMaxMem(parseInt(e.target.value) || 4096)} />
+          </div>
         </SettingsItem>
-        <SettingsItem label="Max CPUs">
-          <Input type="number" value={maxCpus} onChange={(e) => setMaxCpus(parseInt(e.target.value) || 2)} />
+        <SettingsItem title="Max CPUs">
+          <div style={{ width: 120 }}>
+            <Input type="number" value={maxCpus} onChange={(e) => setMaxCpus(parseInt(e.target.value) || 2)} />
+          </div>
         </SettingsItem>
-        <SettingsItem label="Max Duration (seconds)">
-          <Input type="number" value={maxDuration} onChange={(e) => setMaxDuration(parseInt(e.target.value) || 7200)} />
+        <SettingsItem title="Max Duration (seconds)">
+          <div style={{ width: 120 }}>
+            <Input type="number" value={maxDuration} onChange={(e) => setMaxDuration(parseInt(e.target.value) || 7200)} />
+          </div>
         </SettingsItem>
       </SettingsGroup>
 
       <SettingsGroup title="Network Access">
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Build phase</span>
-            <p className="text-xs text-text-muted">Allow network access during harness compilation (needed for package downloads).</p>
-          </div>
+        <SettingsItem title="Build phase" description="Allow network access during harness compilation (needed for package downloads).">
           <Switch checked={networkBuild} onChange={setNetworkBuild} />
-        </div>
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Fuzz phase</span>
-            <p className="text-xs text-text-muted">Allow network access during fuzzing. Not recommended -- untrusted code should not access the network.</p>
-          </div>
+        </SettingsItem>
+        <SettingsItem title="Fuzz phase" description="Allow network access during fuzzing. Not recommended -- untrusted code should not access the network.">
           <Switch checked={networkFuzz} onChange={setNetworkFuzz} />
-        </div>
+        </SettingsItem>
       </SettingsGroup>
     </div>
   );

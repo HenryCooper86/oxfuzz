@@ -19,13 +19,9 @@ export function GuardrailsTab() {
   const [loopDetection, setLoopDetection] = useState(true);
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-base font-semibold">Guardrails</h2>
-        <p className="text-xs text-text-secondary mt-0.5">Human-in-the-loop approval policy for safety-first fuzzing. Generated harnesses are untrusted code and require approval before execution.</p>
-      </div>
-
-      <SettingsGroup title="Permission Mode">
+    <div>
+      <SettingsGroup title="Permission Mode" description="Human-in-the-loop approval policy for safety-first fuzzing. Generated harnesses are untrusted code and require approval before execution.">
+        <div style={{ padding: "10px 14px" }}>
         <div className="flex gap-2">
           {([
             { id: "strict", label: "Strict (recommended)", icon: Shield, desc: "HITL on all high-risk actions" },
@@ -50,55 +46,46 @@ export function GuardrailsTab() {
             </button>
           ))}
         </div>
+        </div>
       </SettingsGroup>
 
       <SettingsGroup title="HITL Approval Gates">
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Harness compilation</span>
-            <p className="text-xs text-text-muted">Require approval before compiling a generated harness in the sandbox.</p>
-          </div>
+        <SettingsItem title="Harness compilation" description="Require approval before compiling a generated harness in the sandbox.">
           <Switch checked={requireHarnessApproval} onChange={setRequireHarnessApproval} />
-        </div>
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Fuzzer execution</span>
-            <p className="text-xs text-text-muted">Require approval before starting a fuzz run.</p>
-          </div>
+        </SettingsItem>
+        <SettingsItem title="Fuzzer execution" description="Require approval before starting a fuzz run.">
           <Switch checked={requireRunApproval} onChange={setRequireRunApproval} />
-        </div>
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Bug report publication</span>
-            <p className="text-xs text-text-muted">Require approval before publishing a drafted bug report.</p>
-          </div>
+        </SettingsItem>
+        <SettingsItem title="Bug report publication" description="Require approval before publishing a drafted bug report.">
           <Switch checked={requireBugReportApproval} onChange={setRequireBugReportApproval} />
-        </div>
+        </SettingsItem>
       </SettingsGroup>
 
       <SettingsGroup title="Risk Scoring">
-        <SettingsItem label="HITL Threshold">
-          <Input type="number" step="0.1" min="0" max="1" value={hitlThreshold} onChange={(e) => setHitlThreshold(parseFloat(e.target.value) || 0.6)} />
+        <SettingsItem title="HITL Threshold">
+          <div style={{ width: 120 }}>
+            <Input type="number" step="0.1" min="0" max="1" value={hitlThreshold} onChange={(e) => setHitlThreshold(parseFloat(e.target.value) || 0.6)} />
+          </div>
         </SettingsItem>
-        <div className="flex gap-2 mt-2">
-          <Badge variant="success">Low risk</Badge>
-          <Badge variant="warning">Medium risk</Badge>
-          <Badge variant="error">High risk</Badge>
-          <span className="text-xs text-text-muted">Actions scoring above {hitlThreshold} require HITL approval.</span>
+        <div className="settings-item" style={{ padding: "10px 14px" }}>
+          <div className="flex gap-2 items-center flex-wrap">
+            <Badge variant="success">Low risk</Badge>
+            <Badge variant="warning">Medium risk</Badge>
+            <Badge variant="error">High risk</Badge>
+            <span className="text-xs text-text-muted">Actions scoring above {hitlThreshold} require HITL approval.</span>
+          </div>
         </div>
       </SettingsGroup>
 
       <SettingsGroup title="Loop Detection">
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Enable loop detection</span>
-            <p className="text-xs text-text-muted">Detect and block repeated identical tool calls to prevent infinite loops.</p>
-          </div>
+        <SettingsItem title="Enable loop detection" description="Detect and block repeated identical tool calls to prevent infinite loops.">
           <Switch checked={loopDetection} onChange={setLoopDetection} />
-        </div>
+        </SettingsItem>
         {loopDetection && (
-          <SettingsItem label="Max identical calls">
-            <Input type="number" value={maxIdenticalCalls} onChange={(e) => setMaxIdenticalCalls(parseInt(e.target.value) || 3)} />
+          <SettingsItem title="Max identical calls">
+            <div style={{ width: 120 }}>
+              <Input type="number" value={maxIdenticalCalls} onChange={(e) => setMaxIdenticalCalls(parseInt(e.target.value) || 3)} />
+            </div>
           </SettingsItem>
         )}
       </SettingsGroup>

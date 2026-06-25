@@ -1,10 +1,15 @@
 import { useState } from "react";
 import { getTransport, pickFolder } from "../lib";
+import { useProject } from "../providers/ProjectContext";
+import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
 import { Crosshair, Search, Loader2, FolderOpen } from "lucide-react";
 
 export function DiscoverView() {
-  const [project, setProject] = useState("");
+  const { activeProject, setActiveProject } = useProject();
+  const { markDone } = usePipeline();
+  const [project, setProject] = useState(activeProject);
+  const [lang, setLang] = useState("c");
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -27,9 +32,11 @@ export function DiscoverView() {
     try {
       const inv = await getTransport().invoke<TargetInventory>("discover", {
         project,
-        lang: "c",
+        lang,
       });
       setInventory(inv);
+      setActiveProject(project);
+      markDone("discover");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -56,6 +63,14 @@ export function DiscoverView() {
           className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
           style={{ fontFamily: "var(--font-mono)" }}
         />
+        <select
+          value={lang}
+          onChange={(e) => setLang(e.target.value)}
+          className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
+        >
+          <option value="c">C</option>
+          <option value="cpp">C++</option>
+        </select>
         <button
           onClick={browse}
           disabled={scanning}

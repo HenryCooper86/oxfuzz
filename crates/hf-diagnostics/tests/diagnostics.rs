@@ -1,7 +1,7 @@
 //! Tests for cost tracking and run journaling.
 
 use hf_core::types::TokenUsage;
-use hf_diagnostics::{CostSummary, CostTracker, RunEvent, RunJournal};
+use hf_diagnostics::{CostTracker, RunEvent, RunJournal};
 use uuid::Uuid;
 
 #[test]
@@ -45,7 +45,7 @@ fn cost_tracker_empty_summary() {
     let tracker = CostTracker::new();
     let summary = tracker.summary();
     assert_eq!(summary.total_tokens, 0);
-    assert_eq!(summary.total_cost, 0.0);
+    assert!(summary.total_cost.abs() < f64::EPSILON);
 }
 
 #[test]

@@ -73,6 +73,9 @@ fn engine_entry_point(engine: EngineKind) -> &'static str {
         EngineKind::LibFuzzer | EngineKind::AflPlusPlus | EngineKind::ClusterFuzzLite => {
             "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)"
         }
+        EngineKind::Syzkaller => {
+            "kernel syscall fuzzing -- no per-function harness; uses syzlang descriptions"
+        }
     }
 }
 
@@ -82,5 +85,6 @@ fn engine_name(engine: EngineKind) -> &'static str {
         EngineKind::AflPlusPlus => "AFL++",
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::ClusterFuzzLite => "ClusterFuzzLite (libFuzzer-compatible)",
+        EngineKind::Syzkaller => "syzkaller (kernel)",
     }
 }

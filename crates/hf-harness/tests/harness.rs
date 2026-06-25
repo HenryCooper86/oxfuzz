@@ -2,7 +2,7 @@
 
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
-use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::provider::{LlmProvider, LlmResponse};
 use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
 use hf_core::target::{
@@ -19,7 +19,7 @@ struct MockLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "mock"
     }
     async fn complete(&self, _messages: Vec<Message>) -> Result<LlmResponse, ClassifiedError> {
@@ -92,7 +92,7 @@ fn target() -> TargetCandidate {
 #[tokio::test]
 async fn draft_extracts_code_block_from_llm_response() {
     let llm = MockLlm {
-        response: r#"Here is the harness:
+        response: r"Here is the harness:
 ```c
 #include <stdint.h>
 #include <stddef.h>
@@ -101,7 +101,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     return 0;
 }
 ```
-That's it."#
+That's it."
             .to_owned(),
     };
     let draft = draft(&target(), EngineKind::LibFuzzer, Box::new(llm))

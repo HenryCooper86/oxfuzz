@@ -97,7 +97,7 @@ struct MockLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "mock"
     }
     async fn complete(&self, _messages: Vec<Message>) -> Result<LlmResponse, ClassifiedError> {

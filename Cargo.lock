@@ -1985,29 +1985,17 @@ name = "hf-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
- "chrono",
  "clap",
  "crossterm",
  "hf-core",
- "hf-corpus",
- "hf-crash",
  "hf-discovery",
- "hf-engine",
- "hf-harness",
- "hf-provider",
- "hf-runtime",
  "hf-service",
  "hf-web",
  "ratatui",
- "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
- "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2355,6 +2343,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

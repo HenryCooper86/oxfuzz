@@ -105,6 +105,11 @@ fn extract_functions(
         if node.kind() != "function_definition" {
             return;
         }
+        // Skip static functions: they have internal linkage and cannot be
+        // called from a separately-compiled harness translation unit.
+        if has_storage_class_specifier(node, src, "static") {
+            return;
+        }
         let Some(declarator) = node.child_by_field_name("declarator") else {
             return;
         };
@@ -123,7 +128,17 @@ fn extract_functions(
         let input_surface = infer_input_surface(&declarator, src);
         let complexity = compute_complexity(node);
         let fit_score = compute_fit_score(kind, input_surface, complexity, params);
-        let signature = Some(node.utf8_text(src.as_bytes()).unwrap_or("").to_owned());
+        // Capture only the function prototype (declarator), not the whole
+        // definition body -- otherwise the signature spans many lines and
+        // downstream consumers (e.g. harness generation) leak body code.
+        let signature = Some(
+            declarator
+                .utf8_text(src.as_bytes())
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         let start = name_node.start_position();
         let location = SourceLocation {
             file: path.to_path_buf(),
@@ -146,6 +161,27 @@ fn extract_functions(
         });
     };
     walk_nodes(root, &mut f);
+}
+
+/// Check whether a function definition has a `storage_class_specifier`
+/// child matching `keyword` (e.g. "static").
+fn has_storage_class_specifier(node: tree_sitter::Node, src: &str, keyword: &str) -> bool {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "storage_class_specifier" {
+                let text = child.utf8_text(src.as_bytes()).unwrap_or("").trim();
+                if text == keyword {
+                    return true;
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    false
 }
 
 fn walk_nodes(node: tree_sitter::Node, f: &mut dyn FnMut(tree_sitter::Node)) {

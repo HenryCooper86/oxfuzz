@@ -18,7 +18,7 @@ struct MockRanker {
 
 #[async_trait::async_trait]
 impl LlmProvider for MockRanker {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "mock-ranker"
     }
     async fn complete(&self, _messages: Vec<Message>) -> Result<LlmResponse, ClassifiedError> {

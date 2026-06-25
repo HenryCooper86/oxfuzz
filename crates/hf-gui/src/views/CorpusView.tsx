@@ -1,25 +1,28 @@
 import { useState } from "react";
 import { getTransport } from "../lib";
+import { useProject } from "../providers/ProjectContext";
 import type { CorpusEntry } from "../types";
 import { Database, Loader2, Plus, Scissors, Eye } from "lucide-react";
 
 export function CorpusView() {
+  const { activeProject } = useProject();
   const [entries, setEntries] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState<string | null>(null);
 
   async function action(op: string) {
     setLoading(op);
     try {
-      if (op === "list") {
+      const project = activeProject || ".";
+      if (op === "corpus_list") {
         const result = await getTransport().invoke<CorpusEntry[]>("corpus_list", {
-          project: ".",
+          project,
           target: "",
         });
         setEntries(result);
       } else {
-        await getTransport().invoke(op, { project: ".", target: "" });
+        await getTransport().invoke(op, { project, target: "" });
         const result = await getTransport().invoke<CorpusEntry[]>("corpus_list", {
-          project: ".",
+          project,
           target: "",
         });
         setEntries(result);

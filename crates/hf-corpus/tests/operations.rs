@@ -1,6 +1,6 @@
 //! Tests for corpus management operations.
 
-use hf_core::corpus::{CorpusEntry, CorpusSource};
+use hf_core::corpus::CorpusSource;
 use hf_corpus::{grow, list, merge, prune, seed};
 use std::fs;
 use tempfile::TempDir;

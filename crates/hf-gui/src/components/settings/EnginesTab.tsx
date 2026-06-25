@@ -5,7 +5,7 @@ import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
 import { Badge } from "../ui/Badge";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
-import { Crosshair, Bug, Zap, Cloud } from "lucide-react";
+import { Crosshair, Bug, Zap, Cloud, Cpu } from "lucide-react";
 
 interface EngineConfig {
   id: string;
@@ -24,6 +24,7 @@ export function EnginesTab() {
     { id: "afl++", label: "AFL++", icon: Crosshair, enabled: true, binary: "afl-fuzz", default_duration: 3600, default_mem: 2048, supports: ["C", "C++"] },
     { id: "honggfuzz", label: "honggfuzz", icon: Bug, enabled: true, binary: "honggfuzz", default_duration: 3600, default_mem: 2048, supports: ["C", "C++"] },
     { id: "clusterfuzzlite", label: "ClusterFuzzLite", icon: Cloud, enabled: false, binary: "python3 infra/helper.py", default_duration: 3600, default_mem: 2048, supports: ["C", "C++", "Rust", "Go", "Python"] },
+    { id: "syzkaller", label: "syzkaller (kernel)", icon: Cpu, enabled: false, binary: "syz-manager -config=manager.cfg", default_duration: 3600, default_mem: 4096, supports: ["C (kernel)"] },
   ]);
 
   function toggle(id: string) {
@@ -34,33 +35,38 @@ export function EnginesTab() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-base font-semibold">Fuzzing Engines</h2>
-        <p className="text-xs text-text-secondary mt-0.5">Configure and enable fuzzing engines. Disabled engines won't appear in the Run panel.</p>
-      </div>
-
-      {engines.map((e) => (
-        <SettingsGroup key={e.id} title={e.label}>
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <e.icon size={16} />
-              <span className="text-sm font-medium text-text-primary">{e.label}</span>
-              {e.enabled ? <Badge variant="success">enabled</Badge> : <Badge>disabled</Badge>}
+    <div>
+      {engines.map((e, idx) => (
+        <SettingsGroup key={e.id} title={e.label} description={idx === 0 ? "Configure and enable fuzzing engines. Disabled engines won't appear in the Run panel." : undefined}>
+          <div style={{ padding: "10px 14px" }}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <e.icon size={16} />
+                <span className="text-sm font-medium text-text-primary">{e.label}</span>
+                {e.enabled ? <Badge variant="success">enabled</Badge> : <Badge>disabled</Badge>}
+              </div>
+              <Switch checked={e.enabled} onChange={() => toggle(e.id)} />
             </div>
-            <Switch checked={e.enabled} onChange={() => toggle(e.id)} />
           </div>
-          <SettingsItem label="Binary / Command">
-            <Input value={e.binary} onChange={(ev) => update(e.id, "binary", ev.target.value)} mono disabled={!e.enabled} />
+          <SettingsItem title="Binary / Command">
+            <div style={{ width: 220 }}>
+              <Input value={e.binary} onChange={(ev) => update(e.id, "binary", ev.target.value)} mono disabled={!e.enabled} />
+            </div>
           </SettingsItem>
-          <SettingsItem label="Default Duration (s)">
-            <Input type="number" value={e.default_duration} onChange={(ev) => update(e.id, "default_duration", parseInt(ev.target.value) || 3600)} disabled={!e.enabled} />
+          <SettingsItem title="Default Duration (s)">
+            <div style={{ width: 120 }}>
+              <Input type="number" value={e.default_duration} onChange={(ev) => update(e.id, "default_duration", parseInt(ev.target.value) || 3600)} disabled={!e.enabled} />
+            </div>
           </SettingsItem>
-          <SettingsItem label="Default Memory (MB)">
-            <Input type="number" value={e.default_mem} onChange={(ev) => update(e.id, "default_mem", parseInt(ev.target.value) || 2048)} disabled={!e.enabled} />
+          <SettingsItem title="Default Memory (MB)">
+            <div style={{ width: 120 }}>
+              <Input type="number" value={e.default_mem} onChange={(ev) => update(e.id, "default_mem", parseInt(ev.target.value) || 2048)} disabled={!e.enabled} />
+            </div>
           </SettingsItem>
-          <div className="flex gap-1 mt-2">
-            {e.supports.map((lang) => <Badge key={lang} variant="accent">{lang}</Badge>)}
+          <div className="settings-item" style={{ padding: "10px 14px" }}>
+            <div className="flex gap-1">
+              {e.supports.map((lang) => <Badge key={lang} variant="accent">{lang}</Badge>)}
+            </div>
           </div>
         </SettingsGroup>
       ))}

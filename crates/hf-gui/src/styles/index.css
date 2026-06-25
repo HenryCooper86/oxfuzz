@@ -161,3 +161,60 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.68; }
 }
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+/* ============================================================
+   Native macOS chrome (Apple-style layered vibrancy)
+   Driven by data-host/data-platform on <html> (set in App.tsx)
+   and the WindowEffect::Sidebar material applied in Rust setup().
+   ============================================================ */
+
+/* Let the native frosted-glass material show through the webview so the
+   rounded window corners and sidebar vibrancy render instead of an opaque
+   square. Only on macOS under Tauri -- web/other platforms stay solid. */
+html[data-host="tauri"][data-platform="macos"] body,
+html[data-host="tauri"][data-platform="macos"] #root,
+html[data-host="tauri"][data-platform="macos"] .app-root {
+  background: transparent;
+}
+
+/* The sidebar reads as the frosted "sidebar" material: a translucent dark
+   veil over the native vibrancy gives subtle depth at the window edge. */
+html[data-host="tauri"][data-platform="macos"] .app-root nav {
+  background: color-mix(in srgb, var(--surface-secondary) 72%, transparent);
+}
+
+/* Main content column stays crisp and opaque so text rendering is sharp. */
+html[data-host="tauri"][data-platform="macos"] .app-main {
+  background: var(--surface-primary);
+}
+
+/* Header is the draggable titlebar when we draw our own chrome; interactive
+   controls inside it opt back out of the drag region. */
+html.custom-decorations header {
+  -webkit-app-region: drag;
+}
+html.custom-decorations header button,
+html.custom-decorations header [role="button"],
+html.custom-decorations header input,
+html.custom-decorations header a {
+  -webkit-app-region: no-drag;
+}
+
+/* The sidebar's top spacer is a drag handle and reserves room for the macOS
+   traffic lights that float over our custom chrome. */
+html.custom-decorations .app-root nav {
+  -webkit-app-region: drag;
+}
+html.custom-decorations .app-root nav button,
+html.custom-decorations .app-root nav [role="button"],
+html.custom-decorations .app-root nav a {
+  -webkit-app-region: no-drag;
+}
+
+/* Hairline separators between consecutive settings rows inside a card. */
+.settings-item + .settings-item {
+  border-top: 1px solid var(--border);
+}

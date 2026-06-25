@@ -16,19 +16,60 @@ import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
 import { TriageView } from "./views/TriageView";
 import { CorpusView } from "./views/CorpusView";
-import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info } from "lucide-react";
+import { ProjectsView } from "./views/ProjectsView";
+import { ArtifactsView } from "./views/ArtifactsView";
+import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
+import { ProjectProvider } from "./providers/ProjectContext";
+import { PipelineProvider, usePipeline } from "./providers/PipelineContext";
+import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
+import { RunStatusProvider } from "./providers/RunStatusContext";
+import { TargetProvider, useTarget } from "./providers/TargetContext";
+import { ProgressPanel } from "./components/ProgressPanel";
+import { isTauriEnvironment } from "./lib";
+import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap } from "lucide-react";
 
-export default function App() {
+/** Detect the host OS for platform-conditional window chrome. */
+function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
+  if (typeof navigator === "undefined") return "unknown";
+  const ua = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  if (ua.includes("mac")) return "macos";
+  if (ua.includes("win")) return "windows";
+  if (ua.includes("linux") || ua.includes("x11")) return "linux";
+  return "unknown";
+}
+
+function AppInner() {
+  const { theme, setTheme } = usePrefs();
+  const { reset: resetPipeline } = usePipeline();
+  const { reset: resetTarget } = useTarget();
   const [activeView, setActiveView] = useState<ViewType>("chat");
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  // Bumping this key remounts ChatView, clearing the conversation for a new task.
+  const [chatResetKey, setChatResetKey] = useState(0);
+
+  // "New task": clear the chat conversation, reset pipeline progress, and return
+  // to the AI Chat welcome screen -- a fresh start, not a jump into Run.
+  const startNewTask = () => {
+    resetPipeline();
+    resetTarget();
+    setChatResetKey((k) => k + 1);
+    setActiveView("chat");
+  };
   const [showDiag, setShowDiag] = useState(false);
   const [showObs, setShowObs] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
+  const [showProgress, setShowProgress] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [setupDone, setSetupDone] = useState(localStorage.getItem("hf_setup_completed") === "true");
+  const platform = detectPlatform();
 
+  // Bootstrap platform-conditional chrome: expose host (tauri/web) and OS on
+  // <html> so CSS can reserve the macOS traffic-light area, enable drag
+  // regions, and let the native vibrancy material show through. (The custom
+  // decorations class itself is owned by PrefsProvider.)
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    document.documentElement.dataset.host = isTauriEnvironment() ? "tauri" : "web";
+    document.documentElement.dataset.platform = detectPlatform();
+  }, []);
 
   if (!setupDone) {
     return <SetupWizard onComplete={() => setSetupDone(true)} />;
@@ -37,16 +78,29 @@ export default function App() {
   return (
     <TooltipProvider>
       <ToastProvider>
-        <div className="flex h-full w-full bg-surface-primary text-text-primary">
-          <Sidebar activeView={activeView} onNavigate={setActiveView} />
-          <div className="flex flex-1 flex-col min-w-0">
+        <div className="app-root flex h-full w-full bg-surface-primary text-text-primary">
+        {activeView === "settings" ? (
+          <SettingsView
+            onBack={() => setActiveView("chat")}
+            onRunWizard={() => {
+              localStorage.removeItem("hf_setup_completed");
+              setSetupDone(false);
+            }}
+          />
+        ) : (
+          <>
+          {sidebarOpen && <Sidebar activeView={activeView} onNavigate={setActiveView} onNewTask={startNewTask} />}
+          <div className="app-main flex flex-1 flex-col min-w-0">
             <Header
               title={viewTitles[activeView]}
               icon={viewIcons[activeView]}
               theme={theme}
-              onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+              onToggleSidebar={() => setSidebarOpen((o) => !o)}
+              reserveLeftInset={!sidebarOpen && platform === "macos"}
+              onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
               actions={
                 <div className="flex items-center gap-1">
+                  <HeaderToggle active={showProgress} onClick={() => setShowProgress(!showProgress)} icon={<ListChecks size={16} />} label="Progress" />
                   <HeaderToggle active={showDiag} onClick={() => setShowDiag(!showDiag)} icon={<Activity size={16} />} label="Diagnostics" />
                   <HeaderToggle active={showObs} onClick={() => setShowObs(!showObs)} icon={<Gauge size={16} />} label="Observability" />
                   <HeaderToggle active={showInfo} onClick={() => setShowInfo(!showInfo)} icon={<Info size={16} />} label="Info" />
@@ -55,7 +109,7 @@ export default function App() {
             />
             <div className="flex flex-1 overflow-hidden">
               <main className="flex-1 overflow-hidden flex flex-col">
-                {activeView === "chat" && <ChatView />}
+                {activeView === "chat" && <ChatView key={chatResetKey} />}
                 {activeView === "discover" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
                     <DiscoverView />
@@ -81,9 +135,34 @@ export default function App() {
                     <CorpusView />
                   </div>
                 )}
-                {activeView === "settings" && (
+                {activeView === "projects" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
-                    <SettingsView />
+                    <ProjectsView onNavigate={setActiveView} />
+                  </div>
+                )}
+                {activeView === "artifacts" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <ArtifactsView />
+                  </div>
+                )}
+                {activeView === "agents" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <AgentsView />
+                  </div>
+                )}
+                {activeView === "skills" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <SkillsView />
+                  </div>
+                )}
+                {activeView === "knowledge" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <KnowledgeView />
+                  </div>
+                )}
+                {activeView === "automation" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <AutomationView />
                   </div>
                 )}
               </main>
@@ -92,12 +171,33 @@ export default function App() {
               {showDiag && <PanelShell title="Diagnostics"><DiagnosticsPanel /></PanelShell>}
               {showObs && <PanelShell title="Observability"><ObservabilityPanel /></PanelShell>}
               {showInfo && <PanelShell title="Info"><InfoPanel /></PanelShell>}
+
+              {/* Progress sidebar (rightmost) */}
+              {showProgress && <ProgressPanel />}
             </div>
             <StatusBar />
           </div>
+          </>
+        )}
         </div>
       </ToastProvider>
     </TooltipProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <PrefsProvider>
+      <ProjectProvider>
+        <TargetProvider>
+          <PipelineProvider>
+            <RunStatusProvider>
+              <AppInner />
+            </RunStatusProvider>
+          </PipelineProvider>
+        </TargetProvider>
+      </ProjectProvider>
+    </PrefsProvider>
   );
 }
 
@@ -140,6 +240,12 @@ const viewTitles: Record<ViewType, string> = {
   triage: "Crash Triage",
   corpus: "Corpus Management",
   settings: "Settings",
+  projects: "Projects",
+  artifacts: "Artifacts",
+  agents: "Agents",
+  skills: "Skills",
+  knowledge: "Knowledge",
+  automation: "Automation",
 };
 
 const viewIcons: Record<ViewType, React.ReactNode> = {
@@ -150,4 +256,10 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   triage: <Bug size={18} />,
   corpus: <Database size={18} />,
   settings: <Settings size={18} />,
+  projects: <FolderOpen size={18} />,
+  artifacts: <Boxes size={18} />,
+  agents: <Bot size={18} />,
+  skills: <Puzzle size={18} />,
+  knowledge: <BookOpen size={18} />,
+  automation: <Zap size={18} />,
 };
