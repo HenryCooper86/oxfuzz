@@ -191,18 +191,20 @@ you receive its result and continue until you can give a final answer."
     }
 }
 
-/// Parse a model reply into a [`Step`], tolerating code fences and surrounding
-/// prose by extracting the outermost JSON object.
+/// Parse a model reply into a [`Step`], tolerating code fences, surrounding
+/// prose, and trailing junk (e.g. a stray extra `}` some models emit).
 fn parse_step(content: &str) -> Option<Step> {
     if let Ok(step) = serde_json::from_str::<Step>(content) {
         return Some(step);
     }
+    // Find the first `{` and parse the first complete JSON value from there.
+    // The streaming deserializer stops at the end of the first value, so it
+    // ignores any trailing characters (closing fences, extra braces, prose).
     let start = content.find('{')?;
-    let end = content.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    serde_json::from_str::<Step>(&content[start..=end]).ok()
+    serde_json::Deserializer::from_str(&content[start..])
+        .into_iter::<Step>()
+        .next()?
+        .ok()
 }
 
 /// Truncate a string to `max` chars with an ellipsis, for event summaries.
