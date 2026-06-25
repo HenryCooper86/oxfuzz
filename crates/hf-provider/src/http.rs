@@ -8,8 +8,14 @@ use serde_json::Value;
 /// without hitting the network.
 #[async_trait]
 pub trait HttpSender: Send + Sync {
-    /// POST JSON to `url` and return the JSON response body.
-    async fn post_json(&self, url: &str, body: Value) -> Result<Value, ClassifiedError>;
+    /// POST JSON to `url` (with a Bearer `api_key` when non-empty) and return
+    /// the JSON response body.
+    async fn post_json(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: Value,
+    ) -> Result<Value, ClassifiedError>;
 }
 
 /// A `reqwest`-backed HTTP sender for production use.
@@ -34,11 +40,17 @@ impl Default for ReqwestSender {
 
 #[async_trait]
 impl HttpSender for ReqwestSender {
-    async fn post_json(&self, url: &str, body: Value) -> Result<Value, ClassifiedError> {
-        let resp = self
-            .client
-            .post(url)
-            .json(&body)
+    async fn post_json(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: Value,
+    ) -> Result<Value, ClassifiedError> {
+        let mut req = self.client.post(url).json(&body);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| ClassifiedError::Provider(format!("http: {e}")))?;
