@@ -19,8 +19,11 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // coverage (leaks are reported separately via ASan logs).
     args.push("-detect_leaks=0".to_owned());
     // libFuzzer writes crashes to the corpus dir by default; use -artifact_prefix
-    // to direct them to the out dir.
-    args.push(format!("-artifact_prefix={out}"));
+    // to direct them to the out dir. The trailing slash is REQUIRED: libFuzzer
+    // concatenates `{prefix}{type}-{hash}`, so without it an artifact lands at
+    // `/work/outcrash-...` (workspace root) instead of `/work/out/crash-...`,
+    // and triage -- which scans `out/` -- never finds it.
+    args.push(format!("-artifact_prefix={}/", out.trim_end_matches('/')));
     args.push(corpus.to_owned());
     if !cfg.env.is_empty() {
         let mut env_prefix = vec!["env".to_owned()];
