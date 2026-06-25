@@ -1,7 +1,7 @@
 //! hf-corpus: Corpus management -- seed, grow, prune, merge, list.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hf_core::corpus::{Corpus, CorpusEntry, CorpusSource};
 use hf_core::error::ClassifiedError;
@@ -78,9 +78,13 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
     })
 }
 
-/// Prune entries that no longer increase coverage (duplicate `coverage_hash`).
+/// Prune redundant corpus entries, deleting their files.
 ///
-/// Entries with `None` `coverage_hash` are always kept.
+/// An entry is redundant when another kept entry already covers it. The dedup
+/// key is the `coverage_hash` when the engine has populated one (true
+/// coverage-based merge); otherwise it falls back to the content `sha256`, so
+/// byte-for-byte duplicate inputs are removed. The returned corpus contains
+/// only the surviving entries.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if files cannot be removed.
@@ -88,15 +92,16 @@ pub fn prune(mut corpus: Corpus) -> Result<Corpus, ClassifiedError> {
     let mut seen = HashSet::new();
     let mut keep = Vec::new();
     for entry in corpus.entries.drain(..) {
-        match &entry.coverage_hash {
-            Some(h) => {
-                if seen.insert(h.clone()) {
-                    keep.push(entry);
-                } else {
-                    let _ = std::fs::remove_file(&entry.path);
-                }
-            }
-            None => keep.push(entry),
+        // Coverage hash is the strongest signal; the content hash guarantees we
+        // at least collapse identical files even when coverage data is absent.
+        let key = entry
+            .coverage_hash
+            .clone()
+            .unwrap_or_else(|| entry.sha256.clone());
+        if seen.insert(key) {
+            keep.push(entry);
+        } else {
+            let _ = std::fs::remove_file(&entry.path);
         }
     }
     corpus.entries = keep;
@@ -170,6 +175,3 @@ fn sha256_hex(data: &[u8]) -> String {
     hasher.update(data);
     hex::encode(hasher.finalize())
 }
-
-#[allow(dead_code)]
-fn _ensure_pathbuf_used(_p: PathBuf) {}

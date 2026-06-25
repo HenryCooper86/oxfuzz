@@ -10,7 +10,6 @@ use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_core::types::{Message, Role};
 use hf_prompt::render_harness_prompt;
-use uuid::Uuid;
 
 /// Draft a harness for a target using the LLM.
 ///
@@ -50,8 +49,11 @@ pub async fn compile(
     workspace: &Path,
 ) -> Result<Harness, ClassifiedError> {
     // Write the harness source to the host workspace (the Docker mount
-    // makes it visible inside the container at container_workspace).
-    let src_path = workspace.join("harness.c");
+    // makes it visible inside the container at container_workspace). Use a
+    // language-appropriate filename so the compiler treats it correctly
+    // (e.g. C++ harnesses must not be compiled as C).
+    let source_name = source_filename(harness.language);
+    let src_path = workspace.join(source_name);
     rt.write_file(&src_path, &harness.source).await?;
 
     // Build the compile command using container-internal paths.
@@ -59,6 +61,10 @@ pub async fn compile(
     // references must use `/work/...` paths.
     // Use bash -c to compile to /tmp (some Docker volumes don't support
     // direct linker output) then copy to /work in a single container.
+    //
+    // Use the engine-correct compiler/args computed by `build_command`
+    // (`afl-clang-fast` for AFL++, `hfuzz-cc` for honggfuzz, ...): compiling
+    // with a literal `clang` would silently drop the engine's instrumentation.
     let container_ws = "/work";
     let output_name = harness
         .build_cmd
@@ -68,11 +74,13 @@ pub async fn compile(
         .to_string_lossy()
         .to_string();
     let compile_script = format!(
-        "clang {} -I{container_ws} /{container_ws}/harness.c {extra_sources} -o /tmp/{output_name} && cp /tmp/{output_name} {container_ws}/{output_name} && chmod +x {container_ws}/{output_name}",
-        harness.build_cmd.args.join(" "),
+        "{compiler} {args} -I{container_ws} {container_ws}/{source_name} {extra_sources} -o /tmp/{output_name} && cp /tmp/{output_name} {container_ws}/{output_name} && chmod +x {container_ws}/{output_name}",
+        compiler = harness.build_cmd.compiler,
+        args = harness.build_cmd.args.join(" "),
         container_ws = container_ws,
+        source_name = source_name,
         output_name = output_name,
-        extra_sources = list_c_files(workspace, container_ws),
+        extra_sources = list_c_files(workspace, container_ws, source_name),
     );
     let cmd = vec!["bash".to_owned(), "-c".to_owned(), compile_script];
     let limits = hf_core::runtime::ResourceLimits {
@@ -266,17 +274,28 @@ fn parse_crashes(stdout: &str) -> u32 {
     count
 }
 
-#[allow(dead_code)]
-fn _ensure_uuid_used(_u: Uuid) {}
+/// The source filename to write the harness to, by language. The extension
+/// drives how the compiler front-end parses the file (C vs C++), so it must
+/// match the harness language rather than always being `.c`.
+fn source_filename(lang: TargetLanguage) -> &'static str {
+    match lang {
+        TargetLanguage::Cpp => "harness.cc",
+        TargetLanguage::Rust => "harness.rs",
+        TargetLanguage::Go => "harness.go",
+        TargetLanguage::Python => "harness.py",
+        TargetLanguage::C => "harness.c",
+    }
+}
 
-/// List all .c files in the workspace (excluding harness.c) as
-/// container-internal paths.
-fn list_c_files(workspace: &Path, container_ws: &str) -> String {
+/// List all C/C++ source files in the workspace (excluding the harness source
+/// itself) as container-internal paths, so multi-file targets link correctly.
+fn list_c_files(workspace: &Path, container_ws: &str, source_name: &str) -> String {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(workspace) {
         for entry in entries.flatten() {
             if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                if ext == "c" && entry.file_name() != "harness.c" {
+                let is_source = matches!(ext, "c" | "cc" | "cpp" | "cxx");
+                if is_source && entry.file_name() != source_name {
                     files.push(format!(
                         "{container_ws}/{}",
                         entry.file_name().to_string_lossy()

@@ -1,6 +1,6 @@
 //! hf-engine: Fuzzing engine adapters.
 //!
-//! Each engine implements the [`EngineAdapter`](registry::EngineAdapter) trait
+//! Each engine implements the [`EngineAdapter`] trait
 //! (argument construction); the [`EngineRunner`](runner::EngineRunner) executes
 //! the command via `hf-runtime` and parses progress/coverage uniformly. Covers
 //! AFL++, honggfuzz, libFuzzer, `ClusterFuzzLite`, and syzkaller. See

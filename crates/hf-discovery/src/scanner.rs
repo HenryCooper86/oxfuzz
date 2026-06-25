@@ -119,7 +119,7 @@ fn extract_functions(
         };
         let symbol = name_node.utf8_text(src.as_bytes()).unwrap_or("").to_owned();
 
-        let params = count_parameters(&declarator, src);
+        let params = count_parameters(&declarator);
         if params == 0 {
             return;
         }
@@ -217,7 +217,7 @@ fn find_identifier<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node
     None
 }
 
-fn count_parameters(declarator: &tree_sitter::Node<'_>, src: &str) -> usize {
+fn count_parameters(declarator: &tree_sitter::Node<'_>) -> usize {
     let mut cursor = declarator.walk();
     if cursor.goto_first_child() {
         loop {
@@ -235,11 +235,10 @@ fn count_parameters(declarator: &tree_sitter::Node<'_>, src: &str) -> usize {
                         }
                     }
                 }
-                let _ = src;
                 return count;
             }
             // Recurse (function_declarator may wrap another declarator).
-            let nested = count_parameters(&child, src);
+            let nested = count_parameters(&child);
             if nested > 0 {
                 return nested;
             }

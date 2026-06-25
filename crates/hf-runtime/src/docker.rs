@@ -7,7 +7,6 @@
 //! `build_exec_args` is a pure function that constructs the `docker run`
 //! argument list from a `RuntimeConfig`; it is unit-tested without a daemon.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -60,8 +59,8 @@ pub fn build_exec_args(cfg: &RuntimeConfig, command: &[String], timeout: Duratio
 
 /// A Docker-based sandbox runtime.
 ///
-/// Uses `bollard` to communicate with the Docker daemon. All commands run
-/// inside a container created from `RuntimeConfig::image`.
+/// Shells out to the `docker` CLI (see [`crate::docker_bin`]) to run each
+/// command inside a `--rm` container created from `RuntimeConfig::image`.
 pub struct DockerRuntime {
     cfg: RuntimeConfig,
     #[allow(dead_code)]
@@ -106,16 +105,36 @@ impl RuntimeAdapter for DockerRuntime {
             }
         }
 
+        // Give the container a unique name so that on timeout we can explicitly
+        // `docker kill` it. `args[0]` is "run"; the name flag must precede the
+        // image/command, so insert it right after the subcommand.
+        let container_name = format!("hf-run-{}", uuid::Uuid::new_v4());
+        args.insert(1, format!("--name={container_name}"));
+
         let mut docker = Command::new(crate::docker_bin());
-        docker.args(&args);
+        // `kill_on_drop` reaps the `docker run` client if this future is
+        // dropped; the explicit `docker kill` below stops the container itself
+        // (killing the client alone leaves the container running).
+        docker.args(&args).kill_on_drop(true);
         for (k, v) in &limits.env {
             docker.env(k, v);
         }
 
-        let output = tokio::time::timeout(timeout, docker.output())
-            .await
-            .map_err(|_| ClassifiedError::Sandbox("command timed out".to_owned()))?
-            .map_err(|e| ClassifiedError::Sandbox(format!("docker run: {e}")))?;
+        let Ok(run_result) = tokio::time::timeout(timeout, docker.output()).await else {
+            // Timed out: tear down the container so it does not leak. Run the
+            // kill synchronously (best effort) before returning the error.
+            let kill = Command::new(crate::docker_bin())
+                .arg("kill")
+                .arg(&container_name)
+                .output()
+                .await;
+            if let Err(e) = kill {
+                tracing::warn!(container = %container_name, error = %e, "failed to kill timed-out container");
+            }
+            return Err(ClassifiedError::Sandbox("command timed out".to_owned()));
+        };
+        let output =
+            run_result.map_err(|e| ClassifiedError::Sandbox(format!("docker run: {e}")))?;
 
         Ok(CommandResult {
             exit_code: output.status.code().unwrap_or(-1),
@@ -241,8 +260,3 @@ impl RuntimeAdapter for DockerRuntime {
             .map_err(|e| ClassifiedError::Sandbox(format!("read: {e}")))
     }
 }
-
-// HashMap is referenced in ResourceLimits env; silence unused import in
-// minimal builds.
-#[allow(dead_code)]
-fn _ensure_hashmap_used(_m: &HashMap<String, String>) {}

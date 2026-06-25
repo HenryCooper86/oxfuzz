@@ -2,7 +2,7 @@
 //!
 //! See `docs/design/corpus-coverage-design.md`.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hf_core::coverage::CoverageReport;
 
@@ -99,6 +99,3 @@ pub fn propose_action(
         None
     }
 }
-
-#[allow(dead_code)]
-fn _ensure_duration_used(_d: Duration) {}

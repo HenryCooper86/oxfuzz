@@ -2,7 +2,7 @@
 
 use hf_core::error::ClassifiedError;
 use hf_core::provider::LlmProvider;
-use hf_core::target::{TargetInventory, TargetLanguage};
+use hf_core::target::TargetInventory;
 use hf_core::types::{Message, Role};
 use hf_prompt::render_discovery_prompt;
 use serde::Deserialize;
@@ -49,11 +49,6 @@ pub async fn rank(
             .partial_cmp(&a.fit_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let _ = inventory
-        .candidates
-        .iter()
-        .map(|c| c.language)
-        .collect::<Vec<TargetLanguage>>();
     Ok(inventory)
 }
 
