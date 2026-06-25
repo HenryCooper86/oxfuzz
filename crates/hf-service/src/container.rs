@@ -102,6 +102,20 @@ pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {
     }
 }
 
+/// Map a host path inside the workspace to its container path under `/work`
+/// (the mount point), falling back to `/work/out/<filename>`.
+fn container_input_path(workspace: &Path, host_path: &Path) -> String {
+    host_path.strip_prefix(workspace).map_or_else(
+        |_| {
+            format!(
+                "/work/out/{}",
+                host_path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        },
+        |rel| format!("/work/{}", rel.display()),
+    )
+}
+
 /// Copy C/C++ source and header files from a project into the workspace
 /// so the sandbox can compile the harness + target together.
 pub fn copy_project_sources(project: &Path, workspace: &Path) {
@@ -638,18 +652,41 @@ impl ServiceContainer {
             })
             .unwrap_or_default();
         let run_id = Uuid::new_v4();
-        let crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
+        let mut crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
+
+        // Reproduce each crash by replaying its input through the harness binary
+        // in the sandbox to capture the sanitizer trace, then classify it (kind
+        // + stack signature). A libFuzzer crash artifact is just the input, so
+        // without this every crash is `Other` with no signature, and dedup
+        // cannot tell distinct bugs apart. Keep the trace for the LLM report.
+        let mut logs: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+        for crash in &mut crashes {
+            let log = self
+                .reproduce_crash(&workspace, target, &crash.input_path)
+                .await;
+            if !log.trim().is_empty() {
+                let (kind, sig, summary) = hf_crash::classify(&log);
+                crash.kind = kind;
+                crash.stack_signature = sig;
+                crash.summary = summary;
+            }
+            logs.insert(crash.input_path.clone(), log);
+        }
+
         let mut deduped = hf_crash::dedup(crashes);
 
         // Draft an LLM bug report for each unique crash when a provider is
-        // configured. The crash's own summary is the best available log text
-        // (the raw sanitizer trace is not retained on the model).
+        // configured, using the captured sanitizer trace.
         if let Some(pool) = &self.provider_pool {
             for crash in &mut deduped {
                 let bridge = LlmProviderBridge {
                     pool: Arc::clone(pool),
                 };
-                let log = crash.summary.clone();
+                let log = logs
+                    .get(&crash.input_path)
+                    .filter(|l| !l.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| crash.summary.clone());
                 match hf_crash::draft_report(crash, &log, Box::new(bridge)).await {
                     Ok(report) => crash.bug_report = Some(report),
                     Err(e) => tracing::warn!("bug report drafting failed for {}: {e}", crash.id),
@@ -665,6 +702,37 @@ impl ServiceContainer {
             }
         }
         Ok(deduped)
+    }
+
+    /// Replay a single crash input through the compiled harness in the sandbox
+    /// and return the combined stdout+stderr (the sanitizer trace). Best-effort:
+    /// returns an empty string if the binary is missing or the run fails.
+    async fn reproduce_crash(
+        &self,
+        workspace: &Path,
+        target: &str,
+        input_host_path: &Path,
+    ) -> String {
+        let bin = format!("fuzz_{target}");
+        if !workspace.join(&bin).exists() {
+            return String::new();
+        }
+        let container_input = container_input_path(workspace, input_host_path);
+        let cmd = vec![format!("/work/{bin}"), container_input];
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 30,
+            env: std::collections::HashMap::new(),
+        };
+        match self.runtime.run_command(&cmd, workspace, &limits).await {
+            // A crashing input exits non-zero; the trace is the useful output.
+            Ok(result) => format!("{}\n{}", result.stdout, result.stderr),
+            Err(e) => {
+                tracing::warn!("crash reproduction failed: {e}");
+                String::new()
+            }
+        }
     }
 
     // -- Corpus -----------------------------------------------------------
