@@ -6,7 +6,9 @@
 //! is still guardrail-gated (AGENTS.md 2.12). Progress is streamed to an
 //! [`EventSink`] so presentation layers can render it live.
 
+mod definition;
 mod event;
+mod registry;
 mod tools;
 
 use std::path::PathBuf;
@@ -18,10 +20,12 @@ use hf_service::ServiceContainer;
 use serde::Deserialize;
 use serde_json::Value;
 
+pub use definition::{AgentDefinition, AgentRole, Autonomy, TrustTier};
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
-pub use tools::{TOOL_CATALOG, TOOL_SPECS};
+pub use registry::{AgentRegistry, RegistryError, DEFAULT_AGENT_ID};
+pub use tools::{catalog_for, TOOL_CATALOG, TOOL_SPECS};
 
-/// Routing tags used when requesting completions from the provider pool.
+/// Default routing tags when an agent specifies none.
 const ROUTE_TAGS: &[&str] = &["general", "reasoning", "code"];
 
 /// One decoded step of the model's plan.
@@ -37,23 +41,44 @@ struct Step {
     final_answer: Option<String>,
 }
 
-/// The autonomous fuzzing agent.
+/// The autonomous fuzzing agent. Its behavior -- system prompt, callable tools,
+/// model routing, and iteration budget -- is fully determined by its
+/// [`AgentDefinition`].
 pub struct Agent {
     container: ServiceContainer,
     project: Option<PathBuf>,
+    definition: AgentDefinition,
     max_iterations: usize,
 }
 
 impl Agent {
     /// Create an agent bound to a service container and an optional project
-    /// root (the folder the chat is operating on).
+    /// root, driven by the default (orchestrator) agent definition.
     #[must_use]
     pub fn new(container: ServiceContainer, project: Option<PathBuf>) -> Self {
+        Self::with_definition(container, project, AgentRegistry::builtin().default_agent())
+    }
+
+    /// Create an agent driven by a specific [`AgentDefinition`].
+    #[must_use]
+    pub fn with_definition(
+        container: ServiceContainer,
+        project: Option<PathBuf>,
+        definition: AgentDefinition,
+    ) -> Self {
+        let max_iterations = definition.max_iterations.max(1);
         Self {
             container,
             project,
-            max_iterations: 8,
+            definition,
+            max_iterations,
         }
+    }
+
+    /// The definition driving this agent.
+    #[must_use]
+    pub fn definition(&self) -> &AgentDefinition {
+        &self.definition
     }
 
     /// Override the maximum number of reason/act iterations per turn.
@@ -68,15 +93,15 @@ impl Agent {
             .project
             .as_ref()
             .map_or_else(|| "(none selected)".to_owned(), |p| p.display().to_string());
+        let catalog = tools::catalog_for(&self.definition.allowed_tools);
         format!(
-            "You are hobot_fuzz, an autonomous AI fuzzing agent. You help the user \
-discover fuzzing targets, write harnesses, run fuzzers, and triage crashes by \
-calling tools. The active project is: {project}.\n\n{TOOL_CATALOG}\n\n\
+            "{role}\n\nThe active project is: {project}.\n\n{catalog}\n\n\
 Respond with EXACTLY ONE JSON object and nothing else:\n\
 - To call a tool: {{\"thought\":\"<brief reasoning>\",\"tool\":\"<name>\",\"args\":{{...}}}}\n\
 - To answer the user: {{\"thought\":\"<brief reasoning>\",\"final\":\"<answer>\"}}\n\
 Do not wrap the JSON in code fences or add prose around it. After a tool runs \
-you receive its result and continue until you can give a final answer."
+you receive its result and continue until you can give a final answer.",
+            role = self.definition.system_prompt.trim(),
         )
     }
 
@@ -111,6 +136,14 @@ you receive its result and continue until you can give a final answer."
             content: user_message.to_owned(),
         });
 
+        // Route to the providers this agent prefers, falling back to the
+        // default tag set when the agent specifies none.
+        let route: Vec<&str> = if self.definition.model_tags.is_empty() {
+            ROUTE_TAGS.to_vec()
+        } else {
+            self.definition.route_tags()
+        };
+
         // Runaway-loop detection. `max_iterations` below is the hard backstop;
         // the guard catches stuck repetition/oscillation/redundant-call patterns
         // before the full step budget is spent.
@@ -120,7 +153,7 @@ you receive its result and continue until you can give a final answer."
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
             let trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
-            let resp = pool.complete(ROUTE_TAGS, trimmed).await?;
+            let resp = pool.complete(&route, trimmed).await?;
             let content = resp.content.trim().to_owned();
 
             let Some(step) = parse_step(&content) else {
@@ -165,12 +198,20 @@ you receive its result and continue until you can give a final answer."
             })
             .await;
 
-            let result =
+            // Enforce the agent's tool allowlist: a specialist may only call its
+            // own tools. The refusal is fed back so the model can self-correct.
+            let result = if self.definition.allowed_tools.iter().all(|t| t != &tool) {
+                format!(
+                    "{{\"error\":\"tool '{tool}' is not permitted for the {} agent\"}}",
+                    self.definition.name
+                )
+            } else {
                 match tools::dispatch(&self.container, self.project.as_deref(), &tool, &args).await
                 {
                     Ok(r) => r,
                     Err(e) => format!("{{\"error\":\"{e}\"}}"),
-                };
+                }
+            };
             sink.emit(AgentEvent::ToolResult {
                 name: tool.clone(),
                 summary: truncate(&result, 400),

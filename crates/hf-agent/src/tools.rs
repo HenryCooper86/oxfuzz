@@ -21,14 +21,52 @@ pub const TOOL_SPECS: &[(&str, &str)] = &[
     ("corpus", "Seed, grow, prune, or list the corpus"),
 ];
 
-/// The tool catalog injected into the system prompt. Kept terse to stay within
-/// the token budget (AGENTS.md 2.4).
+/// Per-tool usage lines for the system-prompt catalog, keyed by tool name.
+const TOOL_USAGE: &[(&str, &str)] = &[
+    (
+        "discover",
+        r#"- discover {"lang": "c|cpp|rust|go|python"} -> ranked fuzzing targets in the project"#,
+    ),
+    (
+        "harness",
+        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|clusterfuzzlite", "lang": "c"} -> draft + compile a harness in the sandbox"#,
+    ),
+    (
+        "run",
+        r#"- run {"target": "<symbol>", "engine": "libfuzzer", "lang": "c", "duration_secs": 60} -> run a fuzz campaign (requires a compiled harness)"#,
+    ),
+    (
+        "triage",
+        r#"- triage {"target": "<symbol>"} -> ingest and deduplicate crash artifacts"#,
+    ),
+    (
+        "corpus",
+        r#"- corpus {"target": "<symbol>", "op": "seed|grow|prune|list"} -> manage the corpus"#,
+    ),
+];
+
+/// The full tool catalog (all tools), for the default/orchestrator agent.
 pub const TOOL_CATALOG: &str = r#"Available tools (call one per step):
 - discover {"lang": "c|cpp|rust|go|python"} -> ranked fuzzing targets in the project
 - harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|clusterfuzzlite", "lang": "c"} -> draft + compile a harness in the sandbox
 - run {"target": "<symbol>", "engine": "libfuzzer", "lang": "c", "duration_secs": 60} -> run a fuzz campaign (requires a compiled harness)
 - triage {"target": "<symbol>"} -> ingest and deduplicate crash artifacts
 - corpus {"target": "<symbol>", "op": "seed|grow|prune|list"} -> manage the corpus"#;
+
+/// Build a tool catalog limited to `allowed` tools, for an agent that may only
+/// call a subset. Unknown names are ignored; an empty result means no tools.
+#[must_use]
+pub fn catalog_for(allowed: &[String]) -> String {
+    let lines: Vec<&str> = TOOL_USAGE
+        .iter()
+        .filter(|(name, _)| allowed.iter().any(|a| a == name))
+        .map(|(_, usage)| *usage)
+        .collect();
+    if lines.is_empty() {
+        return "This agent has no tools; answer the user directly.".to_owned();
+    }
+    format!("Available tools (call one per step):\n{}", lines.join("\n"))
+}
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, ClassifiedError> {
     match s.to_ascii_lowercase().as_str() {
