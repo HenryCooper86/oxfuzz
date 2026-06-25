@@ -9,7 +9,7 @@
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md` and
 //! <https://github.com/google/syzkaller/blob/master/docs/linux/setup.md>.
 
-use hf_core::engine::{BuildArtifact, EngineKind, FuzzRunConfig};
+use hf_core::engine::FuzzRunConfig;
 
 /// Construct the `syz-manager` argument list for a kernel fuzz campaign.
 ///
@@ -23,70 +23,7 @@ pub fn build_run_args(cfg: &FuzzRunConfig, config: &str, _corpus: &str, _out: &s
     args
 }
 
-/// The syzkaller engine adapter (stub for the `FuzzEngine` trait).
+/// The syzkaller engine adapter. Kernel fuzzing launches `syz-manager`; see
+/// [`build_run_args`] and the
+/// [`EngineAdapter`](crate::registry::EngineAdapter) impl in `registry`.
 pub struct Syzkaller;
-
-impl Syzkaller {
-    #[must_use]
-    pub const fn kind() -> EngineKind {
-        EngineKind::Syzkaller
-    }
-}
-
-use async_trait::async_trait;
-use hf_core::coverage::CoverageReport;
-use hf_core::crash::Crash;
-use hf_core::engine::{FuzzEngine, FuzzRunHandle};
-use hf_core::error::ClassifiedError;
-use hf_core::harness::Harness;
-use hf_core::runtime::RuntimeAdapter;
-use hf_core::target::{Sanitizer, TargetLanguage};
-
-#[async_trait]
-impl FuzzEngine for Syzkaller {
-    fn kind(&self) -> EngineKind {
-        EngineKind::Syzkaller
-    }
-
-    fn supports(&self, lang: TargetLanguage, _san: Sanitizer) -> bool {
-        // Kernel sources are C.
-        matches!(lang, TargetLanguage::C)
-    }
-
-    async fn build(
-        &self,
-        _h: &Harness,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<BuildArtifact, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "syzkaller build: kernel fuzzing uses a KCOV-enabled kernel image, not a harness binary"
-                .to_owned(),
-        ))
-    }
-
-    async fn run(
-        &self,
-        _cfg: &FuzzRunConfig,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<FuzzRunHandle, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "syzkaller run: launch via `syz-manager -config=manager.cfg`".to_owned(),
-        ))
-    }
-
-    async fn minimize(
-        &self,
-        _c: &Crash,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<Crash, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "syzkaller minimize: use `syz-repro` on the crash log".to_owned(),
-        ))
-    }
-
-    async fn coverage(&self, _run: &FuzzRunHandle) -> Result<CoverageReport, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "syzkaller coverage: served by the syz-manager web dashboard".to_owned(),
-        ))
-    }
-}
