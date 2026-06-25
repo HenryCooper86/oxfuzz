@@ -5,10 +5,13 @@ import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
 import { Crosshair, Search, Loader2, FolderOpen } from "lucide-react";
 
-export function DiscoverView() {
+export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject, setActiveProject } = useProject();
   const { markDone } = usePipeline();
-  const [project, setProject] = useState(activeProject);
+  // When embedded in the unified workflow, the project is fixed by the
+  // workflow's project gate; standalone, this view has its own picker.
+  const [localProject, setLocalProject] = useState(activeProject);
+  const project = embedded ? activeProject : localProject;
   const [lang, setLang] = useState("c");
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [loading, setLoading] = useState(false);
@@ -19,7 +22,7 @@ export function DiscoverView() {
     setScanning(true);
     try {
       const path = await pickFolder();
-      if (path) setProject(path);
+      if (path) setLocalProject(path);
     } finally {
       setScanning(false);
     }
@@ -46,23 +49,29 @@ export function DiscoverView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <h1 className="text-xl font-semibold" style={{ letterSpacing: "-0.01em" }}>
-        Target Discovery
-      </h1>
-      <p className="text-sm text-text-secondary">
-        Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, and parser heuristics.
-      </p>
+      {!embedded && (
+        <>
+          <h1 className="text-xl font-semibold" style={{ letterSpacing: "-0.01em" }}>
+            Target Discovery
+          </h1>
+          <p className="text-sm text-text-secondary">
+            Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, and parser heuristics.
+          </p>
+        </>
+      )}
 
       <div className="flex gap-2">
-        <input
-          type="text"
-          placeholder="/path/to/project"
-          value={project}
-          onChange={(e) => setProject(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && discover()}
-          className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
-          style={{ fontFamily: "var(--font-mono)" }}
-        />
+        {!embedded && (
+          <input
+            type="text"
+            placeholder="/path/to/project"
+            value={project}
+            onChange={(e) => setLocalProject(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && discover()}
+            className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
+            style={{ fontFamily: "var(--font-mono)" }}
+          />
+        )}
         <select
           value={lang}
           onChange={(e) => setLang(e.target.value)}
@@ -71,14 +80,16 @@ export function DiscoverView() {
           <option value="c">C</option>
           <option value="cpp">C++</option>
         </select>
-        <button
-          onClick={browse}
-          disabled={scanning}
-          className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
-          title="Browse for folder"
-        >
-          {scanning ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
-        </button>
+        {!embedded && (
+          <button
+            onClick={browse}
+            disabled={scanning}
+            className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+            title="Browse for folder"
+          >
+            {scanning ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
+          </button>
+        )}
         <button
           onClick={discover}
           disabled={loading || !project}
