@@ -105,25 +105,11 @@ enum Commands {
 }
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "c" => TargetLanguage::C,
-        "cpp" | "c++" => TargetLanguage::Cpp,
-        "rust" | "rs" => TargetLanguage::Rust,
-        "go" => TargetLanguage::Go,
-        "python" | "py" => TargetLanguage::Python,
-        other => anyhow::bail!("unsupported language: {other}"),
-    })
+    s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
 fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "afl++" | "aflplusplus" => EngineKind::AflPlusPlus,
-        "honggfuzz" | "hfuzz" => EngineKind::Honggfuzz,
-        "libfuzzer" | "libfuzz" => EngineKind::LibFuzzer,
-        "clusterfuzzlite" | "cfl" => EngineKind::ClusterFuzzLite,
-        "syzkaller" | "syz" => EngineKind::Syzkaller,
-        other => anyhow::bail!("unsupported engine: {other}"),
-    })
+    s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
 /// Parse a human duration string like "60m", "2h", "30s".
@@ -216,8 +202,11 @@ async fn cmd_run(
         .harness_compile(draft.source, &project, engine_kind, target, lang)
         .await?;
     println!("compile: status={:?}", outcome.status);
-    // Ensure a seed corpus exists before running.
-    let _ = container.generate_seeds(&project, target);
+    // Ensure a seed corpus exists before running. A failure here is not fatal
+    // (the engine can still run on an empty corpus) but must not be silent.
+    if let Err(e) = container.generate_seeds(&project, target) {
+        eprintln!("warning: could not generate seed corpus: {e}");
+    }
 
     println!("\n--- Running {engine} for {duration_secs}s (live) ---");
     let on_progress = |p: hf_core::engine::FuzzProgress| match p {
@@ -271,7 +260,7 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             println!("Seeded {n} entries.");
         }
         "grow" => {
-            let n = container.corpus_grow(&project, target)?;
+            let n = container.corpus_grow(&project, target).await?;
             println!("Corpus now has {n} entries.");
         }
         "prune" => {
