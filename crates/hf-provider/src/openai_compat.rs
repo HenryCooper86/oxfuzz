@@ -66,7 +66,10 @@ impl LlmProvider for OpenAiCompatProvider {
                 })
             }).collect::<Vec<_>>(),
         });
-        let resp = self.sender.post_json(&self.url(), body).await?;
+        let resp = self
+            .sender
+            .post_json(&self.url(), &self.cfg.api_key, body)
+            .await?;
         let parsed: ChatResponse = serde_json::from_value(resp)
             .map_err(|e| ClassifiedError::Provider(format!("parse: {e}")))?;
         let choice = parsed

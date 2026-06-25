@@ -35,6 +35,7 @@ impl hf_provider::HttpSender for MockSender {
     async fn post_json(
         &self,
         _url: &str,
+        _api_key: &str,
         _body: serde_json::Value,
     ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
