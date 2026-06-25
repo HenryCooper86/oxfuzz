@@ -172,10 +172,11 @@ async fn harness_draft(
     State(state): State<AppState>,
     Json(req): Json<HarnessDraftRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let engine = parse_engine(&req.engine);
-    let lang = req.lang.as_deref().map_or(TargetLanguage::C, |l| {
-        parse_lang(l).unwrap_or(TargetLanguage::C)
-    });
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let lang = match req.lang.as_deref() {
+        Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
+        None => TargetLanguage::C,
+    };
     let draft = state
         .container
         .harness_draft(&req.project, &req.target, engine, lang)
@@ -207,10 +208,11 @@ async fn harness_compile(
     State(state): State<AppState>,
     Json(req): Json<HarnessCompileRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let engine = parse_engine(&req.engine);
-    let lang = req.lang.as_deref().map_or(TargetLanguage::C, |l| {
-        parse_lang(l).unwrap_or(TargetLanguage::C)
-    });
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let lang = match req.lang.as_deref() {
+        Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
+        None => TargetLanguage::C,
+    };
     match state
         .container
         .harness_compile(req.source, &req.project, engine, &req.target, lang)
@@ -277,6 +279,7 @@ async fn corpus(
             let n = state
                 .container
                 .corpus_grow(std::path::Path::new(&req.project), &req.target)
+                .await
                 .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
             Ok(Json(serde_json::json!({"entries": n})))
         }
@@ -332,60 +335,63 @@ async fn chat_send(
 }
 
 // -- Config endpoints ------------------------------------------------------
+//
+// These delegate to `hf_service::config`, the single source of truth shared
+// with the CLI and GUI, so the HTTP API edits the same `config/*.toml` files.
 
 async fn list_models(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!([]))
+    Json(serde_json::json!(hf_service::config::list_models()))
 }
 
 async fn list_configs(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!([]))
+    Json(serde_json::json!(hf_service::config::list_configs()))
 }
 
 #[derive(Debug, Deserialize)]
 struct ReadConfigRequest {
-    _name: String,
+    name: String,
 }
 
 async fn read_config(
     State(_): State<AppState>,
     Json(req): Json<ReadConfigRequest>,
 ) -> ApiResult<String> {
-    let _ = req;
-    Ok(Json(String::new()))
+    let content =
+        hf_service::config::read_config(&req.name).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(content))
 }
 
 #[derive(Debug, Deserialize)]
 struct WriteConfigRequest {
-    _name: String,
-    _content: String,
+    name: String,
+    content: String,
 }
 
 async fn write_config(
     State(_): State<AppState>,
     Json(req): Json<WriteConfigRequest>,
 ) -> ApiResult<()> {
-    let _ = req;
+    hf_service::config::write_config(&req.name, &req.content)
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(()))
 }
 
 async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!([]))
+    Json(serde_json::json!(hf_service::config::get_providers()))
 }
 
 async fn set_providers(
     State(_): State<AppState>,
-    Json(_req): Json<serde_json::Value>,
+    Json(req): Json<Vec<hf_service::config::ProviderConfig>>,
 ) -> ApiResult<()> {
+    hf_service::config::set_providers(&req).map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(()))
 }
 
 // -- System endpoints ------------------------------------------------------
 
 async fn app_paths(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "config_dir": "config",
-        "data_dir": "data",
-    }))
+    Json(serde_json::json!(hf_service::config::app_paths()))
 }
 
 async fn host_arch() -> Json<String> {
@@ -426,22 +432,9 @@ async fn event_stream(State(state): State<AppState>) -> Response {
 // ---------------------------------------------------------------------------
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "c" => Ok(TargetLanguage::C),
-        "cpp" | "c++" => Ok(TargetLanguage::Cpp),
-        "rust" | "rs" => Ok(TargetLanguage::Rust),
-        "go" => Ok(TargetLanguage::Go),
-        "python" | "py" => Ok(TargetLanguage::Python),
-        other => Err(format!("unsupported language: {other}")),
-    }
+    s.parse()
 }
 
-fn parse_engine(s: &str) -> EngineKind {
-    match s.to_ascii_lowercase().as_str() {
-        "afl++" | "aflplusplus" => EngineKind::AflPlusPlus,
-        "honggfuzz" | "hfuzz" => EngineKind::Honggfuzz,
-        "clusterfuzzlite" | "cfl" => EngineKind::ClusterFuzzLite,
-        "syzkaller" | "syz" => EngineKind::Syzkaller,
-        _ => EngineKind::LibFuzzer,
-    }
+fn parse_engine(s: &str) -> Result<EngineKind, String> {
+    s.parse()
 }

@@ -9,10 +9,7 @@ use std::path::PathBuf;
 use hf_core::engine::{EngineKind, FuzzProgress};
 use hf_core::target::TargetLanguage;
 use serde::{Deserialize, Serialize};
-use std::fmt::Write;
 use tauri::Manager;
-
-use crate::state::config_dir;
 
 // ---------------------------------------------------------------------------
 // Docker daemon management (GUI-specific I/O -- not domain logic)
@@ -140,24 +137,12 @@ pub fn system_status() -> SystemStatus {
 // Language + engine parsing helpers
 // ---------------------------------------------------------------------------
 
-fn parse_lang(s: &str) -> TargetLanguage {
-    match s.to_ascii_lowercase().as_str() {
-        "cpp" | "c++" => TargetLanguage::Cpp,
-        "rust" | "rs" => TargetLanguage::Rust,
-        "go" => TargetLanguage::Go,
-        "python" | "py" => TargetLanguage::Python,
-        _ => TargetLanguage::C,
-    }
+fn parse_lang(s: &str) -> Result<TargetLanguage, String> {
+    s.parse()
 }
 
-fn parse_engine(s: &str) -> EngineKind {
-    match s.to_ascii_lowercase().as_str() {
-        "afl++" | "aflplusplus" => EngineKind::AflPlusPlus,
-        "honggfuzz" | "hfuzz" => EngineKind::Honggfuzz,
-        "clusterfuzzlite" | "cfl" => EngineKind::ClusterFuzzLite,
-        "syzkaller" | "syz" => EngineKind::Syzkaller,
-        _ => EngineKind::LibFuzzer,
-    }
+fn parse_engine(s: &str) -> Result<EngineKind, String> {
+    s.parse()
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +156,7 @@ pub async fn discover(
     project: PathBuf,
     lang: String,
 ) -> Result<serde_json::Value, String> {
-    let lang = parse_lang(&lang);
+    let lang = parse_lang(&lang)?;
     let inv = state
         .container
         .discover(&project, lang)
@@ -215,8 +200,11 @@ pub async fn harness_draft(
     engine: String,
     lang: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let engine_kind = parse_engine(&engine);
-    let lang = lang.as_deref().map_or(TargetLanguage::C, parse_lang);
+    let engine_kind = parse_engine(&engine)?;
+    let lang = match lang.as_deref() {
+        Some(l) => parse_lang(l)?,
+        None => TargetLanguage::C,
+    };
     let draft = state
         .container
         .harness_draft(&project, &target, engine_kind, lang)
@@ -245,8 +233,11 @@ pub async fn harness_compile(
     target: String,
     lang: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let engine_kind = parse_engine(&engine);
-    let lang = lang.as_deref().map_or(TargetLanguage::C, parse_lang);
+    let engine_kind = parse_engine(&engine)?;
+    let lang = match lang.as_deref() {
+        Some(l) => parse_lang(l)?,
+        None => TargetLanguage::C,
+    };
     if !hf_runtime::docker_daemon_ready() {
         return Ok(serde_json::json!({
             "status": "Draft",
@@ -319,6 +310,7 @@ pub async fn corpus_grow(
     let n = state
         .container
         .corpus_grow(std::path::Path::new(&project), &target)
+        .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"entries": n}))
 }
@@ -1033,7 +1025,7 @@ pub async fn run_fuzzer(
 ) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
 
-    let engine_kind = parse_engine(&engine);
+    let engine_kind = parse_engine(&engine)?;
     let emit = |ty: &str, data: serde_json::Value| {
         let _ = app.emit(
             "run:progress",
@@ -1044,7 +1036,7 @@ pub async fn run_fuzzer(
     // syzkaller is a kernel fuzzer: it drives a VM against a coverage-enabled
     // kernel via `syz-manager`, not a per-target harness binary. Surface what
     // a campaign needs instead of trying to run a harness.
-    if engine == "syzkaller" {
+    if engine_kind == EngineKind::Syzkaller {
         for line in [
             format!("Starting syzkaller (kernel fuzzing) on project: {project}"),
             "syzkaller fuzzes an OS kernel by mutating sequences of system calls.".to_string(),
@@ -1265,8 +1257,11 @@ pub async fn run_syzkaller(
         cfg_in_container = cfg.to_string();
         logln(&format!("Using provided manager.cfg: {cfg}"));
     } else {
-        let kernel = kernel_image.expect("kernel_image present");
-        let disk = disk_image.expect("disk_image present");
+        let kernel = kernel_image.ok_or_else(|| {
+            "kernel_image is required when no manager.cfg is provided".to_string()
+        })?;
+        let disk = disk_image
+            .ok_or_else(|| "disk_image is required when no manager.cfg is provided".to_string())?;
         if !file_ok(&kernel) {
             return Err(format!("kernel image not found: {kernel}"));
         }
@@ -1387,318 +1382,57 @@ pub async fn run_syzkaller(
 // Raw config file editing (FORM/RAW settings editor)
 // ---------------------------------------------------------------------------
 
-/// Known config sections. Whitelisted to prevent path traversal: only these
-/// names map to a `config/<name>.toml` file.
-const CONFIG_SECTIONS: &[&str] = &[
-    "hobot-fuzz",
-    "providers",
-    "engines",
-    "runtime",
-    "guardrails",
-    "storage",
-    "session",
-    "tools",
-];
+// These commands are thin presentation wrappers over `hf_service::config`,
+// the single source of truth shared with the CLI and web API (AGENTS.md 2.9).
+// The serde shapes are re-exported unchanged so the frontend JSON is identical.
 
-/// One editable config section, as surfaced to the GUI.
-#[derive(Serialize)]
-pub struct ConfigSection {
-    pub name: String,
-    pub exists: bool,
-}
-
-/// Validate that `name` is a known section before touching the filesystem.
-fn validated_section(name: &str) -> Result<&'static str, String> {
-    CONFIG_SECTIONS
-        .iter()
-        .copied()
-        .find(|s| *s == name)
-        .ok_or_else(|| format!("unknown config section: {name}"))
-}
-
-/// Resolved on-disk locations surfaced in the General settings page.
-#[derive(Serialize)]
-pub struct AppPaths {
-    pub config_dir: String,
-    pub data_dir: String,
-}
+pub use hf_service::config::{AppPaths, ConfigSection, ModelInfo, ProviderConfig};
 
 #[tauri::command]
 #[must_use]
 pub fn app_paths() -> AppPaths {
-    let data = hf_service::repo_root().map_or_else(
-        || {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("data")
-        },
-        |r| r.join("data"),
-    );
-    AppPaths {
-        config_dir: config_dir().display().to_string(),
-        data_dir: data.display().to_string(),
-    }
+    hf_service::config::app_paths()
 }
 
-/// A model offered by a configured provider in the pool.
-#[derive(Serialize)]
-pub struct ModelInfo {
-    pub id: String,
-    pub provider_type: String,
-    pub model: String,
-}
-
-/// List the models from the configured provider pool (`providers.toml`,
-/// falling back to the `.example.toml`). Drives the chat model selector.
+/// List the models from the configured provider pool. Drives the chat model
+/// selector.
 #[tauri::command]
 #[must_use]
 pub fn list_models() -> Vec<ModelInfo> {
-    let raw = read_config("providers".to_string()).unwrap_or_default();
-    let parsed: toml::Value =
-        toml::from_str(&raw).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-    let mut out = Vec::new();
-    if let Some(arr) = parsed.get("providers").and_then(toml::Value::as_array) {
-        for p in arr {
-            let model = p
-                .get("model")
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default();
-            if model.is_empty() {
-                continue;
-            }
-            out.push(ModelInfo {
-                id: p
-                    .get("id")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                provider_type: p
-                    .get("provider_type")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                model: model.to_string(),
-            });
-        }
-    }
-    out
-}
-
-/// One provider as surfaced to / received from the Providers settings form.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ProviderConfigGui {
-    pub id: String,
-    #[serde(default)]
-    pub provider_type: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
-    pub api_key_env: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub http_protocol: String,
-    #[serde(default)]
-    pub tool_calling_mode: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default = "default_concurrency")]
-    pub max_concurrency: u32,
-    #[serde(default = "default_context_window")]
-    pub context_window: u64,
-}
-
-const fn default_true() -> bool {
-    true
-}
-const fn default_concurrency() -> u32 {
-    3
-}
-const fn default_context_window() -> u64 {
-    128_000
-}
-
-/// Quote/escape a value as a TOML basic string.
-fn toml_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    hf_service::config::list_models()
 }
 
 /// Load the provider pool as structured data for the settings form.
 #[tauri::command]
 #[must_use]
-pub fn get_providers() -> Vec<ProviderConfigGui> {
-    let raw = read_config("providers".to_string()).unwrap_or_default();
-    let parsed: toml::Value =
-        toml::from_str(&raw).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-    let mut out = Vec::new();
-    let Some(arr) = parsed.get("providers").and_then(toml::Value::as_array) else {
-        return out;
-    };
-    for p in arr {
-        let get = |k: &str| {
-            p.get(k)
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        let provider_type = {
-            let t = get("provider_type");
-            if t.is_empty() {
-                "openai-compat".to_string()
-            } else {
-                t
-            }
-        };
-        let http_protocol = {
-            let h = get("http_protocol");
-            if h.is_empty() {
-                "http1".to_string()
-            } else {
-                h
-            }
-        };
-        let tags = p
-            .get("tags")
-            .and_then(toml::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.push(ProviderConfigGui {
-            id: get("id"),
-            provider_type,
-            model: get("model"),
-            base_url: get("base_url"),
-            api_key: get("api_key"),
-            api_key_env: get("api_key_env"),
-            enabled: p
-                .get("enabled")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(true),
-            http_protocol,
-            tool_calling_mode: get("tool_calling_mode"),
-            tags,
-            max_concurrency: u32::try_from(
-                p.get("max_concurrency")
-                    .and_then(toml::Value::as_integer)
-                    .unwrap_or(3),
-            )
-            .unwrap_or(3),
-            context_window: u64::try_from(
-                p.get("context_window")
-                    .and_then(toml::Value::as_integer)
-                    .unwrap_or(128_000),
-            )
-            .unwrap_or(128_000),
-        });
-    }
-    out
+pub fn get_providers() -> Vec<ProviderConfig> {
+    hf_service::config::get_providers()
 }
 
 /// Persist the provider pool from the settings form back to `providers.toml`.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn set_providers(providers: Vec<ProviderConfigGui>) -> Result<(), String> {
-    let existing = read_config("providers".to_string()).unwrap_or_default();
-    let preamble = existing.find("[[providers]]").map_or_else(
-        || {
-            "# hobot_fuzz -- LLM Provider Pool Configuration\n\
-             default_freeze_duration_secs = 60\n\
-             max_freeze_duration_secs = 3600\n\
-             health_check_interval_secs = 30\n\n"
-                .to_string()
-        },
-        |idx| existing[..idx].to_string(),
-    );
-
-    let mut body = String::new();
-    for p in &providers {
-        body.push_str("[[providers]]\n");
-        let _ = writeln!(body, "id = {}", toml_string(&p.id));
-        let _ = writeln!(body, "provider_type = {}", toml_string(&p.provider_type));
-        let _ = writeln!(body, "model = {}", toml_string(&p.model));
-        if !p.base_url.is_empty() {
-            let _ = writeln!(body, "base_url = {}", toml_string(&p.base_url));
-        }
-        if !p.api_key.is_empty() {
-            let _ = writeln!(body, "api_key = {}", toml_string(&p.api_key));
-        }
-        if !p.api_key_env.is_empty() {
-            let _ = writeln!(body, "api_key_env = {}", toml_string(&p.api_key_env));
-        }
-        let _ = writeln!(body, "enabled = {}", p.enabled);
-        if !p.http_protocol.is_empty() {
-            let _ = writeln!(body, "http_protocol = {}", toml_string(&p.http_protocol));
-        }
-        if !p.tool_calling_mode.is_empty() {
-            let _ = writeln!(
-                body,
-                "tool_calling_mode = {}",
-                toml_string(&p.tool_calling_mode)
-            );
-        }
-        let tags = p
-            .tags
-            .iter()
-            .map(|t| toml_string(t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(body, "tags = [{tags}]");
-        let _ = writeln!(body, "max_concurrency = {}", p.max_concurrency);
-        let _ = writeln!(body, "context_window = {}\n", p.context_window);
-    }
-
-    let content = format!("{preamble}{body}");
-    toml::from_str::<toml::Value>(&content).map_err(|e| format!("invalid TOML: {e}"))?;
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("providers.toml"), content).map_err(|e| e.to_string())
+pub fn set_providers(providers: Vec<ProviderConfig>) -> Result<(), String> {
+    hf_service::config::set_providers(&providers)
 }
 
 /// List the editable config sections and whether each has a live file.
 #[tauri::command]
 #[must_use]
 pub fn list_configs() -> Vec<ConfigSection> {
-    let dir = config_dir();
-    CONFIG_SECTIONS
-        .iter()
-        .map(|name| ConfigSection {
-            name: (*name).to_string(),
-            exists: dir.join(format!("{name}.toml")).is_file(),
-        })
-        .collect()
+    hf_service::config::list_configs()
 }
 
 /// Read a config section's raw TOML.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub fn read_config(name: String) -> Result<String, String> {
-    let section = validated_section(&name)?;
-    let dir = config_dir();
-    let live = dir.join(format!("{section}.toml"));
-    let example = dir.join(format!("{section}.example.toml"));
-    if live.is_file() {
-        std::fs::read_to_string(&live).map_err(|e| e.to_string())
-    } else if example.is_file() {
-        std::fs::read_to_string(&example).map_err(|e| e.to_string())
-    } else {
-        Ok(String::new())
-    }
+    hf_service::config::read_config(&name)
 }
 
 /// Write a config section's raw TOML to its live file.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub fn write_config(name: String, content: String) -> Result<(), String> {
-    let section = validated_section(&name)?;
-    toml::from_str::<toml::Value>(&content).map_err(|e| format!("invalid TOML: {e}"))?;
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(format!("{section}.toml")), content).map_err(|e| e.to_string())
+    hf_service::config::write_config(&name, &content)
 }
