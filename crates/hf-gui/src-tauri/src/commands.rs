@@ -385,14 +385,26 @@ pub fn host_arch() -> String {
 // Chat (LLM-backed)
 // ---------------------------------------------------------------------------
 
+/// Clone the service container, picking up a freshly-saved provider config when
+/// the startup bootstrap had none. This lets a key entered in Settings ->
+/// Providers take effect on the next chat without restarting the app.
+fn container_with_provider(state: &crate::state::AppState) -> hf_service::ServiceContainer {
+    let container = state.container.clone();
+    if container.provider_pool().is_none() {
+        if let Some(pool) = hf_service::provider_pool_from_config() {
+            return container.with_provider_pool(pool);
+        }
+    }
+    container
+}
+
 /// Send a single-turn chat message to the LLM provider pool (no tools).
 #[tauri::command]
 pub async fn chat_send(
     state: tauri::State<'_, crate::state::AppState>,
     message: String,
 ) -> Result<String, String> {
-    state
-        .container
+    container_with_provider(&state)
         .chat_send(&message)
         .await
         .map_err(|e| e.to_string())
@@ -531,7 +543,7 @@ pub async fn chat_agent(
     });
     let guardrails =
         hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
-    let container = state.container.clone().with_guardrails(guardrails);
+    let container = container_with_provider(&state).with_guardrails(guardrails);
 
     let agent = hf_agent::Agent::new(container, project);
     let sink = TauriEventSink { app };
