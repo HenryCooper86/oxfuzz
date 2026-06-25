@@ -43,14 +43,26 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] hf-agent: autonomous reason/act loop dispatching the fuzzing tools.
 - [x] hf-gui: chat wired to the streaming agent (`chat_agent` + `chat:event`).
 - [x] hf-web: REST API + SSE for run progress.
+- [x] hf-engine: real `EngineAdapter` trait + registry (dead `FuzzEngine`
+  removed).
+- [x] hf-cli `init`: scaffolds config from templates + creates/migrates the DB.
+- [x] hf-session + hf-context: persistent conversations + token-budget assembly;
+  agent trims history and persists turns server-side (GUI `create_session`).
+- [x] Interactive HITL dialog in the GUI (`chat:permission_request` ->
+  approve/deny -> `chat_answer_permission`); chat runs under the
+  approval-required guardrail policy.
+- [ ] Provider token streaming: implement OpenAI SSE in `hf-provider` +
+  `ProviderPool::stream` + agent Token events. (Deferred: low value through the
+  ReAct JSON tool-protocol loop; would benefit from a native function-calling
+  redesign first.)
 - [ ] Run cancellation: cooperative cancel of an in-flight `run_fuzzer`
   (needs cancellation-token support in `hf-runtime`/`EngineRunner`).
-- [ ] Interactive HITL dialog in the GUI (emit `chat:permission_request` and
-  await a `chat_answer_permission` response; mechanism exists in hf-guardrails).
 - [ ] Diagnostics/Observability panels: instrument the provider pool and expose
   `hf-diagnostics::CostTracker` via a command (panels currently mocked).
-- [ ] hf-bot, hf-mcp, hf-scheduler, hf-knowledge, hf-skills, hf-hooks,
-  hf-journal, hf-session, hf-context: still scaffold crates.
+- [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
+  command surface; `hf-knowledge` + sub-agent pools are still scaffolds).
+- [ ] Remaining scaffold crates: hf-bot, hf-mcp, hf-scheduler, hf-knowledge,
+  hf-skills (thin), hf-hooks, hf-journal, hf-tools (skeleton), hf-test-utils.
 
 ## Cross-cutting
 
