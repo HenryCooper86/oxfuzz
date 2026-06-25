@@ -428,6 +428,44 @@ impl hf_agent::EventSink for TauriEventSink {
     }
 }
 
+/// A guardrail [`ApprovalGate`](hf_guardrails::ApprovalGate) that asks the user
+/// via the GUI: it emits `chat:permission_request` and blocks until the
+/// frontend answers through `chat_answer_permission`. A dropped channel (e.g.
+/// the window closing) denies by default.
+struct GuiApprovalGate {
+    app: tauri::AppHandle,
+    pending: std::sync::Arc<crate::state::PendingApprovals>,
+}
+
+#[async_trait::async_trait]
+impl hf_guardrails::ApprovalGate for GuiApprovalGate {
+    async fn request_approval(&self, action: &hf_guardrails::Action, reason: &str) -> bool {
+        use tauri::Emitter;
+        let id = uuid::Uuid::new_v4();
+        let rx = self.pending.register(id).await;
+        let _ = self.app.emit(
+            "chat:permission_request",
+            serde_json::json!({
+                "id": id.to_string(),
+                "action": action.label(),
+                "reason": reason,
+            }),
+        );
+        rx.await.unwrap_or(false)
+    }
+}
+
+/// Resolve a pending HITL approval request with the user's decision.
+#[tauri::command]
+pub async fn chat_answer_permission(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+    approved: bool,
+) -> Result<bool, String> {
+    let uid = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    Ok(state.pending_approvals.resolve(uid, approved).await)
+}
+
 /// Create a new persistent conversation session and return its id.
 ///
 /// Returns `None` when no database is configured (chat still works, but turns
@@ -485,7 +523,17 @@ pub async fn chat_agent(
             .collect()
     };
 
-    let agent = hf_agent::Agent::new(state.container.clone(), project);
+    // Run with an interactive guardrail gate: high-risk tool calls (e.g. run a
+    // fuzzer) prompt the user via `chat:permission_request` before executing.
+    let gate = std::sync::Arc::new(GuiApprovalGate {
+        app: app.clone(),
+        pending: state.pending_approvals.clone(),
+    });
+    let guardrails =
+        hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
+    let container = state.container.clone().with_guardrails(guardrails);
+
+    let agent = hf_agent::Agent::new(container, project);
     let sink = TauriEventSink { app };
     let answer = agent
         .run_turn(history, &message, &sink)

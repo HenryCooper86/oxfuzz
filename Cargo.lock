@@ -2164,6 +2164,7 @@ dependencies = [
  "hf-crash",
  "hf-discovery",
  "hf-engine",
+ "hf-guardrails",
  "hf-harness",
  "hf-provider",
  "hf-runtime",
