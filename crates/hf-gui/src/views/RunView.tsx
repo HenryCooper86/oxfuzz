@@ -8,7 +8,7 @@ import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Play, Loader2, Activity, AlertTriangle, FolderOpen } from "lucide-react";
 
-export function RunView() {
+export function RunView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject, setActiveProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { sandboxArch } = usePrefs();
@@ -17,7 +17,9 @@ export function RunView() {
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
   const { log, stats: liveStats, summary, running, runFuzzer, runSyzkaller } = useRunOutput();
-  const [project, setProject] = useState(activeProject);
+  // Embedded in the workflow, the project comes from the workflow's gate.
+  const [localProject, setLocalProject] = useState(activeProject);
+  const project = embedded ? activeProject : localProject;
   const [target, setTarget] = useState(sharedTarget || "");
   const [engine, setEngine] = useState(sharedEngine || "libfuzzer");
   const [duration, setDuration] = useState("60");
@@ -46,7 +48,7 @@ export function RunView() {
   async function browse() {
     const path = await pickFolder();
     if (path) {
-      setProject(path);
+      setLocalProject(path);
       setActiveProject(path); // persist immediately so it survives navigation
     }
   }
@@ -82,34 +84,40 @@ export function RunView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <h1 className="text-xl font-semibold">Fuzz Run</h1>
-      <p className="text-sm text-text-secondary">
-        {isSyz
-          ? "Drive a syzkaller kernel-fuzzing campaign in the sandbox via syz-manager against a KCOV kernel + rootfs."
-          : "Compile a harness in the sandbox and drive a fuzzing engine against the target."}
-      </p>
+      {!embedded && (
+        <>
+          <h1 className="text-xl font-semibold">Fuzz Run</h1>
+          <p className="text-sm text-text-secondary">
+            {isSyz
+              ? "Drive a syzkaller kernel-fuzzing campaign in the sandbox via syz-manager against a KCOV kernel + rootfs."
+              : "Compile a harness in the sandbox and drive a fuzzing engine against the target."}
+          </p>
+        </>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="flex flex-col gap-1">
-          <Label>Project</Label>
-          <div className="flex gap-1">
-            <input
-              type="text"
-              placeholder="/path/to/project"
-              value={project}
-              onChange={(e) => setProject(e.target.value)}
-              className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-              style={{ fontFamily: "var(--font-mono)" }}
-            />
-            <button
-              onClick={browse}
-              className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary"
-              title="Browse for folder"
-            >
-              <FolderOpen size={14} />
-            </button>
+        {!embedded && (
+          <div className="flex flex-col gap-1">
+            <Label>Project</Label>
+            <div className="flex gap-1">
+              <input
+                type="text"
+                placeholder="/path/to/project"
+                value={project}
+                onChange={(e) => setLocalProject(e.target.value)}
+                className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
+                style={{ fontFamily: "var(--font-mono)" }}
+              />
+              <button
+                onClick={browse}
+                className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary"
+                title="Browse for folder"
+              >
+                <FolderOpen size={14} />
+              </button>
+            </div>
           </div>
-        </div>
+        )}
         {!isSyz && (
           <div className="flex flex-col gap-1">
             <Label>Target Symbol{compiled && <span style={{ color: "var(--success)", marginLeft: "8px" }}> (compiled)</span>}</Label>
