@@ -1,21 +1,20 @@
 // ---------------------------------------------------------------------------
 // ProvidersTab -- provider list + per-provider detail form (modeled on y-agent).
-// Loads/saves the structured provider pool via the get_providers/set_providers
-// backend commands.
+// Controlled: the parsed provider pool (Provider[]) is owned by the SettingsView
+// orchestrator and passed via props. The single global "Save Changes" button in
+// the header persists it (via set_providers) -- this tab has no Save button.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Plus, Copy, ChevronUp, ChevronDown, X, Eye, EyeOff, Search, CheckCircle2, XCircle } from "lucide-react";
-import { getTransport } from "../../lib";
 import { ProviderBrandIcon } from "../common/ProviderBrandIcon";
-import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
-interface Provider {
+export interface Provider {
   id: string;
   provider_type: string;
   model: string;
@@ -67,101 +66,54 @@ function emptyProvider(): Provider {
   };
 }
 
-export function ProvidersTab() {
-  const { toast } = useToast();
-  const [providers, setProviders] = useState<Provider[]>([]);
+export function ProvidersTab({
+  value,
+  onChange,
+}: {
+  value: Provider[];
+  onChange: (next: Provider[]) => void;
+}) {
+  const providers = value;
   const [active, setActive] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    getTransport()
-      .invoke<Provider[]>("get_providers")
-      .then((list) => setProviders(list))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
 
   function update(i: number, patch: Partial<Provider>) {
-    setProviders((prev) => prev.map((p, idx) => (idx === i ? { ...p, ...patch } : p)));
-    setDirty(true);
+    onChange(providers.map((p, idx) => (idx === i ? { ...p, ...patch } : p)));
   }
   function add() {
-    setProviders((prev) => {
-      setActive(prev.length);
-      return [...prev, emptyProvider()];
-    });
-    setDirty(true);
+    onChange([...providers, emptyProvider()]);
+    setActive(providers.length);
   }
   function duplicate() {
-    setProviders((prev) => {
-      const s = prev[active];
-      if (!s) return prev;
-      const next = [...prev];
-      next.splice(active + 1, 0, { ...s, id: `${s.id}-copy` });
-      return next;
-    });
-    setActive((a) => a + 1);
-    setDirty(true);
+    const s = providers[active];
+    if (!s) return;
+    const next = [...providers];
+    next.splice(active + 1, 0, { ...s, id: `${s.id}-copy` });
+    onChange(next);
+    setActive(active + 1);
   }
   function remove(i: number) {
-    setProviders((prev) => prev.filter((_, idx) => idx !== i));
+    onChange(providers.filter((_, idx) => idx !== i));
     setActive((a) => Math.max(0, a > i ? a - 1 : Math.min(a, providers.length - 2)));
-    setDirty(true);
   }
   function moveUp() {
     if (active <= 0) return;
-    setProviders((prev) => {
-      const n = [...prev];
-      [n[active - 1], n[active]] = [n[active], n[active - 1]];
-      return n;
-    });
-    setActive((a) => a - 1);
-    setDirty(true);
+    const n = [...providers];
+    [n[active - 1], n[active]] = [n[active], n[active - 1]];
+    onChange(n);
+    setActive(active - 1);
   }
   function moveDown() {
     if (active >= providers.length - 1) return;
-    setProviders((prev) => {
-      const n = [...prev];
-      [n[active], n[active + 1]] = [n[active + 1], n[active]];
-      return n;
-    });
-    setActive((a) => a + 1);
-    setDirty(true);
-  }
-
-  async function save() {
-    setSaving(true);
-    try {
-      await getTransport().invoke("set_providers", { providers });
-      setDirty(false);
-      toast({ title: "Saved", description: "Providers written to providers.toml", variant: "success" });
-    } catch (e) {
-      toast({ title: "Save failed", description: String(e), variant: "error" });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (loading) {
-    return (
-      <div className="text-text-muted text-sm" style={{ padding: "var(--space-md)" }}>
-        Loading…
-      </div>
-    );
+    const n = [...providers];
+    [n[active], n[active + 1]] = [n[active + 1], n[active]];
+    onChange(n);
+    setActive(active + 1);
   }
 
   const cur = providers[active];
 
   return (
     <div className="flex flex-col">
-      <div className="flex justify-end" style={{ marginBottom: "var(--space-md)" }}>
-        <Button variant="primary" size="sm" onClick={save} disabled={!dirty || saving} loading={saving}>
-          Save Changes
-        </Button>
-      </div>
-
       <div className="flex gap-5">
         {/* Provider list */}
         <div style={{ width: "210px", flexShrink: 0 }}>
