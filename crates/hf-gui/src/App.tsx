@@ -20,14 +20,14 @@ import { CorpusView } from "./views/CorpusView";
 import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
-import { ProjectProvider } from "./providers/ProjectContext";
+import { ProjectProvider, useProject } from "./providers/ProjectContext";
 import { PipelineProvider, usePipeline } from "./providers/PipelineContext";
 import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
 import { RunStatusProvider } from "./providers/RunStatusContext";
 import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider, useTarget } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
-import { isTauriEnvironment } from "./lib";
+import { isTauriEnvironment, pickFolder } from "./lib";
 import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
@@ -44,17 +44,32 @@ function AppInner() {
   const { theme, setTheme } = usePrefs();
   const { reset: resetPipeline } = usePipeline();
   const { reset: resetTarget } = useTarget();
+  const { setActiveProject } = useProject();
   const [activeView, setActiveView] = useState<ViewType>("chat");
-  // Bumping this key remounts ChatView, clearing the conversation for a new task.
+  // Bumping this key remounts ChatView, clearing the conversation for a new target.
   const [chatResetKey, setChatResetKey] = useState(0);
 
-  // "New task": clear the chat conversation, reset pipeline progress, and return
-  // to the AI Chat welcome screen -- a fresh start, not a jump into Run.
-  const startNewTask = () => {
+  // "New fuzzing target": pick a project folder, make it active, clear any
+  // prior pipeline/target/chat state, and land on Discover to pick a function
+  // to fuzz. Cancelling the picker is a no-op.
+  const startNewTarget = async () => {
+    const path = await pickFolder();
+    if (!path) return;
+    setActiveProject(path);
     resetPipeline();
     resetTarget();
     setChatResetKey((k) => k + 1);
-    setActiveView("chat");
+    setActiveView("discover");
+  };
+
+  // Switch the active fuzzing target to an existing project. Pipeline/target
+  // state is global, so reset it to avoid carrying one project's progress into
+  // another, then land on the workflow overview.
+  const selectTarget = (path: string) => {
+    setActiveProject(path);
+    resetPipeline();
+    resetTarget();
+    setActiveView("workflow");
   };
   const [showDiag, setShowDiag] = useState(false);
   const [showObs, setShowObs] = useState(false);
@@ -91,7 +106,7 @@ function AppInner() {
           />
         ) : (
           <>
-          {sidebarOpen && <Sidebar activeView={activeView} onNavigate={setActiveView} onNewTask={startNewTask} />}
+          {sidebarOpen && <Sidebar activeView={activeView} onNavigate={setActiveView} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
           <div className="app-main flex flex-1 flex-col min-w-0">
             <Header
               title={viewTitles[activeView]}
