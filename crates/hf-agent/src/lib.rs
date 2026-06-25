@@ -111,7 +111,10 @@ you receive its result and continue until you can give a final answer."
         });
 
         for _ in 0..self.max_iterations {
-            let resp = pool.complete(ROUTE_TAGS, messages.clone()).await?;
+            // Trim history to the context budget before each call so long
+            // multi-turn conversations don't overflow the model window.
+            let trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
+            let resp = pool.complete(ROUTE_TAGS, trimmed).await?;
             let content = resp.content.trim().to_owned();
 
             let Some(step) = parse_step(&content) else {

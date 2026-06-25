@@ -428,11 +428,31 @@ impl hf_agent::EventSink for TauriEventSink {
     }
 }
 
+/// Create a new persistent conversation session and return its id.
+///
+/// Returns `None` when no database is configured (chat still works, but turns
+/// are not persisted server-side).
+#[tauri::command]
+pub async fn create_session(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<Option<String>, String> {
+    use hf_core::session::SessionStore;
+    let Some(sessions) = state.container.session_store() else {
+        return Ok(None);
+    };
+    let id = sessions.create(None).await.map_err(|e| e.to_string())?;
+    Ok(Some(id.0.to_string()))
+}
+
 /// Run an autonomous agent turn over the active project.
 ///
 /// The agent reasons and calls fuzzing tools (discover/harness/run/triage/
 /// corpus) via the guardrail-gated service container, streaming progress to the
 /// frontend via `chat:event`. Returns the final assistant answer.
+///
+/// When `session_id` is supplied and a database is configured, history is
+/// loaded from and the turn is persisted to that session (server-side memory);
+/// otherwise the frontend-supplied `history` is used and nothing is persisted.
 #[tauri::command]
 pub async fn chat_agent(
     app: tauri::AppHandle,
@@ -440,22 +460,61 @@ pub async fn chat_agent(
     message: String,
     project: Option<String>,
     history: Option<Vec<ChatTurn>>,
+    session_id: Option<String>,
 ) -> Result<String, String> {
+    use hf_core::session::SessionStore;
     let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
-    let history: Vec<hf_core::types::Message> = history
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| hf_core::types::Message {
-            role: parse_role(&t.role),
-            content: t.content,
-        })
-        .collect();
+
+    // Resolve a persistent session if one was requested and available.
+    let session = session_id
+        .filter(|s| !s.is_empty())
+        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        .map(hf_core::types::Id)
+        .zip(state.container.session_store());
+
+    let history: Vec<hf_core::types::Message> = if let Some((id, sessions)) = session {
+        sessions.history(id).await.map_err(|e| e.to_string())?
+    } else {
+        history
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| hf_core::types::Message {
+                role: parse_role(&t.role),
+                content: t.content,
+            })
+            .collect()
+    };
+
     let agent = hf_agent::Agent::new(state.container.clone(), project);
     let sink = TauriEventSink { app };
-    agent
+    let answer = agent
         .run_turn(history, &message, &sink)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Persist the turn (user + assistant) when a session is active.
+    if let Some((id, sessions)) = session {
+        let _ = sessions
+            .append(
+                id,
+                hf_core::types::Message {
+                    role: hf_core::types::Role::User,
+                    content: message,
+                },
+            )
+            .await;
+        let _ = sessions
+            .append(
+                id,
+                hf_core::types::Message {
+                    role: hf_core::types::Role::Assistant,
+                    content: answer.clone(),
+                },
+            )
+            .await;
+    }
+
+    Ok(answer)
 }
 
 // ---------------------------------------------------------------------------

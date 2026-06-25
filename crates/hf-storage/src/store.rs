@@ -442,6 +442,83 @@ impl Store {
             .map(|r| json_col(&r, "data_json"))
             .collect()
     }
+
+    // -- sessions -----------------------------------------------------------
+
+    /// Create a conversation session (optionally a child of `parent`) and
+    /// return its id.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn create_session(
+        &self,
+        parent: Option<Uuid>,
+        created_at: DateTime<Utc>,
+    ) -> Result<Uuid, StorageError> {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sessions (id, parent_id, title, created_at) VALUES (?1, ?2, NULL, ?3)",
+        )
+        .bind(id.to_string())
+        .bind(parent.map(|p| p.to_string()))
+        .bind(created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Append a message to a session. The sequence number is assigned
+    /// automatically as `max(seq) + 1`.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn append_message(
+        &self,
+        session: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let next_seq: i64 = sqlx::query(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM messages WHERE session_id = ?1",
+        )
+        .bind(session.to_string())
+        .fetch_one(&self.pool)
+        .await?
+        .try_get("next")?;
+        sqlx::query(
+            "INSERT INTO messages (id, session_id, seq, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session.to_string())
+        .bind(next_seq)
+        .bind(role)
+        .bind(content)
+        .bind(created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Return a session's messages as `(role, content)` pairs, oldest first.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn session_history(
+        &self,
+        session: Uuid,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY seq ASC",
+        )
+        .bind(session.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| Ok((r.try_get("role")?, r.try_get("content")?)))
+            .collect()
+    }
 }
 
 // -- helpers ----------------------------------------------------------------

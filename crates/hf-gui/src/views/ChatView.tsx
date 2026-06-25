@@ -35,7 +35,25 @@ export function ChatView() {
   const [attached, setAttached] = useState<string>(activeProject);
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState<string>("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Create a persistent conversation session once (server-side memory). Falls
+  // back to frontend-replayed history when no database is configured.
+  useEffect(() => {
+    let cancelled = false;
+    getTransport()
+      .invoke<string | null>("create_session")
+      .then((id) => {
+        if (!cancelled) setSessionId(id);
+      })
+      .catch(() => {
+        /* no DB configured; chat still works via replayed history */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Populate the model selector from the configured provider pool, preferring
   // the model the user picked during setup.
@@ -123,6 +141,7 @@ export function ChatView() {
         message: text,
         project: activeProject || null,
         history,
+        sessionId,
       });
       setMessages((m) => [
         ...m,
