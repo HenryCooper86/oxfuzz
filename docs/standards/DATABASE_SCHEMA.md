@@ -1,11 +1,18 @@
 # Database Schema
 
-Status: **draft**. Scope: `hf-storage`.
+Status: **implemented**. Scope: `hf-storage`.
 
 ## 1. Storage
 
 SQLite (embedded via `sqlx`). Path from `HF_DB_PATH` (default
-`data/hobot_fuzz.db`).
+`data/hobot_fuzz.db`). The `Store` type opens (creating if missing) the
+database and applies forward-only migrations on connect.
+
+Every domain table carries the queryable columns listed below **plus a
+`data_json TEXT` column** holding the full serialized `hf-core` model. Queries
+that reconstruct a model read `data_json`; the dedicated columns exist for
+filtering, sorting, and inspection. This keeps the schema stable while
+preserving full-fidelity round-trips as the models evolve.
 
 ## 2. Tables
 
