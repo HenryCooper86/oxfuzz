@@ -12,16 +12,11 @@ hf-harness = { workspace = true }
 hf-engine = { workspace = true }
 hf-crash = { workspace = true }
 hf-corpus = { workspace = true }
-hf-coverage = { workspace = true }
 hf-provider = { workspace = true }
 hf-session = { workspace = true }
 hf-storage = { workspace = true }
 hf-runtime = { workspace = true }
-hf-knowledge = { workspace = true }
-hf-skills = { workspace = true }
 hf-guardrails = { workspace = true }
-hf-journal = { workspace = true }
-hf-tools = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

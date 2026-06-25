@@ -1,7 +1,6 @@
 //! Application state managed by Tauri.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use hf_service::ServiceContainer;
@@ -41,9 +40,6 @@ impl PendingApprovals {
 pub struct AppState {
     /// The service container holding all wired domain services.
     pub container: ServiceContainer,
-    /// Path to the repo root (for config + Dockerfile discovery).
-    #[allow(dead_code)]
-    pub repo_root: Option<PathBuf>,
     /// In-flight HITL approval requests awaiting a user decision.
     pub pending_approvals: Arc<PendingApprovals>,
 }
@@ -54,21 +50,7 @@ impl AppState {
     pub fn new(container: ServiceContainer) -> Self {
         Self {
             container,
-            repo_root: hf_service::repo_root(),
             pending_approvals: Arc::new(PendingApprovals::default()),
         }
     }
-}
-
-/// Resolve the `config/` directory next to the repo root (or CWD).
-#[must_use]
-pub fn config_dir() -> PathBuf {
-    hf_service::repo_root().map_or_else(
-        || {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("config")
-        },
-        |r| r.join("config"),
-    )
 }
