@@ -52,15 +52,7 @@ impl EngineRunner {
         rt: &dyn RuntimeAdapter,
         workspace: &Path,
     ) -> Result<RunResult, ClassifiedError> {
-        let args = match engine {
-            EngineKind::LibFuzzer => crate::libfuzzer::build_run_args(cfg, binary, corpus, out),
-            EngineKind::AflPlusPlus => crate::afl::build_run_args(cfg, binary, corpus, out),
-            EngineKind::Honggfuzz => crate::honggfuzz::build_run_args(cfg, binary, corpus, out),
-            EngineKind::ClusterFuzzLite => {
-                crate::clusterfuzzlite::build_run_args(cfg, binary, corpus, out)
-            }
-            EngineKind::Syzkaller => crate::syzkaller::build_run_args(cfg, binary, corpus, out),
-        };
+        let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out);
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: cfg.max_mem_mb,
             max_cpus: cfg.max_cpus,

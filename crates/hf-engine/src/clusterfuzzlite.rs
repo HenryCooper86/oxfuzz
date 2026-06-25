@@ -5,7 +5,7 @@
 //! `ClusterFuzzLite` wraps oss-fuzz build scripts. The `build_run_args`
 //! function constructs the `python3 infra/helper.py run_fuzzer` command.
 
-use hf_core::engine::{BuildArtifact, EngineKind, FuzzRunConfig};
+use hf_core::engine::FuzzRunConfig;
 
 /// Construct the `ClusterFuzzLite` run argument list.
 ///
@@ -39,75 +39,6 @@ pub fn build_run_args(
     args
 }
 
-/// The `ClusterFuzzLite` engine adapter (stub for the `FuzzEngine` trait).
+/// The `ClusterFuzzLite` engine adapter. See [`build_run_args`] and the
+/// [`EngineAdapter`](crate::registry::EngineAdapter) impl in `registry`.
 pub struct ClusterFuzzLite;
-
-impl ClusterFuzzLite {
-    #[must_use]
-    pub const fn kind() -> EngineKind {
-        EngineKind::ClusterFuzzLite
-    }
-}
-
-use async_trait::async_trait;
-use hf_core::coverage::CoverageReport;
-use hf_core::crash::Crash;
-use hf_core::engine::{FuzzEngine, FuzzRunHandle};
-use hf_core::error::ClassifiedError;
-use hf_core::harness::Harness;
-use hf_core::runtime::RuntimeAdapter;
-use hf_core::target::{Sanitizer, TargetLanguage};
-
-#[async_trait]
-impl FuzzEngine for ClusterFuzzLite {
-    fn kind(&self) -> EngineKind {
-        EngineKind::ClusterFuzzLite
-    }
-
-    fn supports(&self, lang: TargetLanguage, _san: Sanitizer) -> bool {
-        matches!(
-            lang,
-            TargetLanguage::C
-                | TargetLanguage::Cpp
-                | TargetLanguage::Rust
-                | TargetLanguage::Go
-                | TargetLanguage::Python
-        )
-    }
-
-    async fn build(
-        &self,
-        _h: &Harness,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<BuildArtifact, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "clusterfuzzlite build: not implemented".to_owned(),
-        ))
-    }
-
-    async fn run(
-        &self,
-        _cfg: &FuzzRunConfig,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<FuzzRunHandle, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "clusterfuzzlite run: not implemented".to_owned(),
-        ))
-    }
-
-    async fn minimize(
-        &self,
-        _c: &Crash,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<Crash, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "clusterfuzzlite minimize: not implemented".to_owned(),
-        ))
-    }
-
-    async fn coverage(&self, _run: &FuzzRunHandle) -> Result<CoverageReport, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "clusterfuzzlite coverage: not implemented".to_owned(),
-        ))
-    }
-}
