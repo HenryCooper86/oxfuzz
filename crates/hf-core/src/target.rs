@@ -16,6 +16,27 @@ pub enum TargetLanguage {
     Python,
 }
 
+impl std::str::FromStr for TargetLanguage {
+    type Err = String;
+
+    /// Parse a language name (case-insensitive, with common aliases). Unknown
+    /// names are rejected so entrypoints fail uniformly rather than silently
+    /// defaulting to C.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "c" => Ok(Self::C),
+            "cpp" | "c++" | "cxx" => Ok(Self::Cpp),
+            "rust" | "rs" => Ok(Self::Rust),
+            "go" | "golang" => Ok(Self::Go),
+            "python" | "py" => Ok(Self::Python),
+            other => Err(format!(
+                "unknown target language '{other}' (expected one of: \
+                 c, cpp, rust, go, python)"
+            )),
+        }
+    }
+}
+
 /// The kind of fuzzing target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetKind {
