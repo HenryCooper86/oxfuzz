@@ -2156,6 +2156,8 @@ name = "hf-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "hf-agent",
  "hf-core",
  "hf-corpus",
  "hf-crash",

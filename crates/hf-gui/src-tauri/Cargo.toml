@@ -25,6 +25,7 @@ toml = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
@@ -45,6 +46,7 @@ hf-corpus = { workspace = true }
 hf-runtime = { workspace = true }
 hf-service = { workspace = true }
 hf-provider = { workspace = true }
+hf-agent = { workspace = true }
 
 [lints]
 workspace = true

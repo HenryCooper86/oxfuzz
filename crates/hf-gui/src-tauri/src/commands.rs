@@ -385,7 +385,7 @@ pub fn host_arch() -> String {
 // Chat (LLM-backed)
 // ---------------------------------------------------------------------------
 
-/// Send a chat message to the LLM provider pool and return the response.
+/// Send a single-turn chat message to the LLM provider pool (no tools).
 #[tauri::command]
 pub async fn chat_send(
     state: tauri::State<'_, crate::state::AppState>,
@@ -394,6 +394,66 @@ pub async fn chat_send(
     state
         .container
         .chat_send(&message)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A prior chat message passed from the frontend as agent history.
+#[derive(Debug, Deserialize)]
+pub struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
+fn parse_role(role: &str) -> hf_core::types::Role {
+    match role.to_ascii_lowercase().as_str() {
+        "system" => hf_core::types::Role::System,
+        "assistant" => hf_core::types::Role::Assistant,
+        "tool" => hf_core::types::Role::Tool,
+        _ => hf_core::types::Role::User,
+    }
+}
+
+/// An [`EventSink`](hf_agent::EventSink) that forwards agent events to the
+/// frontend as `chat:event` Tauri events for live rendering.
+struct TauriEventSink {
+    app: tauri::AppHandle,
+}
+
+#[async_trait::async_trait]
+impl hf_agent::EventSink for TauriEventSink {
+    async fn emit(&self, event: hf_agent::AgentEvent) {
+        use tauri::Emitter;
+        let _ = self.app.emit("chat:event", &event);
+    }
+}
+
+/// Run an autonomous agent turn over the active project.
+///
+/// The agent reasons and calls fuzzing tools (discover/harness/run/triage/
+/// corpus) via the guardrail-gated service container, streaming progress to the
+/// frontend via `chat:event`. Returns the final assistant answer.
+#[tauri::command]
+pub async fn chat_agent(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    message: String,
+    project: Option<String>,
+    history: Option<Vec<ChatTurn>>,
+) -> Result<String, String> {
+    let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
+    let history: Vec<hf_core::types::Message> = history
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| hf_core::types::Message {
+            role: parse_role(&t.role),
+            content: t.content,
+        })
+        .collect();
+    let agent = hf_agent::Agent::new(state.container.clone(), project);
+    let sink = TauriEventSink { app };
+    agent
+        .run_turn(history, &message, &sink)
         .await
         .map_err(|e| e.to_string())
 }
