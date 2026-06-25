@@ -385,15 +385,14 @@ pub fn host_arch() -> String {
 // Chat (LLM-backed)
 // ---------------------------------------------------------------------------
 
-/// Clone the service container, picking up a freshly-saved provider config when
-/// the startup bootstrap had none. This lets a key entered in Settings ->
-/// Providers take effect on the next chat without restarting the app.
+/// Clone the service container, always preferring the current provider config
+/// from disk. This makes Settings -> Providers edits (key, base URL, model)
+/// take effect on the next chat without restarting the app, even if the startup
+/// bootstrap had cached a different (or broken) provider.
 fn container_with_provider(state: &crate::state::AppState) -> hf_service::ServiceContainer {
     let container = state.container.clone();
-    if container.provider_pool().is_none() {
-        if let Some(pool) = hf_service::provider_pool_from_config() {
-            return container.with_provider_pool(pool);
-        }
+    if let Some(pool) = hf_service::provider_pool_from_config() {
+        return container.with_provider_pool(pool);
     }
     container
 }
