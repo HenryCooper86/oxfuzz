@@ -60,6 +60,41 @@ pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
     Some((cover, executed, crashes))
 }
 
+/// Parse every progress event present in a single line.
+///
+/// Unlike [`parse_progress_line`] (which returns the first match), a libFuzzer
+/// pulse line carries both coverage and exec/s, so this can yield several
+/// events -- useful for live stat updates as the fuzzer streams output.
+#[must_use]
+pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
+    let lower = line.to_ascii_lowercase();
+    let mut events = Vec::new();
+    if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
+        if let Some(edges) =
+            parse_number_near(line, "cov").or_else(|| parse_number_near(line, "edges"))
+        {
+            events.push(FuzzProgress::EdgesCovered(edges));
+        }
+    }
+    if lower.contains("exec/s") || lower.contains("execs/sec") || lower.contains("execs:") {
+        if let Some(eps) = parse_number_near(line, "exec") {
+            events.push(FuzzProgress::ExecsPerSec(eps as f64));
+        }
+    }
+    // A real crash artifact line, not the literal "crashes 0" status token.
+    if (lower.contains("crash")
+        || lower.contains("addresssanitizer")
+        || lower.contains("ubsan")
+        || lower.contains("sigsegv")
+        || lower.contains("sigabrt"))
+        && !lower.contains("crashes 0")
+        && !lower.contains("crashes: 0")
+    {
+        events.push(FuzzProgress::CrashesFound(1));
+    }
+    events
+}
+
 /// Parse a full stdout buffer into a list of progress events.
 #[must_use]
 pub fn parse_progress(stdout: &str) -> Vec<FuzzProgress> {
@@ -119,7 +154,38 @@ fn first_number(s: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_syzkaller_status;
+    use super::{parse_progress_events, parse_syzkaller_status};
+    use hf_core::engine::FuzzProgress;
+
+    #[test]
+    fn libfuzzer_pulse_line_yields_edges_and_execs() {
+        // A real libFuzzer line carries both coverage and exec/s.
+        let line =
+            "#131072 pulse cov: 58 ft: 406 corp: 215/64Kb lim: 4096 exec/s: 43690 rss: 546Mb";
+        let events = parse_progress_events(line);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::EdgesCovered(58))));
+        assert!(events.iter().any(
+            |e| matches!(e, FuzzProgress::ExecsPerSec(v) if (*v - 43690.0).abs() < f64::EPSILON)
+        ));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::CrashesFound(_))));
+    }
+
+    #[test]
+    fn crash_line_is_detected_but_not_zero_status() {
+        assert!(
+            parse_progress_events("SUMMARY: AddressSanitizer: heap-buffer-overflow")
+                .iter()
+                .any(|e| matches!(e, FuzzProgress::CrashesFound(_)))
+        );
+        // The literal "crashes 0" status token is not a crash event.
+        assert!(!parse_progress_events("VMs 4, executed 100, crashes 0")
+            .iter()
+            .any(|e| matches!(e, FuzzProgress::CrashesFound(_))));
+    }
 
     #[test]
     fn parses_syz_manager_status_line() {

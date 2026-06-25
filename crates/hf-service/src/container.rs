@@ -557,8 +557,10 @@ impl ServiceContainer {
         }
 
         let runner = hf_engine::runner::EngineRunner::new();
+        // Stream progress live: `on_progress` fires for each output line and
+        // stat as the fuzzer runs, not post-hoc.
         let run_result = runner
-            .run(
+            .run_streaming(
                 engine,
                 &run_cfg,
                 &binary_str,
@@ -566,6 +568,7 @@ impl ServiceContainer {
                 "/work/out",
                 self.runtime.as_ref(),
                 &workspace,
+                on_progress,
             )
             .await;
         if let (Some(store), Some(rec)) = (&self.store, &run_record) {
@@ -579,17 +582,18 @@ impl ServiceContainer {
             }
         }
         let result = run_result?;
+        // Summarize from the parsed events. Live streaming already forwarded
+        // them to `on_progress`, so do not re-emit here.
         let mut edges = 0u64;
         let mut execs = 0.0_f64;
         let mut crashes = 0u32;
         for p in &result.progress {
             match p {
                 FuzzProgress::EdgesCovered(v) => edges = edges.max(*v),
-                FuzzProgress::ExecsPerSec(v) => execs = *v,
+                FuzzProgress::ExecsPerSec(v) => execs = execs.max(*v),
                 FuzzProgress::CrashesFound(n) => crashes += n,
                 FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
             }
-            on_progress(p.clone());
         }
         Ok(RunSummary {
             edges,
