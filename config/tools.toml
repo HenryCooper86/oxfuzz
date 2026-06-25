@@ -1,0 +1,26 @@
+# ==============================================================================
+# hobot_fuzz -- Tool Registry Configuration
+# ==============================================================================
+
+# Maximum number of tools activated per turn (LRU).
+max_active_tools = 12
+
+# Maximum output size per tool call (chars). Truncated beyond this.
+max_output_chars = 20000
+
+# Enable built-in tools.
+[builtin]
+shell_exec = true
+file_read = true
+file_write = true
+project_scan = true
+harness_build = true
+fuzz_run = true
+crash_minimize = true
+knowledge_search = true
+task = true
+
+# MCP servers (optional).
+# [[mcp_servers]]
+# name = "example"
+# command = ["node", "mcp-server.js"]

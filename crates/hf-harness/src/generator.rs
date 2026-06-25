@@ -97,15 +97,30 @@ pub async fn compile(
 
 /// Run a 60-second smoke fuzz on a compiled harness.
 ///
+/// The harness is considered valid if the fuzzer actually ran (any exec/s,
+/// libFuzzer init/done markers, or a crash). A crash found during smoke marks
+/// `passed = false` but is still a working harness; `# Errors` is only returned
+/// when no fuzzer activity is detected at all (e.g. the binary failed to exec).
+///
 /// # Errors
-/// Returns `ClassifiedError` if the smoke run finds 0 execs/sec or crashes
-/// on empty input.
+/// Returns `ClassifiedError` if the sandbox command fails or no fuzzer activity
+/// is detected in the output.
 pub async fn smoke_fuzz(
     mut harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
 ) -> Result<Harness, ClassifiedError> {
-    let binary = harness.build_cmd.output.to_string_lossy().to_string();
+    // Reference the binary by its container-internal path: the runtime mounts
+    // the workspace at `/work` (matching `EngineRunner`), so the host path is
+    // not valid inside the sandbox.
+    let binary_name = harness
+        .build_cmd
+        .output
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("fuzz_target")
+        .to_string();
+    let binary = format!("/work/{binary_name}");
     let cmd = vec![binary, "-max_total_time=60".to_owned()];
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: 2048,
@@ -114,12 +129,23 @@ pub async fn smoke_fuzz(
         env: std::collections::HashMap::new(),
     };
     let result = rt.run_command(&cmd, workspace, &limits).await?;
-    let execs = parse_execs_per_sec(&result.stdout);
-    let crashes = parse_crashes(&result.stdout);
-    if execs <= 0.0 {
+    // libFuzzer writes progress/crashes to stderr; parse both streams.
+    let combined = format!("{}\n{}", result.stdout, result.stderr);
+    let execs = parse_execs_per_sec(&combined);
+    let crashes = parse_crashes(&combined);
+    // The harness is valid if the fuzzer actually ran. A campaign that finds a
+    // crash immediately (so it reports 0 exec/s) still proves the harness
+    // exercises the target -- the crash is reported, not treated as a failure.
+    let lower = combined.to_ascii_lowercase();
+    let ran = execs > 0.0
+        || crashes > 0
+        || lower.contains("exec/s")
+        || lower.contains("inited")
+        || lower.contains("done");
+    if !ran {
         return Err(ClassifiedError::Harness(format!(
-            "smoke fuzz: 0 execs/sec; stdout: {}",
-            result.stdout
+            "smoke fuzz: no fuzzer activity detected; output: {}",
+            combined.chars().take(800).collect::<String>()
         )));
     }
     let passed = crashes == 0;
@@ -185,23 +211,28 @@ fn extract_code_block(s: &str) -> Option<String> {
 
 /// Parse execs/sec from fuzzer stdout.
 fn parse_execs_per_sec(stdout: &str) -> f64 {
-    // Look for patterns like "5000 execs/sec" or "execs_per_sec : 500.0".
+    // Match libFuzzer's "exec/s: N" as well as "5000 execs/sec" and
+    // "execs_per_sec : 500.0". libFuzzer prints exec/s many times (starting at
+    // 0 in the first sub-second window), so report the peak observed.
+    let mut max = 0.0_f64;
     for line in stdout.lines() {
         let lower = line.to_ascii_lowercase();
-        if let Some(pos) = lower.find("execs") {
-            // Try to find a number before "execs" (e.g. "5000 execs/sec").
-            let before = &line[..pos];
-            if let Some(n) = last_number(before) {
-                return n;
-            }
-            // Try after "execs" (e.g. "execs_per_sec : 500.0").
-            let after = &line[pos + "execs".len()..];
+        // libFuzzer: "#1024 pulse cov: .. exec/s: 5000 ..".
+        if let Some(pos) = lower.find("exec/s") {
+            let after = &line[pos + "exec/s".len()..];
             if let Some(n) = first_number(after) {
-                return n;
+                max = max.max(n);
+            }
+        } else if let Some(pos) = lower.find("execs") {
+            // "5000 execs/sec" (number before) or "execs_per_sec : 500.0".
+            let before = &line[..pos];
+            let after = &line[pos + "execs".len()..];
+            if let Some(n) = last_number(before).or_else(|| first_number(after)) {
+                max = max.max(n);
             }
         }
     }
-    0.0
+    max
 }
 
 fn last_number(s: &str) -> Option<f64> {
@@ -255,4 +286,34 @@ fn list_c_files(workspace: &Path, container_ws: &str) -> String {
         }
     }
     files.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_libfuzzer_exec_per_sec_peak() {
+        // libFuzzer writes "exec/s:" to stderr, starting at 0, then ramping up.
+        let log = "\
+#2 INITED cov: 12 ft: 13 corp: 1/1b exec/s: 0 rss: 30Mb
+#1024 pulse cov: 40 ft: 50 corp: 5/9b exec/s: 51200 rss: 35Mb
+#4096 pulse cov: 60 ft: 70 corp: 9/40b exec/s: 48000 rss: 36Mb";
+        // Reports the peak, not the first (0) sample.
+        assert!((parse_execs_per_sec(log) - 51200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_generic_execs_phrasing() {
+        assert!((parse_execs_per_sec("ran at 5000 execs/sec total") - 5000.0).abs() < f64::EPSILON);
+        assert!((parse_execs_per_sec("execs_per_sec : 500") - 500.0).abs() < f64::EPSILON);
+        assert!(parse_execs_per_sec("no throughput here").abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn counts_libfuzzer_crash_artifacts() {
+        let log =
+            "Test unit written to ./crash-abc\nSUMMARY: AddressSanitizer: heap-buffer-overflow";
+        assert!(parse_crashes(log) >= 1);
+    }
 }
