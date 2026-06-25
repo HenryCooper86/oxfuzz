@@ -219,9 +219,14 @@ async fn cmd_run(
     // Ensure a seed corpus exists before running.
     let _ = container.generate_seeds(&project, target);
 
-    println!("\n--- Running {engine} for {duration_secs}s ---");
+    println!("\n--- Running {engine} for {duration_secs}s (live) ---");
+    let on_progress = |p: hf_core::engine::FuzzProgress| match p {
+        hf_core::engine::FuzzProgress::LogLine(line) => println!("  {line}"),
+        hf_core::engine::FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
+        _ => {}
+    };
     let summary = container
-        .run_fuzzer(&project, target, engine_kind, duration_secs, &|_p| {})
+        .run_fuzzer(&project, target, engine_kind, duration_secs, &on_progress)
         .await?;
     println!("\n--- Run summary ---");
     println!("  execs/sec: {:.0}", summary.execs);

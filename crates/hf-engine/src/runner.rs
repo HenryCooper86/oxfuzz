@@ -41,7 +41,7 @@ impl Default for EngineRunner {
 }
 
 impl EngineRunner {
-    /// Run a fuzz campaign.
+    /// Run a fuzz campaign, collecting progress/coverage from the output.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the engine is not supported or the
@@ -55,6 +55,31 @@ impl EngineRunner {
         out: &str,
         rt: &dyn RuntimeAdapter,
         workspace: &Path,
+    ) -> Result<RunResult, ClassifiedError> {
+        self.run_streaming(engine, cfg, binary, corpus, out, rt, workspace, &|_| {})
+            .await
+    }
+
+    /// Run a fuzz campaign, invoking `on_progress` for each event **as the
+    /// fuzzer produces it** (live), in addition to returning the final result.
+    ///
+    /// Each output line is forwarded as a [`FuzzProgress::LogLine`] for a live
+    /// terminal view, plus any structured stats it carries (edges, exec/s,
+    /// crashes). A closing [`FuzzProgress::Done`] is emitted on success.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the engine is not supported or the
+    /// sandboxed command returns a non-zero exit code.
+    pub async fn run_streaming(
+        &self,
+        engine: EngineKind,
+        cfg: &FuzzRunConfig,
+        binary: &str,
+        corpus: &str,
+        out: &str,
+        rt: &dyn RuntimeAdapter,
+        workspace: &Path,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunResult, ClassifiedError> {
         let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out);
         // The sandbox wall-clock timeout must exceed the fuzzer's own run time:
@@ -70,9 +95,30 @@ impl EngineRunner {
             max_duration_secs,
             env: cfg.env.iter().cloned().collect(),
         };
-        let result = rt.run_command(&args, workspace, &limits).await?;
-        // libFuzzer writes progress to stderr; AFL++ to stdout. Parse both.
-        let combined = format!("{}\n{}", result.stdout, result.stderr);
+
+        // Accumulate the full output for the final coverage/validation pass
+        // while forwarding each line live.
+        let combined = std::sync::Mutex::new(String::new());
+        let on_line = |line: &str| {
+            if let Ok(mut buf) = combined.lock() {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            on_progress(FuzzProgress::LogLine(line.to_owned()));
+            for event in crate::progress::parse_progress_events(line) {
+                on_progress(event);
+            }
+        };
+        let result = rt
+            .run_command_streaming(&args, workspace, &limits, &on_line)
+            .await?;
+
+        let mut combined = combined.into_inner().unwrap_or_default();
+        if combined.trim().is_empty() {
+            // A runtime that did not stream anything still returns captured I/O.
+            combined = format!("{}\n{}", result.stdout, result.stderr);
+        }
+
         // libFuzzer exit codes: 0 = clean exit, 77 = crash/leak found,
         // 76 = OOM, 1 = error. 0 and 77 are valid fuzzing outcomes.
         let is_valid_outcome = result.exit_code == 0
@@ -86,9 +132,10 @@ impl EngineRunner {
                 result.stderr.chars().take(500).collect::<String>()
             )));
         }
-        let progress = parse_progress(&combined);
         let run_id = Uuid::new_v4();
+        let progress = parse_progress(&combined);
         let coverage = parse_coverage(&combined, run_id);
+        on_progress(FuzzProgress::Done);
         Ok(RunResult { progress, coverage })
     }
 }
