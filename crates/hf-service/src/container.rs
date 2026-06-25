@@ -17,6 +17,7 @@ use hf_core::harness::{BuildCommand, Harness, HarnessDraft, HarnessStatus, Smoke
 use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
+use hf_guardrails::{Action, Guardrails};
 use hf_provider::{DefaultProviderPool, OpenAiCompatProvider, ProviderConfig};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{RunRecord, RunStatus, Store};
@@ -183,6 +184,7 @@ pub struct ServiceContainer {
     provider_pool: Option<Arc<dyn ProviderPool>>,
     runtime_config: RuntimeConfig,
     store: Option<Arc<Store>>,
+    guardrails: Guardrails,
 }
 
 impl ServiceContainer {
@@ -198,6 +200,7 @@ impl ServiceContainer {
             provider_pool,
             runtime_config,
             store: None,
+            guardrails: Guardrails::permissive(),
         }
     }
 
@@ -206,6 +209,20 @@ impl ServiceContainer {
     pub fn with_store(mut self, store: Arc<Store>) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Replace the guardrail engine (e.g. install an interactive HITL gate),
+    /// returning the updated container.
+    #[must_use]
+    pub fn with_guardrails(mut self, guardrails: Guardrails) -> Self {
+        self.guardrails = guardrails;
+        self
+    }
+
+    /// The active guardrail engine.
+    #[must_use]
+    pub fn guardrails(&self) -> &Guardrails {
+        &self.guardrails
     }
 
     /// Construct the canonical container used by every presentation layer
@@ -230,6 +247,7 @@ impl ServiceContainer {
             provider_pool,
             runtime_config: RuntimeConfig::default(),
             store,
+            guardrails: Guardrails::from_env(),
         }
     }
 
@@ -350,6 +368,7 @@ impl ServiceContainer {
         target: &str,
         lang: TargetLanguage,
     ) -> Result<CompileOutcome, ClassifiedError> {
+        self.guardrails.authorize(Action::CompileHarness).await?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
@@ -397,6 +416,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<SmokeRunSummary, ClassifiedError> {
+        self.guardrails.authorize(Action::RunHarness).await?;
         let workspace = workspace_dir(project, target);
         let bin = format!("fuzz_{target}");
         let mut build_cmd = hf_harness::build_command(engine, lang, &bin);
@@ -470,6 +490,12 @@ impl ServiceContainer {
         duration_secs: u64,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
+        self.guardrails
+            .authorize(Action::RunFuzzer {
+                engine: format!("{engine:?}"),
+                duration_secs,
+            })
+            .await?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let out_dir = workspace.join("out");
@@ -568,6 +594,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
         let out_dir = workspace.join("out");
         let target_id = self
