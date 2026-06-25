@@ -161,9 +161,9 @@ export function ChatView() {
             ...m,
             { role: "system", content: `${e.name} -> ${e.summary}`, timestamp: now() },
           ]);
-        } else if (e.type === "thinking" && e.text) {
-          setMessages((m) => [...m, { role: "system", content: e.text, timestamp: now() }]);
         }
+        // "thinking" events are the model's internal reasoning -- not shown as
+        // chat messages.
       });
 
       const responseText = await transport.invoke<string>("chat_agent", {
