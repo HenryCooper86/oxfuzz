@@ -629,6 +629,289 @@ pub fn list_skills() -> Vec<SkillInfo> {
     out
 }
 
+/// Validate a file-backed entity name: alphanumeric, dash, underscore only
+/// (no path traversal). Returns the trimmed name.
+fn safe_name(name: &str) -> Result<String, String> {
+    let n = name.trim();
+    if n.is_empty()
+        || !n
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("name must be non-empty and only letters, digits, '-' or '_'".to_owned());
+    }
+    Ok(n.to_owned())
+}
+
+fn skills_dir() -> std::path::PathBuf {
+    hf_service::repo_root().map_or_else(|| std::path::PathBuf::from("skills"), |r| r.join("skills"))
+}
+
+fn agents_dir() -> std::path::PathBuf {
+    hf_service::repo_root().map_or_else(
+        || std::path::PathBuf::from("config/agents"),
+        |r| r.join("config").join("agents"),
+    )
+}
+
+// -- Skills CRUD ------------------------------------------------------------
+
+/// A skill's full content for editing: metadata + the root.md markdown body.
+#[derive(Debug, Default, Serialize)]
+pub struct SkillDetail {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub domain: Vec<String>,
+    pub content: String,
+}
+
+/// Read a skill's metadata + root.md content for editing.
+#[tauri::command]
+pub async fn read_skill(name: String) -> Result<SkillDetail, String> {
+    let name = safe_name(&name)?;
+    let dir = skills_dir().join(&name);
+    let text = std::fs::read_to_string(dir.join("skill.toml")).map_err(|e| e.to_string())?;
+    let parsed: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
+    let skill = parsed.get("skill");
+    let get = |k: &str| {
+        skill
+            .and_then(|s| s.get(k))
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let domain = skill
+        .and_then(|s| s.get("classification"))
+        .and_then(|c| c.get("domain"))
+        .and_then(toml::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let root_rel = skill
+        .and_then(|s| s.get("root"))
+        .and_then(|r| r.get("path"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("root.md");
+    let content = std::fs::read_to_string(dir.join(root_rel)).unwrap_or_default();
+    Ok(SkillDetail {
+        name,
+        description: get("description"),
+        version: get("version"),
+        domain,
+        content,
+    })
+}
+
+/// Create or update a skill: writes `skills/<name>/skill.toml` + `root.md`.
+#[tauri::command]
+pub async fn save_skill(
+    name: String,
+    description: String,
+    version: String,
+    domain: Vec<String>,
+    content: String,
+) -> Result<(), String> {
+    let name = safe_name(&name)?;
+    let dir = skills_dir().join(&name);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let version = if version.trim().is_empty() {
+        "0.1.0".to_owned()
+    } else {
+        version
+    };
+    let doc = SkillFileOut {
+        skill: SkillInnerOut {
+            name: name.clone(),
+            version,
+            description,
+            author: "hobot_fuzz".to_owned(),
+            source_format: "markdown".to_owned(),
+            classification: SkillClassOut {
+                kind: "llm_reasoning".to_owned(),
+                domain,
+                atomic: true,
+            },
+            root: SkillRootOut {
+                path: "root.md".to_owned(),
+            },
+        },
+    };
+    let toml_str = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("skill.toml"), toml_str).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("root.md"), content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SkillFileOut {
+    skill: SkillInnerOut,
+}
+#[derive(Serialize)]
+struct SkillInnerOut {
+    name: String,
+    version: String,
+    description: String,
+    author: String,
+    source_format: String,
+    classification: SkillClassOut,
+    root: SkillRootOut,
+}
+#[derive(Serialize)]
+struct SkillClassOut {
+    #[serde(rename = "type")]
+    kind: String,
+    domain: Vec<String>,
+    atomic: bool,
+}
+#[derive(Serialize)]
+struct SkillRootOut {
+    path: String,
+}
+
+/// Delete a skill directory.
+#[tauri::command]
+pub async fn delete_skill(name: String) -> Result<(), String> {
+    let name = safe_name(&name)?;
+    let dir = skills_dir().join(&name);
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// -- Agent profiles CRUD ----------------------------------------------------
+
+/// An agent profile from `config/agents/<id>.toml`.
+#[derive(Debug, Default, Serialize)]
+pub struct AgentProfile {
+    pub id: String,
+    pub model_tags: Vec<String>,
+    pub autonomy: String,
+    pub max_iterations: u32,
+    pub tools: Vec<String>,
+}
+
+/// List the live agent profiles (the editable `*.toml`, not `*.example.toml`).
+#[tauri::command]
+pub fn list_agents() -> Vec<AgentProfile> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(agents_dir()) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_toml = std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+        if !is_toml || name.ends_with(".example.toml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = toml::from_str::<toml::Value>(&text) else {
+            continue;
+        };
+        let agent = parsed.get("agent");
+        let id = agent
+            .and_then(|a| a.get("id"))
+            .and_then(toml::Value::as_str)
+            .map_or_else(|| name.trim_end_matches(".toml").to_owned(), str::to_owned);
+        let arr = |v: Option<&toml::Value>| {
+            v.and_then(toml::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        out.push(AgentProfile {
+            id,
+            model_tags: arr(agent.and_then(|a| a.get("model_tags"))),
+            autonomy: agent
+                .and_then(|a| a.get("autonomy"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or("Assist")
+                .to_owned(),
+            max_iterations: agent
+                .and_then(|a| a.get("max_iterations"))
+                .and_then(toml::Value::as_integer)
+                .unwrap_or(5) as u32,
+            tools: arr(agent
+                .and_then(|a| a.get("tools"))
+                .and_then(|t| t.get("enabled"))),
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Create or update an agent profile at `config/agents/<id>.toml`.
+#[tauri::command]
+pub async fn save_agent(
+    id: String,
+    model_tags: Vec<String>,
+    autonomy: String,
+    max_iterations: u32,
+    tools: Vec<String>,
+) -> Result<(), String> {
+    let id = safe_name(&id)?;
+    let dir = agents_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let autonomy = if autonomy.trim().is_empty() {
+        "Assist".to_owned()
+    } else {
+        autonomy
+    };
+    let doc = AgentFileOut {
+        agent: AgentInnerOut {
+            id: id.clone(),
+            model_tags,
+            autonomy,
+            max_iterations: max_iterations.clamp(1, 50),
+            tools: AgentToolsOut { enabled: tools },
+        },
+    };
+    let toml_str = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{id}.toml")), toml_str).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct AgentFileOut {
+    agent: AgentInnerOut,
+}
+#[derive(Serialize)]
+struct AgentInnerOut {
+    id: String,
+    model_tags: Vec<String>,
+    autonomy: String,
+    max_iterations: u32,
+    tools: AgentToolsOut,
+}
+#[derive(Serialize)]
+struct AgentToolsOut {
+    enabled: Vec<String>,
+}
+
+/// Delete an agent profile.
+#[tauri::command]
+pub async fn delete_agent(id: String) -> Result<(), String> {
+    let id = safe_name(&id)?;
+    let path = agents_dir().join(format!("{id}.toml"));
+    if path.is_file() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Create a new persistent conversation session and return its id.
 ///
 /// Returns `None` when no database is configured (chat still works, but turns

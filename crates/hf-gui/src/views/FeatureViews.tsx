@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, Square, Bot, Shield, Database } from "lucide-react";
+import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, Square, Bot, Shield, Database, Pencil, Save, X } from "lucide-react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -77,22 +77,143 @@ const TOOL_ICONS: Record<string, ReactNode> = {
   corpus: <Database size={16} />,
 };
 
+// -- shared form primitives -------------------------------------------------
+
+const INPUT_CLS =
+  "w-full px-2.5 py-1.5 text-sm rounded-md border border-border bg-surface-primary text-text-primary outline-none font-mono";
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs text-text-muted">
+        {label}
+        {hint && <span className="text-text-muted opacity-70"> — {hint}</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+function PrimaryBtn({ onClick, disabled, icon, children }: { onClick: () => void; disabled?: boolean; icon: ReactNode; children: ReactNode }) {
+  return (
+    <button onClick={onClick} disabled={disabled} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50" style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }}>
+      {icon}
+      {children}
+    </button>
+  );
+}
+function GhostBtn({ onClick, icon, children, title }: { onClick: () => void; icon: ReactNode; children?: ReactNode; title?: string }) {
+  return (
+    <button onClick={onClick} title={title} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary">
+      {icon}
+      {children}
+    </button>
+  );
+}
+function IconBtn({ onClick, icon, danger, title }: { onClick: () => void; icon: ReactNode; danger?: boolean; title?: string }) {
+  return (
+    <button onClick={onClick} title={title} className={`inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:bg-surface-hover ${danger ? "hover:text-error" : "hover:text-text-primary"}`}>
+      {icon}
+    </button>
+  );
+}
+function ErrorBanner({ message }: { message: string }) {
+  return (
+    <div className="text-xs rounded-md px-3 py-2" style={{ background: "var(--error-subtle, rgba(220,60,60,0.12))", color: "var(--error)", border: "1px solid var(--error)" }}>
+      {message}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Agents (runtime agent + editable profiles)
+// ---------------------------------------------------------------------------
+
+interface AgentProfile {
+  id: string;
+  model_tags: string[];
+  autonomy: string;
+  max_iterations: number;
+  tools: string[];
+}
+interface AgentDraft {
+  id: string;
+  model_tags: string;
+  autonomy: string;
+  max_iterations: number;
+  tools: string;
+  isNew: boolean;
+}
+
+const AUTONOMY_LEVELS = ["Manual", "Assist", "Auto"];
+const AGENT_TOOL_OPTIONS = ["ProjectScan", "FileRead", "KnowledgeSearch", "ShellExec", "HarnessWrite", "CorpusManage"];
+
 export function AgentsView() {
   const [info, setInfo] = useState<AgentInfo | null>(null);
+  const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const [draft, setDraft] = useState<AgentDraft | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = () => getTransport().invoke<AgentProfile[]>("list_agents").then(setProfiles).catch(() => {});
   useEffect(() => {
     let cancelled = false;
-    getTransport()
-      .invoke<AgentInfo>("agent_info")
-      .then((d) => !cancelled && setInfo(d))
-      .catch(() => {});
+    getTransport().invoke<AgentInfo>("agent_info").then((d) => !cancelled && setInfo(d)).catch(() => {});
+    getTransport().invoke<AgentProfile[]>("list_agents").then((d) => !cancelled && setProfiles(d)).catch(() => {});
     return () => {
       cancelled = true;
     };
   }, []);
 
+  function startNew() {
+    setError(null);
+    setDraft({ id: "", model_tags: "reasoning, code", autonomy: "Assist", max_iterations: 5, tools: "ProjectScan, FileRead", isNew: true });
+  }
+  function startEdit(p: AgentProfile) {
+    setError(null);
+    setDraft({ id: p.id, model_tags: p.model_tags.join(", "), autonomy: p.autonomy, max_iterations: p.max_iterations, tools: p.tools.join(", "), isNew: false });
+  }
+  const splitList = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+  async function save() {
+    if (!draft) return;
+    const id = draft.id.trim();
+    if (!id) {
+      setError("Agent id is required.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await getTransport().invoke("save_agent", {
+        id,
+        modelTags: splitList(draft.model_tags),
+        autonomy: draft.autonomy,
+        maxIterations: draft.max_iterations,
+        tools: splitList(draft.tools),
+      });
+      setDraft(null);
+      reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function del(id: string) {
+    if (!window.confirm(`Delete agent profile "${id}"?`)) return;
+    try {
+      await getTransport().invoke("delete_agent", { id });
+      reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Agent" description="The autonomous fuzzing agent — its model, safety policy, and the tools it calls to drive the pipeline." />
+      <ViewHeader title="Agents" description="The autonomous fuzzing agent (model, policy, tools) and editable sub-agent profiles." />
+
       {info && (
         <>
           <div className="grid grid-cols-3 gap-3">
@@ -100,15 +221,72 @@ export function AgentsView() {
             <Tile icon={<Activity size={16} />} label="Provider" value={info.provider_type || "—"} />
             <Tile icon={<Shield size={16} />} label="Guardrails" value={info.guardrails} />
           </div>
-          <div className="text-xs text-text-muted uppercase mt-1" style={{ letterSpacing: "0.08em" }}>
-            Tools ({info.tools.length})
-          </div>
           <div className="grid grid-cols-2 gap-3">
             {info.tools.map((t) => (
               <Card key={t.name} icon={TOOL_ICONS[t.name] ?? <Target size={16} />} title={t.name} subtitle={t.description} />
             ))}
           </div>
         </>
+      )}
+
+      <div className="flex items-center justify-between mt-2">
+        <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
+          Agent Profiles ({profiles.length})
+        </span>
+        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>New profile</PrimaryBtn>}
+      </div>
+
+      {error && !draft && <ErrorBanner message={error} />}
+
+      {draft ? (
+        <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+          {error && <ErrorBanner message={error} />}
+          <Field label="Agent id" hint="letters, digits, -, _">
+            <input className={INPUT_CLS} value={draft.id} disabled={!draft.isNew} placeholder="my-agent" onChange={(e) => setDraft({ ...draft, id: e.target.value })} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Model tags" hint="comma-separated">
+              <input className={INPUT_CLS} value={draft.model_tags} placeholder="reasoning, code" onChange={(e) => setDraft({ ...draft, model_tags: e.target.value })} />
+            </Field>
+            <Field label="Autonomy">
+              <select className={INPUT_CLS} value={draft.autonomy} onChange={(e) => setDraft({ ...draft, autonomy: e.target.value })}>
+                {AUTONOMY_LEVELS.map((a) => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Max iterations">
+              <input type="number" min={1} max={50} className={INPUT_CLS} value={draft.max_iterations} onChange={(e) => setDraft({ ...draft, max_iterations: Number(e.target.value) || 1 })} />
+            </Field>
+            <Field label="Tools" hint="comma-separated">
+              <input className={INPUT_CLS} value={draft.tools} placeholder={AGENT_TOOL_OPTIONS.slice(0, 3).join(", ")} onChange={(e) => setDraft({ ...draft, tools: e.target.value })} />
+            </Field>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>Cancel</GhostBtn>
+            <PrimaryBtn onClick={save} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>Save</PrimaryBtn>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {profiles.map((p) => (
+            <div key={p.id} className="surface-card flex items-center gap-3" style={{ padding: "var(--space-md)" }}>
+              <div className="flex items-center justify-center shrink-0 rounded-md" style={{ width: "34px", height: "34px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}>
+                <span style={{ color: "var(--accent)" }}><Bot size={16} /></span>
+              </div>
+              <div className="flex flex-col min-w-0 flex-1">
+                <span className="text-sm font-medium">{p.id}</span>
+                <span className="text-xs text-text-muted font-mono">
+                  {p.autonomy} · {p.max_iterations} iters · tags [{p.model_tags.join(", ")}] · tools [{p.tools.join(", ")}]
+                </span>
+              </div>
+              <IconBtn onClick={() => startEdit(p)} icon={<Pencil size={14} />} title="Edit" />
+              <IconBtn onClick={() => del(p.id)} icon={<Trash2 size={14} />} danger title="Delete" />
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -127,7 +305,7 @@ function Tile({ icon, label, value }: { icon: ReactNode; label: string; value: s
 }
 
 // ---------------------------------------------------------------------------
-// Skills
+// Skills (editable)
 // ---------------------------------------------------------------------------
 
 interface SkillInfo {
@@ -136,53 +314,155 @@ interface SkillInfo {
   version: string;
   domain: string[];
 }
+interface SkillDraft {
+  name: string;
+  description: string;
+  version: string;
+  domain: string;
+  content: string;
+  isNew: boolean;
+}
 
 export function SkillsView() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [draft, setDraft] = useState<SkillDraft | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reload = () => getTransport().invoke<SkillInfo[]>("list_skills").then(setSkills).catch(() => {});
   useEffect(() => {
     let cancelled = false;
     getTransport()
       .invoke<SkillInfo[]>("list_skills")
-      .then((s) => !cancelled && setSkills(s))
-      .catch(() => {})
-      .finally(() => !cancelled && setLoaded(true));
+      .then((s) => {
+        if (!cancelled) {
+          setSkills(s);
+          setLoaded(true);
+        }
+      })
+      .catch(() => !cancelled && setLoaded(true));
     return () => {
       cancelled = true;
     };
   }, []);
 
+  function startNew() {
+    setError(null);
+    setDraft({ name: "", description: "", version: "0.1.0", domain: "fuzzing", content: "# new-skill\n\nDescribe when to use this skill and the procedure to follow.\n", isNew: true });
+  }
+  async function startEdit(name: string) {
+    setError(null);
+    try {
+      const d = await getTransport().invoke<SkillDraft & { domain: string[] }>("read_skill", { name });
+      setDraft({ name: d.name, description: d.description, version: d.version, domain: (d.domain as unknown as string[]).join(", "), content: d.content, isNew: false });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  async function save() {
+    if (!draft) return;
+    const name = draft.name.trim();
+    if (!name) {
+      setError("Skill name is required.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await getTransport().invoke("save_skill", {
+        name,
+        description: draft.description,
+        version: draft.version,
+        domain: draft.domain.split(",").map((x) => x.trim()).filter(Boolean),
+        content: draft.content,
+      });
+      setDraft(null);
+      reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function del(name: string) {
+    if (!window.confirm(`Delete skill "${name}"? This removes skills/${name}/.`)) return;
+    try {
+      await getTransport().invoke("delete_skill", { name });
+      reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Skills" description="Reusable, file-backed skills the agent applies across runs (from the skills/ registry)." />
-      {loaded && skills.length === 0 && (
-        <EmptyState icon={<Puzzle size={20} />} hint="No skills found in the skills/ directory." />
-      )}
-      <div className="flex flex-col gap-2">
-        {skills.map((s) => (
-          <div key={s.name} className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
-            <div className="flex items-center justify-center shrink-0 rounded-md" style={{ width: "34px", height: "34px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}>
-              <span style={{ color: "var(--accent)" }}><Puzzle size={16} /></span>
-            </div>
-            <div className="flex flex-col min-w-0 flex-1">
-              <span className="text-sm font-medium flex items-center gap-2">
-                {s.name}
-                <span className="text-xs text-text-muted font-mono">v{s.version}</span>
-              </span>
-              <span className="text-xs text-text-secondary mt-0.5">{s.description}</span>
-              {s.domain.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {s.domain.map((d) => (
-                    <span key={d} className="text-xs px-1.5 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}>
-                      {d}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
+      <div className="flex items-center justify-between">
+        <ViewHeader title="Skills" description="Reusable, file-backed skills the agent applies across runs (skills/ registry) — add, edit, or remove them." />
+        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>New skill</PrimaryBtn>}
       </div>
+
+      {error && !draft && <ErrorBanner message={error} />}
+
+      {draft ? (
+        <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+          {error && <ErrorBanner message={error} />}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Name" hint="letters, digits, -, _">
+              <input className={INPUT_CLS} value={draft.name} disabled={!draft.isNew} placeholder="my-skill" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            </Field>
+            <Field label="Version">
+              <input className={INPUT_CLS} value={draft.version} placeholder="0.1.0" onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Description">
+            <input className={INPUT_CLS} value={draft.description} placeholder="What this skill does" onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+          </Field>
+          <Field label="Domain" hint="comma-separated tags">
+            <input className={INPUT_CLS} value={draft.domain} placeholder="fuzzing, harness-generation" onChange={(e) => setDraft({ ...draft, domain: e.target.value })} />
+          </Field>
+          <Field label="Content (root.md)">
+            <textarea className={`${INPUT_CLS} resize-y`} rows={12} value={draft.content} onChange={(e) => setDraft({ ...draft, content: e.target.value })} />
+          </Field>
+          <div className="flex gap-2 justify-end">
+            <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>Cancel</GhostBtn>
+            <PrimaryBtn onClick={save} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>Save</PrimaryBtn>
+          </div>
+        </div>
+      ) : (
+        <>
+          {loaded && skills.length === 0 && (
+            <EmptyState icon={<Puzzle size={20} />} hint="No skills yet. Click 'New skill' to author one — it's written to skills/<name>/." />
+          )}
+          <div className="flex flex-col gap-2">
+            {skills.map((s) => (
+              <div key={s.name} className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
+                <div className="flex items-center justify-center shrink-0 rounded-md" style={{ width: "34px", height: "34px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}>
+                  <span style={{ color: "var(--accent)" }}><Puzzle size={16} /></span>
+                </div>
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="text-sm font-medium flex items-center gap-2">
+                    {s.name}
+                    <span className="text-xs text-text-muted font-mono">v{s.version}</span>
+                  </span>
+                  <span className="text-xs text-text-secondary mt-0.5">{s.description}</span>
+                  {s.domain.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {s.domain.map((d) => (
+                        <span key={d} className="text-xs px-1.5 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}>
+                          {d}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <IconBtn onClick={() => startEdit(s.name)} icon={<Pencil size={14} />} title="Edit" />
+                <IconBtn onClick={() => del(s.name)} icon={<Trash2 size={14} />} danger title="Delete" />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
