@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Check, ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Minus, RotateCcw } from "lucide-react";
 import { usePipeline, PIPELINE_STAGES, type StageId } from "../providers/PipelineContext";
 
 export function ProgressPanel() {
-  const { isDone, currentStage, completed, reset } = usePipeline();
+  const { isDone, isSkipped, currentStage, completed, reset } = usePipeline();
   const [open, setOpen] = useState(true);
   const total = PIPELINE_STAGES.length;
   const doneCount = completed.length;
@@ -63,6 +63,7 @@ export function ProgressPanel() {
                   index={i + 1}
                   label={stage.label}
                   done={isDone(stage.id as StageId)}
+                  skipped={isSkipped(stage.id as StageId)}
                   current={currentStage === stage.id}
                 />
               ))}
@@ -91,13 +92,17 @@ function StepRow({
   index,
   label,
   done,
+  skipped,
   current,
 }: {
   index: number;
   label: string;
   done: boolean;
+  skipped: boolean;
   current: boolean;
 }) {
+  // A skipped stage counts as done but renders as a muted dash, not a check.
+  const marker = skipped ? <Minus size={12} /> : done ? <Check size={12} /> : index;
   return (
     <div className="flex items-center gap-2.5" style={{ padding: "6px 8px" }}>
       <span
@@ -107,22 +112,29 @@ function StepRow({
           height: "20px",
           fontSize: "11px",
           fontWeight: 600,
-          background: done ? "var(--accent)" : "transparent",
-          border: done ? "none" : `1px solid ${current ? "var(--accent)" : "var(--border)"}`,
-          color: done ? "var(--accent-contrast)" : current ? "var(--accent)" : "var(--text-muted)",
+          background: skipped ? "var(--surface-active)" : done ? "var(--accent)" : "transparent",
+          border: done || skipped ? "none" : `1px solid ${current ? "var(--accent)" : "var(--border)"}`,
+          color: skipped
+            ? "var(--text-muted)"
+            : done
+              ? "var(--accent-contrast)"
+              : current
+                ? "var(--accent)"
+                : "var(--text-muted)",
         }}
       >
-        {done ? <Check size={12} /> : index}
+        {marker}
       </span>
       <span
         className="text-sm"
         style={{
-          color: done ? "var(--text-muted)" : current ? "var(--text-primary)" : "var(--text-muted)",
+          color: done || skipped ? "var(--text-muted)" : current ? "var(--text-primary)" : "var(--text-muted)",
           fontWeight: current ? 500 : 400,
-          textDecoration: done ? "line-through" : "none",
+          textDecoration: done && !skipped ? "line-through" : "none",
         }}
       >
         {label}
+        {skipped && <span className="text-xs text-text-muted"> (skipped)</span>}
       </span>
     </div>
   );

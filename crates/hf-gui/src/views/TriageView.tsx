@@ -2,25 +2,33 @@ import { useState } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
+import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash } from "../types";
 import { Bug, Loader2, ChevronRight } from "lucide-react";
 
 export function TriageView() {
   const { activeProject } = useProject();
-  const { markDone } = usePipeline();
+  const { markDone, markSkipped } = usePipeline();
+  // The target + crash count from the most recent run, so triage scans the
+  // right workspace and we know whether there is anything to triage.
+  const { lastTarget, summary } = useRunOutput();
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
+
+  // Whether the last run produced crashes (null = no run yet this session).
+  const ranWithCrashes = summary ? summary.crashes > 0 : null;
 
   async function triage() {
     setLoading(true);
     try {
       const result = await getTransport().invoke<Crash[]>("triage", {
         project: activeProject || ".",
-        target: "",
+        target: lastTarget,
       });
       setCrashes(result);
       if (result.length > 0) markDone("triage");
+      else markSkipped("triage");
     } catch {
       setCrashes([]);
     } finally {
@@ -54,14 +62,39 @@ export function TriageView() {
         </button>
       </div>
 
+      {/* Context from the last run, so the user knows what to expect. */}
+      {summary && crashes.length === 0 && (
+        <div
+          className="surface-card text-sm"
+          style={{ padding: "var(--space-md)", borderLeft: `3px solid ${ranWithCrashes ? "var(--error)" : "var(--success)"}` }}
+        >
+          {ranWithCrashes ? (
+            <>
+              Last run{lastTarget ? ` on ${lastTarget}` : ""} reported{" "}
+              <strong>{summary.crashes}</strong> crash{summary.crashes === 1 ? "" : "es"}. Scan to ingest
+              and deduplicate them.
+            </>
+          ) : (
+            <>
+              Last run{lastTarget ? ` on ${lastTarget}` : ""} found no crashes — nothing to triage. This
+              stage was skipped.
+            </>
+          )}
+        </div>
+      )}
+
       {crashes.length === 0 && !loading && (
         <div
           className="surface-card flex flex-col items-center justify-center"
           style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
         >
           <Bug size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">No crash artifacts found.</p>
-          <p className="text-xs text-text-muted mt-1">Run a fuzz campaign first, then scan the output directory.</p>
+          <p className="text-sm text-text-muted">No crash artifacts ingested yet.</p>
+          <p className="text-xs text-text-muted mt-1">
+            {lastTarget
+              ? `Scan the output of the last run on "${lastTarget}".`
+              : "Run a fuzz campaign first, then scan the output directory."}
+          </p>
         </div>
       )}
 

@@ -1,31 +1,27 @@
-import { useState, useEffect } from "react";
-import { getTransport, pickFolder, pickFile } from "../lib";
+import { useState, useEffect, useRef } from "react";
+import { pickFolder, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useRunStatus } from "../providers/RunStatusContext";
+import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Play, Loader2, Activity, AlertTriangle, FolderOpen } from "lucide-react";
 
 export function RunView() {
   const { activeProject, setActiveProject } = useProject();
-  const { markDone } = usePipeline();
+  const { markDone, markSkipped } = usePipeline();
   const { sandboxArch } = usePrefs();
   const { setActiveEngine } = useRunStatus();
   const { target: sharedTarget, engine: sharedEngine, compiled } = useTarget();
+  // Run output (log/stats/summary/running) lives in a shared, always-mounted
+  // context, so a run keeps streaming and is preserved when you navigate away.
+  const { log, stats: liveStats, summary, running, runFuzzer, runSyzkaller } = useRunOutput();
   const [project, setProject] = useState(activeProject);
   const [target, setTarget] = useState(sharedTarget || "");
   const [engine, setEngine] = useState(sharedEngine || "libfuzzer");
   const [duration, setDuration] = useState("60");
-  const [running, setRunning] = useState(false);
-  const [log, setLog] = useState<string[]>([]);
-  const [summary, setSummary] = useState<{ edges: number; crashes: number; execs: number } | null>(null);
-  // Live stats updated in place from run:progress events while fuzzing.
-  const [liveStats, setLiveStats] = useState<{ execs: number; edges: number; crashes: number }>({
-    execs: 0,
-    edges: 0,
-    crashes: 0,
-  });
+  const logRef = useRef<HTMLDivElement>(null);
 
   // syzkaller (kernel fuzzing) campaign artifacts.
   const [kernelImage, setKernelImage] = useState("");
@@ -36,18 +32,23 @@ export function RunView() {
 
   const isSyz = engine === "syzkaller";
 
-  // Sync the shared target/engine into local state when arriving from the
-  // Harness view (or when the user picks a different target there).
+  // Note: target/engine initialize from the shared context on mount (the
+  // Harness -> Run handoff). Because switching views unmounts this component,
+  // a fresh mount always picks up the latest shared values without a syncing
+  // effect.
+
+  // Keep the live log pinned to the latest line as progress streams in.
   useEffect(() => {
-    if (sharedTarget) setTarget(sharedTarget);
-  }, [sharedTarget]);
-  useEffect(() => {
-    if (sharedEngine) setEngine(sharedEngine);
-  }, [sharedEngine]);
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [log]);
 
   async function browse() {
     const path = await pickFolder();
-    if (path) setProject(path);
+    if (path) {
+      setProject(path);
+      setActiveProject(path); // persist immediately so it survives navigation
+    }
   }
 
   async function run() {
@@ -55,66 +56,26 @@ export function RunView() {
     // Non-kernel engines require a target symbol.
     if (!isSyz && !target) return;
     setActiveProject(project);
-    setRunning(true);
     setActiveEngine(engine);
-    setLog([]);
-    setSummary(null);
-    setLiveStats({ execs: 0, edges: 0, crashes: 0 });
-    const transport = getTransport();
-    let unlisten: (() => void) | undefined;
     try {
-      setLog((l) => [
-        ...l,
-        `[${new Date().toLocaleTimeString()}] Starting ${engine}${isSyz ? "" : ` on ${target}`} for ${duration}s`,
-      ]);
-
-      // Subscribe to live progress streamed by the run command. Structured
-      // stats update the live bar in place; raw fuzzer lines fill the log.
-      unlisten = await transport.listen<{ type: string; data: unknown }>("run:progress", (ev) => {
-        const p = ev.payload;
-        if (p?.type === "ExecsPerSec") {
-          const v = Number(p.data) || 0;
-          setLiveStats((s) => ({ ...s, execs: Math.max(s.execs, v) }));
-        } else if (p?.type === "EdgesCovered") {
-          const v = Number(p.data) || 0;
-          setLiveStats((s) => ({ ...s, edges: Math.max(s.edges, v) }));
-        } else if (p?.type === "CrashesFound") {
-          setLiveStats((s) => ({ ...s, crashes: s.crashes + 1 }));
-          setLog((l) => [...l, `  ⚠ CRASH DETECTED`]);
-        } else if (p?.type === "LogLine") {
-          setLog((l) => (l.length > 500 ? [...l.slice(-500), `  ${p.data}`] : [...l, `  ${p.data}`]));
-        }
-      });
-
-      type RunResult = { edges: number; crashes: number; execs: number; exit_code: number | null };
-      const result = isSyz
-        ? await transport.invoke<RunResult>("run_syzkaller", {
-            opts: {
-              project,
-              arch: sandboxArch,
-              duration: Number(duration) || 60,
-              kernel_image: kernelImage || null,
-              disk_image: diskImage || null,
-              ssh_key: sshKey || null,
-              manager_cfg: managerCfg || null,
-              vm_count: Number(vmCount) || 2,
-            },
-          })
-        : await transport.invoke<RunResult>("run_fuzzer", {
+      const crashes = isSyz
+        ? await runSyzkaller({
             project,
-            target,
-            engine,
-            duration: Number(duration) || 60,
             arch: sandboxArch,
-          });
-      setSummary({ edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) });
-      setLog((l) => [...l, `[${new Date().toLocaleTimeString()}] Run complete (exit ${result.exit_code ?? "?"})`]);
+            duration: Number(duration) || 60,
+            kernel_image: kernelImage || null,
+            disk_image: diskImage || null,
+            ssh_key: sshKey || null,
+            manager_cfg: managerCfg || null,
+            vm_count: Number(vmCount) || 2,
+          })
+        : await runFuzzer({ project, target, engine, duration: Number(duration) || 60, arch: sandboxArch });
       markDone("run");
-    } catch (e) {
-      setLog((l) => [...l, `error: ${e}`]);
+      // If the run found no crashes, there is nothing to triage.
+      if (crashes === 0) markSkipped("triage");
+    } catch {
+      // The error is already surfaced in the run output log.
     } finally {
-      if (unlisten) unlisten();
-      setRunning(false);
       setActiveEngine(null);
     }
   }
@@ -255,6 +216,7 @@ export function RunView() {
 
       {log.length > 0 && (
         <div
+          ref={logRef}
           className="surface-card max-h-96 overflow-auto"
           style={{ padding: "var(--space-md)", fontFamily: "var(--font-mono)" }}
         >
