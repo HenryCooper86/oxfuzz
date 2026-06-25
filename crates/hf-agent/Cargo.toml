@@ -9,6 +9,7 @@ description = "Agent loop, delegation, sub-agent pools"
 hf-core = { workspace = true }
 hf-service = { workspace = true }
 hf-context = { workspace = true }
+hf-guardrails = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
