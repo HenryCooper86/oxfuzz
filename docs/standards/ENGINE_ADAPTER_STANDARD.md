@@ -4,19 +4,27 @@ Status: **active**. Scope: `hf-engine`, `hf-core`.
 
 ## 1. Contract
 
-Every engine adapter implements `FuzzEngine` from `hf-core`:
+Every engine adapter implements `EngineAdapter` from `hf-engine`. Adapters own
+only argument construction; the engine-agnostic `EngineRunner` executes the
+command via `hf-runtime` and parses progress/coverage from its output uniformly
+(`hf-engine::progress`). This keeps the sandbox-execution and output-parsing
+policy in one place rather than duplicated per engine.
 
 ```rust
-#[async_trait]
-pub trait FuzzEngine: Send + Sync {
+pub trait EngineAdapter: Send + Sync {
     fn kind(&self) -> EngineKind;
-    fn supports(&self, lang: TargetLanguage, san: Sanitizer) -> bool;
-    async fn build(&self, harness: &Harness, rt: &dyn RuntimeAdapter) -> Result<BuildArtifact>;
-    async fn run(&self, cfg: &FuzzRunConfig, rt: &dyn RuntimeAdapter) -> Result<FuzzRunHandle>;
-    async fn minimize(&self, crash: &Crash, rt: &dyn RuntimeAdapter) -> Result<Crash>;
-    async fn coverage(&self, run: &FuzzRunHandle) -> Result<CoverageReport>;
+    fn build_run_args(
+        &self,
+        cfg: &FuzzRunConfig,
+        binary: &str,   // or, for syzkaller, the manager config path
+        corpus: &str,
+        out: &str,
+    ) -> Vec<String>;
 }
 ```
+
+Register a new engine by adding its `EngineKind` variant and a match arm in
+`hf-engine::registry::adapter_for`.
 
 ## 2. Build Flags
 

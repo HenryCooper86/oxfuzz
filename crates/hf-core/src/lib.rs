@@ -19,7 +19,7 @@
 //! | [`skill`] | `SkillRegistry` | - |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
-//! | [`engine`] | `FuzzEngine`, `FuzzRunHandle` | ENGINE_ADAPTER_STANDARD.md |
+//! | [`engine`] | `EngineKind`, `FuzzRunConfig`, `FuzzProgress` | ENGINE_ADAPTER_STANDARD.md |
 //! | [`crash`] | `Crash`, `CrashReport` | crash-triage-design.md |
 //! | [`corpus`] | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 //! | [`coverage`] | `CoverageReport` | corpus-coverage-design.md |
