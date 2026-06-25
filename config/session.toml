@@ -1,0 +1,12 @@
+# ==============================================================================
+# hobot_fuzz -- Session Configuration
+# ==============================================================================
+
+# Maximum messages retained in short-term memory before compaction.
+short_term_max_messages = 50
+
+# Compaction strategy: "summarize" or "drop".
+compaction_strategy = "summarize"
+
+# Auto-archive sessions older than N days.
+auto_archive_days = 30
