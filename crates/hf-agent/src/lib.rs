@@ -1,5 +1,213 @@
-//! hf-agent: Agent loop, delegation, sub-agent pools.
+//! hf-agent: the autonomous agent loop.
 //!
-//! See `docs/standards/AGENT_AUTONOMY.md`.
+//! A ReAct-style loop drives the fuzzing tools (`hf-service`) on the model's
+//! behalf: each step the model either calls a tool or returns a final answer.
+//! Tool calls flow through the [`ServiceContainer`], so every privileged action
+//! is still guardrail-gated (AGENTS.md 2.12). Progress is streamed to an
+//! [`EventSink`] so presentation layers can render it live.
 
-#![allow(dead_code)]
+mod event;
+mod tools;
+
+use std::path::PathBuf;
+
+use hf_core::error::ClassifiedError;
+use hf_core::types::{Message, Role};
+use hf_service::ServiceContainer;
+use serde::Deserialize;
+use serde_json::Value;
+
+pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
+pub use tools::TOOL_CATALOG;
+
+/// Routing tags used when requesting completions from the provider pool.
+const ROUTE_TAGS: &[&str] = &["general", "reasoning", "code"];
+
+/// One decoded step of the model's plan.
+#[derive(Debug, Deserialize)]
+struct Step {
+    #[serde(default)]
+    thought: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    args: Option<Value>,
+    #[serde(default, rename = "final")]
+    final_answer: Option<String>,
+}
+
+/// The autonomous fuzzing agent.
+pub struct Agent {
+    container: ServiceContainer,
+    project: Option<PathBuf>,
+    max_iterations: usize,
+}
+
+impl Agent {
+    /// Create an agent bound to a service container and an optional project
+    /// root (the folder the chat is operating on).
+    #[must_use]
+    pub fn new(container: ServiceContainer, project: Option<PathBuf>) -> Self {
+        Self {
+            container,
+            project,
+            max_iterations: 8,
+        }
+    }
+
+    /// Override the maximum number of reason/act iterations per turn.
+    #[must_use]
+    pub fn with_max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = n.max(1);
+        self
+    }
+
+    fn system_prompt(&self) -> String {
+        let project = self
+            .project
+            .as_ref()
+            .map_or_else(|| "(none selected)".to_owned(), |p| p.display().to_string());
+        format!(
+            "You are hobot_fuzz, an autonomous AI fuzzing agent. You help the user \
+discover fuzzing targets, write harnesses, run fuzzers, and triage crashes by \
+calling tools. The active project is: {project}.\n\n{TOOL_CATALOG}\n\n\
+Respond with EXACTLY ONE JSON object and nothing else:\n\
+- To call a tool: {{\"thought\":\"<brief reasoning>\",\"tool\":\"<name>\",\"args\":{{...}}}}\n\
+- To answer the user: {{\"thought\":\"<brief reasoning>\",\"final\":\"<answer>\"}}\n\
+Do not wrap the JSON in code fences or add prose around it. After a tool runs \
+you receive its result and continue until you can give a final answer."
+        )
+    }
+
+    /// Run one agent turn: reason, optionally call tools, and produce a final
+    /// answer. Emits [`AgentEvent`]s to `sink` throughout.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if no provider pool is configured or an LLM
+    /// call fails. Tool failures are fed back to the model rather than
+    /// aborting the turn.
+    pub async fn run_turn(
+        &self,
+        history: Vec<Message>,
+        user_message: &str,
+        sink: &dyn EventSink,
+    ) -> Result<String, ClassifiedError> {
+        sink.emit(AgentEvent::Started).await;
+
+        let pool = self.container.provider_pool().ok_or_else(|| {
+            let msg = "no LLM provider configured (set HF_PROVIDER_API_KEY)".to_owned();
+            ClassifiedError::Provider(msg)
+        })?;
+
+        let mut messages = Vec::with_capacity(history.len() + 2);
+        messages.push(Message {
+            role: Role::System,
+            content: self.system_prompt(),
+        });
+        messages.extend(history);
+        messages.push(Message {
+            role: Role::User,
+            content: user_message.to_owned(),
+        });
+
+        for _ in 0..self.max_iterations {
+            let resp = pool.complete(ROUTE_TAGS, messages.clone()).await?;
+            let content = resp.content.trim().to_owned();
+
+            let Some(step) = parse_step(&content) else {
+                // Not a tool-protocol object: treat as the final answer.
+                sink.emit(AgentEvent::Complete {
+                    content: content.clone(),
+                })
+                .await;
+                return Ok(content);
+            };
+
+            if let Some(thought) = &step.thought {
+                if !thought.is_empty() {
+                    sink.emit(AgentEvent::Thinking {
+                        text: thought.clone(),
+                    })
+                    .await;
+                }
+            }
+
+            if let Some(answer) = step.final_answer {
+                sink.emit(AgentEvent::Complete {
+                    content: answer.clone(),
+                })
+                .await;
+                return Ok(answer);
+            }
+
+            let Some(tool) = step.tool else {
+                // No tool and no final: accept the raw content as the answer.
+                sink.emit(AgentEvent::Complete {
+                    content: content.clone(),
+                })
+                .await;
+                return Ok(content);
+            };
+
+            let args = step.args.unwrap_or(Value::Null);
+            sink.emit(AgentEvent::ToolCall {
+                name: tool.clone(),
+                args: args.clone(),
+            })
+            .await;
+
+            let result =
+                match tools::dispatch(&self.container, self.project.as_deref(), &tool, &args).await
+                {
+                    Ok(r) => r,
+                    Err(e) => format!("{{\"error\":\"{e}\"}}"),
+                };
+            sink.emit(AgentEvent::ToolResult {
+                name: tool.clone(),
+                summary: truncate(&result, 400),
+            })
+            .await;
+
+            // Record the model's action and the tool result, then continue.
+            messages.push(Message {
+                role: Role::Assistant,
+                content,
+            });
+            messages.push(Message {
+                role: Role::Tool,
+                content: format!("result of {tool}: {result}"),
+            });
+        }
+
+        let exhausted = "Reached the step limit for this turn without a final answer.".to_owned();
+        sink.emit(AgentEvent::Complete {
+            content: exhausted.clone(),
+        })
+        .await;
+        Ok(exhausted)
+    }
+}
+
+/// Parse a model reply into a [`Step`], tolerating code fences and surrounding
+/// prose by extracting the outermost JSON object.
+fn parse_step(content: &str) -> Option<Step> {
+    if let Ok(step) = serde_json::from_str::<Step>(content) {
+        return Some(step);
+    }
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<Step>(&content[start..=end]).ok()
+}
+
+/// Truncate a string to `max` chars with an ellipsis, for event summaries.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
