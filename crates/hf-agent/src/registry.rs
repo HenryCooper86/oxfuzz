@@ -94,6 +94,7 @@ Discover targets, write harnesses, run fuzzers, and triage crashes by calling to
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),
+        skills: Vec::new(),
         model_tags: Vec::new(),
         temperature: None,
         max_iterations: 16,

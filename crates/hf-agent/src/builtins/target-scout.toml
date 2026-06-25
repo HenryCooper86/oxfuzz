@@ -4,6 +4,7 @@ description = "Finds and ranks the functions in a project most worth fuzzing."
 role = "discovery"
 icon = "crosshair"
 allowed_tools = ["discover"]
+skills = ["target-triage"]
 model_tags = ["reasoning", "code"]
 temperature = 0.2
 max_iterations = 6

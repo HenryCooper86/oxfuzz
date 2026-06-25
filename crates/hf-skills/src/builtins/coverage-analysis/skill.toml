@@ -1,0 +1,19 @@
+[skill]
+name = "coverage-analysis"
+version = "0.1.0"
+description = "Judge fuzzing progress and recommend how to push coverage deeper"
+author = "hobot_fuzz"
+source_format = "markdown"
+
+[skill.classification]
+type = "llm_reasoning"
+domain = ["fuzzing", "coverage", "stagnation"]
+atomic = true
+
+[skill.constraints]
+max_input_tokens = 8000
+max_output_tokens = 2000
+
+[skill.root]
+path = "root.md"
+token_count = 360

@@ -99,6 +99,9 @@ pub struct AgentDefinition {
     /// `discover`, `harness`, `run`, `triage`, `corpus`).
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// Skill names whose playbooks are injected into this agent's context.
+    #[serde(default)]
+    pub skills: Vec<String>,
     /// Provider-routing tags. Empty falls back to the default route.
     #[serde(default)]
     pub model_tags: Vec<String>,

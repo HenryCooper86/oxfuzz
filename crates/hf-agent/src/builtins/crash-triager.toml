@@ -4,6 +4,7 @@ description = "Reproduces, classifies, and deduplicates crashes and drafts bug r
 role = "triage"
 icon = "bug"
 allowed_tools = ["triage"]
+skills = ["crash-triage"]
 model_tags = ["reasoning"]
 temperature = 0.2
 max_iterations = 6

@@ -94,8 +94,19 @@ impl Agent {
             .as_ref()
             .map_or_else(|| "(none selected)".to_owned(), |p| p.display().to_string());
         let catalog = tools::catalog_for(&self.definition.allowed_tools);
+        // Inject the playbooks the agent references. Built-in skills are always
+        // available; user skills come from the repo's `skills/` directory.
+        let skills_block = if self.definition.skills.is_empty() {
+            String::new()
+        } else {
+            let registry = hf_skills::SkillRegistry::with_user_dir(skills_dir());
+            registry
+                .render(&self.definition.skills)
+                .map(|s| format!("{s}\n\n"))
+                .unwrap_or_default()
+        };
         format!(
-            "{role}\n\nThe active project is: {project}.\n\n{catalog}\n\n\
+            "{role}\n\nThe active project is: {project}.\n\n{skills_block}{catalog}\n\n\
 Respond with EXACTLY ONE JSON object and nothing else:\n\
 - To call a tool: {{\"thought\":\"<brief reasoning>\",\"tool\":\"<name>\",\"args\":{{...}}}}\n\
 - To answer the user: {{\"thought\":\"<brief reasoning>\",\"final\":\"<answer>\"}}\n\
@@ -253,6 +264,12 @@ you receive its result and continue until you can give a final answer.",
         .await;
         Ok(exhausted)
     }
+}
+
+/// Resolve the skills directory: `<repo>/skills`, else `./skills`. User skills
+/// live here; built-in skills are embedded and always available.
+fn skills_dir() -> PathBuf {
+    hf_service::repo_root().map_or_else(|| PathBuf::from("skills"), |r| r.join("skills"))
 }
 
 /// Parse a model reply into a [`Step`], tolerating code fences, surrounding

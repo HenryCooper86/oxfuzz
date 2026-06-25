@@ -5,7 +5,7 @@ Rank functions in a codebase by their suitability for fuzzing.
 ## When to use
 
 - The user asks "what should I fuzz in this project?"
-- `hf-discovery` produces a raw candidate list that needs scoring.
+- `discover` produces a raw candidate list that needs scoring.
 
 ## Procedure
 

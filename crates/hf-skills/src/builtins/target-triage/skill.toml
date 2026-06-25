@@ -1,19 +1,19 @@
 [skill]
-name = "harness-author"
+name = "target-triage"
 version = "0.1.0"
-description = "Write a fuzzing harness for a target"
+description = "Rank functions in a project by fuzzing fit"
 author = "hobot_fuzz"
 source_format = "markdown"
 
 [skill.classification]
 type = "llm_reasoning"
-domain = ["fuzzing", "harness-generation", "code-generation"]
+domain = ["fuzzing", "static-analysis", "target-discovery"]
 atomic = true
 
 [skill.constraints]
-max_input_tokens = 16000
+max_input_tokens = 12000
 max_output_tokens = 4000
 
 [skill.root]
 path = "root.md"
-token_count = 520
+token_count = 480

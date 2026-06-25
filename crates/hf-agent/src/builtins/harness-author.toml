@@ -4,6 +4,7 @@ description = "Writes and compiles a fuzz harness for a chosen target in the san
 role = "harness-author"
 icon = "file-code"
 allowed_tools = ["discover", "harness"]
+skills = ["harness-author", "target-triage"]
 model_tags = ["reasoning", "code"]
 temperature = 0.2
 max_iterations = 8
