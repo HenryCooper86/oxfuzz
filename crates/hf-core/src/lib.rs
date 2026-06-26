@@ -24,6 +24,7 @@
 //! | [`corpus`] | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 //! | [`coverage`] | `CoverageReport` | corpus-coverage-design.md |
 
+pub mod agent;
 pub mod checkpoint;
 pub mod corpus;
 pub mod coverage;
@@ -39,4 +40,5 @@ pub mod session;
 pub mod skill;
 pub mod target;
 pub mod tool;
+pub mod trust;
 pub mod types;

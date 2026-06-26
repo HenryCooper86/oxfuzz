@@ -1,0 +1,494 @@
+//! Agent delegation traits for cross-module invocation.
+//!
+//! Design reference: `multi-agent-design.md` §Cross-Module Invocation Protocol,
+//! `AGENT_AUTONOMY.md` §2.4
+//!
+//! This module defines the `AgentDelegator` trait that enables any module
+//! to request agent delegation without depending on the `y-agent` crate directly. At runtime,
+//! `y-agent`'s `AgentPool` implements this trait and is injected into
+//! modules that need it (e.g., `y-context`, `y-session`, `y-skills`).
+
+use std::fmt::{self, Write as _};
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+use crate::provider::ResponseFormat;
+use crate::trust::TrustTier;
+
+// ---------------------------------------------------------------------------
+// Context strategy hint
+// ---------------------------------------------------------------------------
+
+/// Lightweight hint for context sharing strategy across crate boundaries.
+///
+/// Mirrors `ContextStrategy` from `y-agent` without creating a dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextStrategyHint {
+    /// Only the delegation prompt is provided.
+    #[default]
+    None,
+    /// LLM-generated summary of relevant conversation context.
+    Summary,
+    /// Specific messages matching a filter (by role, recency, keyword).
+    Filtered,
+    /// Complete conversation history up to token limit.
+    Full,
+}
+
+// ---------------------------------------------------------------------------
+// Delegation output
+// ---------------------------------------------------------------------------
+
+/// Result of a successful agent delegation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationOutput {
+    /// The text output produced by the delegated agent.
+    pub text: String,
+    /// Approximate tokens consumed during the delegation.
+    pub tokens_used: u64,
+    /// Input tokens consumed (for diagnostics breakdown).
+    pub input_tokens: u64,
+    /// Output tokens generated (for diagnostics breakdown).
+    pub output_tokens: u64,
+    /// Model that was actually used.
+    pub model_used: String,
+    /// Wall-clock duration of the delegation in milliseconds.
+    pub duration_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Delegation error
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during agent delegation.
+#[derive(Debug, thiserror::Error)]
+pub enum DelegationError {
+    /// The requested agent name was not found in the registry.
+    #[error("agent not found: '{name}'")]
+    AgentNotFound { name: String },
+
+    /// The delegation failed during execution.
+    #[error("delegation failed: {message}")]
+    DelegationFailed { message: String },
+
+    /// The delegation timed out.
+    #[error("delegation timed out after {duration_ms}ms")]
+    Timeout { duration_ms: u64 },
+
+    /// The delegation depth has been exhausted (no further nesting allowed).
+    #[error("delegation depth exhausted at depth {depth}")]
+    DepthExhausted { depth: u32 },
+}
+
+// ---------------------------------------------------------------------------
+// AgentDelegator trait
+// ---------------------------------------------------------------------------
+
+/// Trait for modules to request agent delegation without depending on `y-agent`.
+///
+/// Modules pass structured input data — the agent controls its own prompt.
+/// The agent's system prompt and reasoning strategy are defined in its `AgentDefinition`;
+/// the caller only provides the data to be processed.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // In y-context (or any other crate):
+/// async fn compact_context(
+///     delegator: &dyn AgentDelegator,
+///     messages: serde_json::Value,
+///     session_id: Option<uuid::Uuid>,
+/// ) -> Result<String, DelegationError> {
+///     let result = delegator
+///         .delegate("compaction-summarizer", messages, ContextStrategyHint::None, session_id)
+///         .await?;
+///     Ok(result.text)
+/// }
+/// ```
+#[async_trait]
+pub trait AgentDelegator: Send + Sync + fmt::Debug {
+    /// Delegate a task to a named agent with structured input data.
+    ///
+    /// `input` is the raw data the agent needs to process (e.g., messages to
+    /// summarize, experience records to analyze). The agent's own prompt template
+    /// determines how this data is presented to the LLM.
+    ///
+    /// `session_id` optionally associates the delegation trace with a specific
+    /// user session so that the subagent call appears in session-level
+    /// diagnostics. Pass `None` for session-independent operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DelegationError` if the agent is not found, the delegation fails,
+    /// times out, or the delegation depth is exhausted.
+    async fn delegate(
+        &self,
+        agent_name: &str,
+        input: serde_json::Value,
+        context_strategy: ContextStrategyHint,
+        session_id: Option<uuid::Uuid>,
+    ) -> Result<DelegationOutput, DelegationError>;
+}
+
+// ---------------------------------------------------------------------------
+// AgentRunner trait
+// ---------------------------------------------------------------------------
+
+/// Configuration for a single agent execution.
+///
+/// Built from an `AgentDefinition` and the caller's input data.
+/// Passed to [`AgentRunner::run`] to execute the agent's LLM reasoning.
+#[derive(Debug, Clone)]
+pub struct AgentRunConfig {
+    /// Agent name (for routing and logging).
+    pub agent_name: String,
+    /// The agent's system prompt (from its TOML definition).
+    pub system_prompt: String,
+    /// Structured input data from the caller.
+    pub input: serde_json::Value,
+    /// Preferred models (tried in order).
+    pub preferred_models: Vec<String>,
+    /// Fallback models if preferred are unavailable.
+    pub fallback_models: Vec<String>,
+    /// Provider routing tags (e.g. `["general"]`, `["title"]`).
+    /// Used as `required_tags` in `RouteRequest` for provider selection.
+    pub provider_tags: Vec<String>,
+    /// Ordered fallback provider tag sets used when the primary tags have no provider.
+    pub fallback_provider_tags: Vec<Vec<String>>,
+    /// Sampling temperature override (from agent definition).
+    pub temperature: Option<f64>,
+    /// Maximum tokens to generate.
+    pub max_tokens: Option<u32>,
+    /// Timeout for the entire run in seconds.
+    pub timeout_secs: u64,
+    /// Tools the agent is allowed to use (from `AgentDefinition`).
+    /// Empty = no tool calling (single-turn mode).
+    pub allowed_tools: Vec<String>,
+    /// Maximum agent loop iterations (tool-call loop limit).
+    pub max_iterations: usize,
+    /// Trust tier of the agent (for permission bypass decisions).
+    ///
+    /// When `Some(TrustTier::BuiltIn)`, the runner may auto-allow tools
+    /// listed in `allowed_tools` without consulting the global permission
+    /// policy.
+    pub trust_tier: Option<TrustTier>,
+    /// Optional pre-created trace ID from the diagnostics delegator.
+    ///
+    /// When set, the runner should forward this to the execution engine so
+    /// that per-iteration observations are recorded under this trace instead
+    /// of creating a new one.
+    pub trace_id: Option<uuid::Uuid>,
+    /// Whether to prune historical tool call pairs from `working_history`.
+    ///
+    /// This is only safe for agents whose prompt guarantees a non-empty
+    /// rolling summary in every tool-calling assistant message. Otherwise,
+    /// deleting old tool results would destroy context needed for later
+    /// iterations.
+    pub prune_tool_history: bool,
+    /// Response format for structured output (`None` = default text).
+    ///
+    /// When set, the provider enforces the response conforms to the
+    /// specified format (e.g., a JSON Schema).
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// Output from a single agent execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunOutput {
+    /// Text output produced by the agent.
+    pub text: String,
+    /// Tokens consumed during execution (input + output combined).
+    pub tokens_used: u64,
+    /// Input tokens consumed (for diagnostics breakdown).
+    pub input_tokens: u64,
+    /// Output tokens generated (for diagnostics breakdown).
+    pub output_tokens: u64,
+    /// Model that was actually used.
+    pub model_used: String,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
+// InheritedConstraints
+// ---------------------------------------------------------------------------
+
+/// Constraints inherited from a parent agent or orchestrator.
+///
+/// Propagated through delegation chains so that sub-agents respect
+/// behavioral boundaries and format conventions established by the parent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InheritedConstraints {
+    /// Directories, modules, or subsystems that are off-limits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_boundaries: Vec<String>,
+
+    /// Behavioral constraints (e.g., format rules, tool restrictions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guardrails: Vec<String>,
+
+    /// Output format conventions agreed with the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<String>,
+}
+
+impl InheritedConstraints {
+    pub fn is_empty(&self) -> bool {
+        self.scope_boundaries.is_empty()
+            && self.guardrails.is_empty()
+            && self.output_format.is_none()
+    }
+
+    pub fn to_system_prompt_section(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut section = String::from("\n\n## Inherited Constraints\n\n");
+        if !self.scope_boundaries.is_empty() {
+            section.push_str("### Off-Limits (Do NOT modify)\n");
+            for boundary in &self.scope_boundaries {
+                let _ = writeln!(section, "- {boundary}");
+            }
+            section.push('\n');
+        }
+        if !self.guardrails.is_empty() {
+            section.push_str("### Behavioral Guardrails\n");
+            for g in &self.guardrails {
+                let _ = writeln!(section, "- {g}");
+            }
+            section.push('\n');
+        }
+        if let Some(fmt) = &self.output_format {
+            let _ = writeln!(section, "### Output Format\n{fmt}\n");
+        }
+        section
+    }
+}
+
+/// Executes an agent's LLM reasoning given its configuration and input.
+///
+/// Implementations bridge agent definitions to actual `ProviderPool` calls.
+/// Injected into `AgentPool` at startup via dependency injection.
+///
+/// # Implementations
+///
+/// - `SingleTurnRunner` (in `y-provider`): `system_prompt` + input → single
+///   `ProviderPool::chat_completion()` call. Suitable for system agents
+///   (title-generator, compaction-summarizer, etc.).
+#[async_trait]
+pub trait AgentRunner: Send + Sync {
+    /// Run a single-turn agent: `system_prompt` + input → text output.
+    ///
+    /// The runner builds the appropriate `ChatRequest` from the config,
+    /// routes it to an available provider, and returns the result.
+    async fn run(&self, config: AgentRunConfig) -> Result<AgentRunOutput, DelegationError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-MA-P2-01: `AgentDelegator` trait is object-safe (can be used as `Arc<dyn AgentDelegator>`).
+    #[test]
+    fn test_agent_delegator_trait_object_safe() {
+        // This test verifies the trait is object-safe by compiling.
+        fn _assert_object_safe(_delegator: std::sync::Arc<dyn AgentDelegator>) {}
+    }
+
+    /// T-MA-P2-02: `ContextStrategyHint` serde roundtrip.
+    #[test]
+    fn test_context_strategy_hint_serde() {
+        let strategies = [
+            (ContextStrategyHint::None, "\"none\""),
+            (ContextStrategyHint::Summary, "\"summary\""),
+            (ContextStrategyHint::Filtered, "\"filtered\""),
+            (ContextStrategyHint::Full, "\"full\""),
+        ];
+
+        for (hint, expected_json) in strategies {
+            let json = serde_json::to_string(&hint).unwrap();
+            assert_eq!(json, expected_json);
+            let parsed: ContextStrategyHint = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, hint);
+        }
+    }
+
+    /// T-MA-P2-03: `DelegationOutput` fields are accessible and constructible.
+    #[test]
+    fn test_delegation_output_fields() {
+        let output = DelegationOutput {
+            text: "summarized content".to_string(),
+            tokens_used: 150,
+            input_tokens: 100,
+            output_tokens: 50,
+            model_used: "gpt-4o".to_string(),
+            duration_ms: 1200,
+        };
+
+        assert_eq!(output.text, "summarized content");
+        assert_eq!(output.tokens_used, 150);
+        assert_eq!(output.input_tokens, 100);
+        assert_eq!(output.output_tokens, 50);
+        assert_eq!(output.model_used, "gpt-4o");
+        assert_eq!(output.duration_ms, 1200);
+    }
+
+    /// T-MA-P2-04: `DelegationError` variants have correct Display output.
+    #[test]
+    fn test_delegation_error_variants() {
+        let errors: Vec<(DelegationError, &str)> = vec![
+            (
+                DelegationError::AgentNotFound {
+                    name: "test-agent".to_string(),
+                },
+                "agent not found: 'test-agent'",
+            ),
+            (
+                DelegationError::DelegationFailed {
+                    message: "LLM call failed".to_string(),
+                },
+                "delegation failed: LLM call failed",
+            ),
+            (
+                DelegationError::Timeout { duration_ms: 5000 },
+                "delegation timed out after 5000ms",
+            ),
+            (
+                DelegationError::DepthExhausted { depth: 0 },
+                "delegation depth exhausted at depth 0",
+            ),
+        ];
+
+        for (error, expected_msg) in errors {
+            assert_eq!(error.to_string(), expected_msg);
+        }
+    }
+
+    /// T-MA-P2-03b: `DelegationOutput` serde roundtrip.
+    #[test]
+    fn test_delegation_output_serde() {
+        let output = DelegationOutput {
+            text: "test output".to_string(),
+            tokens_used: 42,
+            input_tokens: 30,
+            output_tokens: 12,
+            model_used: "gpt-4o".to_string(),
+            duration_ms: 500,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: DelegationOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.text, output.text);
+        assert_eq!(parsed.tokens_used, output.tokens_used);
+        assert_eq!(parsed.input_tokens, output.input_tokens);
+        assert_eq!(parsed.output_tokens, output.output_tokens);
+        assert_eq!(parsed.model_used, output.model_used);
+        assert_eq!(parsed.duration_ms, output.duration_ms);
+    }
+
+    /// `AgentRunner` trait is object-safe.
+    #[test]
+    fn test_agent_runner_trait_object_safe() {
+        fn _assert_object_safe(_runner: std::sync::Arc<dyn AgentRunner>) {}
+    }
+
+    /// `AgentRunConfig` is constructible with all fields.
+    #[test]
+    fn test_agent_run_config_fields() {
+        let config = AgentRunConfig {
+            agent_name: "title-generator".to_string(),
+            system_prompt: "Generate a title.".to_string(),
+            input: serde_json::json!({"messages": ["hello"]}),
+            preferred_models: vec!["gpt-4o-mini".to_string()],
+            fallback_models: vec!["gpt-4o".to_string()],
+            provider_tags: vec!["title".to_string()],
+            fallback_provider_tags: vec![],
+            temperature: Some(0.3),
+            max_tokens: Some(30),
+            timeout_secs: 30,
+            allowed_tools: vec![],
+            max_iterations: 1,
+            trust_tier: None,
+            trace_id: None,
+            prune_tool_history: false,
+            response_format: None,
+        };
+        assert_eq!(config.agent_name, "title-generator");
+        assert_eq!(config.preferred_models.len(), 1);
+    }
+
+    /// `AgentRunOutput` serde roundtrip.
+    #[test]
+    fn test_agent_run_output_serde() {
+        let output = AgentRunOutput {
+            text: "My Title".to_string(),
+            tokens_used: 15,
+            input_tokens: 10,
+            output_tokens: 5,
+            model_used: "gpt-4o-mini".to_string(),
+            duration_ms: 200,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: AgentRunOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.text, output.text);
+        assert_eq!(parsed.model_used, output.model_used);
+    }
+
+    #[test]
+    fn test_inherited_constraints_is_empty() {
+        let c = InheritedConstraints::default();
+        assert!(c.is_empty());
+
+        let c = InheritedConstraints {
+            scope_boundaries: vec!["auth/".to_string()],
+            ..Default::default()
+        };
+        assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn test_inherited_constraints_to_system_prompt_section_empty() {
+        let c = InheritedConstraints::default();
+        assert_eq!(c.to_system_prompt_section(), "");
+    }
+
+    #[test]
+    fn test_inherited_constraints_to_system_prompt_section_full() {
+        let c = InheritedConstraints {
+            scope_boundaries: vec!["auth/".to_string(), "payments/".to_string()],
+            guardrails: vec!["No inline lint suppression".to_string()],
+            output_format: Some("Report in markdown bullet points".to_string()),
+        };
+        let section = c.to_system_prompt_section();
+        assert!(section.contains("## Inherited Constraints"));
+        assert!(section.contains("### Off-Limits (Do NOT modify)"));
+        assert!(section.contains("- auth/"));
+        assert!(section.contains("- payments/"));
+        assert!(section.contains("### Behavioral Guardrails"));
+        assert!(section.contains("- No inline lint suppression"));
+        assert!(section.contains("### Output Format"));
+        assert!(section.contains("Report in markdown bullet points"));
+    }
+
+    #[test]
+    fn test_inherited_constraints_serde_roundtrip() {
+        let c = InheritedConstraints {
+            scope_boundaries: vec!["auth/".to_string()],
+            guardrails: vec!["English only".to_string()],
+            output_format: Some("JSON".to_string()),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let parsed: InheritedConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn test_inherited_constraints_serde_skip_empty_fields() {
+        let c = InheritedConstraints::default();
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, "{}");
+        let parsed: InheritedConstraints = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_empty());
+    }
+}
