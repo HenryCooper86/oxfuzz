@@ -248,10 +248,10 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         <div style={{ padding: "6px 8px 0" }}>
           <button
             onClick={onBack}
-            className="flex items-center gap-2 w-full text-left rounded-md text-text-secondary hover:bg-accent-subtle hover:text-text-primary transition-all duration-150 outline-none"
-            style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500 }}
+            className="flex items-center gap-2 w-full text-left rounded-md bg-transparent border border-transparent text-text-secondary hover:bg-accent-subtle hover:text-text-primary transition-all duration-150 outline-none"
+            style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, cursor: "pointer" }}
           >
-            <ArrowLeft size={18} />
+            <ArrowLeft size={16} />
             <span>Back</span>
           </button>
         </div>
