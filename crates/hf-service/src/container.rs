@@ -658,6 +658,12 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        /// Cap on LLM bug-report drafts per triage pass: a run may surface many
+        /// distinct bugs, and one report each would fan out into hundreds of LLM
+        /// calls. Crashes beyond the cap are still ingested and persisted, just
+        /// without a drafted report.
+        const MAX_BUG_REPORT_DRAFTS: usize = 20;
+
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
         let out_dir = workspace.join("out");
@@ -701,9 +707,10 @@ impl ServiceContainer {
         let mut deduped = hf_crash::dedup(crashes);
 
         // Draft an LLM bug report for each unique crash when a provider is
-        // configured, using the captured sanitizer trace.
+        // configured, using the captured sanitizer trace (capped, see above).
         if let Some(pool) = &self.provider_pool {
-            for crash in &mut deduped {
+            let unique = deduped.len();
+            for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
                 let bridge = LlmProviderBridge::new(Arc::clone(pool));
                 let log = logs
                     .get(&crash.input_path)
@@ -714,6 +721,11 @@ impl ServiceContainer {
                     Ok(report) => crash.bug_report = Some(report),
                     Err(e) => tracing::warn!("bug report drafting failed for {}: {e}", crash.id),
                 }
+            }
+            if unique > MAX_BUG_REPORT_DRAFTS {
+                tracing::info!(
+                    "capped bug-report drafting at {MAX_BUG_REPORT_DRAFTS} of {unique} unique crashes"
+                );
             }
         }
 
