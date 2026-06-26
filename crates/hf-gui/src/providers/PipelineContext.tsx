@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { useProject } from "./ProjectContext";
 
 export const PIPELINE_STAGES = [
   { id: "discover", label: "Discover targets" },
@@ -24,38 +25,68 @@ interface PipelineContextValue {
   reset: () => void;
 }
 
+interface Progress {
+  completed: StageId[];
+  skipped: StageId[];
+}
+const EMPTY: Progress = { completed: [], skipped: [] };
+
 const PipelineContext = createContext<PipelineContextValue | null>(null);
 
 export function PipelineProvider({ children }: { children: React.ReactNode }) {
-  const [completed, setCompleted] = useState<StageId[]>([]);
-  const [skipped, setSkipped] = useState<StageId[]>([]);
+  // Progress is kept per fuzzing target (project path), so switching between
+  // targets retains each one's pipeline state instead of resetting it.
+  const { activeProject } = useProject();
+  const key = activeProject || "__none__";
+  const [byProject, setByProject] = useState<Record<string, Progress>>({});
+  const cur = byProject[key] ?? EMPTY;
 
-  const markDone = useCallback((id: StageId) => {
-    setCompleted((prev) => (prev.includes(id) ? prev : [...prev, id]));
-    setSkipped((prev) => prev.filter((s) => s !== id));
-  }, []);
+  const update = useCallback(
+    (fn: (p: Progress) => Progress) => {
+      setByProject((prev) => ({ ...prev, [key]: fn(prev[key] ?? EMPTY) }));
+    },
+    [key],
+  );
 
-  const markSkipped = useCallback((id: StageId) => {
-    setSkipped((prev) => (prev.includes(id) ? prev : [...prev, id]));
-    setCompleted((prev) => (prev.includes(id) ? prev : [...prev, id]));
-  }, []);
+  const markDone = useCallback(
+    (id: StageId) =>
+      update((p) => ({
+        completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
+        skipped: p.skipped.filter((s) => s !== id),
+      })),
+    [update],
+  );
 
-  const reset = useCallback(() => {
-    setCompleted([]);
-    setSkipped([]);
-  }, []);
+  const markSkipped = useCallback(
+    (id: StageId) =>
+      update((p) => ({
+        completed: p.completed.includes(id) ? p.completed : [...p.completed, id],
+        skipped: p.skipped.includes(id) ? p.skipped : [...p.skipped, id],
+      })),
+    [update],
+  );
 
-  const isDone = useCallback((id: StageId) => completed.includes(id), [completed]);
-  const isSkipped = useCallback((id: StageId) => skipped.includes(id), [skipped]);
+  const reset = useCallback(() => update(() => EMPTY), [update]);
+
+  const isDone = useCallback((id: StageId) => cur.completed.includes(id), [cur]);
+  const isSkipped = useCallback((id: StageId) => cur.skipped.includes(id), [cur]);
 
   const currentStage = useMemo<StageId | null>(() => {
-    const next = PIPELINE_STAGES.find((s) => !completed.includes(s.id));
+    const next = PIPELINE_STAGES.find((s) => !cur.completed.includes(s.id));
     return next ? next.id : null;
-  }, [completed]);
+  }, [cur]);
 
   const value = useMemo(
-    () => ({ completed, isDone, isSkipped, currentStage, markDone, markSkipped, reset }),
-    [completed, isDone, isSkipped, currentStage, markDone, markSkipped, reset],
+    () => ({
+      completed: cur.completed,
+      isDone,
+      isSkipped,
+      currentStage,
+      markDone,
+      markSkipped,
+      reset,
+    }),
+    [cur.completed, isDone, isSkipped, currentStage, markDone, markSkipped, reset],
   );
 
   return <PipelineContext.Provider value={value}>{children}</PipelineContext.Provider>;
