@@ -1,64 +1,66 @@
-//! hf-context: token-budget-aware prompt assembly.
+//! y-context: Context assembly pipeline, compaction, memory recall.
 //!
-//! The agent's history can grow past the model's context window. [`assemble`]
-//! trims a message list to fit a token budget while preserving order: system
-//! messages are always kept, and the most recent non-system turns are kept
-//! until the budget is exhausted (oldest dropped first).
+//! This crate provides:
+//!
+//! - [`ContextPipeline`] — ordered pipeline of context providers
+//! - [`ContextWindowGuard`] — token budget monitoring with 3 trigger modes
+//! - [`CompactionEngine`] — summarizes older messages to reclaim context space
+//! - [`repair`] — session history repair (empty, orphan, duplicate, merge)
+//! - [`RecallStore`] — memory recall via hybrid text/vector search
+//! - [`ContextMiddlewareAdapter`] — bridges `ContextProvider` to y-hooks Middleware
+//! - [`InjectContextStatus`] — pipeline stage for context budget reporting
+//!
+//! The pipeline stages (`BuildSystemPrompt`, `InjectBootstrap`, `InjectMemory`,
+//! `InjectSkills`, `InjectTools`, `LoadHistory`, `InjectContextStatus`) are
+//! implemented as [`ContextProvider`] trait objects.
 
-use hf_core::types::{Message, Role};
+pub mod simple;
+pub use simple::{assemble, estimate_tokens, total_tokens, DEFAULT_BUDGET_TOKENS};
+pub mod compaction;
+pub mod context_manager;
+pub mod context_status;
+pub mod enrichment;
+pub mod guard;
+pub mod inject_bootstrap;
+pub mod inject_memory;
+pub mod inject_tools;
+pub mod knowledge_provider;
+pub mod load_history;
+pub mod memory;
+pub mod middleware_adapter;
+pub mod pipeline;
+pub mod pruning;
+pub mod recall;
+pub mod repair;
+pub mod system_prompt;
+pub mod token_utils;
+pub mod working_memory;
 
-/// Default assembly budget in tokens (leaves headroom under a 128k window).
-pub const DEFAULT_BUDGET_TOKENS: usize = 96_000;
-
-/// Estimate the token count of a string. Uses the common ~4-chars-per-token
-/// heuristic; deliberately conservative and provider-agnostic.
-#[must_use]
-pub fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)
-}
-
-/// Total estimated tokens across a message slice.
-#[must_use]
-pub fn total_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(|m| estimate_tokens(&m.content)).sum()
-}
-
-/// Trim `messages` to fit within `max_tokens`, preserving original order.
-///
-/// System messages are always retained. Non-system messages are kept from the
-/// most recent backwards until the budget runs out; older ones are dropped. If
-/// the system messages alone exceed the budget they are still returned (the
-/// caller decides what to do with an over-budget system prompt).
-#[must_use]
-pub fn assemble(messages: &[Message], max_tokens: usize) -> Vec<Message> {
-    let system_tokens: usize = messages
-        .iter()
-        .filter(|m| matches!(m.role, Role::System))
-        .map(|m| estimate_tokens(&m.content))
-        .sum();
-
-    let mut budget = max_tokens.saturating_sub(system_tokens);
-
-    // Walk non-system messages newest-first, marking those that fit.
-    let mut keep = vec![false; messages.len()];
-    for (i, m) in messages.iter().enumerate().rev() {
-        if matches!(m.role, Role::System) {
-            keep[i] = true;
-            continue;
-        }
-        let cost = estimate_tokens(&m.content);
-        if cost <= budget {
-            budget -= cost;
-            keep[i] = true;
-        }
-        // Older messages are still considered in case they are smaller, keeping
-        // as much recent context as the budget allows.
-    }
-
-    messages
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| keep[i])
-        .map(|(_, m)| m.clone())
-        .collect()
-}
+// Re-export primary types.
+pub use compaction::{
+    CompactionConfig, CompactionEngine, CompactionLlm, CompactionResult, CompactionStrategy,
+    IdentifierPolicy,
+};
+pub use context_manager::{ContextManager, PreparedContext};
+pub use context_status::InjectContextStatus;
+pub use guard::{ContextWindowGuard, GuardMode, GuardVerdict, TokenBudget};
+pub use inject_bootstrap::{BootstrapEntry, InjectBootstrap};
+pub use inject_memory::InjectMemory;
+pub use inject_tools::InjectTools;
+pub use knowledge_provider::KnowledgeContextProvider;
+pub use load_history::LoadHistory;
+pub use middleware_adapter::{stage_priorities, ContextMiddlewareAdapter};
+pub use pipeline::{
+    AssembledContext, ContextCategory, ContextItem, ContextPipeline, ContextPipelineError,
+    ContextProvider, ContextRequest,
+};
+pub use pruning::{
+    PruningCandidate, PruningConfig, PruningEngine, PruningReport, PruningStrategy,
+    PruningStrategyMode,
+};
+pub use recall::{RecallConfig, RecallMethod, RecallStore, RecalledMemory};
+pub use repair::{repair_history, HistoryMessage, RepairReport};
+pub use system_prompt::{
+    BuildSystemPromptProvider, BunVenvPromptInfo, PythonVenvPromptInfo, SystemPromptConfig,
+    VenvPromptInfo,
+};
