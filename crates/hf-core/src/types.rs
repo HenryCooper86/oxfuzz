@@ -23,40 +23,77 @@ impl Default for Id {
     }
 }
 
+/// Strongly-typed session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(pub String);
+
+/// Strongly-typed workflow identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkflowId(pub String);
+
+/// Strongly-typed task identifier within a workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskId(pub String);
+
 /// Strongly-typed provider identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
 
-impl fmt::Display for ProviderId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+/// Strongly-typed agent identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentId(pub String);
+
+/// Strongly-typed tool name (tools are identified by name, not UUID).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ToolName(pub String);
+
+/// Strongly-typed skill identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(pub String);
+
+/// Strongly-typed memory identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MemoryId(pub String);
+
+// Implement Display + constructors for all ID types via a macro.
+macro_rules! impl_id_display {
+    ($($t:ty),*) => {
+        $(
+            impl fmt::Display for $t {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str(&self.0)
+                }
+            }
+
+            impl $t {
+                /// Create a new random identifier.
+                #[must_use]
+                pub fn new() -> Self {
+                    Self(Uuid::new_v4().to_string())
+                }
+
+                /// Create from an existing string.
+                pub fn from_string(s: impl Into<String>) -> Self {
+                    Self(s.into())
+                }
+
+                /// Get the inner string reference.
+                #[must_use]
+                pub fn as_str(&self) -> &str {
+                    &self.0
+                }
+            }
+
+            impl Default for $t {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+        )*
+    };
 }
 
-impl ProviderId {
-    /// Create a new random identifier.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4().to_string())
-    }
-
-    /// Create from an existing string.
-    pub fn from_string(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    /// Get the inner string reference.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Default for ProviderId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl_id_display!(SessionId, WorkflowId, TaskId, ProviderId, AgentId, ToolName, SkillId, MemoryId);
 
 /// A UTC timestamp.
 pub type Timestamp = DateTime<Utc>;
