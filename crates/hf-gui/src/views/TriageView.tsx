@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
@@ -19,7 +19,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   // Whether the last run produced crashes (null = no run yet this session).
   const ranWithCrashes = summary ? summary.crashes > 0 : null;
 
-  async function triage() {
+  const triage = useCallback(async () => {
     setLoading(true);
     try {
       const result = await getTransport().invoke<Crash[]>("triage", {
@@ -34,7 +34,18 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [activeProject, lastTarget, markDone, markSkipped]);
+
+  // Auto-triage: once a run completes with crashes, ingest + dedup them
+  // automatically (once per run) so the user doesn't have to click Scan. The
+  // button remains for manual re-scans.
+  const autoTriagedRef = useRef<typeof summary>(null);
+  useEffect(() => {
+    if (summary && summary.crashes > 0 && autoTriagedRef.current !== summary) {
+      autoTriagedRef.current = summary;
+      void triage();
+    }
+  }, [summary, triage]);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -75,8 +86,8 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           {ranWithCrashes ? (
             <>
               Last run{lastTarget ? ` on ${lastTarget}` : ""} reported{" "}
-              <strong>{summary.crashes}</strong> crash{summary.crashes === 1 ? "" : "es"}. Scan to ingest
-              and deduplicate them.
+              <strong>{summary.crashes}</strong> crash{summary.crashes === 1 ? "" : "es"} — ingesting
+              and deduplicating automatically. Use Scan to re-run.
             </>
           ) : (
             <>
