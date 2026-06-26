@@ -4,10 +4,7 @@ use hf_context::{assemble, estimate_tokens, total_tokens};
 use hf_core::types::{Message, Role};
 
 fn msg(role: Role, content: &str) -> Message {
-    Message {
-        role,
-        content: content.to_owned(),
-    }
+    Message::new(role, content)
 }
 
 #[test]

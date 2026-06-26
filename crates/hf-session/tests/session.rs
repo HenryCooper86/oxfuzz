@@ -18,23 +18,11 @@ async fn create_append_history_roundtrip() {
 
     let id = sessions.create(None).await.unwrap();
     sessions
-        .append(
-            id,
-            Message {
-                role: Role::User,
-                content: "discover targets".to_owned(),
-            },
-        )
+        .append(id, Message::user("discover targets"))
         .await
         .unwrap();
     sessions
-        .append(
-            id,
-            Message {
-                role: Role::Assistant,
-                content: "found parse_value".to_owned(),
-            },
-        )
+        .append(id, Message::assistant("found parse_value"))
         .await
         .unwrap();
 

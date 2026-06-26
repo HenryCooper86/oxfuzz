@@ -14,6 +14,7 @@ mod tools;
 use std::path::PathBuf;
 
 use hf_core::error::ClassifiedError;
+use hf_core::provider::{ChatRequest, RouteRequest};
 use hf_core::types::{Message, Role};
 use hf_guardrails::{LoopGuard, StepRecord};
 use hf_service::ServiceContainer;
@@ -137,15 +138,9 @@ you receive its result and continue until you can give a final answer.",
         })?;
 
         let mut messages = Vec::with_capacity(history.len() + 2);
-        messages.push(Message {
-            role: Role::System,
-            content: self.system_prompt(),
-        });
+        messages.push(Message::system(self.system_prompt()));
         messages.extend(history);
-        messages.push(Message {
-            role: Role::User,
-            content: user_message.to_owned(),
-        });
+        messages.push(Message::user(user_message.to_owned()));
 
         // Route to the providers this agent prefers, falling back to the
         // default tag set when the agent specifies none.
@@ -164,8 +159,11 @@ you receive its result and continue until you can give a final answer.",
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
             let trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
-            let resp = pool.complete(&route, trimmed).await?;
-            let content = resp.content.trim().to_owned();
+            let req = ChatRequest::from_messages(trimmed);
+            let resp = pool
+                .chat_completion(&req, &RouteRequest::with_tags(&route))
+                .await?;
+            let content = resp.text().trim().to_owned();
 
             let Some(step) = parse_step(&content) else {
                 // Not a tool-protocol object: treat as the final answer.
@@ -247,14 +245,11 @@ you receive its result and continue until you can give a final answer.",
             }
 
             // Record the model's action and the tool result, then continue.
-            messages.push(Message {
-                role: Role::Assistant,
-                content,
-            });
-            messages.push(Message {
-                role: Role::Tool,
-                content: format!("result of {tool}: {result}"),
-            });
+            messages.push(Message::new(Role::Assistant, content));
+            messages.push(Message::new(
+                Role::Tool,
+                format!("result of {tool}: {result}"),
+            ));
         }
 
         let exhausted = "Reached the step limit for this turn without a final answer.".to_owned();
