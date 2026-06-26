@@ -1207,6 +1207,13 @@ pub fn set_providers(providers: Vec<ProviderConfig>) -> Result<(), String> {
     hf_service::config::set_providers(&providers)
 }
 
+/// Test a provider configuration with a live probe request.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn provider_test(provider: ProviderConfig) -> Result<String, String> {
+    hf_service::config::test_provider(provider).await
+}
+
 /// List the editable config sections and whether each has a live file.
 #[tauri::command]
 #[must_use]
