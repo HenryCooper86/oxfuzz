@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useProject } from "./ProjectContext";
 
 export const PIPELINE_STAGES = [
@@ -31,15 +31,37 @@ interface Progress {
 }
 const EMPTY: Progress = { completed: [], skipped: [] };
 
+const STORAGE_KEY = "hf_pipeline_progress_v1";
+
+/** Load per-target progress from localStorage (best-effort). */
+function loadProgress(): Record<string, Progress> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, Progress>) : {};
+  } catch {
+    return {};
+  }
+}
+
 const PipelineContext = createContext<PipelineContextValue | null>(null);
 
 export function PipelineProvider({ children }: { children: React.ReactNode }) {
   // Progress is kept per fuzzing target (project path), so switching between
-  // targets retains each one's pipeline state instead of resetting it.
+  // targets retains each one's pipeline state instead of resetting it, and it
+  // is persisted to localStorage so it survives an app restart.
   const { activeProject } = useProject();
   const key = activeProject || "__none__";
-  const [byProject, setByProject] = useState<Record<string, Progress>>({});
+  const [byProject, setByProject] = useState<Record<string, Progress>>(loadProgress);
   const cur = byProject[key] ?? EMPTY;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(byProject));
+    } catch {
+      // Best-effort: localStorage may be unavailable or full.
+    }
+  }, [byProject]);
 
   const update = useCallback(
     (fn: (p: Progress) => Progress) => {
