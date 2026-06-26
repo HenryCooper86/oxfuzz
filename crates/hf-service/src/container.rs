@@ -663,6 +663,11 @@ impl ServiceContainer {
         /// calls. Crashes beyond the cap are still ingested and persisted, just
         /// without a drafted report.
         const MAX_BUG_REPORT_DRAFTS: usize = 20;
+        /// Hard cap on sandbox crash replays per triage pass.
+        const MAX_REPRODUCE: usize = 300;
+        /// Stop reproducing once this many consecutive crashes yield no new
+        /// stack signature (the distinct-bug set has saturated).
+        const SIGNATURE_STAGNATION: usize = 40;
 
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
@@ -683,28 +688,57 @@ impl ServiceContainer {
                 .map_or_else(Uuid::new_v4, |run| run.id),
             None => Uuid::new_v4(),
         };
-        let mut crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
+        let crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
+        let total_ingested = crashes.len();
 
-        // Reproduce each crash by replaying its input through the harness binary
-        // in the sandbox to capture the sanitizer trace, then classify it (kind
-        // + stack signature). A libFuzzer crash artifact is just the input, so
-        // without this every crash is `Other` with no signature, and dedup
-        // cannot tell distinct bugs apart. Keep the trace for the LLM report.
+        // Reproduce crashes by replaying each input through the harness binary in
+        // the sandbox to capture the sanitizer trace, then classify it (kind +
+        // stack signature) so dedup can tell distinct bugs apart. A fuzzer can
+        // emit tens of thousands of crash inputs for the same handful of bugs, so
+        // replaying every one is needlessly expensive (one sandbox run each).
+        // Reproduce only until the set of distinct signatures saturates -- no new
+        // signature seen for `SIGNATURE_STAGNATION` consecutive crashes -- or a
+        // hard cap is hit. That surfaces every distinct bug while skipping the
+        // long tail of duplicates. Crashes are written by the engine roughly in
+        // discovery order, so distinct bugs are interleaved rather than segregated,
+        // which is what makes the stagnation window reliable.
         let mut logs: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
-        for crash in &mut crashes {
+        let mut reproduced: Vec<hf_core::crash::Crash> = Vec::new();
+        let mut seen_signatures: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut since_new_signature = 0usize;
+        for mut crash in crashes {
+            if reproduced.len() >= MAX_REPRODUCE || since_new_signature >= SIGNATURE_STAGNATION {
+                break;
+            }
             let log = self
                 .reproduce_crash(&workspace, target, &crash.input_path)
                 .await;
-            if !log.trim().is_empty() {
+            if log.trim().is_empty() {
+                since_new_signature += 1;
+            } else {
                 let (kind, sig, summary) = hf_crash::classify(&log);
                 crash.kind = kind;
-                crash.stack_signature = sig;
                 crash.summary = summary;
+                if seen_signatures.insert(sig.clone()) {
+                    since_new_signature = 0;
+                } else {
+                    since_new_signature += 1;
+                }
+                crash.stack_signature = sig;
             }
             logs.insert(crash.input_path.clone(), log);
+            reproduced.push(crash);
+        }
+        if reproduced.len() < total_ingested {
+            tracing::info!(
+                "reproduced {} of {total_ingested} crash inputs ({} distinct signatures) before saturating",
+                reproduced.len(),
+                seen_signatures.len()
+            );
         }
 
-        let mut deduped = hf_crash::dedup(crashes);
+        let mut deduped = hf_crash::dedup(reproduced);
 
         // Draft an LLM bug report for each unique crash when a provider is
         // configured, using the captured sanitizer trace (capped, see above).
