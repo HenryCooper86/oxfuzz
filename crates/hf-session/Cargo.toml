@@ -16,8 +16,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
+hf-test-utils = { workspace = true }
+toml = { workspace = true }
+temp-env = "0.3"
 tempfile = { workspace = true }
 
 [lints]
