@@ -56,6 +56,33 @@ const ZERO: Stats = { execs: 0, edges: 0, crashes: 0 };
 const EMPTY: RunData = { log: [], stats: ZERO, summary: null, lastTarget: "", lastEngine: "" };
 const LOG_CAP = 600;
 
+// Per-target run summary/stats are persisted across restarts; the live log is
+// not (large and ephemeral -- the crashes and corpus live on disk/DB).
+const STORAGE_KEY = "hf_run_summary_v1";
+type PersistedRun = Pick<RunData, "stats" | "summary" | "lastTarget" | "lastEngine">;
+
+/** Load persisted per-target run summaries (best-effort); log starts empty. */
+function loadSummaries(): Record<string, RunData> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, RunData> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, PersistedRun>)) {
+      out[k] = {
+        log: [],
+        stats: v.stats ?? ZERO,
+        summary: v.summary ?? null,
+        lastTarget: v.lastTarget ?? "",
+        lastEngine: v.lastEngine ?? "",
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   const { activeProject } = useProject();
   const key = activeProject || "__none__";
@@ -65,9 +92,32 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
     keyRef.current = key;
   }, [key]);
 
-  const [byProject, setByProject] = useState<Record<string, RunData>>({});
+  const [byProject, setByProject] = useState<Record<string, RunData>>(loadSummaries);
   const [running, setRunning] = useState(false);
   const cur = byProject[key] ?? EMPTY;
+
+  // Persist the summary/stats subset (never the log) when it changes.
+  const lastWriteRef = useRef("");
+  useEffect(() => {
+    try {
+      const persisted: Record<string, PersistedRun> = {};
+      for (const [k, d] of Object.entries(byProject)) {
+        persisted[k] = {
+          stats: d.stats,
+          summary: d.summary,
+          lastTarget: d.lastTarget,
+          lastEngine: d.lastEngine,
+        };
+      }
+      const serialized = JSON.stringify(persisted);
+      if (serialized !== lastWriteRef.current) {
+        lastWriteRef.current = serialized;
+        localStorage.setItem(STORAGE_KEY, serialized);
+      }
+    } catch {
+      // Best-effort: localStorage may be unavailable or full.
+    }
+  }, [byProject]);
 
   const patch = useCallback((k: string, fn: (d: RunData) => RunData) => {
     setByProject((prev) => ({ ...prev, [k]: fn(prev[k] ?? EMPTY) }));
