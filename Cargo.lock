@@ -898,6 +898,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "croner"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c344b0690c1ad1c7176fe18eb173e0c927008fdaaa256e40dfd43ddd149c0843"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2221,12 +2230,19 @@ name = "hf-diagnostics"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "hf-core",
+ "hf-storage",
+ "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -2363,6 +2379,8 @@ dependencies = [
  "hf-core",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2457,9 +2475,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "croner",
  "hf-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
