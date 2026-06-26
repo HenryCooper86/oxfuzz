@@ -14,6 +14,21 @@ pub enum ErrorSeverity {
     UserActionRequired,
 }
 
+/// Classification metadata carried by errors in the ported agent-infra crates.
+///
+/// (y-agent's `y-core` calls this trait `ClassifiedError`; hobot already uses
+/// that name for its universal error enum, so the trait is renamed here.)
+pub trait ErrorClassification {
+    /// Whether this error is safe to retry.
+    fn is_retryable(&self) -> bool;
+
+    /// Machine-readable error code (e.g., "`PROVIDER_RATE_LIMITED`").
+    fn error_code(&self) -> &str;
+
+    /// Severity classification.
+    fn severity(&self) -> ErrorSeverity;
+}
+
 /// A classified error with a category for retry/routing decisions.
 #[derive(Debug, Clone, Error)]
 pub enum ClassifiedError {

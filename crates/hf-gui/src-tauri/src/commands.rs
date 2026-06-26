@@ -709,7 +709,6 @@ pub fn delete_agent(id: String) -> Result<(), String> {
 pub async fn create_session(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Option<String>, String> {
-    use hf_core::session::SessionStore;
     let Some(sessions) = state.container.session_store() else {
         return Ok(None);
     };
@@ -736,7 +735,6 @@ pub async fn chat_agent(
     session_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<String, String> {
-    use hf_core::session::SessionStore;
     let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
 
     // Resolve a persistent session if one was requested and available.
