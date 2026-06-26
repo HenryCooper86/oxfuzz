@@ -126,3 +126,61 @@ async fn pool_returns_error_when_no_tag_match() {
     let msg = err.to_string();
     assert!(msg.contains("no provider"), "unexpected error: {msg}");
 }
+
+/// A mock sender returning a caller-supplied JSON body, for exercising the
+/// response parser's tolerance of real-world OpenAI-compatible variants.
+struct CannedSender(serde_json::Value);
+
+#[async_trait::async_trait]
+impl hf_provider::HttpSender for CannedSender {
+    async fn post_json(
+        &self,
+        _url: &str,
+        _api_key: &str,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn test_cfg() -> ProviderConfig {
+    ProviderConfig {
+        id: "t".to_owned(),
+        model: "m".to_owned(),
+        api_key: "k".to_owned(),
+        base_url: "https://example.com/v1".to_owned(),
+        tags: vec!["general".to_owned()],
+        max_concurrency: 1,
+        context_window: 4096,
+    }
+}
+
+/// Reasoning models (GLM, DeepSeek-R1) may return null `content` with the text
+/// in `reasoning_content`. We should surface that instead of erroring.
+#[tokio::test]
+async fn reasoning_content_is_used_when_content_is_null() {
+    let body = serde_json::json!({
+        "choices": [{ "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": "answer from reasoning"
+        }}],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 }
+    });
+    let provider = OpenAiCompatProvider::with_sender(test_cfg(), Arc::new(CannedSender(body)));
+    let resp = provider.complete(vec![user_msg("hi")]).await.unwrap();
+    assert_eq!(resp.content, "answer from reasoning");
+}
+
+/// Some OpenAI-compatible endpoints omit the `usage` block entirely. That must
+/// not fail the request; usage just defaults to zero.
+#[tokio::test]
+async fn missing_usage_block_defaults_to_zero() {
+    let body = serde_json::json!({
+        "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
+    });
+    let provider = OpenAiCompatProvider::with_sender(test_cfg(), Arc::new(CannedSender(body)));
+    let resp = provider.complete(vec![user_msg("hi")]).await.unwrap();
+    assert_eq!(resp.content, "ok");
+    assert_eq!(resp.usage.total_tokens, 0);
+}

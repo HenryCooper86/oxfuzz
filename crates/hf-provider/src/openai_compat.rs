@@ -76,12 +76,22 @@ impl LlmProvider for OpenAiCompatProvider {
             .choices
             .first()
             .ok_or_else(|| ClassifiedError::Provider("no choices in response".to_owned()))?;
+        // Reasoning models (e.g. GLM, DeepSeek-R1) often return a null `content`
+        // and put the answer in `reasoning_content`; fall back to it so we don't
+        // reject an otherwise-valid 200 response.
+        let content = choice
+            .message
+            .content
+            .clone()
+            .or_else(|| choice.message.reasoning_content.clone())
+            .unwrap_or_default();
+        let usage = parsed.usage.unwrap_or_default();
         Ok(LlmResponse {
-            content: choice.message.content.clone(),
+            content,
             usage: TokenUsage {
-                prompt_tokens: parsed.usage.prompt_tokens,
-                completion_tokens: parsed.usage.completion_tokens,
-                total_tokens: parsed.usage.total_tokens,
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
             },
             model: self.cfg.model.clone(),
         })
@@ -112,7 +122,9 @@ fn role_str(r: Role) -> &'static str {
 #[derive(Debug, Deserialize, Serialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
-    usage: Usage,
+    // Not every OpenAI-compatible endpoint returns a usage block.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -122,12 +134,20 @@ struct Choice {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ChatMessage {
-    content: String,
+    // Reasoning models may send a null/absent `content` with the text in
+    // `reasoning_content`, so both are optional.
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct Usage {
+    #[serde(default)]
     prompt_tokens: u64,
+    #[serde(default)]
     completion_tokens: u64,
+    #[serde(default)]
     total_tokens: u64,
 }
