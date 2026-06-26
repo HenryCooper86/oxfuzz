@@ -1,41 +1,33 @@
 // ---------------------------------------------------------------------------
-// ProvidersTab -- provider list + per-provider detail form (modeled on y-agent).
+// ProvidersTab -- provider list + per-provider detail form (mirrors y-agent).
 // Controlled: the parsed provider pool (Provider[]) is owned by the SettingsView
 // orchestrator and passed via props. The single global "Save Changes" button in
 // the header persists it (via set_providers) -- this tab has no Save button.
 // ---------------------------------------------------------------------------
 
 import { useState } from "react";
-import { Plus, Copy, ChevronUp, ChevronDown, X, Eye, EyeOff, Search, CheckCircle2, XCircle } from "lucide-react";
+import {
+  Plus, Copy, ChevronUp, ChevronDown, X, Eye, EyeOff, CheckCircle2, XCircle, Trash2,
+} from "lucide-react";
 import { ProviderBrandIcon } from "../common/ProviderBrandIcon";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
+import { getTransport } from "../../lib";
+import { normalizeProvider, type Provider } from "./providerTypes";
 
-export interface Provider {
-  id: string;
-  provider_type: string;
-  model: string;
-  base_url: string;
-  api_key: string;
-  api_key_env: string;
-  enabled: boolean;
-  http_protocol: string;
-  tool_calling_mode: string;
-  tags: string[];
-  max_concurrency: number;
-  context_window: number;
-}
+export type { Provider } from "./providerTypes";
 
 const PROVIDER_TYPES = [
-  { value: "openai", label: "OpenAI" },
+  { value: "openai", label: "OpenAI (Response API)" },
   { value: "openai-compat", label: "OpenAI-compatible (vLLM, LiteLLM…)" },
   { value: "anthropic", label: "Anthropic" },
   { value: "deepseek", label: "DeepSeek" },
   { value: "gemini", label: "Gemini" },
   { value: "ollama", label: "Ollama" },
+  { value: "azure", label: "Azure OpenAI" },
 ];
 
 const PROMPT_BASED = ["openai-compat", "custom", "ollama"];
@@ -47,23 +39,11 @@ const BASE_URL_PLACEHOLDERS: Record<string, string> = {
   deepseek: "https://api.deepseek.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
   ollama: "http://localhost:11434/v1",
+  azure: "https://{resource}.openai.azure.com/openai",
 };
 
 function emptyProvider(): Provider {
-  return {
-    id: "new-provider",
-    provider_type: "openai-compat",
-    model: "",
-    base_url: "",
-    api_key: "",
-    api_key_env: "",
-    enabled: true,
-    http_protocol: "http1",
-    tool_calling_mode: "",
-    tags: [],
-    max_concurrency: 3,
-    context_window: 128000,
-  };
+  return normalizeProvider({});
 }
 
 export function ProvidersTab({
@@ -154,7 +134,7 @@ export function ProvidersTab({
                   className="inline-flex items-center justify-center shrink-0"
                   style={{ width: "16px", height: "16px", color: p.enabled ? "var(--text-primary)" : "var(--text-muted)" }}
                 >
-                  <ProviderBrandIcon type={p.provider_type} size={15} />
+                  <ProviderBrandIcon type={p.icon || p.provider_type} size={15} />
                 </span>
                 <span
                   className="text-xs font-mono flex-1 truncate"
@@ -198,22 +178,79 @@ export function ProvidersTab({
   );
 }
 
+// Inline key-value editor for custom HTTP headers.
+function HeadersEditor({
+  headers,
+  onChange,
+}: {
+  headers: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  const entries = Object.entries(headers ?? {});
+
+  function setKey(oldKey: string, newKey: string) {
+    const next: Record<string, string> = {};
+    for (const [k, v] of entries) next[k === oldKey ? newKey : k] = v;
+    onChange(next);
+  }
+  function setVal(key: string, val: string) {
+    onChange({ ...headers, [key]: val });
+  }
+  function removeKey(key: string) {
+    const next = { ...headers };
+    delete next[key];
+    onChange(next);
+  }
+  function addRow() {
+    onChange({ ...headers, "": "" });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {entries.map(([k, v], i) => (
+        <div key={i} className="flex items-center gap-1.5">
+          <Input className="w-[150px]" value={k} onChange={(e) => setKey(k, e.target.value)} placeholder="Header" mono />
+          <Input className="w-[180px]" value={v} onChange={(e) => setVal(k, e.target.value)} placeholder="Value" mono />
+          <Button variant="icon" size="sm" onClick={() => removeKey(k)} title="Remove header">
+            <Trash2 size={13} />
+          </Button>
+        </div>
+      ))}
+      <div>
+        <Button variant="ghost" size="sm" onClick={addRow}>
+          <Plus size={12} /> Add header
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (patch: Partial<Provider>) => void }) {
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testOk, setTestOk] = useState<boolean | null>(null);
+  const [testMsg, setTestMsg] = useState("");
 
-  function test() {
+  async function test() {
     setTesting(true);
     setTestOk(null);
-    setTimeout(() => {
+    setTestMsg("");
+    try {
+      const msg = await getTransport().invoke<string>("provider_test", { provider });
+      setTestOk(true);
+      setTestMsg(msg);
+    } catch (e) {
+      setTestOk(false);
+      setTestMsg(String(e));
+    } finally {
       setTesting(false);
-      setTestOk(Boolean(provider.model && (provider.base_url || provider.api_key || provider.api_key_env)));
-    }, 1200);
+    }
   }
 
   const effectiveMode = provider.tool_calling_mode || (PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native");
   const isNative = effectiveMode === "native";
+  const isAzure = provider.provider_type === "azure";
+  const numOrNull = (s: string): number | null => (s.trim() === "" ? null : Number(s));
 
   return (
     <div className="flex flex-col">
@@ -227,40 +264,25 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
           </div>
         </SettingsItem>
         <SettingsItem title="ID">
-          <Input
-            className="w-[260px]"
-            value={provider.id}
-            onChange={(e) => onChange({ id: e.target.value })}
-            placeholder="e.g. openai-main"
-            mono
-          />
+          <Input className="w-[260px]" value={provider.id} onChange={(e) => onChange({ id: e.target.value })} placeholder="e.g. openai-main" mono />
         </SettingsItem>
         <SettingsItem title="Provider Type">
           <div className="flex items-center gap-2">
-            <span
-              className="inline-flex items-center justify-center shrink-0"
-              style={{ width: "18px", height: "18px", color: "var(--text-primary)" }}
-            >
-              <ProviderBrandIcon type={provider.provider_type} size={17} />
+            <span className="inline-flex items-center justify-center shrink-0" style={{ width: "18px", height: "18px", color: "var(--text-primary)" }}>
+              <ProviderBrandIcon type={provider.icon || provider.provider_type} size={17} />
             </span>
-            <Select
-              value={provider.provider_type}
-              onChange={(v) => onChange({ provider_type: v })}
-              options={PROVIDER_TYPES}
-              className="w-[230px]"
-            />
+            <Select value={provider.provider_type} onChange={(v) => onChange({ provider_type: v })} options={PROVIDER_TYPES} className="w-[230px]" />
           </div>
+        </SettingsItem>
+        <SettingsItem title="Icon" description="Optional brand icon id (e.g. openai, deepseek, qwen).">
+          <Input className="w-[200px]" value={provider.icon ?? ""} onChange={(e) => onChange({ icon: e.target.value || null })} placeholder="auto from type" mono />
         </SettingsItem>
       </SettingsGroup>
 
       <SettingsGroup title="Tool Calling">
         <SettingsItem
           title="Tool Calling Mode"
-          description={
-            provider.tool_calling_mode
-              ? "Manually set"
-              : `Auto-detected from provider type (${PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native"})`
-          }
+          description={provider.tool_calling_mode ? "Manually set" : `Auto-detected from provider type (${PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native"})`}
         >
           <div className="flex items-center gap-2">
             <Switch checked={isNative} onChange={(v) => onChange({ tool_calling_mode: v ? "native" : "prompt_based" })} />
@@ -273,41 +295,14 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
 
       <SettingsGroup title="Connection">
         <SettingsItem title="Model ID">
-          <div className="relative w-[260px]">
-            <Input
-              className="pr-8"
-              value={provider.model}
-              onChange={(e) => onChange({ model: e.target.value })}
-              placeholder="e.g. gpt-4o"
-              mono
-            />
-            <span
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted"
-              title="Model discovery"
-              style={{ display: "inline-flex" }}
-            >
-              <Search size={13} />
-            </span>
-          </div>
+          <Input className="w-[260px]" value={provider.model} onChange={(e) => onChange({ model: e.target.value })} placeholder="e.g. gpt-4o" mono />
         </SettingsItem>
         <SettingsItem title="Base URL">
-          <Input
-            className="w-[260px]"
-            value={provider.base_url}
-            onChange={(e) => onChange({ base_url: e.target.value })}
-            placeholder={BASE_URL_PLACEHOLDERS[provider.provider_type] ?? "Default"}
-            mono
-          />
+          <Input className="w-[260px]" value={provider.base_url ?? ""} onChange={(e) => onChange({ base_url: e.target.value || null })} placeholder={BASE_URL_PLACEHOLDERS[provider.provider_type] ?? "Default"} mono />
         </SettingsItem>
         <SettingsItem title="API Key">
           <div className="relative w-[260px]">
-            <Input
-              className="pr-8"
-              type={showKey ? "text" : "password"}
-              value={provider.api_key}
-              onChange={(e) => onChange({ api_key: e.target.value })}
-              placeholder="Direct key (optional)"
-            />
+            <Input className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder="Direct key (optional)" />
             <button
               type="button"
               onClick={() => setShowKey((s) => !s)}
@@ -320,18 +315,12 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
           </div>
         </SettingsItem>
         <SettingsItem title="API Key Env Var">
-          <Input
-            className="w-[260px]"
-            value={provider.api_key_env}
-            onChange={(e) => onChange({ api_key_env: e.target.value })}
-            placeholder="e.g. OPENAI_API_KEY"
-            mono
-          />
+          <Input className="w-[260px]" value={provider.api_key_env ?? ""} onChange={(e) => onChange({ api_key_env: e.target.value || null })} placeholder="e.g. OPENAI_API_KEY" mono />
         </SettingsItem>
         <SettingsItem title="HTTP Protocol">
           <Select
             value={provider.http_protocol}
-            onChange={(v) => onChange({ http_protocol: v })}
+            onChange={(v) => onChange({ http_protocol: v as "http1" | "http2" })}
             options={[
               { value: "http1", label: "HTTP/1.1" },
               { value: "http2", label: "HTTP/2" },
@@ -339,7 +328,7 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
             className="w-[140px]"
           />
         </SettingsItem>
-        <SettingsItem title="Test Connection">
+        <SettingsItem title="Test Connection" description={testMsg || undefined}>
           <div className="flex items-center gap-2">
             {testOk === true && <CheckCircle2 size={15} style={{ color: "var(--success)" }} />}
             {testOk === false && <XCircle size={15} style={{ color: "var(--error)" }} />}
@@ -350,35 +339,79 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
         </SettingsItem>
       </SettingsGroup>
 
+      {isAzure && (
+        <SettingsGroup title="Azure">
+          <SettingsItem title="Resource Name">
+            <Input className="w-[260px]" value={provider.azure_resource_name ?? ""} onChange={(e) => onChange({ azure_resource_name: e.target.value || null })} placeholder="myresource" mono />
+          </SettingsItem>
+          <SettingsItem title="API Version">
+            <Input className="w-[200px]" value={provider.azure_api_version ?? ""} onChange={(e) => onChange({ azure_api_version: e.target.value || null })} placeholder="2024-10-21" mono />
+          </SettingsItem>
+          <SettingsItem title="Deployment URLs" description="Use /deployments/{model} URL format.">
+            <Switch checked={provider.azure_use_deployment_urls ?? false} onChange={(v) => onChange({ azure_use_deployment_urls: v })} />
+          </SettingsItem>
+          <SettingsItem title="Auth Mode">
+            <Select
+              value={provider.azure_auth_mode ?? "api_key"}
+              onChange={(v) => onChange({ azure_auth_mode: v })}
+              options={[
+                { value: "api_key", label: "API Key" },
+                { value: "bearer", label: "Bearer (Entra ID)" },
+              ]}
+              className="w-[180px]"
+            />
+          </SettingsItem>
+        </SettingsGroup>
+      )}
+
+      <SettingsGroup title="HTTP Headers">
+        <SettingsItem title="Custom Headers" description="Extra headers sent with every request to this provider.">
+          <HeadersEditor headers={provider.headers} onChange={(h) => onChange({ headers: h })} />
+        </SettingsItem>
+      </SettingsGroup>
+
       <SettingsGroup title="Parameters">
         <SettingsItem title="Tags">
           <Input
             className="w-[260px]"
             value={provider.tags.join(", ")}
-            onChange={(e) =>
-              onChange({ tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })
-            }
+            onChange={(e) => onChange({ tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })}
             placeholder="general, reasoning, code"
             mono
           />
         </SettingsItem>
-        <SettingsItem title="Max Concurrency">
+        <SettingsItem title="Capabilities" description="text, vision, image_generation">
           <Input
-            className="w-[100px]"
-            type="number"
-            min={1}
-            value={provider.max_concurrency}
-            onChange={(e) => onChange({ max_concurrency: Number(e.target.value) || 1 })}
+            className="w-[260px]"
+            value={provider.capabilities.join(", ")}
+            onChange={(e) => onChange({ capabilities: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })}
+            placeholder="text"
+            mono
           />
         </SettingsItem>
+        <SettingsItem title="Max Concurrency">
+          <Input className="w-[100px]" type="number" min={1} value={provider.max_concurrency} onChange={(e) => onChange({ max_concurrency: Number(e.target.value) || 1 })} />
+        </SettingsItem>
         <SettingsItem title="Context Window">
-          <Input
-            className="w-[120px]"
-            type="number"
-            min={1}
-            value={provider.context_window}
-            onChange={(e) => onChange({ context_window: Number(e.target.value) || 128000 })}
-          />
+          <Input className="w-[120px]" type="number" min={1} value={provider.context_window} onChange={(e) => onChange({ context_window: Number(e.target.value) || 128000 })} />
+        </SettingsItem>
+        <SettingsItem title="Temperature" description="0.0 - 2.0, blank = model default.">
+          <Input className="w-[100px]" type="number" value={provider.temperature ?? ""} onChange={(e) => onChange({ temperature: numOrNull(e.target.value) })} placeholder="default" />
+        </SettingsItem>
+        <SettingsItem title="Top P" description="0.0 - 1.0, blank = model default.">
+          <Input className="w-[100px]" type="number" value={provider.top_p ?? ""} onChange={(e) => onChange({ top_p: numOrNull(e.target.value) })} placeholder="default" />
+        </SettingsItem>
+        <SettingsItem title="max_completion_tokens" description="Send output limit as max_completion_tokens (o1/o3/gpt-5).">
+          <Switch checked={provider.use_max_completion_tokens ?? false} onChange={(v) => onChange({ use_max_completion_tokens: v })} />
+        </SettingsItem>
+      </SettingsGroup>
+
+      <SettingsGroup title="Cost">
+        <SettingsItem title="Cost / 1k Input">
+          <Input className="w-[120px]" type="number" min={0} step="0.0001" value={provider.cost_per_1k_input} onChange={(e) => onChange({ cost_per_1k_input: Number(e.target.value) || 0 })} />
+        </SettingsItem>
+        <SettingsItem title="Cost / 1k Output">
+          <Input className="w-[120px]" type="number" min={0} step="0.0001" value={provider.cost_per_1k_output} onChange={(e) => onChange({ cost_per_1k_output: Number(e.target.value) || 0 })} />
         </SettingsItem>
       </SettingsGroup>
     </div>
