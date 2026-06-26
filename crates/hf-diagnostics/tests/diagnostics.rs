@@ -10,9 +10,9 @@ fn cost_tracker_records_and_summarizes() {
     tracker.record(
         "openai",
         &TokenUsage {
-            prompt_tokens: 1000,
-            completion_tokens: 500,
-            total_tokens: 1500,
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
         },
         0.005,
         0.015,
@@ -20,9 +20,9 @@ fn cost_tracker_records_and_summarizes() {
     tracker.record(
         "anthropic",
         &TokenUsage {
-            prompt_tokens: 2000,
-            completion_tokens: 1000,
-            total_tokens: 3000,
+            input_tokens: 2000,
+            output_tokens: 1000,
+            ..Default::default()
         },
         0.003,
         0.015,

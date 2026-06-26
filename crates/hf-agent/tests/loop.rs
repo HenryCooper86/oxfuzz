@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hf_agent::{Agent, AgentEvent, CollectingSink};
-use hf_core::error::ClassifiedError;
-use hf_core::provider::{LlmResponse, ProviderPool};
-use hf_core::types::Message;
+use hf_core::provider::{
+    ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderPool,
+    RouteRequest,
+};
 use hf_service::ServiceContainer;
 use tokio::sync::Mutex;
 
@@ -26,25 +27,48 @@ impl ScriptedPool {
 
 #[async_trait]
 impl ProviderPool for ScriptedPool {
-    async fn complete(
+    async fn chat_completion(
         &self,
-        _tags: &[&str],
-        _messages: Vec<Message>,
-    ) -> Result<LlmResponse, ClassifiedError> {
+        _request: &ChatRequest,
+        _route: &RouteRequest,
+    ) -> Result<ChatResponse, ProviderError> {
         let content = self
             .replies
             .lock()
             .await
             .pop_front()
             .unwrap_or_else(|| "{\"final\":\"(exhausted)\"}".to_owned());
-        Ok(LlmResponse {
-            content,
-            usage: hf_core::types::TokenUsage::default(),
+        Ok(ChatResponse {
+            id: "scripted".to_owned(),
             model: "scripted".to_owned(),
+            content: Some(content),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            usage: hf_core::types::TokenUsage::default(),
+            finish_reason: FinishReason::Stop,
+            raw_request: None,
+            raw_response: None,
+            provider_id: None,
+            generated_images: Vec::new(),
         })
     }
-    async fn freeze(&self, _provider_id: &str) {}
-    async fn thaw(&self, _provider_id: &str) {}
+    async fn chat_completion_stream(
+        &self,
+        _request: &ChatRequest,
+        _route: &RouteRequest,
+    ) -> Result<ChatStreamResponse, ProviderError> {
+        Err(ProviderError::Other {
+            message: "no stream".to_owned(),
+        })
+    }
+    fn report_error(&self, _provider_id: &hf_core::types::ProviderId, _error: &ProviderError) {}
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(&self, _provider_id: &hf_core::types::ProviderId) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 fn agent_with(replies: Vec<&str>, project: Option<std::path::PathBuf>) -> Agent {

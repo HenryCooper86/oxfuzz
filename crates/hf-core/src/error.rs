@@ -1,6 +1,18 @@
 //! Error classification and redaction.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Severity of an error, used for provider freeze-duration decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorSeverity {
+    /// Transient failure, safe to retry.
+    Transient,
+    /// Permanent failure, do not retry.
+    Permanent,
+    /// Requires user action (e.g., invalid config, missing API key).
+    UserActionRequired,
+}
 
 /// A classified error with a category for retry/routing decisions.
 #[derive(Debug, Clone, Error)]

@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{BuildCommand, Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
-use hf_core::provider::LlmProvider;
+use hf_core::provider::{ChatRequest, LlmProvider};
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{TargetCandidate, TargetLanguage};
-use hf_core::types::{Message, Role};
+use hf_core::types::Message;
 use hf_prompt::render_harness_prompt;
 
 /// Draft a harness for a target using the LLM.
@@ -22,12 +22,10 @@ pub async fn draft(
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
     let prompt = render_harness_prompt(target, engine);
-    let messages = vec![Message {
-        role: Role::User,
-        content: prompt,
-    }];
-    let resp = llm.complete(messages).await?;
-    let source = extract_code_block(&resp.content).ok_or_else(|| {
+    let messages = vec![Message::user(prompt)];
+    let req = ChatRequest::from_messages(messages);
+    let resp = llm.chat_completion(&req).await?;
+    let source = extract_code_block(resp.text()).ok_or_else(|| {
         ClassifiedError::Harness("LLM response contained no fenced code block".to_owned())
     })?;
     Ok(HarnessDraft {

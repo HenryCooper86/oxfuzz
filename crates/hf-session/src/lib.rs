@@ -48,10 +48,7 @@ impl SessionStore for SqliteSessionStore {
         let rows = self.store.session_history(session.0).await?;
         Ok(rows
             .into_iter()
-            .map(|(role, content)| Message {
-                role: role_from(&role),
-                content,
-            })
+            .map(|(role, content)| Message::new(role_from(&role), content))
             .collect())
     }
 }

@@ -18,7 +18,6 @@ use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
 use hf_guardrails::{Action, Guardrails};
-use hf_provider::{DefaultProviderPool, OpenAiCompatProvider, ProviderConfig};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_session::SqliteSessionStore;
 use hf_storage::{RunRecord, RunStatus, Store};
@@ -327,9 +326,7 @@ impl ServiceContainer {
         let pool = self.provider_pool.as_ref().ok_or_else(|| {
             ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
         })?;
-        let bridge = LlmProviderBridge {
-            pool: Arc::clone(pool),
-        };
+        let bridge = LlmProviderBridge::new(Arc::clone(pool));
         let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
         if let Some(store) = &self.store {
             if let Err(e) = store.save_inventory(&ranked, Utc::now()).await {
@@ -365,9 +362,7 @@ impl ServiceContainer {
             .clone();
 
         if let Some(pool) = &self.provider_pool {
-            let provider = LlmProviderBridge {
-                pool: Arc::clone(pool),
-            };
+            let provider = LlmProviderBridge::new(Arc::clone(pool));
             match hf_harness::draft(&candidate, engine, Box::new(provider)).await {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down, auth,
@@ -711,9 +706,7 @@ impl ServiceContainer {
         // configured, using the captured sanitizer trace.
         if let Some(pool) = &self.provider_pool {
             for crash in &mut deduped {
-                let bridge = LlmProviderBridge {
-                    pool: Arc::clone(pool),
-                };
+                let bridge = LlmProviderBridge::new(Arc::clone(pool));
                 let log = logs
                     .get(&crash.input_path)
                     .filter(|l| !l.trim().is_empty())
@@ -849,23 +842,28 @@ impl ServiceContainer {
     /// Returns `ClassifiedError` if no provider is configured or the LLM
     /// call fails.
     pub async fn chat_send(&self, message: &str) -> Result<String, ClassifiedError> {
-        use hf_core::types::{Message, Role};
+        use hf_core::provider::{ChatRequest, RouteRequest};
+        use hf_core::types::Message;
         let pool = self
             .provider_pool
             .as_deref()
             .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
-        let system = Message {
-            role: Role::System,
-            content: "You are hobot_fuzz, an AI fuzzing assistant. You help users discover fuzzing targets, generate harnesses, run fuzzing engines, triage crashes, and manage corpora. Be concise and actionable.".to_owned(),
-        };
-        let user = Message {
-            role: Role::User,
-            content: message.to_owned(),
-        };
+        let messages = vec![
+            Message::system(
+                "You are hobot_fuzz, an AI fuzzing assistant. You help users discover \
+                 fuzzing targets, generate harnesses, run fuzzing engines, triage crashes, \
+                 and manage corpora. Be concise and actionable.",
+            ),
+            Message::user(message),
+        ];
+        let req = ChatRequest::from_messages(messages);
         let resp = pool
-            .complete(&["general", "reasoning", "code"], vec![system, user])
+            .chat_completion(
+                &req,
+                &RouteRequest::with_tags(&["general", "reasoning", "code"]),
+            )
             .await?;
-        Ok(resp.content)
+        Ok(resp.text().to_owned())
     }
 }
 
@@ -890,150 +888,54 @@ pub fn runtime_from_env() -> Arc<dyn RuntimeAdapter> {
 /// API key is configured.
 #[must_use]
 pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
-    let api_key = std::env::var("HF_PROVIDER_API_KEY").ok()?;
+    let api_key = std::env::var("HF_PROVIDER_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())?;
     let model = std::env::var("HF_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
     let base_url = std::env::var("HF_PROVIDER_BASE_URL")
         .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
-    let cfg = ProviderConfig {
-        id: "default".to_owned(),
-        model,
-        api_key,
-        base_url,
-        tags: vec![
-            "general".to_owned(),
-            "reasoning".to_owned(),
-            "code".to_owned(),
-        ],
-        max_concurrency: 4,
-        context_window: 128_000,
-    };
-    let provider = OpenAiCompatProvider::new(cfg.clone());
-    let pool = DefaultProviderPool::with_configs(vec![Box::new(provider)], vec![cfg]);
-    Some(Arc::new(pool))
-}
-
-/// One `[[providers]]` entry in `config/providers.toml` (the GUI-managed
-/// provider config). Only the fields the pool needs are deserialized.
-#[derive(serde::Deserialize)]
-struct ProviderEntry {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    provider_type: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    base_url: String,
-    #[serde(default)]
-    api_key: String,
-    #[serde(default)]
-    api_key_env: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default = "default_concurrency")]
-    max_concurrency: u32,
-    #[serde(default = "default_context_window")]
-    context_window: u64,
-}
-
-#[derive(serde::Deserialize)]
-struct ProvidersFile {
-    #[serde(default)]
-    providers: Vec<ProviderEntry>,
-}
-
-fn default_true() -> bool {
-    true
-}
-fn default_concurrency() -> u32 {
-    3
-}
-fn default_context_window() -> u64 {
-    128_000
+    // Build a single-provider pool through the TOML schema so every
+    // ProviderConfig field receives its serde default without an unwieldy
+    // struct literal.
+    let toml_str = format!(
+        "[[providers]]
+\
+         id = \"env\"
+\
+         provider_type = \"openai-compat\"
+\
+         model = \"{model}\"
+\
+         api_key = \"{api_key}\"
+\
+         base_url = \"{base_url}\"
+\
+         tags = [\"general\", \"reasoning\", \"code\"]
+"
+    );
+    let cfg: hf_provider::ProviderPoolConfig = toml::from_str(&toml_str).ok()?;
+    hf_provider::ProviderPoolImpl::from_config(&cfg)
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn ProviderPool>)
 }
 
 /// Build an LLM provider pool from `config/providers.toml` (the file the GUI
 /// Settings -> Providers tab writes). Returns `None` if the file is missing,
-/// unparsable, or contains no enabled provider with a usable API key.
-///
-/// An entry's key comes from `api_key`, or from the env var named by
-/// `api_key_env`. The base URL defaults by `provider_type` when not set.
+/// unparsable, or has no enabled provider.
 #[must_use]
 pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
     let path = crate::init::config_dir().join("providers.toml");
     let text = std::fs::read_to_string(&path).ok()?;
-    let parsed: ProvidersFile = toml::from_str(&text).ok()?;
-
-    let mut providers: Vec<Box<dyn hf_core::provider::LlmProvider>> = Vec::new();
-    let mut configs: Vec<ProviderConfig> = Vec::new();
-    for entry in parsed.providers {
-        if !entry.enabled {
-            continue;
-        }
-        let api_key = if !entry.api_key.is_empty() {
-            entry.api_key.clone()
-        } else if !entry.api_key_env.is_empty() {
-            std::env::var(&entry.api_key_env).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        // Usable if it has a key, or an explicit endpoint (local/no-auth
-        // OpenAI-compatible servers like Ollama need no key). A blank template
-        // entry (no key, no base_url) is skipped.
-        if api_key.is_empty() && entry.base_url.is_empty() {
-            continue;
-        }
-        let base_url = if entry.base_url.is_empty() {
-            default_base_url(&entry.provider_type)
-        } else {
-            entry.base_url.clone()
-        };
-        let model = if entry.model.is_empty() {
-            "gpt-4o".to_owned()
-        } else {
-            entry.model.clone()
-        };
-        let tags = if entry.tags.is_empty() {
-            vec![
-                "general".to_owned(),
-                "reasoning".to_owned(),
-                "code".to_owned(),
-            ]
-        } else {
-            entry.tags.clone()
-        };
-        let cfg = ProviderConfig {
-            id: entry.id.clone(),
-            model,
-            api_key,
-            base_url,
-            tags,
-            max_concurrency: entry.max_concurrency.max(1),
-            context_window: entry.context_window,
-        };
-        providers.push(Box::new(OpenAiCompatProvider::new(cfg.clone())));
-        configs.push(cfg);
-    }
-
-    if providers.is_empty() {
+    let cfg: hf_provider::ProviderPoolConfig = toml::from_str(&text).ok()?;
+    if !cfg.providers.iter().any(|p| p.enabled) {
         return None;
     }
-    Some(Arc::new(DefaultProviderPool::with_configs(
-        providers, configs,
-    )))
-}
-
-/// Default API base URL for a provider type. Only the OpenAI-compatible wire
-/// format is supported; cloud/remote endpoints should set `base_url` explicitly.
-fn default_base_url(provider_type: &str) -> String {
-    match provider_type {
-        // Local Ollama's OpenAI-compatible endpoint. Ollama Cloud users must
-        // set base_url = https://ollama.com/v1 explicitly.
-        "ollama" => "http://localhost:11434/v1".to_owned(),
-        "anthropic" => "https://api.anthropic.com/v1".to_owned(),
-        _ => "https://api.openai.com/v1".to_owned(),
+    match hf_provider::ProviderPoolImpl::from_config(&cfg) {
+        Ok(pool) => Some(Arc::new(pool) as Arc<dyn ProviderPool>),
+        Err(e) => {
+            tracing::warn!("failed to build provider pool from config: {e}");
+            None
+        }
     }
 }
 
@@ -1071,38 +973,52 @@ pub struct RunSummary {
 
 struct LlmProviderBridge {
     pool: Arc<dyn ProviderPool>,
+    meta: hf_core::provider::ProviderMetadata,
+}
+
+impl LlmProviderBridge {
+    fn new(pool: Arc<dyn ProviderPool>) -> Self {
+        use hf_core::provider::{
+            ProviderCapability, ProviderMetadata, ProviderType, ToolCallingMode,
+        };
+        let meta = ProviderMetadata {
+            id: hf_core::types::ProviderId::from_string("pool-bridge"),
+            provider_type: ProviderType::Custom,
+            model: String::new(),
+            tags: Vec::new(),
+            capabilities: vec![ProviderCapability::Text],
+            max_concurrency: 1,
+            context_window: 128_000,
+            cost_per_1k_input: 0.0,
+            cost_per_1k_output: 0.0,
+            tool_calling_mode: ToolCallingMode::PromptBased,
+        };
+        Self { pool, meta }
+    }
 }
 
 #[async_trait::async_trait]
 impl hf_core::provider::LlmProvider for LlmProviderBridge {
-    fn id(&self) -> &'static str {
-        "pool"
+    async fn chat_completion(
+        &self,
+        request: &hf_core::provider::ChatRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        self.pool
+            .chat_completion(request, &hf_core::provider::RouteRequest::default())
+            .await
     }
 
-    async fn complete(
+    async fn chat_completion_stream(
         &self,
-        messages: Vec<hf_core::types::Message>,
-    ) -> Result<hf_core::provider::LlmResponse, ClassifiedError> {
-        let resp = self.pool.complete(&[], messages).await?;
-        Ok(hf_core::provider::LlmResponse {
-            content: resp.content,
-            usage: resp.usage,
-            model: resp.model,
-        })
+        request: &hf_core::provider::ChatRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        self.pool
+            .chat_completion_stream(request, &hf_core::provider::RouteRequest::default())
+            .await
     }
 
-    async fn stream(
-        &self,
-        messages: Vec<hf_core::types::Message>,
-    ) -> Result<
-        Box<dyn futures::Stream<Item = Result<String, ClassifiedError>> + Send + Unpin>,
-        ClassifiedError,
-    > {
-        // The pool does not support streaming; fall back to complete + yield.
-        let resp = self.pool.complete(&[], messages).await?;
-        let chunk = resp.content;
-        let stream = futures::stream::iter(vec![Ok(chunk)]);
-        Ok(Box::new(stream))
+    fn metadata(&self) -> &hf_core::provider::ProviderMetadata {
+        &self.meta
     }
 }
 
