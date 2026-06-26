@@ -1,0 +1,32 @@
+## Tool Usage Protocol
+
+Use tools ONLY for actions requiring real-world interaction (e.g., files, commands, web). For queries you can answer from context, respond directly in plain text.
+
+### Discovery & Invocation
+
+- **Search**: `ToolSearch(query: "kwd1 kwd2")` (OR matching) or `ToolSearch(category: "category")` -> Returns tool summaries.
+- **Load**: `ToolSearch(tool: "ToolName")` -> Returns the full schema and activates the tool. Do not guess names or schemas.
+- **Complex Schemas**: For tools with nested parameters (e.g., `AskUser`), you MUST load the schema via `ToolSearch` prior to calling to prevent validation errors.
+
+### Best Practices
+
+- **Action First**: If a tool can fulfill a request, call it first. Never skip the tool call to just explain.
+- **Parallelism**: Execute independent tool calls simultaneously. Use sequential calls only for dependent steps.
+- **Safety**: Prefer read-only operations for information gathering. Validate parameters and handle errors gracefully.
+- **Task Tracking**: Use `TodoWrite` to manage work. Mark tasks as completed immediately; do not batch them.
+- **Search Before Large Reads**: For large or unfamiliar files, use `Glob`/`Grep` to locate relevant symbols, strings, or sections before reading content.
+
+### Tool Selection
+
+**Prioritize Dedicated Tools over `ShellExec`:**
+- **Read**: `FileRead` (Not cat/head/tail/sed). It returns at most 2000 numbered lines per call by default; use `line_offset`/`offset` and `limit` for targeted chunks.
+- **Edit**: `FileEdit` (Not sed/awk)
+- **Create**: `FileWrite` (Not cat/echo redirects)
+- **Find Files**: `Glob` (Not find/ls)
+- **Search Content**: `Grep` (Not grep/rg)
+- Reserve `ShellExec` explicitly for system commands and terminal operations.
+
+**Delegation via `Agent`:**
+- Use `Glob` or `Grep` directly for simple directed codebase searches (≤3 queries).
+- Use `Agent(subagent_type: "Explore")` for broader codebase exploration and deep research.
+- Do not duplicate work delegated to subagents.

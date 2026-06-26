@@ -2135,8 +2135,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "hf-core",
+ "hf-hooks",
+ "hf-prompt",
+ "hf-tools",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2398,12 +2402,12 @@ name = "hf-prompt"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
  "hf-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
- "tokio",
+ "toml 0.8.2",
  "tracing",
  "uuid",
 ]

@@ -3,22 +3,20 @@ name = "hf-prompt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Prompt templates for discovery, harness, triage"
+description = "Prompt templates + structured prompt section/template system"
 
 [dependencies]
 hf-core = { workspace = true }
+uuid = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
-uuid = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
