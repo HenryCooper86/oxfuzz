@@ -1,7 +1,39 @@
-//! hf-mcp: Model Context Protocol client/server
+//! y-mcp: MCP protocol support for third-party tools and memory.
 //!
-//! Status: scaffold. Implementation pending per TODO.md.
+//! This crate provides the Model Context Protocol (MCP) integration for y-agent:
+//!
+//! - [`McpClient`] — connects to MCP servers via pluggable transports
+//! - [`McpToolAdapter`] — wraps MCP-hosted tools as y-core [`Tool`](hf_core::tool::Tool)
+//! - [`McpTransport`] — transport abstraction (stdio, HTTP)
+//! - [`discovery`] — server and tool discovery
+//!
+//! # Design
+//!
+//! MCP tools are discovered at startup via `tools/list` and registered with
+//! the tool registry as [`ToolType::Mcp`](hf_core::tool::ToolType::Mcp).
+//! Tool calls are proxied via `tools/call` over the configured transport.
+//! Transport implementations (stdio, HTTP/SSE) are pluggable.
 
-#![allow(dead_code)]
+pub mod auth;
+pub mod client;
+pub mod discovery;
+pub mod error;
+pub mod manager;
+pub mod tool_adapter;
+pub mod transport;
 
-pub mod stub;
+// Re-export primary types.
+pub use auth::{McpAuthStore, McpAuthTokens};
+pub use client::{
+    GetPromptResult, McpClient, McpPrompt, McpResource, McpRoot, McpToolInfo, PromptArgument,
+    PromptMessage, ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+};
+pub use error::McpError;
+pub use manager::{
+    McpConnectionManager, McpEvent, McpServerConfigRef, McpServerStatus, ReconnectPolicy,
+};
+pub use tool_adapter::{McpManagedToolAdapter, McpToolAdapter};
+pub use transport::{
+    HttpTransport, HttpTransportBuilder, McpTransport, NotificationHandler, RequestHandler,
+    StdioTransport,
+};
