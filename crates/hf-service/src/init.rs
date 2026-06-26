@@ -21,14 +21,58 @@ pub struct InitReport {
 /// Resolve the config directory: `<repo>/config`, else `./config`.
 #[must_use]
 pub fn config_dir() -> PathBuf {
-    repo_root().map_or_else(
-        || {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("config")
-        },
-        |r| r.join("config"),
-    )
+    // 1. Explicit override (e.g. set by the desktop shell or for tests).
+    if let Some(dir) = std::env::var_os("HF_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    // 2. Source checkout: keep config next to the tree for `cargo run`/CLI dev.
+    if let Some(root) = repo_root() {
+        return root.join("config");
+    }
+    // 3. Installed app: a writable per-user directory. We must NOT fall back to
+    //    `current_dir()/config` -- a Finder-launched .app has cwd `/`, so that
+    //    resolves to `/config` on the read-only system volume and every write
+    //    fails with EROFS (os error 30).
+    user_app_dir().join("config")
+}
+
+/// A writable, per-user application directory used when not running from a
+/// source checkout. Platform conventions:
+/// - macOS:   `~/Library/Application Support/hobot_fuzz`
+/// - Linux:   `$XDG_DATA_HOME/hobot_fuzz` or `~/.local/share/hobot_fuzz`
+/// - Windows: `%APPDATA%\hobot_fuzz`
+///
+/// Falls back to a temp directory so writes always land on a writable volume.
+#[must_use]
+pub fn user_app_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("hobot_fuzz");
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata).join("hobot_fuzz");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            if !xdg.is_empty() {
+                return PathBuf::from(xdg).join("hobot_fuzz");
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("hobot_fuzz");
+        }
+    }
+    std::env::temp_dir().join("hobot_fuzz")
 }
 
 /// Resolve the database path the same way [`Store::connect_from_env`] does.

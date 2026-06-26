@@ -118,12 +118,16 @@ pub fn validated_section(name: &str) -> Result<&'static str, String> {
 /// Resolve the runtime data directory (`<repo>/data`, else `./data`).
 #[must_use]
 pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("HF_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    // Source checkout keeps data next to the tree; an installed app uses a
+    // writable per-user directory instead of the read-only `/data` that a
+    // Finder-launched .app would otherwise target (see `init::config_dir`).
     crate::repo_root().map_or_else(
-        || {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("data")
-        },
+        || crate::init::user_app_dir().join("data"),
         |r| r.join("data"),
     )
 }
