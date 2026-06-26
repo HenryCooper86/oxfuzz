@@ -6,20 +6,24 @@
 //! is still guardrail-gated (AGENTS.md 2.12). Progress is streamed to an
 //! [`EventSink`] so presentation layers can render it live.
 
+mod agent_tools;
 mod definition;
 mod event;
 mod registry;
 mod tools;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use hf_core::error::ClassifiedError;
 use hf_core::provider::{ChatRequest, RouteRequest};
 use hf_core::types::{Message, Role};
 use hf_guardrails::{LoopGuard, StepRecord};
 use hf_service::ServiceContainer;
+use hf_tools::registry::ToolRegistryImpl;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::OnceCell;
 
 pub use definition::{AgentDefinition, AgentRole, Autonomy, TrustTier};
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
@@ -50,6 +54,7 @@ pub struct Agent {
     project: Option<PathBuf>,
     definition: AgentDefinition,
     max_iterations: usize,
+    registry: OnceCell<Arc<ToolRegistryImpl>>,
 }
 
 impl Agent {
@@ -73,6 +78,7 @@ impl Agent {
             project,
             definition,
             max_iterations,
+            registry: OnceCell::new(),
         }
     }
 
@@ -107,13 +113,14 @@ impl Agent {
                 .unwrap_or_default()
         };
         format!(
-            "{role}\n\nThe active project is: {project}.\n\n{skills_block}{catalog}\n\n\
+            "{role}\n\nThe active project is: {project}.\n\n{skills_block}{catalog}\n{inspection}\n\n\
 Respond with EXACTLY ONE JSON object and nothing else:\n\
 - To call a tool: {{\"thought\":\"<brief reasoning>\",\"tool\":\"<name>\",\"args\":{{...}}}}\n\
 - To answer the user: {{\"thought\":\"<brief reasoning>\",\"final\":\"<answer>\"}}\n\
 Do not wrap the JSON in code fences or add prose around it. After a tool runs \
 you receive its result and continue until you can give a final answer.",
             role = self.definition.system_prompt.trim(),
+            inspection = agent_tools::INSPECTION_CATALOG,
         )
     }
 
@@ -209,7 +216,14 @@ you receive its result and continue until you can give a final answer.",
 
             // Enforce the agent's tool allowlist: a specialist may only call its
             // own tools. The refusal is fed back so the model can self-correct.
-            let result = if self.definition.allowed_tools.iter().all(|t| t != &tool) {
+            let result = if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
+                let registry = self
+                    .registry
+                    .get_or_init(agent_tools::build_inspection_registry)
+                    .await;
+                let wd = self.project.as_deref().and_then(|p| p.to_str());
+                agent_tools::dispatch_inspection(registry, &tool, &args, wd).await
+            } else if self.definition.allowed_tools.iter().all(|t| t != &tool) {
                 format!(
                     "{{\"error\":\"tool '{tool}' is not permitted for the {} agent\"}}",
                     self.definition.name
