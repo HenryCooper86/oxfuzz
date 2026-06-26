@@ -5,8 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "Middleware chain and event bus"
 
+[features]
+default = ["hooks_enabled", "event_bus", "middleware_chains", "hook_handlers"]
+hooks_enabled = []
+event_bus = []
+middleware_chains = []
+hook_handlers = ["dep:reqwest", "dep:regex"]
+llm_hooks = ["dep:hf-provider", "hook_handlers"]
+
 [dependencies]
 hf-core = { workspace = true }
+hf-provider = { workspace = true, optional = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +24,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+temp-env = "0.3"
 
 [lints]
 workspace = true
