@@ -10,7 +10,7 @@ import { Badge } from "../ui/Badge";
 import { Separator } from "../ui/Separator";
 import { useToast } from "../ui/Toast";
 import { getTransport } from "../../lib";
-import type { Provider } from "../settings/ProvidersTab";
+import { normalizeProvider, type Provider } from "../settings/providerTypes";
 
 type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
 
@@ -55,20 +55,14 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       const key = apiKey.trim();
       const url = baseUrl.trim();
       if (key || url) {
-        const provider: Provider = {
+        const provider: Provider = normalizeProvider({
           id: "default",
           provider_type: /(^|\.)openai\.com/.test(url) ? "openai" : "openai-compat",
           model: model.trim() || "gpt-4o",
           base_url: url,
           api_key: key,
-          api_key_env: "",
-          enabled: true,
-          http_protocol: "http1",
-          tool_calling_mode: "",
           tags: ["general", "reasoning", "code"],
-          max_concurrency: 3,
-          context_window: 128000,
-        };
+        });
         await getTransport().invoke("set_providers", { providers: [provider] });
       }
       // ChatView reads the preferred model from localStorage; the API key now

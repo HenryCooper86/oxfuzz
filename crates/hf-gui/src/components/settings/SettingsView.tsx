@@ -13,7 +13,8 @@ import { getTransport } from "../../lib";
 import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
 import { GeneralTab } from "./GeneralTab";
-import { ProvidersTab, type Provider } from "./ProvidersTab";
+import { ProvidersTab } from "./ProvidersTab";
+import { normalizeProvider, type Provider } from "./providerTypes";
 import { RuntimeTab } from "./RuntimeTab";
 import { EnginesTab } from "./EnginesTab";
 import { GuardrailsTab } from "./GuardrailsTab";
@@ -119,7 +120,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
       try {
         const T = getTransport();
         if (s.id === "providers") {
-          const list = await T.invoke<Provider[]>("get_providers");
+          const list = (await T.invoke<Provider[]>("get_providers")).map(normalizeProvider);
           setValue(list);
           setRaw(await T.invoke<string>("config_value_to_toml", { value: { providers: list } }));
         } else {
