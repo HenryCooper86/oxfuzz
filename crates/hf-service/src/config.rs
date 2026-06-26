@@ -144,9 +144,33 @@ pub fn toml_to_json(content: &str) -> Result<serde_json::Value, String> {
 /// # Errors
 /// Returns an error string if the value cannot be represented as TOML.
 pub fn json_to_toml(value: &serde_json::Value) -> Result<String, String> {
+    // TOML has no null type, so a form field left unset (serialized as JSON
+    // `null` by the GUI) cannot be represented. Drop null entries -- the correct
+    // TOML representation of an absent optional value -- before converting.
+    let mut value = value.clone();
+    strip_nulls(&mut value);
     let toml_value: toml::Value =
-        serde_json::from_value(value.clone()).map_err(|e| format!("not representable: {e}"))?;
+        serde_json::from_value(value).map_err(|e| format!("not representable: {e}"))?;
     toml::to_string_pretty(&toml_value).map_err(|e| e.to_string())
+}
+
+/// Recursively remove `null` values from a JSON value (objects drop the key,
+/// arrays recurse into elements) so it can be represented as TOML.
+fn strip_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_nulls(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                strip_nulls(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Write a config section's raw TOML to its live file (validated first).
@@ -373,6 +397,19 @@ cpus = 2\n";
         let back = json_to_toml(&value).expect("serialize");
         let reparsed = toml_to_json(&back).expect("reparse");
         assert_eq!(reparsed, value);
+    }
+
+    #[test]
+    fn json_to_toml_strips_nulls_in_provider_arrays() {
+        let v = serde_json::json!({
+            "providers": [{
+                "id": "p", "model": "m", "api_key": "k",
+                "api_key_env": null, "temperature": null, "tool_calling_mode": null
+            }]
+        });
+        let toml = json_to_toml(&v).expect("null fields should be stripped, not error");
+        assert!(toml.contains("id = \"p\""));
+        assert!(!toml.contains("api_key_env"), "null keys must be dropped");
     }
 
     #[test]
