@@ -116,6 +116,23 @@ pub fn run() {
 /// the `HF_DB_PATH` persistence store -- the same construction the CLI and web
 /// API use.
 fn build_app_state() -> AppState {
+    ensure_writable_data_paths();
     let container = tauri::async_runtime::block_on(hf_service::ServiceContainer::bootstrap());
     AppState::new(container)
+}
+
+/// When the app runs as an installed bundle (no source checkout), a
+/// Finder-launched process has cwd `/`, so the relative `data/hobot_fuzz.db`
+/// default would target the read-only system volume and persistence silently
+/// fails. Point `HF_DB_PATH` at the writable per-user data directory instead.
+/// In a dev checkout (`repo_root()` resolves) the repo-relative paths are kept.
+fn ensure_writable_data_paths() {
+    if hf_service::repo_root().is_some() {
+        return;
+    }
+    let data = hf_service::init::user_app_dir().join("data");
+    let _ = std::fs::create_dir_all(&data);
+    if std::env::var_os("HF_DB_PATH").is_none() {
+        std::env::set_var("HF_DB_PATH", data.join("hobot_fuzz.db"));
+    }
 }

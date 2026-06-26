@@ -8,6 +8,9 @@ import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
 import { Badge } from "../ui/Badge";
 import { Separator } from "../ui/Separator";
+import { useToast } from "../ui/Toast";
+import { getTransport } from "../../lib";
+import type { Provider } from "../settings/ProvidersTab";
 
 type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
 
@@ -21,7 +24,9 @@ const STEPS: { id: Step; label: string; icon: ReactNode }[] = [
 ];
 
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
+  const { toast } = useToast();
   const [step, setStep] = useState<Step>("welcome");
+  const [saving, setSaving] = useState(false);
   const stepIdx = STEPS.findIndex((s) => s.id === step);
 
   // Config state
@@ -40,13 +45,41 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
     const prevIdx = stepIdx - 1;
     if (prevIdx >= 0) setStep(STEPS[prevIdx].id);
   }
-  function finish() {
-    // Save config
-    localStorage.setItem("hf_provider_api_key", apiKey);
-    localStorage.setItem("hf_provider_model", model);
-    localStorage.setItem("hf_provider_base_url", baseUrl);
-    localStorage.setItem("hf_setup_completed", "true");
-    onComplete();
+  async function finish() {
+    if (saving) return;
+    setSaving(true);
+    try {
+      // Persist the provider to the backend (config/providers.toml) so harness
+      // generation and chat actually have an LLM. Without this the key only
+      // lived in localStorage and never reached the service layer.
+      const key = apiKey.trim();
+      const url = baseUrl.trim();
+      if (key || url) {
+        const provider: Provider = {
+          id: "default",
+          provider_type: /(^|\.)openai\.com/.test(url) ? "openai" : "openai-compat",
+          model: model.trim() || "gpt-4o",
+          base_url: url,
+          api_key: key,
+          api_key_env: "",
+          enabled: true,
+          http_protocol: "http1",
+          tool_calling_mode: "",
+          tags: ["general", "reasoning", "code"],
+          max_concurrency: 3,
+          context_window: 128000,
+        };
+        await getTransport().invoke("set_providers", { providers: [provider] });
+      }
+      // ChatView reads the preferred model from localStorage; the API key now
+      // lives only in the backend config, not in the browser store.
+      localStorage.setItem("hf_provider_model", model);
+      localStorage.setItem("hf_setup_completed", "true");
+      onComplete();
+    } catch (e) {
+      toast({ title: "Setup save failed", description: String(e), variant: "error" });
+      setSaving(false);
+    }
   }
 
   return (
@@ -225,8 +258,8 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                 Next <ArrowRight size={14} />
               </Button>
             ) : (
-              <Button variant="primary" size="sm" onClick={finish}>
-                Get Started <CheckCircle2 size={14} />
+              <Button variant="primary" size="sm" onClick={finish} disabled={saving}>
+                {saving ? "Saving…" : "Get Started"} <CheckCircle2 size={14} />
               </Button>
             )}
           </div>
