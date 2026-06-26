@@ -368,7 +368,20 @@ impl ServiceContainer {
             let provider = LlmProviderBridge {
                 pool: Arc::clone(pool),
             };
-            hf_harness::draft(&candidate, engine, Box::new(provider)).await
+            match hf_harness::draft(&candidate, engine, Box::new(provider)).await {
+                Ok(draft) => Ok(draft),
+                // The LLM is configured but the call failed (provider down, auth,
+                // bad model, network). Degrade to the heuristic draft so the
+                // pipeline still produces a usable harness instead of dead-ending
+                // on a red error; the warning makes the LLM failure visible.
+                Err(e) => {
+                    tracing::warn!(
+                        "LLM harness draft for '{target}' failed ({e}); \
+                         falling back to heuristic draft"
+                    );
+                    Ok(heuristic_draft(&candidate, engine))
+                }
+            }
         } else {
             // No LLM configured: generate a heuristic draft so the GUI still
             // produces something useful.
