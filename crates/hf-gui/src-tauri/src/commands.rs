@@ -458,6 +458,19 @@ impl hf_guardrails::ApprovalGate for GuiApprovalGate {
     }
 }
 
+/// An approval gate that auto-approves. Used for high-risk actions the user has
+/// already explicitly initiated via the workflow UI (e.g. clicking "Run Fuzzer"):
+/// the click itself is the human approval, and execution still goes through the
+/// hf-runtime sandbox. The agent/chat path uses the interactive GuiApprovalGate.
+struct AutoApproveGate;
+
+#[async_trait::async_trait]
+impl hf_guardrails::ApprovalGate for AutoApproveGate {
+    async fn request_approval(&self, _action: &hf_guardrails::Action, _reason: &str) -> bool {
+        true
+    }
+}
+
 /// Resolve a pending HITL approval request with the user's decision.
 #[tauri::command]
 pub async fn chat_answer_permission(
@@ -913,8 +926,17 @@ pub async fn run_fuzzer(
         }
     };
 
-    let result = state
+    // The explicit "Run Fuzzer" click is the human approval for this high-risk
+    // action (sandboxed via hf-runtime); auto-approve so the workflow run is not
+    // blocked by the agent-oriented HITL gate.
+    let container = state
         .container
+        .clone()
+        .with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            std::sync::Arc::new(AutoApproveGate),
+        ));
+    let result = container
         .run_fuzzer(
             std::path::Path::new(&project),
             &target,
