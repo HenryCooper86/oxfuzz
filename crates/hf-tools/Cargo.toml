@@ -3,18 +3,33 @@ name = "hf-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Tool registry: ShellExec, FileRead, ProjectScan, HarnessBuild, FuzzRun, CrashMinimize"
+description = "Tool registry: lazy loading, JSON Schema validation, builtin tools"
 
 [dependencies]
 hf-core = { workspace = true }
+hf-hooks = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+jsonschema = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
 chrono = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+grep-searcher = { workspace = true }
+grep-regex = { workspace = true }
+grep-matcher = { workspace = true }
+chardetng = "0.1"
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
