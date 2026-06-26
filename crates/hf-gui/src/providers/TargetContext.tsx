@@ -1,8 +1,9 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { useProject } from "./ProjectContext";
 
 // Carries the selected target + engine + language across views so the
-// Harness -> Run handoff works: the user picks a target in Harness, compiles
-// it, and switches to Run with the target/engine/language pre-populated.
+// Harness -> Run handoff works. Kept per fuzzing target (project path) so
+// switching between targets retains each one's selection.
 
 interface TargetContextValue {
   /** The selected target symbol (e.g. "parse_value"). */
@@ -17,13 +18,14 @@ interface TargetContextValue {
   setEngine: (e: string) => void;
   setLang: (l: string) => void;
   setCompiled: (c: boolean) => void;
-  /** Reset all fields (used by "New task"). */
+  /** Reset the current target's fields. */
   reset: () => void;
 }
 
 const TargetContext = createContext<TargetContextValue | null>(null);
 
-const DEFAULTS: Pick<TargetContextValue, "target" | "engine" | "lang" | "compiled"> = {
+type TargetState = Pick<TargetContextValue, "target" | "engine" | "lang" | "compiled">;
+const DEFAULTS: TargetState = {
   target: "",
   engine: "libfuzzer",
   lang: "c",
@@ -31,29 +33,27 @@ const DEFAULTS: Pick<TargetContextValue, "target" | "engine" | "lang" | "compile
 };
 
 export function TargetProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState(DEFAULTS);
+  const { activeProject } = useProject();
+  const key = activeProject || "__none__";
+  const [byProject, setByProject] = useState<Record<string, TargetState>>({});
+  const cur = byProject[key] ?? DEFAULTS;
 
-  const setTarget = useCallback(
-    (target: string) => setState((s) => ({ ...s, target })),
-    [],
+  const patch = useCallback(
+    (p: Partial<TargetState>) => {
+      setByProject((prev) => ({ ...prev, [key]: { ...(prev[key] ?? DEFAULTS), ...p } }));
+    },
+    [key],
   );
-  const setEngine = useCallback(
-    (engine: string) => setState((s) => ({ ...s, engine })),
-    [],
-  );
-  const setLang = useCallback(
-    (lang: string) => setState((s) => ({ ...s, lang })),
-    [],
-  );
-  const setCompiled = useCallback(
-    (compiled: boolean) => setState((s) => ({ ...s, compiled })),
-    [],
-  );
-  const reset = useCallback(() => setState(DEFAULTS), []);
+
+  const setTarget = useCallback((target: string) => patch({ target }), [patch]);
+  const setEngine = useCallback((engine: string) => patch({ engine }), [patch]);
+  const setLang = useCallback((lang: string) => patch({ lang }), [patch]);
+  const setCompiled = useCallback((compiled: boolean) => patch({ compiled }), [patch]);
+  const reset = useCallback(() => patch(DEFAULTS), [patch]);
 
   const value = useMemo(
-    () => ({ ...state, setTarget, setEngine, setLang, setCompiled, reset }),
-    [state, setTarget, setEngine, setLang, setCompiled, reset],
+    () => ({ ...cur, setTarget, setEngine, setLang, setCompiled, reset }),
+    [cur, setTarget, setEngine, setLang, setCompiled, reset],
   );
 
   return <TargetContext.Provider value={value}>{children}</TargetContext.Provider>;

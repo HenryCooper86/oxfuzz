@@ -21,11 +21,11 @@ import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
 import { ProjectProvider, useProject } from "./providers/ProjectContext";
-import { PipelineProvider, usePipeline } from "./providers/PipelineContext";
+import { PipelineProvider } from "./providers/PipelineContext";
 import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
 import { RunStatusProvider } from "./providers/RunStatusContext";
 import { RunOutputProvider } from "./providers/RunOutputContext";
-import { TargetProvider, useTarget } from "./providers/TargetContext";
+import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
 import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap } from "lucide-react";
@@ -42,33 +42,26 @@ function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
 
 function AppInner() {
   const { theme, setTheme } = usePrefs();
-  const { reset: resetPipeline } = usePipeline();
-  const { reset: resetTarget } = useTarget();
   const { setActiveProject } = useProject();
   const [activeView, setActiveView] = useState<ViewType>("chat");
   // Bumping this key remounts ChatView, clearing the conversation for a new target.
   const [chatResetKey, setChatResetKey] = useState(0);
 
-  // "New fuzzing target": pick a project folder, make it active, clear any
-  // prior pipeline/target/chat state, and land on Discover to pick a function
-  // to fuzz. Cancelling the picker is a no-op.
+  // "New fuzzing target": pick a project folder, make it active, and land on
+  // Discover. Per-target pipeline/target state is retained, so an existing
+  // project keeps its progress; a brand-new one starts fresh. Cancelling is a no-op.
   const startNewTarget = async () => {
     const path = await pickFolder();
     if (!path) return;
     setActiveProject(path);
-    resetPipeline();
-    resetTarget();
     setChatResetKey((k) => k + 1);
     setActiveView("discover");
   };
 
-  // Switch the active fuzzing target to an existing project. Pipeline/target
-  // state is global, so reset it to avoid carrying one project's progress into
-  // another, then land on the workflow overview.
+  // Switch the active fuzzing target to an existing project. Its per-target
+  // pipeline/run state is retained, so its progress reappears as it was left.
   const selectTarget = (path: string) => {
     setActiveProject(path);
-    resetPipeline();
-    resetTarget();
     setActiveView("workflow");
   };
   const [showDiag, setShowDiag] = useState(false);

@@ -1,11 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getTransport } from "../lib";
+import { useProject } from "./ProjectContext";
 
-// Owns the output of a fuzz run -- the live log, rolling stats, final summary,
-// and running flag -- and the `run:progress` listener. Because this lives at
-// the app root (always mounted), a run keeps streaming into it even when the
-// user navigates away from the Run view, so no progress is lost when jumping
-// between stages.
+// Owns the output of a fuzz run -- the live log, rolling stats, final summary --
+// and the `run:progress` listener. Persistent output is kept per fuzzing target
+// (project path) so switching targets retains each one's last run; the live
+// `running` flag is global since only one run happens at a time. Because this
+// lives at the app root (always mounted), a run keeps streaming even when the
+// user navigates away from the Run view.
 
 interface Stats {
   execs: number;
@@ -18,6 +20,14 @@ interface Summary {
   execs: number;
 }
 type RunResult = { edges: number; crashes: number; execs: number; exit_code: number | null };
+
+interface RunData {
+  log: string[];
+  stats: Stats;
+  summary: Summary | null;
+  lastTarget: string;
+  lastEngine: string;
+}
 
 interface RunOutputValue {
   log: string[];
@@ -43,36 +53,53 @@ interface RunOutputValue {
 const RunOutputContext = createContext<RunOutputValue | null>(null);
 
 const ZERO: Stats = { execs: 0, edges: 0, crashes: 0 };
+const EMPTY: RunData = { log: [], stats: ZERO, summary: null, lastTarget: "", lastEngine: "" };
 const LOG_CAP = 600;
 
 export function RunOutputProvider({ children }: { children: React.ReactNode }) {
-  const [log, setLog] = useState<string[]>([]);
-  const [stats, setStats] = useState<Stats>(ZERO);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [running, setRunning] = useState(false);
-  const [lastTarget, setLastTarget] = useState("");
-  const [lastEngine, setLastEngine] = useState("");
+  const { activeProject } = useProject();
+  const key = activeProject || "__none__";
+  // The always-mounted progress listener writes to whichever target is active.
+  const keyRef = useRef(key);
+  useEffect(() => {
+    keyRef.current = key;
+  }, [key]);
 
-  const appendLog = useCallback((line: string) => {
-    setLog((l) => (l.length >= LOG_CAP ? [...l.slice(-(LOG_CAP - 1)), line] : [...l, line]));
+  const [byProject, setByProject] = useState<Record<string, RunData>>({});
+  const [running, setRunning] = useState(false);
+  const cur = byProject[key] ?? EMPTY;
+
+  const patch = useCallback((k: string, fn: (d: RunData) => RunData) => {
+    setByProject((prev) => ({ ...prev, [k]: fn(prev[k] ?? EMPTY) }));
   }, []);
 
+  const appendLog = useCallback(
+    (line: string) => {
+      patch(keyRef.current, (d) => ({
+        ...d,
+        log: d.log.length >= LOG_CAP ? [...d.log.slice(-(LOG_CAP - 1)), line] : [...d.log, line],
+      }));
+    },
+    [patch],
+  );
+
   // Always-on progress listener: stats update in place, raw fuzzer lines fill
-  // the log. Mounted once for the app's lifetime.
+  // the active target's log. Mounted once for the app's lifetime.
   useEffect(() => {
     let alive = true;
     let unlisten: (() => void) | undefined;
     getTransport()
       .listen<{ type: string; data: unknown }>("run:progress", (ev) => {
         const p = ev.payload;
+        const k = keyRef.current;
         if (p?.type === "ExecsPerSec") {
           const v = Number(p.data) || 0;
-          setStats((s) => ({ ...s, execs: Math.max(s.execs, v) }));
+          patch(k, (d) => ({ ...d, stats: { ...d.stats, execs: Math.max(d.stats.execs, v) } }));
         } else if (p?.type === "EdgesCovered") {
           const v = Number(p.data) || 0;
-          setStats((s) => ({ ...s, edges: Math.max(s.edges, v) }));
+          patch(k, (d) => ({ ...d, stats: { ...d.stats, edges: Math.max(d.stats.edges, v) } }));
         } else if (p?.type === "CrashesFound") {
-          setStats((s) => ({ ...s, crashes: s.crashes + 1 }));
+          patch(k, (d) => ({ ...d, stats: { ...d.stats, crashes: d.stats.crashes + 1 } }));
           appendLog("  ⚠ CRASH DETECTED");
         } else if (p?.type === "LogLine") {
           appendLog(`  ${p.data}`);
@@ -86,23 +113,24 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       alive = false;
       if (unlisten) unlisten();
     };
-  }, [appendLog]);
+  }, [appendLog, patch]);
 
   const clear = useCallback(() => {
-    setLog([]);
-    setStats(ZERO);
-    setSummary(null);
-  }, []);
+    patch(keyRef.current, () => EMPTY);
+  }, [patch]);
 
   const now = () => new Date().toLocaleTimeString();
 
   const runFuzzer = useCallback<RunOutputValue["runFuzzer"]>(
     async (p) => {
-      clear();
+      const k = p.project || "__none__";
+      patch(k, () => ({
+        ...EMPTY,
+        lastTarget: p.target,
+        lastEngine: p.engine,
+        log: [`[${now()}] Starting ${p.engine} on ${p.target} for ${p.duration}s`],
+      }));
       setRunning(true);
-      setLastTarget(p.target);
-      setLastEngine(p.engine);
-      setLog([`[${now()}] Starting ${p.engine} on ${p.target} for ${p.duration}s`]);
       try {
         const result = await getTransport().invoke<RunResult>("run_fuzzer", {
           project: p.project,
@@ -116,7 +144,10 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
           appendLog(`[${now()}] Fuzzing is not available in web mode.`);
           return 0;
         }
-        setSummary({ edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) });
+        patch(k, (d) => ({
+          ...d,
+          summary: { edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) },
+        }));
         appendLog(`[${now()}] Run complete (exit ${result.exit_code ?? "?"})`);
         return result.crashes;
       } catch (e) {
@@ -126,16 +157,14 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         setRunning(false);
       }
     },
-    [appendLog, clear],
+    [appendLog, patch],
   );
 
   const runSyzkaller = useCallback<RunOutputValue["runSyzkaller"]>(
     async (opts) => {
-      clear();
+      const k = keyRef.current;
+      patch(k, () => ({ ...EMPTY, lastEngine: "syzkaller", log: [`[${now()}] Starting syzkaller campaign`] }));
       setRunning(true);
-      setLastTarget("");
-      setLastEngine("syzkaller");
-      setLog([`[${now()}] Starting syzkaller campaign`]);
       try {
         const result = await getTransport().invoke<RunResult>("run_syzkaller", { opts });
         // Web mode has no run_syzkaller endpoint and resolves to undefined.
@@ -143,7 +172,10 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
           appendLog(`[${now()}] Syzkaller is not available in web mode.`);
           return 0;
         }
-        setSummary({ edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) });
+        patch(k, (d) => ({
+          ...d,
+          summary: { edges: result.edges, crashes: result.crashes, execs: Math.round(result.execs) },
+        }));
         appendLog(`[${now()}] Campaign step complete (exit ${result.exit_code ?? "?"})`);
         return result.crashes;
       } catch (e) {
@@ -153,12 +185,22 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         setRunning(false);
       }
     },
-    [appendLog, clear],
+    [appendLog, patch],
   );
 
   const value = useMemo(
-    () => ({ log, stats, summary, running, lastTarget, lastEngine, runFuzzer, runSyzkaller, clear }),
-    [log, stats, summary, running, lastTarget, lastEngine, runFuzzer, runSyzkaller, clear],
+    () => ({
+      log: cur.log,
+      stats: cur.stats,
+      summary: cur.summary,
+      running,
+      lastTarget: cur.lastTarget,
+      lastEngine: cur.lastEngine,
+      runFuzzer,
+      runSyzkaller,
+      clear,
+    }),
+    [cur, running, runFuzzer, runSyzkaller, clear],
   );
 
   return <RunOutputContext.Provider value={value}>{children}</RunOutputContext.Provider>;
