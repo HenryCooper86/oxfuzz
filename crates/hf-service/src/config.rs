@@ -53,55 +53,9 @@ pub struct ModelInfo {
     pub model: String,
 }
 
-/// One provider as surfaced to / received from the Providers settings form.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderConfig {
-    /// Stable provider id.
-    pub id: String,
-    /// Provider type (defaults to `openai-compat`).
-    #[serde(default)]
-    pub provider_type: String,
-    /// Default model.
-    #[serde(default)]
-    pub model: String,
-    /// Base URL for OpenAI-compatible endpoints.
-    #[serde(default)]
-    pub base_url: String,
-    /// Inline API key (kept only in the gitignored live file).
-    #[serde(default)]
-    pub api_key: String,
-    /// Name of an env var holding the API key.
-    #[serde(default)]
-    pub api_key_env: String,
-    /// Whether the provider is active.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// HTTP protocol hint (`http1`/`http2`).
-    #[serde(default)]
-    pub http_protocol: String,
-    /// Tool-calling mode hint.
-    #[serde(default)]
-    pub tool_calling_mode: String,
-    /// Routing tags.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Max in-flight requests.
-    #[serde(default = "default_concurrency")]
-    pub max_concurrency: u32,
-    /// Context window in tokens.
-    #[serde(default = "default_context_window")]
-    pub context_window: u64,
-}
-
-const fn default_true() -> bool {
-    true
-}
-const fn default_concurrency() -> u32 {
-    3
-}
-const fn default_context_window() -> u64 {
-    128_000
-}
+/// The provider form struct surfaced to / received from the GUI is the full
+/// pool [`hf_provider::ProviderConfig`] (every field round-trips 1:1).
+pub use hf_provider::ProviderConfig;
 
 /// Validate that `name` is a known section before touching the filesystem.
 ///
@@ -226,73 +180,9 @@ pub fn list_models() -> Vec<ModelInfo> {
 #[must_use]
 pub fn get_providers() -> Vec<ProviderConfig> {
     let raw = read_config("providers").unwrap_or_default();
-    let parsed: toml::Value =
-        toml::from_str(&raw).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-    let Some(arr) = parsed.get("providers").and_then(toml::Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .map(|p| {
-            let get = |k: &str| {
-                p.get(k)
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            let provider_type = {
-                let t = get("provider_type");
-                if t.is_empty() {
-                    "openai-compat".to_string()
-                } else {
-                    t
-                }
-            };
-            let http_protocol = {
-                let h = get("http_protocol");
-                if h.is_empty() {
-                    "http1".to_string()
-                } else {
-                    h
-                }
-            };
-            let tags = p
-                .get("tags")
-                .and_then(toml::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            ProviderConfig {
-                id: get("id"),
-                provider_type,
-                model: get("model"),
-                base_url: get("base_url"),
-                api_key: get("api_key"),
-                api_key_env: get("api_key_env"),
-                enabled: p
-                    .get("enabled")
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(true),
-                http_protocol,
-                tool_calling_mode: get("tool_calling_mode"),
-                tags,
-                max_concurrency: u32::try_from(
-                    p.get("max_concurrency")
-                        .and_then(toml::Value::as_integer)
-                        .unwrap_or(3),
-                )
-                .unwrap_or(3),
-                context_window: u64::try_from(
-                    p.get("context_window")
-                        .and_then(toml::Value::as_integer)
-                        .unwrap_or(128_000),
-                )
-                .unwrap_or(128_000),
-            }
-        })
-        .collect()
+    toml::from_str::<hf_provider::ProviderPoolConfig>(&raw)
+        .map(|c| c.providers)
+        .unwrap_or_default()
 }
 
 /// Quote/escape a value as a TOML basic string.
@@ -300,11 +190,21 @@ fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Serialize a serde enum (e.g. `ToolCallingMode`) to its wire string.
+fn enum_str<T: Serialize>(v: &T) -> Option<String> {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|j| j.as_str().map(str::to_owned))
+}
+
 /// Persist the provider pool back to `providers.toml`, preserving the
-/// pool-level preamble (freeze/health settings) ahead of the provider entries.
+/// pool-level preamble (freeze/health/proxy settings) ahead of the provider
+/// entries. Emits every field of the full schema, with the optional
+/// `[providers.headers]` table last (TOML requires sub-tables after scalars).
 ///
 /// # Errors
 /// Returns an error string if the rendered TOML is invalid or cannot be written.
+#[allow(clippy::too_many_lines)]
 pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     let existing = read_config("providers").unwrap_or_default();
     let preamble = existing.find("[[providers]]").map_or_else(
@@ -324,35 +224,90 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
         let _ = writeln!(body, "id = {}", toml_string(&p.id));
         let _ = writeln!(body, "provider_type = {}", toml_string(&p.provider_type));
         let _ = writeln!(body, "model = {}", toml_string(&p.model));
-        if !p.base_url.is_empty() {
-            let _ = writeln!(body, "base_url = {}", toml_string(&p.base_url));
+        if !p.enabled {
+            let _ = writeln!(body, "enabled = false");
         }
-        if !p.api_key.is_empty() {
-            let _ = writeln!(body, "api_key = {}", toml_string(&p.api_key));
+        if !p.tags.is_empty() {
+            let tags = p
+                .tags
+                .iter()
+                .map(|t| toml_string(t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(body, "tags = [{tags}]");
         }
-        if !p.api_key_env.is_empty() {
-            let _ = writeln!(body, "api_key_env = {}", toml_string(&p.api_key_env));
+        if !p.capabilities.is_empty() {
+            let caps = p
+                .capabilities
+                .iter()
+                .filter_map(enum_str)
+                .map(|c| toml_string(&c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(body, "capabilities = [{caps}]");
         }
-        let _ = writeln!(body, "enabled = {}", p.enabled);
-        if !p.http_protocol.is_empty() {
-            let _ = writeln!(body, "http_protocol = {}", toml_string(&p.http_protocol));
-        }
-        if !p.tool_calling_mode.is_empty() {
-            let _ = writeln!(
-                body,
-                "tool_calling_mode = {}",
-                toml_string(&p.tool_calling_mode)
-            );
-        }
-        let tags = p
-            .tags
-            .iter()
-            .map(|t| toml_string(t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(body, "tags = [{tags}]");
         let _ = writeln!(body, "max_concurrency = {}", p.max_concurrency);
-        let _ = writeln!(body, "context_window = {}\n", p.context_window);
+        let _ = writeln!(body, "context_window = {}", p.context_window);
+        if p.cost_per_1k_input > 0.0 {
+            let _ = writeln!(body, "cost_per_1k_input = {}", p.cost_per_1k_input);
+        }
+        if p.cost_per_1k_output > 0.0 {
+            let _ = writeln!(body, "cost_per_1k_output = {}", p.cost_per_1k_output);
+        }
+        if let Some(k) = p.api_key.as_ref().filter(|s| !s.is_empty()) {
+            let _ = writeln!(body, "api_key = {}", toml_string(k));
+        }
+        if let Some(k) = p.api_key_env.as_ref().filter(|s| !s.is_empty()) {
+            let _ = writeln!(body, "api_key_env = {}", toml_string(k));
+        }
+        if let Some(u) = p.base_url.as_ref().filter(|s| !s.is_empty()) {
+            let _ = writeln!(body, "base_url = {}", toml_string(u));
+        }
+        if enum_str(&p.http_protocol).as_deref() == Some("http2") {
+            let _ = writeln!(body, "http_protocol = \"http2\"");
+        }
+        if let Some(b) = p.include_usage {
+            let _ = writeln!(body, "include_usage = {b}");
+        }
+        if let Some(b) = p.use_max_completion_tokens {
+            let _ = writeln!(body, "use_max_completion_tokens = {b}");
+        }
+        if let Some(t) = p.temperature {
+            let _ = writeln!(body, "temperature = {t}");
+        }
+        if let Some(t) = p.top_p {
+            let _ = writeln!(body, "top_p = {t}");
+        }
+        if let Some(m) = p.tool_calling_mode.as_ref().and_then(enum_str) {
+            let _ = writeln!(body, "tool_calling_mode = {}", toml_string(&m));
+        }
+        if let Some(i) = p.icon.as_ref().filter(|s| !s.is_empty()) {
+            let _ = writeln!(body, "icon = {}", toml_string(i));
+        }
+        if let Some(r) = p.azure_resource_name.as_ref().filter(|s| !s.is_empty()) {
+            let _ = writeln!(body, "azure_resource_name = {}", toml_string(r));
+        }
+        if let Some(v) = p.azure_api_version.as_ref().filter(|s| !s.is_empty()) {
+            let _ = writeln!(body, "azure_api_version = {}", toml_string(v));
+        }
+        if let Some(b) = p.azure_use_deployment_urls {
+            let _ = writeln!(body, "azure_use_deployment_urls = {b}");
+        }
+        if let Some(m) = p.azure_auth_mode.as_ref().and_then(enum_str) {
+            let _ = writeln!(body, "azure_auth_mode = {}", toml_string(&m));
+        }
+        let headers: Vec<_> = p
+            .headers
+            .iter()
+            .filter(|(k, _)| !k.trim().is_empty())
+            .collect();
+        if !headers.is_empty() {
+            let _ = writeln!(body, "[providers.headers]");
+            for (k, v) in headers {
+                let _ = writeln!(body, "{} = {}", toml_string(k), toml_string(v));
+            }
+        }
+        body.push('\n');
     }
 
     let content = format!("{preamble}{body}");
@@ -360,6 +315,39 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("providers.toml"), content).map_err(|e| e.to_string())
+}
+
+/// Probe a provider configuration by building it and sending a tiny chat
+/// request. Powers the Settings -> Providers "Test Connection" button.
+///
+/// # Errors
+/// Returns the provider error string if the request fails.
+pub async fn test_provider(mut cfg: ProviderConfig) -> Result<String, String> {
+    cfg.enabled = true;
+    let pool_cfg = hf_provider::ProviderPoolConfig {
+        providers: vec![cfg],
+        ..Default::default()
+    };
+    let provider = hf_provider::build_providers(&pool_cfg)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "could not construct provider from config".to_owned())?;
+    let mut req =
+        hf_core::provider::ChatRequest::from_messages(vec![hf_core::types::Message::user(
+            "Reply with the single word: OK",
+        )]);
+    req.max_tokens = Some(16);
+    match provider.chat_completion(&req).await {
+        Ok(resp) => {
+            let reply: String = resp.text().chars().take(120).collect();
+            Ok(format!(
+                "Connected to model {}. Reply: {}",
+                provider.metadata().model,
+                reply.trim()
+            ))
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[cfg(test)]
