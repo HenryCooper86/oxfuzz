@@ -42,13 +42,13 @@ impl CostTracker {
         cost_per_1k_input: f64,
         cost_per_1k_output: f64,
     ) {
-        let cost = (usage.prompt_tokens as f64 / 1000.0 * cost_per_1k_input)
-            + (usage.completion_tokens as f64 / 1000.0 * cost_per_1k_output);
+        let cost = (f64::from(usage.input_tokens) / 1000.0 * cost_per_1k_input)
+            + (f64::from(usage.output_tokens) / 1000.0 * cost_per_1k_output);
         let entry = self
             .by_provider
             .entry(provider_id.to_owned())
             .or_insert((0, 0.0));
-        entry.0 += usage.total_tokens;
+        entry.0 += u64::from(usage.total());
         entry.1 += cost;
     }
 

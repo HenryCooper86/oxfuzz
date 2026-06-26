@@ -752,10 +752,7 @@ pub async fn chat_agent(
         history
             .unwrap_or_default()
             .into_iter()
-            .map(|t| hf_core::types::Message {
-                role: parse_role(&t.role),
-                content: t.content,
-            })
+            .map(|t| hf_core::types::Message::new(parse_role(&t.role), t.content))
             .collect()
     };
 
@@ -787,22 +784,10 @@ pub async fn chat_agent(
     // Persist the turn (user + assistant) when a session is active.
     if let Some((id, sessions)) = session {
         let _ = sessions
-            .append(
-                id,
-                hf_core::types::Message {
-                    role: hf_core::types::Role::User,
-                    content: message,
-                },
-            )
+            .append(id, hf_core::types::Message::user(message))
             .await;
         let _ = sessions
-            .append(
-                id,
-                hf_core::types::Message {
-                    role: hf_core::types::Role::Assistant,
-                    content: answer.clone(),
-                },
-            )
+            .append(id, hf_core::types::Message::assistant(answer.clone()))
             .await;
     }
 

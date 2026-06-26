@@ -1,223 +1,418 @@
-//! Classify a failed completion into a retry/failover decision.
+//! Error classifier: normalizes provider errors into a `StandardError` enum.
 //!
-//! A single provider blip (a 429, a 5xx, a dropped connection) must not kill an
-//! in-flight fuzzing campaign. The pool reacts to a failed `complete()` by
-//! classifying the error here, then freezing the offending provider and failing
-//! over to the next candidate.
+//! Design reference: providers-design.md §Error Classification
 //!
-//! This is a pragmatic adaptation of y-agent's `error_classifier`: rather than a
-//! full `StandardError` taxonomy, the pool only needs to know "can another
-//! attempt (here or elsewhere) plausibly succeed, and how long should we back
-//! off this provider?". So we collapse everything into [`FailureClass`].
+//! The classifier examines HTTP status codes and error body content to
+//! categorize provider failures into standard types. These standard errors
+//! drive freeze duration decisions, alerting, and retry strategies.
 
 use std::time::Duration;
 
-use hf_core::error::ClassifiedError;
-
-/// Base backoff applied to a rate-limited (429) provider before exponential
-/// scaling by the freeze registry.
-const BACKOFF_RATE_LIMIT: Duration = Duration::from_mins(1);
-/// Base backoff for a transient server-side (5xx) failure.
-const BACKOFF_SERVER: Duration = Duration::from_secs(30);
-/// Base backoff for a network/timeout failure.
-const BACKOFF_NETWORK: Duration = Duration::from_secs(15);
-/// Base backoff for an otherwise-unclassified provider error. We still treat it
-/// as retryable so failover can try a healthy peer.
-const BACKOFF_UNKNOWN: Duration = Duration::from_secs(30);
-/// Freeze applied to a fatal (auth/config) failure: long enough to take the
-/// provider out of rotation, but not literally permanent so operators can
-/// recover without a restart once they fix credentials.
-const BACKOFF_FATAL: Duration = Duration::from_hours(1);
-
-/// How the pool should react to a failed completion.
+/// Standardized error classification for provider failures.
+///
+/// All provider-specific errors are normalized to one of these variants,
+/// which then drive the freeze/retry logic in the pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FailureClass {
-    /// A transient failure: freeze this provider for `backoff` (scaled
-    /// exponentially on repeated freezes) and try the next candidate.
-    Retryable {
-        /// Base backoff before exponential scaling.
-        backoff: Duration,
+pub enum StandardError {
+    /// Context window exceeded (too many tokens).
+    ContextWindowExceeded,
+    /// Rate limited by the provider.
+    RateLimited {
+        /// Suggested retry delay from the provider (Retry-After header).
+        retry_after: Option<Duration>,
     },
-    /// A fatal failure (bad credentials, missing model, malformed request):
-    /// retrying the same provider will not help. Freeze it for a long window
-    /// and fail over.
-    Fatal {
-        /// Backoff used to park the provider out of rotation.
-        backoff: Duration,
-    },
+    /// API quota or billing limit exhausted.
+    QuotaExhausted,
+    /// Authentication failed (invalid credentials format, etc.).
+    AuthenticationFailed,
+    /// API key is invalid or revoked.
+    KeyInvalid,
+    /// Account has insufficient balance/credits.
+    InsufficientBalance,
+    /// Requested model does not exist or is not accessible.
+    ModelNotFound,
+    /// Server-side error (5xx).
+    ServerError,
+    /// Network connectivity issue.
+    NetworkError,
+    /// Content was filtered by the provider's safety system.
+    ContentFiltered,
+    /// Unclassified error.
+    Unknown,
 }
 
-impl FailureClass {
-    /// The base backoff the pool should freeze the provider for.
-    #[must_use]
-    pub fn backoff(&self) -> Duration {
+impl StandardError {
+    /// Recommended freeze duration for this error type.
+    ///
+    /// Returns `None` for errors that should cause permanent freeze
+    /// (requiring manual intervention).
+    pub fn freeze_duration(&self) -> Option<Duration> {
         match self {
-            Self::Retryable { backoff } | Self::Fatal { backoff } => *backoff,
+            Self::RateLimited { retry_after } => {
+                Some(retry_after.unwrap_or(Duration::from_mins(1)))
+            }
+            Self::ServerError => Some(Duration::from_mins(5)),
+            Self::NetworkError => Some(Duration::from_secs(30)),
+            Self::ModelNotFound => Some(Duration::from_hours(1)),
+            Self::AuthenticationFailed => Some(Duration::from_hours(24)), // 24h
+            Self::Unknown => Some(Duration::from_mins(1)),
+            // Not a provider issue (context window, content filter) — don't freeze.
+            // Permanent errors (key invalid, quota, balance) — freeze duration
+            // is effectively infinite, handled by freeze_permanent().
+            Self::ContextWindowExceeded
+            | Self::ContentFiltered
+            | Self::KeyInvalid
+            | Self::QuotaExhausted
+            | Self::InsufficientBalance => None,
         }
     }
+
+    /// Whether this error should cause a permanent freeze (no auto-thaw).
+    pub fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::KeyInvalid | Self::QuotaExhausted | Self::InsufficientBalance
+        )
+    }
+
+    /// Whether this error is a transient provider issue (freeze + retry).
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::ServerError | Self::NetworkError | Self::Unknown
+        )
+    }
+
+    /// Whether this error should NOT cause a provider freeze.
+    ///
+    /// Some errors (context window, content filter) are request-specific
+    /// and don't indicate a provider problem.
+    pub fn should_freeze(&self) -> bool {
+        !matches!(
+            self,
+            Self::ContextWindowExceeded | Self::ContentFiltered | Self::NetworkError
+        )
+    }
 }
 
-/// Classify a failed `complete()` result into a [`FailureClass`].
+/// Classify a provider error from HTTP status code and response body.
 ///
-/// The `openai_compat` layer encodes the HTTP status into the error message as
-/// `http <status>: <body>` (e.g. `http 429 Too Many Requests: {...}`), so we
-/// recover the status code when present and fall back to keyword matching on the
-/// message otherwise.
-#[must_use]
-pub fn classify(error: &ClassifiedError) -> FailureClass {
-    match error {
-        // A timeout is always worth retrying elsewhere.
-        ClassifiedError::Timeout => FailureClass::Retryable {
-            backoff: BACKOFF_NETWORK,
-        },
-        ClassifiedError::Provider(msg) => classify_provider_message(msg),
-        // Validation and other local errors are not provider faults; do not
-        // treat them as retryable failover candidates.
-        _ => FailureClass::Fatal {
-            backoff: BACKOFF_FATAL,
-        },
-    }
-}
-
-fn classify_provider_message(msg: &str) -> FailureClass {
-    if let Some(status) = extract_http_status(msg) {
-        return classify_status(status);
-    }
-    // No HTTP status: this is a transport/parse error from the sender layer
-    // (e.g. "http: connection refused", "decode: ...", "parse: ...").
-    let lower = msg.to_lowercase();
-    if lower.starts_with("http:")
-        || lower.contains("connection")
-        || lower.contains("network")
-        || lower.contains("dns")
-        || lower.contains("timed out")
-    {
-        return FailureClass::Retryable {
-            backoff: BACKOFF_NETWORK,
-        };
-    }
-    // Unknown provider error: still retryable so failover can try a peer.
-    FailureClass::Retryable {
-        backoff: BACKOFF_UNKNOWN,
-    }
-}
-
-/// Map an HTTP status code to a [`FailureClass`].
-fn classify_status(status: u16) -> FailureClass {
+/// This function examines the status code first, then falls back to
+/// regex-like pattern matching on the error body for more specific
+/// classification.
+pub fn classify(status: u16, body: &str) -> StandardError {
+    // 1. Status-code based classification.
     match status {
-        429 => FailureClass::Retryable {
-            backoff: BACKOFF_RATE_LIMIT,
-        },
-        500..=599 => FailureClass::Retryable {
-            backoff: BACKOFF_SERVER,
-        },
-        // Auth / forbidden / not-found / bad-request: a config or request fault.
-        // Retrying the same provider with the same input will not help.
-        400..=499 => FailureClass::Fatal {
-            backoff: BACKOFF_FATAL,
-        },
-        // Any other unexpected status: retry elsewhere.
-        _ => FailureClass::Retryable {
-            backoff: BACKOFF_UNKNOWN,
-        },
+        401 => classify_auth_error(body),
+        403 => classify_forbidden_error(body),
+        429 => StandardError::RateLimited { retry_after: None },
+        404 => {
+            if body_contains_any(body, &["model", "not found", "does not exist"]) {
+                StandardError::ModelNotFound
+            } else {
+                StandardError::Unknown
+            }
+        }
+        400 => classify_bad_request(body),
+        500..=599 => StandardError::ServerError,
+        0 => StandardError::NetworkError, // Status 0 indicates network failure.
+        _ => classify_from_body(body),
     }
 }
 
-/// Extract the numeric HTTP status from an `http <status>: ...` message.
-fn extract_http_status(msg: &str) -> Option<u16> {
-    let rest = msg.strip_prefix("http ")?;
-    // The status is the leading run of ASCII digits (reqwest renders the status
-    // as e.g. "429 Too Many Requests").
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return None;
+/// Classify a provider error from a `ProviderError` enum.
+///
+/// This provides a bridge from the existing `ProviderError` type to
+/// the new `StandardError` classification.
+pub fn classify_provider_error(error: &hf_core::provider::ProviderError) -> StandardError {
+    use hf_core::provider::ProviderError;
+    match error {
+        ProviderError::RateLimited {
+            retry_after_secs, ..
+        } => StandardError::RateLimited {
+            retry_after: Some(Duration::from_secs(*retry_after_secs)),
+        },
+        ProviderError::QuotaExhausted { .. } => StandardError::QuotaExhausted,
+        ProviderError::AuthenticationFailed { .. } => StandardError::AuthenticationFailed,
+        ProviderError::KeyInvalid { .. } => StandardError::KeyInvalid,
+        ProviderError::ServerError { message, .. } => {
+            // Try to sub-classify server errors from the message.
+            if message.contains("context") && message.contains("length") {
+                StandardError::ContextWindowExceeded
+            } else {
+                StandardError::ServerError
+            }
+        }
+        ProviderError::NetworkError { .. } => StandardError::NetworkError,
+        ProviderError::NoProviderAvailable { .. }
+        | ProviderError::Cancelled
+        | ProviderError::ParseError { .. } => StandardError::Unknown,
+        ProviderError::Other { message } => classify_from_body(message),
     }
-    digits.parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Internal classification helpers
+// ---------------------------------------------------------------------------
+
+fn classify_auth_error(body: &str) -> StandardError {
+    let lower = body.to_lowercase();
+    if (lower.contains("invalid") && lower.contains("key"))
+        || lower.contains("expired")
+        || lower.contains("revoked")
+    {
+        StandardError::KeyInvalid
+    } else {
+        StandardError::AuthenticationFailed
+    }
+}
+
+fn classify_forbidden_error(body: &str) -> StandardError {
+    let lower = body.to_lowercase();
+    if lower.contains("quota") || (lower.contains("exceeded") && lower.contains("limit")) {
+        StandardError::QuotaExhausted
+    } else if lower.contains("balance")
+        || lower.contains("insufficient")
+        || lower.contains("billing")
+        || lower.contains("payment")
+    {
+        StandardError::InsufficientBalance
+    } else {
+        StandardError::AuthenticationFailed
+    }
+}
+
+fn classify_bad_request(body: &str) -> StandardError {
+    let lower = body.to_lowercase();
+    if (lower.contains("context") && (lower.contains("length") || lower.contains("window")))
+        || (lower.contains("maximum") && lower.contains("token"))
+    {
+        StandardError::ContextWindowExceeded
+    } else if lower.contains("content_filter") || lower.contains("content filter") {
+        StandardError::ContentFiltered
+    } else if lower.contains("model") && lower.contains("not") {
+        StandardError::ModelNotFound
+    } else {
+        StandardError::Unknown
+    }
+}
+
+fn classify_from_body(body: &str) -> StandardError {
+    let lower = body.to_lowercase();
+    if lower.contains("rate limit") || lower.contains("rate_limit") {
+        StandardError::RateLimited { retry_after: None }
+    } else if lower.contains("quota") || (lower.contains("exceeded") && lower.contains("limit")) {
+        StandardError::QuotaExhausted
+    } else if lower.contains("invalid api key") || lower.contains("invalid_api_key") {
+        StandardError::KeyInvalid
+    } else if lower.contains("insufficient") && lower.contains("balance") {
+        StandardError::InsufficientBalance
+    } else if lower.contains("context") && lower.contains("length") {
+        StandardError::ContextWindowExceeded
+    } else if lower.contains("content_filter") || lower.contains("content filter") {
+        StandardError::ContentFiltered
+    } else {
+        StandardError::Unknown
+    }
+}
+
+/// Check if body contains any of the given substrings (case-insensitive).
+fn body_contains_any(body: &str, patterns: &[&str]) -> bool {
+    let lower = body.to_lowercase();
+    patterns.iter().any(|p| lower.contains(p))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Status-code based classification
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn rate_limit_is_retryable() {
-        let err = ClassifiedError::Provider("http 429 Too Many Requests: {}".to_owned());
+    fn test_classify_rate_limited() {
+        let err = classify(429, "rate limit exceeded");
+        assert_eq!(err, StandardError::RateLimited { retry_after: None });
+    }
+
+    #[test]
+    fn test_classify_auth_failed() {
+        let err = classify(401, "unauthorized");
+        assert_eq!(err, StandardError::AuthenticationFailed);
+    }
+
+    #[test]
+    fn test_classify_invalid_key() {
+        let err = classify(401, "Invalid API key provided");
+        assert_eq!(err, StandardError::KeyInvalid);
+    }
+
+    #[test]
+    fn test_classify_quota_exhausted() {
+        let err = classify(403, "quota exceeded");
+        assert_eq!(err, StandardError::QuotaExhausted);
+    }
+
+    #[test]
+    fn test_classify_insufficient_balance() {
+        let err = classify(403, "insufficient balance");
+        assert_eq!(err, StandardError::InsufficientBalance);
+    }
+
+    #[test]
+    fn test_classify_billing_issue() {
+        let err = classify(403, "billing hard limit reached, payment required");
+        assert_eq!(err, StandardError::InsufficientBalance);
+    }
+
+    #[test]
+    fn test_classify_model_not_found() {
+        let err = classify(404, "The model gpt-5 does not exist");
+        assert_eq!(err, StandardError::ModelNotFound);
+    }
+
+    #[test]
+    fn test_classify_context_window_exceeded() {
+        let err = classify(400, "maximum context length exceeded");
+        assert_eq!(err, StandardError::ContextWindowExceeded);
+    }
+
+    #[test]
+    fn test_classify_context_token_limit() {
+        let err = classify(400, "maximum token limit reached");
+        assert_eq!(err, StandardError::ContextWindowExceeded);
+    }
+
+    #[test]
+    fn test_classify_content_filtered() {
+        let err = classify(400, "content_filter triggered");
+        assert_eq!(err, StandardError::ContentFiltered);
+    }
+
+    #[test]
+    fn test_classify_server_error() {
+        let err = classify(500, "internal server error");
+        assert_eq!(err, StandardError::ServerError);
+    }
+
+    #[test]
+    fn test_classify_bad_gateway() {
+        let err = classify(502, "Bad Gateway");
+        assert_eq!(err, StandardError::ServerError);
+    }
+
+    #[test]
+    fn test_classify_network_error() {
+        let err = classify(0, "connection refused");
+        assert_eq!(err, StandardError::NetworkError);
+    }
+
+    #[test]
+    fn test_classify_unknown_status() {
+        let err = classify(418, "I'm a teapot");
+        assert_eq!(err, StandardError::Unknown);
+    }
+
+    // -----------------------------------------------------------------------
+    // ProviderError bridge
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_classify_provider_error_rate_limited() {
+        use hf_core::provider::ProviderError;
+        let err = ProviderError::RateLimited {
+            provider: "test".into(),
+            retry_after_secs: 120,
+        };
+        let std_err = classify_provider_error(&err);
         assert_eq!(
-            classify(&err),
-            FailureClass::Retryable {
-                backoff: BACKOFF_RATE_LIMIT
+            std_err,
+            StandardError::RateLimited {
+                retry_after: Some(Duration::from_mins(2))
             }
         );
     }
 
     #[test]
-    fn server_error_is_retryable() {
-        let err = ClassifiedError::Provider("http 503 Service Unavailable: {}".to_owned());
+    fn test_classify_provider_error_key_invalid() {
+        use hf_core::provider::ProviderError;
+        let err = ProviderError::KeyInvalid {
+            provider: "test".into(),
+            message: String::new(),
+        };
+        assert_eq!(classify_provider_error(&err), StandardError::KeyInvalid);
+    }
+
+    #[test]
+    fn test_classify_provider_error_network() {
+        use hf_core::provider::ProviderError;
+        let err = ProviderError::NetworkError {
+            message: "connection reset".into(),
+        };
+        assert_eq!(classify_provider_error(&err), StandardError::NetworkError);
+    }
+
+    // -----------------------------------------------------------------------
+    // Freeze behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_permanent_errors() {
+        assert!(StandardError::KeyInvalid.is_permanent());
+        assert!(StandardError::QuotaExhausted.is_permanent());
+        assert!(StandardError::InsufficientBalance.is_permanent());
+        assert!(!StandardError::RateLimited { retry_after: None }.is_permanent());
+        assert!(!StandardError::ServerError.is_permanent());
+    }
+
+    #[test]
+    fn test_transient_errors() {
+        assert!(StandardError::RateLimited { retry_after: None }.is_transient());
+        assert!(StandardError::ServerError.is_transient());
+        assert!(StandardError::NetworkError.is_transient());
+        assert!(!StandardError::KeyInvalid.is_transient());
+    }
+
+    #[test]
+    fn test_should_freeze() {
+        assert!(!StandardError::ContextWindowExceeded.should_freeze());
+        assert!(!StandardError::ContentFiltered.should_freeze());
+        assert!(StandardError::RateLimited { retry_after: None }.should_freeze());
+        assert!(StandardError::KeyInvalid.should_freeze());
+    }
+
+    #[test]
+    fn test_freeze_durations() {
+        // Rate limited: default 60s.
+        let rl = StandardError::RateLimited { retry_after: None };
+        assert_eq!(rl.freeze_duration(), Some(Duration::from_mins(1)));
+
+        // Rate limited with custom retry-after.
+        let rl_custom = StandardError::RateLimited {
+            retry_after: Some(Duration::from_mins(2)),
+        };
+        assert_eq!(rl_custom.freeze_duration(), Some(Duration::from_mins(2)));
+
+        // Server error: 5min.
         assert_eq!(
-            classify(&err),
-            FailureClass::Retryable {
-                backoff: BACKOFF_SERVER
-            }
+            StandardError::ServerError.freeze_duration(),
+            Some(Duration::from_mins(5))
         );
-    }
 
-    #[test]
-    fn auth_error_is_fatal() {
-        let err = ClassifiedError::Provider("http 401 Unauthorized: {}".to_owned());
-        assert!(matches!(classify(&err), FailureClass::Fatal { .. }));
-    }
-
-    #[test]
-    fn forbidden_is_fatal() {
-        let err = ClassifiedError::Provider("http 403 Forbidden: {}".to_owned());
-        assert!(matches!(classify(&err), FailureClass::Fatal { .. }));
-    }
-
-    #[test]
-    fn network_error_is_retryable() {
-        let err = ClassifiedError::Provider("http: connection refused".to_owned());
+        // Auth: 24h.
         assert_eq!(
-            classify(&err),
-            FailureClass::Retryable {
-                backoff: BACKOFF_NETWORK
-            }
+            StandardError::AuthenticationFailed.freeze_duration(),
+            Some(Duration::from_hours(24))
         );
-    }
 
-    #[test]
-    fn timeout_is_retryable() {
-        assert_eq!(
-            classify(&ClassifiedError::Timeout),
-            FailureClass::Retryable {
-                backoff: BACKOFF_NETWORK
-            }
-        );
-    }
+        // Key invalid: permanent (None).
+        assert_eq!(StandardError::KeyInvalid.freeze_duration(), None);
 
-    #[test]
-    fn validation_is_fatal() {
-        let err = ClassifiedError::Validation("bad arg".to_owned());
-        assert!(matches!(classify(&err), FailureClass::Fatal { .. }));
-    }
+        // Quota: permanent (None).
+        assert_eq!(StandardError::QuotaExhausted.freeze_duration(), None);
 
-    #[test]
-    fn unknown_provider_error_is_retryable() {
-        let err = ClassifiedError::Provider("no choices in response".to_owned());
-        assert_eq!(
-            classify(&err),
-            FailureClass::Retryable {
-                backoff: BACKOFF_UNKNOWN
-            }
-        );
-    }
-
-    #[test]
-    fn extracts_status_code() {
-        assert_eq!(
-            extract_http_status("http 429 Too Many Requests: {}"),
-            Some(429)
-        );
-        assert_eq!(extract_http_status("http: connection refused"), None);
-        assert_eq!(extract_http_status("decode: bad json"), None);
+        // Context window: no freeze (None).
+        assert_eq!(StandardError::ContextWindowExceeded.freeze_duration(), None);
     }
 }
