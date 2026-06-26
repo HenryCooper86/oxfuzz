@@ -461,7 +461,7 @@ impl hf_guardrails::ApprovalGate for GuiApprovalGate {
 /// An approval gate that auto-approves. Used for high-risk actions the user has
 /// already explicitly initiated via the workflow UI (e.g. clicking "Run Fuzzer"):
 /// the click itself is the human approval, and execution still goes through the
-/// hf-runtime sandbox. The agent/chat path uses the interactive GuiApprovalGate.
+/// hf-runtime sandbox. The agent/chat path uses the interactive `GuiApprovalGate`.
 struct AutoApproveGate;
 
 #[async_trait::async_trait]
