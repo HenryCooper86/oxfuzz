@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useProject } from "./ProjectContext";
 
 // Carries the selected target + engine + language across views so the
@@ -32,11 +32,32 @@ const DEFAULTS: TargetState = {
   compiled: false,
 };
 
+const STORAGE_KEY = "hf_target_selection_v1";
+
+/** Load per-target selection from localStorage (best-effort). */
+function loadSelection(): Record<string, TargetState> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, TargetState>) : {};
+  } catch {
+    return {};
+  }
+}
+
 export function TargetProvider({ children }: { children: React.ReactNode }) {
   const { activeProject } = useProject();
   const key = activeProject || "__none__";
-  const [byProject, setByProject] = useState<Record<string, TargetState>>({});
+  const [byProject, setByProject] = useState<Record<string, TargetState>>(loadSelection);
   const cur = byProject[key] ?? DEFAULTS;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(byProject));
+    } catch {
+      // Best-effort: localStorage may be unavailable or full.
+    }
+  }, [byProject]);
 
   const patch = useCallback(
     (p: Partial<TargetState>) => {
