@@ -41,4 +41,18 @@ int parse_entry(const unsigned char *data, size_t len) {
         entry.accumulated_complexity,
         entry.complexity
     );
+
+    // The call graph exposes project-only direct edges for the tree view.
+    let entry_callees = inv
+        .call_graph
+        .get("parse_entry")
+        .expect("parse_entry edges");
+    assert!(entry_callees.contains(&"validate".to_owned()));
+    assert!(entry_callees.contains(&"decode".to_owned()));
+    assert_eq!(
+        inv.call_graph.get("validate"),
+        Some(&vec!["decode".to_owned()])
+    );
+    // Leaf functions with only library calls have no edges.
+    assert!(!inv.call_graph.contains_key("decode"));
 }

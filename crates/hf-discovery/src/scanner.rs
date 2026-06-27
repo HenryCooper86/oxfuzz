@@ -27,7 +27,7 @@ pub async fn discover(
     lang: TargetLanguage,
 ) -> Result<TargetInventory, ClassifiedError> {
     tokio::task::yield_now().await;
-    let candidates = match lang {
+    let (candidates, call_graph) = match lang {
         TargetLanguage::C | TargetLanguage::Cpp => scan_c(project_root, lang)?,
         _ => {
             return Err(ClassifiedError::Validation(format!(
@@ -38,6 +38,7 @@ pub async fn discover(
     Ok(TargetInventory {
         project_root: project_root.to_path_buf(),
         candidates,
+        call_graph,
     })
 }
 
@@ -50,7 +51,12 @@ fn exts_for(lang: TargetLanguage) -> &'static [&'static str] {
     }
 }
 
-fn scan_c(root: &Path, lang: TargetLanguage) -> Result<Vec<TargetCandidate>, ClassifiedError> {
+type ScanResult = (
+    Vec<TargetCandidate>,
+    std::collections::HashMap<String, Vec<String>>,
+);
+
+fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedError> {
     let mut parser = TsParser::new();
     match lang {
         TargetLanguage::C => {
@@ -105,7 +111,22 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<Vec<TargetCandidate>, Cla
     }
     // Annotate candidates with reachability + accumulated complexity.
     crate::reachability::analyze(&mut candidates, &calls, &complexity_map);
-    Ok(candidates)
+    // Project-only call adjacency (drop library/self edges) for the call-tree view.
+    let mut call_graph: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (caller, callees) in &calls {
+        let mut project: Vec<String> = callees
+            .iter()
+            .filter(|c| *c != caller && complexity_map.contains_key(*c))
+            .cloned()
+            .collect();
+        project.sort();
+        project.dedup();
+        if !project.is_empty() {
+            call_graph.insert(caller.clone(), project);
+        }
+    }
+    Ok((candidates, call_graph))
 }
 
 #[allow(clippy::too_many_arguments)]

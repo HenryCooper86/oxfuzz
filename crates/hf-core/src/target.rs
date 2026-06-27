@@ -103,6 +103,10 @@ pub struct TargetCandidate {
 pub struct TargetInventory {
     pub project_root: PathBuf,
     pub candidates: Vec<TargetCandidate>,
+    /// Project-only call adjacency (`caller -> direct project callees`), for the
+    /// call-tree view. Empty until reachability/scanning populates it.
+    #[serde(default)]
+    pub call_graph: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl TargetInventory {
