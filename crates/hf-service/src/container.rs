@@ -180,15 +180,15 @@ fn collect_casreps_into(dir: &Path, out: &mut Vec<(PathBuf, hf_core::crash::Casr
 }
 
 /// Map a `.casrep` path back to the crash input it analyzed: CASR names each
-/// report after its input (`crash-abc.casrep` -> `out/crash-abc`). Falls back to
-/// the report path when no matching input exists.
+/// report after its input (`crash-abc.casrep` -> `crash-abc`), so the report's
+/// file stem under `out` gives a clean input name for display. (The libFuzzer
+/// path's input sits directly in `out`; the AFL path's lives deeper, but the
+/// stem still carries the crash id.)
 fn casrep_input_path(out_dir: &Path, casrep: &Path) -> PathBuf {
     casrep
         .file_stem()
         .and_then(|s| s.to_str())
-        .map(|stem| out_dir.join(stem))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| casrep.to_path_buf())
+        .map_or_else(|| casrep.to_path_buf(), |stem| out_dir.join(stem))
 }
 
 /// Copy C/C++ source and header files from a project into the workspace
@@ -882,21 +882,28 @@ impl ServiceContainer {
         if !out_dir.exists() {
             return None;
         }
-        // Stage only crash inputs into a clean dir: engines (esp. honggfuzz) mix
-        // coverage maps and sanitizer logs into `out`, and CASR would otherwise
-        // replay every one of them. Bail to the fallback if there are none.
-        let staging = workspace.join("casr_in");
-        let _ = std::fs::remove_dir_all(&staging);
-        if stage_crash_inputs(&out_dir, &staging) == 0 {
-            return None;
-        }
+        // CASR's input expectation differs by driver: `casr-afl` walks the AFL
+        // output tree (out/<instance>/crashes/...), while `casr-libfuzzer` wants
+        // a flat directory of crash inputs. For non-AFL engines we stage only
+        // real crash inputs into a clean dir, since engines like honggfuzz mix
+        // coverage maps and logs into `out` that CASR would otherwise replay.
+        let crash_dir = if engine == EngineKind::AflPlusPlus {
+            "/work/out".to_owned()
+        } else {
+            let staging = workspace.join("casr_in");
+            let _ = std::fs::remove_dir_all(&staging);
+            if stage_crash_inputs(&out_dir, &staging) == 0 {
+                return None;
+            }
+            "/work/casr_in".to_owned()
+        };
         // Fresh CASR output directory each pass.
         let casr_host = workspace.join("casr_out");
         let _ = std::fs::remove_dir_all(&casr_host);
         let cmd = hf_crash::casr_command(
             engine,
             &format!("/work/{bin}"),
-            "/work/casr_in",
+            &crash_dir,
             "/work/casr_out",
             30,
         );
