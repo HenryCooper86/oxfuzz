@@ -87,7 +87,7 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Operation: seed, grow, prune, list.
+        /// Operation: seed, grow, prune, minimize, list.
         #[arg(long)]
         op: String,
     },
@@ -267,11 +267,17 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             let n = container.corpus_prune(&project, target)?;
             println!("Pruned to {n} entries.");
         }
+        "minimize" | "cmin" => {
+            let outcome = container.corpus_minimize(&project, target).await?;
+            println!("Minimized {} -> {} entries.", outcome.before, outcome.after);
+        }
         "list" => {
             let corpus = container.corpus_list(&project, target)?;
             println!("{}", serde_json::to_string_pretty(&corpus.entries)?);
         }
-        other => anyhow::bail!("unknown corpus op: {other} (use seed|grow|prune|list)"),
+        other => {
+            anyhow::bail!("unknown corpus op: {other} (use seed|grow|prune|minimize|list)")
+        }
     }
     Ok(())
 }
