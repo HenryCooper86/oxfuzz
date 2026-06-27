@@ -16,6 +16,7 @@ hf-provider = { workspace = true }
 hf-knowledge = { workspace = true }
 hf-diagnostics = { workspace = true }
 hf-scheduler = { workspace = true }
+hf-journal = { workspace = true }
 ignore = { workspace = true }
 hf-session = { workspace = true }
 hf-storage = { workspace = true }

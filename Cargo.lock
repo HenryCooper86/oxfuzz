@@ -2675,6 +2675,7 @@ dependencies = [
  "hf-engine",
  "hf-guardrails",
  "hf-harness",
+ "hf-journal",
  "hf-knowledge",
  "hf-provider",
  "hf-runtime",

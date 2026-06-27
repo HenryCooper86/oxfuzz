@@ -551,6 +551,27 @@ pub async fn diagnostics_cost_summary(
     Ok(state.container.cost_summary().await)
 }
 
+/// Runs interrupted by a prior crash/quit, awaiting recovery.
+#[tauri::command]
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn interrupted_runs(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Vec<hf_service::recovery::InterruptedRun> {
+    state.container.interrupted_runs()
+}
+
+/// Dismiss an interrupted run; returns the updated list.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn dismiss_interrupted_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Vec<hf_service::recovery::InterruptedRun> {
+    state.container.dismiss_interrupted_run(&run_id);
+    state.container.interrupted_runs()
+}
+
 /// List all scheduled fuzz campaigns.
 #[tauri::command]
 pub async fn schedule_list(

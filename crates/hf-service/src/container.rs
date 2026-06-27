@@ -283,6 +283,7 @@ pub struct ServiceContainer {
     session_store: Option<ChatSessionStore>,
     guardrails: Guardrails,
     diagnostics: Arc<crate::diagnostics::DiagnosticsRecorder>,
+    run_journal: Arc<crate::recovery::RunJournal>,
 }
 
 /// Build the per-model cost table (`model -> (per-1k-in, per-1k-out)`) from the
@@ -310,6 +311,7 @@ impl ServiceContainer {
             diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
                 build_cost_map(),
             )),
+            run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
         }
     }
 
@@ -317,6 +319,17 @@ impl ServiceContainer {
     #[must_use]
     pub fn diagnostics(&self) -> &Arc<crate::diagnostics::DiagnosticsRecorder> {
         &self.diagnostics
+    }
+
+    /// Runs interrupted by an app crash/quit, awaiting recovery.
+    #[must_use]
+    pub fn interrupted_runs(&self) -> Vec<crate::recovery::InterruptedRun> {
+        self.run_journal.interrupted()
+    }
+
+    /// Dismiss an interrupted run from the recovery list.
+    pub fn dismiss_interrupted_run(&self, run_id: &str) {
+        self.run_journal.dismiss(run_id);
     }
 
     /// Aggregated LLM cost/usage recorded this session.
@@ -381,6 +394,21 @@ impl ServiceContainer {
             }
         };
         let session_store = store.as_ref().map(|s| ChatSessionStore::new(Arc::clone(s)));
+        // Open the persistent run journal and detect runs interrupted by a prior
+        // crash/quit (scopes opened but never closed). Reconcile the DB so those
+        // runs are not left stuck as `Running` forever.
+        let run_journal = Arc::new(crate::recovery::RunJournal::open(
+            crate::init::user_app_dir().join("run_journal.jsonl"),
+        ));
+        if let Some(store) = &store {
+            for run in run_journal.interrupted() {
+                if let Ok(id) = run.run_id.parse::<Uuid>() {
+                    let _ = store
+                        .set_run_status(id, RunStatus::Failed, Some(Utc::now()))
+                        .await;
+                }
+            }
+        }
         Self {
             runtime,
             provider_pool,
@@ -390,6 +418,7 @@ impl ServiceContainer {
             diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
                 build_cost_map(),
             )),
+            run_journal,
         }
     }
 
@@ -715,6 +744,10 @@ impl ServiceContainer {
                 tracing::warn!("failed to record run start: {e}");
             }
         }
+        // Journal the run as an open scope so an interrupted run (crash/quit
+        // mid-fuzz) is detected and offered for recovery on the next startup.
+        let run_id = run_record.as_ref().map_or_else(Uuid::new_v4, |rec| rec.id);
+        self.run_journal.open_run(run_id, project, target, engine);
 
         let runner = hf_engine::runner::EngineRunner::new();
         // Stream progress live: `on_progress` fires for each output line and
@@ -741,6 +774,9 @@ impl ServiceContainer {
                 tracing::warn!("failed to record run end: {e}");
             }
         }
+        // Close the run's journal scope: it completed (whether ok or errored),
+        // so it is no longer a recovery candidate.
+        self.run_journal.close_run(run_id);
         let result = run_result?;
         // Summarize from the parsed events. Live streaming already forwarded
         // them to `on_progress`, so do not re-emit here.

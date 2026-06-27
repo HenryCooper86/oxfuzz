@@ -3,6 +3,7 @@ import type { ViewType } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { Header } from "./components/Header";
 import { StatusBar } from "./components/StatusBar";
+import { RecoveryBanner } from "./components/RecoveryBanner";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { ToastProvider } from "./components/ui/Toast";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
@@ -119,6 +120,7 @@ function AppInner() {
             />
             <div className="flex flex-1 overflow-hidden">
               <main className="flex-1 overflow-hidden flex flex-col">
+                <RecoveryBanner />
                 {activeView === "chat" && <ChatView key={chatResetKey} />}
                 {activeView === "workflow" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
