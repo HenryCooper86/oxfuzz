@@ -121,6 +121,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/seeds/generate", post(generate_seeds))
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
+        .route("/report", post(report))
         .route("/chat/send", post(chat_send))
         .route("/config/models", get(list_models))
         .route("/config/sections", get(list_configs))
@@ -315,6 +316,18 @@ async fn triage(
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::to_value(&deduped).unwrap_or_default()))
+}
+
+async fn report(
+    State(state): State<AppState>,
+    Json(req): Json<TriageRequest>,
+) -> ApiResult<String> {
+    let markdown = state
+        .container
+        .generate_report(std::path::Path::new(&req.project), &req.target)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(markdown))
 }
 
 #[derive(Debug, Deserialize)]

@@ -1206,6 +1206,65 @@ pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
     state.container.cancel_all_runs()
 }
 
+/// Compose the Markdown campaign report for a target and return it as a string,
+/// so the GUI can preview or download it.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn generate_report(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<String, String> {
+    state
+        .container
+        .generate_report(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Generate the campaign report and save it to a user-chosen `.md` file via a
+/// native save dialog. Returns the saved path, or `None` if the user cancelled.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn save_report(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let markdown = state
+        .container
+        .generate_report(std::path::Path::new(&project), &target)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let default_name = format!("hobot_fuzz_report_{}.md", sanitize_filename(&target));
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title("Save fuzzing report")
+        .set_file_name(&default_name)
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&path, markdown).map_err(|e| format!("write report: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Reduce a target symbol to a filesystem-safe filename fragment.
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
 /// Artifacts for a real syzkaller kernel-fuzzing campaign.
 #[derive(Debug, Deserialize)]
 pub struct SyzkallerOpts {

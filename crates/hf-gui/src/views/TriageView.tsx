@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
-import { Bug, Loader2, ChevronRight } from "lucide-react";
+import { Bug, Loader2, ChevronRight, FileDown } from "lucide-react";
 
 // CASR exploitability badge styling, keyed by the serialized CrashSeverity.
 const SEVERITY_STYLE: Record<string, { label: string; bg: string; fg: string }> = {
@@ -36,6 +36,8 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
+  const [reporting, setReporting] = useState(false);
+  const [reportMsg, setReportMsg] = useState<string | null>(null);
 
   // Whether the last run produced crashes (null = no run yet this session).
   const ranWithCrashes = summary ? summary.crashes > 0 : null;
@@ -56,6 +58,39 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       setLoading(false);
     }
   }, [activeProject, lastTarget, markDone, markSkipped]);
+
+  // Compose the full Markdown campaign report and save it via a native dialog.
+  // Falls back to an in-browser download when running in web mode (no Tauri
+  // save dialog / filesystem).
+  const downloadReport = useCallback(async () => {
+    setReporting(true);
+    setReportMsg(null);
+    const args = { project: activeProject || ".", target: lastTarget };
+    try {
+      const saved = await getTransport().invoke<string | null>("save_report", args);
+      if (saved) {
+        setReportMsg(`Saved to ${saved}`);
+      } else {
+        // Either the user cancelled the native dialog, or we are in web mode
+        // (save_report resolves to undefined there) -- try a browser download.
+        const md = await getTransport().invoke<string>("generate_report", args);
+        if (md) {
+          const blob = new Blob([md], { type: "text/markdown" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `hobot_fuzz_report_${(lastTarget || "target").replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
+          a.click();
+          URL.revokeObjectURL(url);
+          setReportMsg("Report downloaded.");
+        }
+      }
+    } catch (e) {
+      setReportMsg(`Report failed: ${e}`);
+    } finally {
+      setReporting(false);
+    }
+  }, [activeProject, lastTarget]);
 
   // Auto-triage: once a run completes with crashes, ingest + dedup them
   // automatically (once per run) so the user doesn't have to click Scan. The
@@ -81,22 +116,49 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             </p>
           </div>
         )}
-        <button
-          onClick={triage}
-          disabled={loading}
-          className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55"
-          style={{
-            background: "var(--accent)",
-            color: "var(--accent-contrast)",
-            borderColor: "transparent",
-          }}
-          onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = "0.85")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
-        >
-          {loading ? <Loader2 size={14} className="animate-spin" /> : <Bug size={14} />}
-          {loading ? "Scanning..." : "Scan for Crashes"}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Download a full Markdown report of the campaign. Enabled once a run
+              has happened (a target is known); summarizes target, coverage,
+              corpus, and every triaged crash. */}
+          <button
+            onClick={() => void downloadReport()}
+            disabled={reporting || !lastTarget}
+            className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
+            style={{
+              background: "transparent",
+              color: "var(--text-secondary)",
+              borderColor: "var(--border)",
+            }}
+            onMouseEnter={(e) => !reporting && (e.currentTarget.style.opacity = "0.85")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            title="Compose and download a detailed Markdown report"
+          >
+            {reporting ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />}
+            {reporting ? "Composing..." : "Download Report"}
+          </button>
+          <button
+            onClick={triage}
+            disabled={loading}
+            className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55"
+            style={{
+              background: "var(--accent)",
+              color: "var(--accent-contrast)",
+              borderColor: "transparent",
+            }}
+            onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = "0.85")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <Bug size={14} />}
+            {loading ? "Scanning..." : "Scan for Crashes"}
+          </button>
+        </div>
       </div>
+
+      {reportMsg && (
+        <div className="text-xs text-text-muted" style={{ marginTop: "-0.5rem" }}>
+          {reportMsg}
+        </div>
+      )}
 
       {/* Context from the last run, so the user knows what to expect. */}
       {summary && crashes.length === 0 && (

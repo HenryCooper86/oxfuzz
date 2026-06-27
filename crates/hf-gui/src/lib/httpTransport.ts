@@ -15,6 +15,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   corpus_grow: { method: "POST", path: "/corpus/grow" },
   corpus_prune: { method: "POST", path: "/corpus/prune" },
   triage: { method: "POST", path: "/triage" },
+  generate_report: { method: "POST", path: "/report" },
   system_status: { method: "GET", path: "/health" },
   system_status_cmd: { method: "GET", path: "/health" },
   // ChatView invokes `chat_agent`; the web router exposes the chat handler at
@@ -37,7 +38,7 @@ export function createHttpTransport(): Transport {
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "ensure_docker", "run_fuzzer", "run_syzkaller", "cancel_run"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "ensure_docker", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {
