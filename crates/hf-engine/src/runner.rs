@@ -94,6 +94,7 @@ impl EngineRunner {
             max_cpus: cfg.max_cpus,
             max_duration_secs,
             env: cfg.env.iter().cloned().collect(),
+            ptrace: false,
         };
 
         // Accumulate the full output for the final coverage/validation pass

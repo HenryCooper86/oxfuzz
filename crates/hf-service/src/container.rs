@@ -793,6 +793,7 @@ impl ServiceContainer {
             max_cpus: 1,
             max_duration_secs: 30,
             env: std::collections::HashMap::new(),
+            ptrace: false,
         };
         match self.runtime.run_command(&cmd, workspace, &limits).await {
             // A crashing input exits non-zero; the trace is the useful output.

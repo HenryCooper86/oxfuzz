@@ -7,12 +7,15 @@ use std::path::PathBuf;
 use crate::error::ClassifiedError;
 
 /// Resource limits for a sandboxed command.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     pub max_mem_mb: u64,
     pub max_cpus: u32,
     pub max_duration_secs: u64,
     pub env: HashMap<String, String>,
+    /// Grant `SYS_PTRACE` + unconfined seccomp for this run. Needed by CASR's
+    /// ptrace-based crash analysis; off by default since it weakens isolation.
+    pub ptrace: bool,
 }
 
 /// Result of a sandboxed command execution.
