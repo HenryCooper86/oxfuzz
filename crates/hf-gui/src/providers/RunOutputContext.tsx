@@ -34,6 +34,8 @@ interface RunOutputValue {
   stats: Stats;
   summary: Summary | null;
   running: boolean;
+  /** True between a cancel request and the run actually stopping. */
+  cancelling: boolean;
   /** Target + engine of the most recent run, for the Run -> Triage handoff. */
   lastTarget: string;
   lastEngine: string;
@@ -47,6 +49,8 @@ interface RunOutputValue {
   }) => Promise<number>;
   /** Run a syzkaller campaign; resolves to the crash count. */
   runSyzkaller: (opts: Record<string, unknown>) => Promise<number>;
+  /** Cancel the in-flight fuzz run (cooperative; the run stops shortly after). */
+  cancelRun: () => Promise<void>;
   clear: () => void;
 }
 
@@ -94,6 +98,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
 
   const [byProject, setByProject] = useState<Record<string, RunData>>(loadSummaries);
   const [running, setRunning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const cur = byProject[key] ?? EMPTY;
 
   // Persist the summary/stats subset (never the log) when it changes.
@@ -205,10 +210,25 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         throw e;
       } finally {
         setRunning(false);
+        setCancelling(false);
       }
     },
     [appendLog, patch],
   );
+
+  // Cooperatively cancel the active fuzz run. The backend kills the sandboxed
+  // fuzzer and `run_fuzzer` resolves shortly after with its partial results,
+  // which clears `running`/`cancelling` via its finally block.
+  const cancelRun = useCallback<RunOutputValue["cancelRun"]>(async () => {
+    setCancelling(true);
+    appendLog(`[${now()}] Stopping run...`);
+    try {
+      await getTransport().invoke<number>("cancel_run", {});
+    } catch (e) {
+      appendLog(`error: ${e}`);
+      setCancelling(false);
+    }
+  }, [appendLog]);
 
   const runSyzkaller = useCallback<RunOutputValue["runSyzkaller"]>(
     async (opts) => {
@@ -233,6 +253,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         throw e;
       } finally {
         setRunning(false);
+        setCancelling(false);
       }
     },
     [appendLog, patch],
@@ -244,13 +265,15 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       stats: cur.stats,
       summary: cur.summary,
       running,
+      cancelling,
       lastTarget: cur.lastTarget,
       lastEngine: cur.lastEngine,
       runFuzzer,
       runSyzkaller,
+      cancelRun,
       clear,
     }),
-    [cur, running, runFuzzer, runSyzkaller, clear],
+    [cur, running, cancelling, runFuzzer, runSyzkaller, cancelRun, clear],
   );
 
   return <RunOutputContext.Provider value={value}>{children}</RunOutputContext.Provider>;
@@ -265,10 +288,12 @@ export function useRunOutput(): RunOutputValue {
       stats: ZERO,
       summary: null,
       running: false,
+      cancelling: false,
       lastTarget: "",
       lastEngine: "",
       runFuzzer: async () => 0,
       runSyzkaller: async () => 0,
+      cancelRun: async () => {},
       clear: () => {},
     };
   }
