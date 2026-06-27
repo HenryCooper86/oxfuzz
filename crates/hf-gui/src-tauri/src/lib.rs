@@ -18,8 +18,8 @@ use commands::{
     harness_compile, harness_draft, host_arch, interrupted_runs, knowledge_index, knowledge_search,
     knowledge_summary, list_agents, list_configs, list_models, list_skills, open_file_dialog,
     open_folder_dialog, provider_test, read_config, read_skill, run_fuzzer, run_syzkaller,
-    save_agent, save_skill, schedule_create, schedule_delete, schedule_list, schedule_set_enabled,
-    set_providers, show_window, system_status_cmd, triage, write_config,
+    save_agent, save_skill, schedule_create, schedule_delete, schedule_history, schedule_list,
+    schedule_set_enabled, set_providers, show_window, system_status_cmd, triage, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -69,6 +69,7 @@ pub fn run() {
             interrupted_runs,
             dismiss_interrupted_run,
             schedule_list,
+            schedule_history,
             schedule_create,
             schedule_delete,
             schedule_set_enabled,

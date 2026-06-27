@@ -580,6 +580,15 @@ pub async fn schedule_list(
     Ok(state.scheduler.list_views().await)
 }
 
+/// Recent scheduled-campaign executions (newest first).
+#[tauri::command]
+pub async fn schedule_history(
+    state: tauri::State<'_, crate::state::AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<hf_service::scheduler::ExecutionView>, String> {
+    Ok(state.scheduler.recent_executions(limit.unwrap_or(20)).await)
+}
+
 /// Create a scheduled fuzz campaign; returns the updated list.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
