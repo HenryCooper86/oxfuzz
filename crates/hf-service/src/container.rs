@@ -163,6 +163,17 @@ fn coverage_cache() -> &'static CoverageCache {
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Cache value: the signature the summary was computed for + the summary.
+type SummaryCache =
+    std::sync::Mutex<std::collections::HashMap<String, (u64, hf_coverage::CoverageSummary)>>;
+
+/// Process-global cache of line/region coverage summaries, keyed by
+/// `project::target`, invalidated by the same corpus+harness signature.
+fn summary_cache() -> &'static SummaryCache {
+    static CACHE: std::sync::OnceLock<SummaryCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// A cheap fingerprint of the inputs that affect coverage: the corpus file count
 /// and the latest mtime across the corpus and `harness.c`. Changes when a run
 /// grows the corpus or the harness is rebuilt, invalidating the cache.
@@ -1235,6 +1246,63 @@ impl ServiceContainer {
             Err(e) => {
                 tracing::warn!("coverage collection failed: {e}");
                 Vec::new()
+            }
+        }
+    }
+
+    /// Line/region/function coverage totals for a fuzz run.
+    ///
+    /// Complements [`Self::coverage_functions`] (which names covered functions
+    /// for the call-tree overlay) with the structural percentages reviewers
+    /// actually report: lines, functions, and regions covered out of the total.
+    /// Builds the same source-based-coverage binary in the sandbox, replays the
+    /// corpus, and parses the `llvm-cov export` totals. Returns `None` when no
+    /// harness was built or the coverage tooling is unavailable. Cached per
+    /// target by the corpus+harness signature, like the covered-function set.
+    pub async fn coverage_summary(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Option<hf_coverage::CoverageSummary> {
+        let workspace = workspace_dir(project, target);
+        if !workspace.join("harness.c").exists() {
+            return None;
+        }
+        let cache_key = format!("{}::{target}", project.display());
+        let signature = coverage_signature(&workspace);
+        if let Some((cached_sig, cached)) = summary_cache()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&cache_key).copied())
+        {
+            if cached_sig == signature {
+                return Some(cached);
+            }
+        }
+        let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
+             -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
+             && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \
+             llvm-profdata merge -sparse cov.profraw -o cov.profdata 2>/dev/null \
+             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata 2>/dev/null";
+        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 4096,
+            max_cpus: 2,
+            max_duration_secs: 180,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        match self.runtime.run_command(&cmd, &workspace, &limits).await {
+            Ok(result) => {
+                let summary = hf_coverage::parse_llvm_cov_summary(&result.stdout)?;
+                if let Ok(mut map) = summary_cache().lock() {
+                    map.insert(cache_key, (signature, summary));
+                }
+                Some(summary)
+            }
+            Err(e) => {
+                tracing::warn!("coverage summary collection failed: {e}");
+                None
             }
         }
     }
