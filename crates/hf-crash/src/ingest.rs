@@ -48,6 +48,7 @@ pub fn ingest(
                 summary,
                 minimized: false,
                 bug_report: None,
+                casr: None,
             });
         }
     }
@@ -82,6 +83,7 @@ pub fn ingest(
                 summary,
                 minimized: false,
                 bug_report: None,
+                casr: None,
             });
         }
     }
