@@ -91,6 +91,14 @@ enum Commands {
         #[arg(long)]
         op: String,
     },
+    /// Report line/function/region coverage for a target's corpus.
+    Coverage {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+    },
     /// Start the web server (REST API).
     Serve {
         /// Port to listen on.
@@ -282,6 +290,40 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
     Ok(())
 }
 
+async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match container.coverage_summary(&project, target).await {
+        Some(s) => {
+            println!("Coverage for {target}:");
+            println!(
+                "  lines:     {}/{} ({:.1}%)",
+                s.lines_covered,
+                s.lines_total,
+                s.line_percent()
+            );
+            println!(
+                "  functions: {}/{} ({:.1}%)",
+                s.functions_covered,
+                s.functions_total,
+                s.function_percent()
+            );
+            println!(
+                "  regions:   {}/{} ({:.1}%)",
+                s.regions_covered,
+                s.regions_total,
+                s.region_percent()
+            );
+        }
+        None => {
+            eprintln!(
+                "No coverage available -- compile a harness and build a corpus first, \
+                 and ensure the sandbox has clang/llvm-cov."
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -327,6 +369,7 @@ async fn main() -> anyhow::Result<()> {
             target,
             op,
         } => cmd_corpus(project, &target, &op).await?,
+        Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
         Commands::Serve { port } => {
             let app = hf_web::build_bootstrapped().await;
             let addr = format!("0.0.0.0:{port}");

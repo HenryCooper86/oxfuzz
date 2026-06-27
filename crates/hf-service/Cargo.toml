@@ -12,6 +12,7 @@ hf-harness = { workspace = true }
 hf-engine = { workspace = true }
 hf-crash = { workspace = true }
 hf-corpus = { workspace = true }
+hf-coverage = { workspace = true }
 hf-provider = { workspace = true }
 hf-knowledge = { workspace = true }
 hf-diagnostics = { workspace = true }
