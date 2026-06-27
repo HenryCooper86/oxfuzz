@@ -14,6 +14,10 @@ use hf_core::engine::EngineKind;
 /// honggfuzz and everything else (their harnesses share the libFuzzer file-arg
 /// ABI). Both reproduce each crash, classify severity, and cluster/deduplicate,
 /// writing `.casrep` reports under `out_dir`. Paths are container paths.
+///
+/// Note the input expectations differ: `casr-afl` needs the AFL *output tree*
+/// (`<instance>/crashes/...`) and reads the target from `--`, so it gets
+/// `--ignore-cmdline`; `casr-libfuzzer` takes a flat directory of crash inputs.
 #[must_use]
 pub fn casr_command(
     engine: EngineKind,
@@ -25,6 +29,7 @@ pub fn casr_command(
     match engine {
         EngineKind::AflPlusPlus => vec![
             "casr-afl".to_owned(),
+            "--ignore-cmdline".to_owned(),
             "-i".to_owned(),
             crash_dir.to_owned(),
             "-o".to_owned(),
@@ -192,6 +197,7 @@ mod tests {
             30,
         );
         assert_eq!(afl[0], "casr-afl");
+        assert!(afl.contains(&"--ignore-cmdline".to_owned()));
         assert_eq!(afl.last().unwrap(), "@@");
     }
 
