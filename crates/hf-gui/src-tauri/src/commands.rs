@@ -536,6 +536,7 @@ pub async fn knowledge_summary(
                     "kind": format!("{:?}", c.kind),
                     "summary": c.summary,
                     "signature": c.stack_signature,
+                    "severity": c.casr.as_ref().map(|r| format!("{:?}", r.severity)),
                 })
             })
             .collect(),
