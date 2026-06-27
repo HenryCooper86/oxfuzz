@@ -108,6 +108,60 @@ pub fn prune(mut corpus: Corpus) -> Result<Corpus, ClassifiedError> {
     Ok(corpus)
 }
 
+/// Absorb crash reproducer inputs back into the corpus.
+///
+/// Each path in `inputs` is a crash-triggering input surfaced by triage. Inputs
+/// whose content is not already in the corpus (by sha256) are copied into
+/// `corpus_root` tagged `CorpusSource::Fuzzer` -- they are exactly the inputs
+/// the harness should keep exercising, closing the run -> triage -> corpus
+/// loop. Returns the full corpus and the number of newly added entries.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the corpus cannot be read or an input cannot be
+/// copied.
+pub fn absorb(
+    corpus_root: &Path,
+    inputs: &[std::path::PathBuf],
+) -> Result<(Corpus, usize), ClassifiedError> {
+    std::fs::create_dir_all(corpus_root)
+        .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
+    let existing = list(corpus_root)?;
+    let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
+    let mut entries = existing.entries;
+    let mut added = 0usize;
+    for input in inputs {
+        if !input.is_file() {
+            continue;
+        }
+        let data = std::fs::read(input)
+            .map_err(|e| ClassifiedError::Internal(format!("read crash input: {e}")))?;
+        let hash = sha256_hex(&data);
+        if !seen.insert(hash) {
+            continue;
+        }
+        // Name absorbed entries distinctly so they never collide with an
+        // existing corpus file of the same basename.
+        let stem = input
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("crash");
+        let dest = corpus_root.join(format!("crash_{stem}"));
+        std::fs::write(&dest, &data)
+            .map_err(|e| ClassifiedError::Internal(format!("write absorbed: {e}")))?;
+        entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
+        added += 1;
+    }
+    Ok((
+        Corpus {
+            id: Uuid::new_v4(),
+            target_id: Uuid::nil(),
+            root: corpus_root.to_path_buf(),
+            entries,
+        },
+        added,
+    ))
+}
+
 /// Adopt a coverage-minimized input set as the live corpus.
 ///
 /// `minimized_dir` holds the survivors of an out-of-band coverage-guided merge

@@ -1,7 +1,7 @@
 //! Tests for corpus management operations.
 
 use hf_core::corpus::CorpusSource;
-use hf_corpus::{grow, list, merge, minimize, prune, seed};
+use hf_corpus::{absorb, grow, list, merge, minimize, prune, seed};
 use std::fs;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -136,6 +136,36 @@ async fn minimize_swaps_in_the_minimized_set_and_tags_it() {
             .all(|e| matches!(e.source, CorpusSource::Minimized)),
         "survivors tagged Minimized"
     );
+}
+
+#[tokio::test]
+async fn absorb_adds_unique_crash_inputs_and_skips_dups() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    // The corpus already contains one input.
+    fs::write(corpus_root.join("existing"), b"already-here").unwrap();
+
+    // Crash reproducers found during triage: one new, one a content-dup of the
+    // existing entry.
+    let crash_dir = dir.path().join("crashes");
+    fs::create_dir_all(&crash_dir).unwrap();
+    let new_crash = crash_dir.join("crash-001");
+    let dup_crash = crash_dir.join("crash-002");
+    fs::write(&new_crash, b"boom").unwrap();
+    fs::write(&dup_crash, b"already-here").unwrap();
+
+    let (corpus, added) = absorb(&corpus_root, &[new_crash, dup_crash]).unwrap();
+
+    assert_eq!(added, 1, "only the genuinely new crash is absorbed");
+    assert_eq!(corpus.entries.len(), 2);
+    // The new crash now lives in the corpus, tagged as fuzzer-derived.
+    let absorbed = corpus
+        .entries
+        .iter()
+        .find(|e| std::fs::read(&e.path).unwrap() == b"boom")
+        .expect("new crash present");
+    assert!(matches!(absorbed.source, CorpusSource::Fuzzer));
 }
 
 #[tokio::test]
