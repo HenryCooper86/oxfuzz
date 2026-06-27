@@ -38,6 +38,8 @@ fn sample_target(project: &str) -> TargetCandidate {
         fit_score: 0.82,
         sanitizers: vec![Sanitizer::Address],
         rationale: "hot parser path".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
     }
 }
 

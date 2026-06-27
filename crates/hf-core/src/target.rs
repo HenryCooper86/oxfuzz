@@ -88,6 +88,14 @@ pub struct TargetCandidate {
     pub fit_score: f64,
     pub sanitizers: Vec<Sanitizer>,
     pub rationale: String,
+    /// Project functions transitively reachable from this one (direct calls,
+    /// capped). Empty until reachability analysis runs.
+    #[serde(default)]
+    pub reachable_functions: Vec<String>,
+    /// Cyclomatic complexity of this function plus all reachable functions --
+    /// how much code fuzzing this target exercises.
+    #[serde(default)]
+    pub accumulated_complexity: u32,
 }
 
 /// A ranked inventory of fuzzing targets.

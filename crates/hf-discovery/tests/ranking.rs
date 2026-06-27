@@ -83,6 +83,8 @@ fn cand(symbol: &str) -> TargetCandidate {
         fit_score: 0.5,
         sanitizers: vec![Sanitizer::Address],
         rationale: String::new(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
     }
 }
 

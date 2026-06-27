@@ -24,6 +24,8 @@ fn sample_candidate(symbol: &str, fit: f64) -> TargetCandidate {
         fit_score: fit,
         sanitizers: vec![Sanitizer::Address],
         rationale: String::new(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
     }
 }
 
