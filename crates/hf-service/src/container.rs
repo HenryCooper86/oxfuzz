@@ -10,7 +10,6 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::chat_session::ChatSessionStore;
 use chrono::Utc;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
@@ -280,7 +279,7 @@ pub struct ServiceContainer {
     runtime: Arc<dyn RuntimeAdapter>,
     provider_pool: Option<Arc<dyn ProviderPool>>,
     store: Option<Arc<Store>>,
-    session_store: Option<ChatSessionStore>,
+    session_manager: Option<Arc<hf_session::SessionManager>>,
     guardrails: Guardrails,
     diagnostics: Arc<crate::diagnostics::DiagnosticsRecorder>,
     run_journal: Arc<crate::recovery::RunJournal>,
@@ -295,6 +294,21 @@ fn build_cost_map() -> std::collections::HashMap<String, (f64, f64)> {
         .collect()
 }
 
+/// Build the `hf-session` [`SessionManager`](hf_session::SessionManager) over a
+/// database store: the `SQLite` session tree plus `JSONL` display + context
+/// transcripts under the user data dir (separate subdirs so they don't collide).
+fn build_session_manager(store: &Arc<Store>) -> Arc<hf_session::SessionManager> {
+    let base = crate::init::user_app_dir().join("transcripts");
+    Arc::new(hf_session::SessionManager::new(
+        Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone())),
+        Arc::new(hf_storage::JsonlTranscriptStore::new(base.join("context"))),
+        Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(
+            base.join("display"),
+        )),
+        hf_session::SessionConfig::default(),
+    ))
+}
+
 impl ServiceContainer {
     /// Create a new `ServiceContainer` without persistence.
     #[must_use]
@@ -306,7 +320,7 @@ impl ServiceContainer {
             runtime,
             provider_pool,
             store: None,
-            session_store: None,
+            session_manager: None,
             guardrails: Guardrails::permissive(),
             diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
                 build_cost_map(),
@@ -337,19 +351,20 @@ impl ServiceContainer {
         self.diagnostics.summary().await
     }
 
-    /// Attach a persistence store (and a session store derived from it),
+    /// Attach a persistence store (and the session manager derived from it),
     /// returning the updated container.
     #[must_use]
     pub fn with_store(mut self, store: Arc<Store>) -> Self {
-        self.session_store = Some(ChatSessionStore::new(Arc::clone(&store)));
+        self.session_manager = Some(build_session_manager(&store));
         self.store = Some(store);
         self
     }
 
-    /// The conversation session store (if a database is configured).
+    /// The conversation session manager (if a database is configured): the
+    /// `hf-session` tree model with display + context transcripts.
     #[must_use]
-    pub fn session_store(&self) -> Option<&ChatSessionStore> {
-        self.session_store.as_ref()
+    pub fn session_manager(&self) -> Option<&Arc<hf_session::SessionManager>> {
+        self.session_manager.as_ref()
     }
 
     /// Replace the guardrail engine (e.g. install an interactive HITL gate),
@@ -393,7 +408,7 @@ impl ServiceContainer {
                 None
             }
         };
-        let session_store = store.as_ref().map(|s| ChatSessionStore::new(Arc::clone(s)));
+        let session_manager = store.as_ref().map(build_session_manager);
         // Open the persistent run journal and detect runs interrupted by a prior
         // crash/quit (scopes opened but never closed). Reconcile the DB so those
         // runs are not left stuck as `Running` forever.
@@ -422,7 +437,7 @@ impl ServiceContainer {
             runtime,
             provider_pool,
             store,
-            session_store,
+            session_manager,
             guardrails: Guardrails::from_env(),
             diagnostics,
             run_journal,
