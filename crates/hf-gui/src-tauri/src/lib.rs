@@ -11,7 +11,7 @@ use state::AppState;
 use tauri::Manager;
 
 use commands::{
-    agent_info, agent_tools, app_paths, chat_agent, chat_answer_permission, chat_branch,
+    agent_info, agent_tools, app_paths, cancel_run, chat_agent, chat_answer_permission, chat_branch,
     chat_branches, chat_checkpoints, chat_history, chat_rollback, chat_rollback_to, chat_send,
     config_toml_to_value, config_value_to_toml, corpus_grow, corpus_list, corpus_prune,
     corpus_seed, coverage_functions, create_session, delete_agent, delete_skill,
@@ -62,6 +62,7 @@ pub fn run() {
             config_value_to_toml,
             run_fuzzer,
             run_syzkaller,
+            cancel_run,
             chat_send,
             chat_agent,
             create_session,

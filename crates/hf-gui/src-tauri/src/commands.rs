@@ -1191,6 +1191,21 @@ pub async fn run_fuzzer(
     }
 }
 
+/// Cancel any in-flight fuzz run, stopping the sandboxed fuzzer cooperatively.
+///
+/// The GUI runs one campaign at a time, so this cancels every active run rather
+/// than tracking individual run ids. The interrupted `run_fuzzer` returns with
+/// its partial results and the run is recorded as cancelled. Returns the number
+/// of runs that were signalled.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
+    // The active-run registry is shared (Arc) across container clones, so the
+    // base container sees runs started by the guardrail-adjusted clone in
+    // `run_fuzzer`.
+    state.container.cancel_all_runs()
+}
+
 /// Artifacts for a real syzkaller kernel-fuzzing campaign.
 #[derive(Debug, Deserialize)]
 pub struct SyzkallerOpts {

@@ -6,7 +6,7 @@ import { usePrefs } from "../providers/PrefsContext";
 import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
-import { Play, Loader2, Activity, AlertTriangle, FolderOpen } from "lucide-react";
+import { Play, Loader2, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
 
 export function RunView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject, setActiveProject } = useProject();
@@ -16,7 +16,7 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
   const { target: sharedTarget, engine: sharedEngine, compiled } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
-  const { log, stats: liveStats, summary, running, runFuzzer, runSyzkaller } = useRunOutput();
+  const { log, stats: liveStats, summary, running, cancelling, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
   // Embedded in the workflow, the project comes from the workflow's gate.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
@@ -189,21 +189,45 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
-      <button
-        onClick={run}
-        disabled={running || !project || (!isSyz && !target)}
-        className="self-start inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
-        style={{
-          background: "var(--accent)",
-          color: "var(--accent-contrast)",
-          borderColor: "transparent",
-        }}
-        onMouseEnter={(e) => !running && (e.currentTarget.style.opacity = "0.85")}
-        onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
-      >
-        {running ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-        {running ? "Running..." : isSyz ? "Launch Campaign" : "Run Fuzzer"}
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={run}
+          disabled={running || !project || (!isSyz && !target)}
+          className="self-start inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
+          style={{
+            background: "var(--accent)",
+            color: "var(--accent-contrast)",
+            borderColor: "transparent",
+          }}
+          onMouseEnter={(e) => !running && (e.currentTarget.style.opacity = "0.85")}
+          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+        >
+          {running ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+          {running ? "Running..." : isSyz ? "Launch Campaign" : "Run Fuzzer"}
+        </button>
+
+        {/* Stop is offered while a harness fuzz run is in flight. Kernel
+            (syzkaller) campaigns run through a separate path not covered by the
+            cancellation registry, so the button is scoped to non-syzkaller runs. */}
+        {running && !isSyz && (
+          <button
+            onClick={() => void cancelRun()}
+            disabled={cancelling}
+            className="self-start inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
+            style={{
+              background: "transparent",
+              color: "var(--error)",
+              borderColor: "var(--error)",
+            }}
+            onMouseEnter={(e) => !cancelling && (e.currentTarget.style.opacity = "0.85")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            title="Cancel the running fuzz campaign"
+          >
+            {cancelling ? <Loader2 size={14} className="animate-spin" /> : <Square size={14} />}
+            {cancelling ? "Stopping..." : "Stop"}
+          </button>
+        )}
+      </div>
 
       {/* Live stats while fuzzing (updates in place from streamed events). */}
       {running && !isSyz && (
