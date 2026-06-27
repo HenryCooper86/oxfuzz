@@ -12,6 +12,7 @@ pub mod chat_session;
 pub mod config;
 pub mod container;
 pub mod init;
+pub mod knowledge;
 
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, provider_pool_from_config,
