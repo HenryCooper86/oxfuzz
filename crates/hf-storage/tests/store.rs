@@ -143,3 +143,55 @@ async fn crash_and_corpus_roundtrip() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].size, 42);
 }
+
+#[tokio::test]
+async fn schedule_executions_round_trip_and_latest_fire() {
+    let (store, _dir) = temp_store().await;
+
+    store
+        .upsert_schedule_execution(
+            "e1",
+            "s1",
+            "2026-07-01T01:00:00+00:00",
+            "completed",
+            r#"{"k":1}"#,
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_schedule_execution(
+            "e2",
+            "s1",
+            "2026-07-01T02:00:00+00:00",
+            "failed",
+            r#"{"k":2}"#,
+        )
+        .await
+        .unwrap();
+
+    let recent = store.list_schedule_executions(10).await.unwrap();
+    assert_eq!(recent.len(), 2);
+    // Newest first.
+    assert_eq!(recent[0], r#"{"k":2}"#);
+
+    let fires: std::collections::HashMap<String, String> = store
+        .latest_schedule_fires()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(fires.get("s1").unwrap(), "2026-07-01T02:00:00+00:00");
+
+    // Upsert replaces by id (no duplicate).
+    store
+        .upsert_schedule_execution(
+            "e2",
+            "s1",
+            "2026-07-01T02:00:00+00:00",
+            "completed",
+            r#"{"k":3}"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.list_schedule_executions(10).await.unwrap().len(), 2);
+}
