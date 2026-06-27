@@ -16,16 +16,21 @@ pub fn render_discovery_prompt(candidates: &[TargetCandidate]) -> String {
         "  symbol, fit_score (0.0-1.0), rationale (one sentence).".to_owned(),
         "Only include functions that accept untrusted input.".to_owned(),
         "Do not include trivial wrappers or pure formatting functions.".to_owned(),
+        "Prefer targets with high accumulated_complexity / reaches: they exercise \
+         more reachable code per run."
+            .to_owned(),
         String::new(),
         "Candidates (heuristic-ranked):".to_owned(),
     ];
     for c in candidates {
         lines.push(format!(
-            "- symbol={} kind={:?} input_surface={:?} complexity={} fit_score={:.3} signature={}",
+            "- symbol={} kind={:?} input_surface={:?} complexity={} accumulated_complexity={} reaches={} fit_score={:.3} signature={}",
             c.symbol,
             c.kind,
             c.input_surface,
             c.complexity,
+            c.accumulated_complexity,
+            c.reachable_functions.len(),
             c.fit_score,
             c.signature.as_deref().unwrap_or("(unknown)")
         ));
@@ -38,6 +43,30 @@ pub fn render_discovery_prompt(candidates: &[TargetCandidate]) -> String {
 pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> String {
     let entry_point = engine_entry_point(engine);
     let engine_name = engine_name(engine);
+    // List the project functions this target reaches, so the harness shapes its
+    // input to exercise them (capped to keep the prompt focused).
+    let reach_line = if target.reachable_functions.is_empty() {
+        String::new()
+    } else {
+        let shown: Vec<&str> = target
+            .reachable_functions
+            .iter()
+            .take(20)
+            .map(String::as_str)
+            .collect();
+        let more = target.reachable_functions.len().saturating_sub(shown.len());
+        let suffix = if more > 0 {
+            format!(", +{more} more")
+        } else {
+            String::new()
+        };
+        format!(
+            "\n- reaches ({n}) functions: {list}{suffix}\n\
+             - shape the input so it drives execution into these where possible",
+            n = target.reachable_functions.len(),
+            list = shown.join(", "),
+        )
+    };
     format!(
         "You are the harness-agent for hobot_fuzz.\n\
          Your job: write a fuzzing harness for the target below using {engine_name}.\n\
@@ -53,12 +82,14 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
          - language: {lang:?}\n\
          - kind: {kind:?}\n\
          - input_surface: {input_surface:?}\n\
+         - accumulated_complexity: {acc}\n\
          - signature: {sig}\n\
-         - location: {file}:{line}",
+         - location: {file}:{line}{reach_line}",
         symbol = target.symbol,
         lang = target.language,
         kind = target.kind,
         input_surface = target.input_surface,
+        acc = target.accumulated_complexity,
         sig = target.signature.as_deref().unwrap_or("(unknown)"),
         file = target.location.file.display(),
         line = target.location.line,
