@@ -9,7 +9,7 @@ pub mod ingest;
 pub mod minimize;
 pub mod report;
 
-pub use casr::{parse_casrep, severity_from_str};
+pub use casr::{casr_command, kind_from_short, parse_casrep, severity_from_str};
 pub use classify::classify;
 pub use dedup::dedup;
 pub use ingest::ingest;
