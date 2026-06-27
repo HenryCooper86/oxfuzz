@@ -2,7 +2,7 @@
 //!
 //! The GUI chat uses one session per view mount with its message list held in
 //! the frontend, so checkpoints only need to live for the app session (an undo
-//! buffer), not survive restarts. This backs [`ChatCheckpointManager`] with a
+//! buffer), not survive restarts. This backs `ChatCheckpointManager` with a
 //! simple `Mutex<Vec<..>>`.
 
 use std::sync::Mutex;

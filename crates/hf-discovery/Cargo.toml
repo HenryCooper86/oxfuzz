@@ -24,6 +24,7 @@ tree-sitter-c = { workspace = true }
 tree-sitter-cpp = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 futures = { workspace = true }
 

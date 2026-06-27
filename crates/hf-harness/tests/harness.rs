@@ -113,6 +113,8 @@ fn target() -> TargetCandidate {
         fit_score: 0.9,
         sanitizers: vec![Sanitizer::Address],
         rationale: String::new(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
     }
 }
 

@@ -3,6 +3,7 @@
 //! See `docs/design/target-discovery-design.md`.
 
 pub mod ranking;
+mod reachability;
 pub mod scanner;
 
 pub use ranking::rank;

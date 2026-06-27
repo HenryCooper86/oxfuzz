@@ -70,6 +70,12 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<Vec<TargetCandidate>, Cla
     let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
 
     let mut candidates = Vec::new();
+    // Call graph accumulated across all files: function name -> direct callees,
+    // and function name -> complexity (membership = project-defined).
+    let mut calls: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut complexity_map: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     for entry in walker {
         let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -87,17 +93,30 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<Vec<TargetCandidate>, Cla
         let Some(tree) = parser.parse(&src, None) else {
             continue;
         };
-        extract_functions(&tree, path, &src, lang, &mut candidates);
+        extract_functions(
+            &tree,
+            path,
+            &src,
+            lang,
+            &mut candidates,
+            &mut calls,
+            &mut complexity_map,
+        );
     }
+    // Annotate candidates with reachability + accumulated complexity.
+    crate::reachability::analyze(&mut candidates, &calls, &complexity_map);
     Ok(candidates)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_functions(
     tree: &tree_sitter::Tree,
     path: &Path,
     src: &str,
     lang: TargetLanguage,
     out: &mut Vec<TargetCandidate>,
+    calls: &mut std::collections::HashMap<String, Vec<String>>,
+    complexity_map: &mut std::collections::HashMap<String, u32>,
 ) {
     let root = tree.root_node();
 
@@ -128,6 +147,9 @@ fn extract_functions(
         let input_surface = infer_input_surface(&declarator, src);
         let complexity = compute_complexity(node);
         let fit_score = compute_fit_score(kind, input_surface, complexity, params);
+        // Record the call graph for interprocedural reachability analysis.
+        complexity_map.insert(symbol.clone(), complexity);
+        calls.insert(symbol.clone(), extract_calls(node, src));
         // Capture only the function prototype (declarator), not the whole
         // definition body -- otherwise the signature spans many lines and
         // downstream consumers (e.g. harness generation) leak body code.
@@ -158,6 +180,8 @@ fn extract_functions(
             fit_score,
             sanitizers: vec![Sanitizer::Address],
             rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
         });
     };
     walk_nodes(root, &mut f);
@@ -182,6 +206,26 @@ fn has_storage_class_specifier(node: tree_sitter::Node, src: &str, keyword: &str
         }
     }
     false
+}
+
+/// Collect the names of functions directly called within `func` -- the callee
+/// identifier of each `call_expression` whose target is a plain identifier
+/// (direct calls; function-pointer/method calls are ignored).
+fn extract_calls(func: tree_sitter::Node, src: &str) -> Vec<String> {
+    let mut callees = Vec::new();
+    let mut f = |n: tree_sitter::Node| {
+        if n.kind() == "call_expression" {
+            if let Some(callee) = n.child_by_field_name("function") {
+                if callee.kind() == "identifier" {
+                    if let Ok(name) = callee.utf8_text(src.as_bytes()) {
+                        callees.push(name.to_owned());
+                    }
+                }
+            }
+        }
+    };
+    walk_nodes(func, &mut f);
+    callees
 }
 
 fn walk_nodes(node: tree_sitter::Node, f: &mut dyn FnMut(tree_sitter::Node)) {
