@@ -3,7 +3,7 @@ import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
-import { Crosshair, Search, Loader2, FolderOpen } from "lucide-react";
+import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject, setActiveProject } = useProject();
@@ -125,7 +125,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             {inventory.candidates
               .sort((a, b) => b.fit_score - a.fit_score)
               .map((c) => (
-                <CandidateCard key={c.id} candidate={c} />
+                <CandidateCard key={c.id} candidate={c} callGraph={inventory.call_graph ?? {}} />
               ))}
           </div>
         </div>
@@ -134,16 +134,25 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   );
 }
 
-function CandidateCard({ candidate: c }: { candidate: TargetCandidate }) {
+function CandidateCard({ candidate: c, callGraph }: { candidate: TargetCandidate; callGraph: Record<string, string[]> }) {
   const fitColor = c.fit_score > 0.8 ? "var(--accent)" : c.fit_score > 0.6 ? "var(--warning)" : "var(--text-muted)";
   const reaches = c.reachable_functions?.length ?? 0;
+  const hasTree = (callGraph[c.symbol]?.length ?? 0) > 0;
+  const [treeOpen, setTreeOpen] = useState(false);
   return (
+    <div className="surface-card flex flex-col" style={{ padding: 0 }}>
     <div
-      className="surface-card flex items-center gap-3 transition-all duration-150"
-      style={{ padding: "var(--space-md)", cursor: "pointer" }}
+      className="flex items-center gap-3 transition-all duration-150"
+      style={{ padding: "var(--space-md)", cursor: hasTree ? "pointer" : "default" }}
+      onClick={hasTree ? () => setTreeOpen((o) => !o) : undefined}
       onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--border-focus)")}
       onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
     >
+      {hasTree ? (
+        <span className="shrink-0 text-text-muted">{treeOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+      ) : (
+        <span className="shrink-0" style={{ width: "14px" }} />
+      )}
       <Crosshair size={16} className="shrink-0" style={{ color: "var(--accent)" }} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
@@ -184,6 +193,60 @@ function CandidateCard({ candidate: c }: { candidate: TargetCandidate }) {
           </span>
         )}
       </div>
+    </div>
+    {treeOpen && hasTree && (
+      <div style={{ padding: "0 var(--space-md) var(--space-md) calc(var(--space-md) + 22px)", borderTop: "1px solid var(--border)" }}>
+        <div className="text-xs text-text-muted uppercase mt-2 mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+          Call Tree
+        </div>
+        {(callGraph[c.symbol] ?? []).map((child) => (
+          <CallTreeNode key={child} name={child} graph={callGraph} ancestors={new Set([c.symbol])} depth={1} />
+        ))}
+      </div>
+    )}
+    </div>
+  );
+}
+
+// One node of the call tree: the function name + an expander for its project
+// callees. `ancestors` guards against cycles; deeper levels start collapsed.
+function CallTreeNode({
+  name,
+  graph,
+  ancestors,
+  depth,
+}: {
+  name: string;
+  graph: Record<string, string[]>;
+  ancestors: Set<string>;
+  depth: number;
+}) {
+  const isCycle = ancestors.has(name);
+  const children = isCycle ? [] : graph[name] ?? [];
+  const hasChildren = children.length > 0;
+  const [open, setOpen] = useState(depth < 2);
+  return (
+    <div>
+      <div className="flex items-center gap-1 text-xs font-mono" style={{ padding: "1px 0" }}>
+        {hasChildren ? (
+          <button onClick={() => setOpen((o) => !o)} className="text-text-muted hover:text-text-primary outline-none">
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+        ) : (
+          <span style={{ width: "12px" }} />
+        )}
+        <span style={{ color: hasChildren ? "var(--text-primary)" : "var(--text-secondary)" }}>
+          {name}
+          {isCycle ? " ↻" : ""}
+        </span>
+      </div>
+      {open && hasChildren && (
+        <div style={{ marginLeft: "5px", borderLeft: "1px solid var(--border)", paddingLeft: "8px" }}>
+          {children.map((child) => (
+            <CallTreeNode key={child} name={child} graph={graph} ancestors={new Set([...ancestors, name])} depth={depth + 1} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -36,6 +36,8 @@ export interface TargetCandidate {
 export interface TargetInventory {
   project_root: string;
   candidates: TargetCandidate[];
+  /** Project-only call adjacency (caller -> direct project callees). */
+  call_graph?: Record<string, string[]>;
 }
 
 export interface CorpusEntry {
