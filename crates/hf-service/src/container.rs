@@ -153,6 +153,39 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
     staged
 }
 
+/// Parse `llvm-cov export` JSON, returning the names of functions with a
+/// non-zero execution count (the covered set).
+fn parse_covered_functions(json: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let mut covered: Vec<String> = value
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|d| d.get("functions"))
+        .and_then(serde_json::Value::as_array)
+        .map(|funcs| {
+            funcs
+                .iter()
+                .filter(|f| {
+                    f.get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        > 0
+                })
+                .filter_map(|f| {
+                    f.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    covered.sort();
+    covered.dedup();
+    covered
+}
+
 /// Recursively collect and parse every `.casrep` report under `dir`.
 fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrReport)> {
     let mut out = Vec::new();
@@ -1109,6 +1142,41 @@ impl ServiceContainer {
     /// Replay a single crash input through the compiled harness in the sandbox
     /// and return the combined stdout+stderr (the sanitizer trace). Best-effort:
     /// returns an empty string if the binary is missing or the run fails.
+    /// Functions covered by a fuzz run, for the call-tree coverage overlay.
+    ///
+    /// Builds a source-based-coverage harness from the workspace sources,
+    /// replays the accumulated corpus through it in the sandbox, and exports
+    /// per-function execution counts with `llvm-cov` -- engine-agnostic, since
+    /// it compiles its own coverage binary rather than reusing the run's. Empty
+    /// when no harness was built or coverage tooling is unavailable.
+    pub async fn coverage_functions(&self, project: &Path, target: &str) -> Vec<String> {
+        let workspace = workspace_dir(project, target);
+        if !workspace.join("harness.c").exists() {
+            return Vec::new();
+        }
+        // One sandbox shell pipeline: coverage build -> replay corpus -> export.
+        let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
+             -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
+             && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \
+             llvm-profdata merge -sparse cov.profraw -o cov.profdata 2>/dev/null \
+             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata 2>/dev/null";
+        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 4096,
+            max_cpus: 2,
+            max_duration_secs: 180,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        match self.runtime.run_command(&cmd, &workspace, &limits).await {
+            Ok(result) => parse_covered_functions(&result.stdout),
+            Err(e) => {
+                tracing::warn!("coverage collection failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     async fn reproduce_crash(
         &self,
         workspace: &Path,
@@ -1750,4 +1818,28 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     }
     let _ = write!(body, "    {symbol}({});", args.join(", "));
     body
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::parse_covered_functions;
+
+    #[test]
+    fn parses_covered_functions_from_llvm_cov_json() {
+        let json = r#"{"data":[{"functions":[
+            {"name":"parse_entry","count":5},
+            {"name":"validate","count":2},
+            {"name":"never_called","count":0},
+            {"name":"decode","count":3}
+        ]}]}"#;
+        let covered = parse_covered_functions(json);
+        assert_eq!(covered, vec!["decode", "parse_entry", "validate"]);
+        assert!(!covered.contains(&"never_called".to_owned()));
+    }
+
+    #[test]
+    fn parse_handles_garbage() {
+        assert!(parse_covered_functions("not json").is_empty());
+        assert!(parse_covered_functions("{}").is_empty());
+    }
 }
