@@ -3,8 +3,29 @@ import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
-import type { Crash } from "../types";
+import type { Crash, CasrReport } from "../types";
 import { Bug, Loader2, ChevronRight } from "lucide-react";
+
+// CASR exploitability badge styling, keyed by the serialized CrashSeverity.
+const SEVERITY_STYLE: Record<string, { label: string; bg: string; fg: string }> = {
+  Exploitable: { label: "EXPLOITABLE", bg: "var(--error-subtle)", fg: "var(--error)" },
+  ProbablyExploitable: { label: "PROBABLY EXPL.", bg: "rgba(217,119,6,0.16)", fg: "#d97706" },
+  NotExploitable: { label: "NOT EXPL.", bg: "var(--surface-active)", fg: "var(--text-secondary)" },
+  Undefined: { label: "UNCLASSIFIED", bg: "var(--surface-active)", fg: "var(--text-muted)" },
+};
+
+function SeverityBadge({ casr }: { casr: CasrReport }) {
+  const s = SEVERITY_STYLE[casr.severity] ?? SEVERITY_STYLE.Undefined;
+  return (
+    <span
+      className="text-xs px-1.5 py-0.5 rounded-sm font-semibold shrink-0"
+      style={{ background: s.bg, color: s.fg, letterSpacing: "0.03em" }}
+      title={casr.severity_short || casr.severity}
+    >
+      {s.label}
+    </span>
+  );
+}
 
 export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject } = useProject();
@@ -128,6 +149,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
               >
                 <Bug size={14} className="shrink-0" style={{ color: "var(--error)" }} />
                 <span className="text-xs font-mono flex-1 truncate">{c.kind}</span>
+                {c.casr && <SeverityBadge casr={c.casr} />}
                 <span className="text-xs text-text-muted">{c.input_path.split("/").pop()}</span>
                 <ChevronRight size={14} className="text-text-muted" />
               </button>
@@ -156,9 +178,34 @@ function CrashDetail({ crash }: { crash: Crash }) {
         >
           {crash.kind}
         </span>
+        {crash.casr && <SeverityBadge casr={crash.casr} />}
         <span className="text-xs text-text-muted font-mono">{crash.input_path.split("/").pop()}</span>
       </div>
       {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
+      {crash.casr && (
+        <div className="border-t border-border pt-3">
+          <div className="text-xs text-text-muted uppercase mb-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+            CASR Analysis
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <SeverityBadge casr={crash.casr} />
+            {crash.casr.severity_short && (
+              <span className="text-xs text-text-secondary font-mono">{crash.casr.severity_short}</span>
+            )}
+            {crash.casr.crashline && (
+              <span className="text-xs text-text-muted font-mono">@ {crash.casr.crashline}</span>
+            )}
+            {crash.casr.cluster != null && (
+              <span className="text-xs text-text-muted">cluster {crash.casr.cluster}</span>
+            )}
+          </div>
+          {crash.casr.stack.length > 0 && (
+            <code className="text-xs text-text-secondary block font-mono p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)" }}>
+              {crash.casr.stack.slice(0, 8).join("\n")}
+            </code>
+          )}
+        </div>
+      )}
       {crash.stack_signature && (
         <div>
           <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
