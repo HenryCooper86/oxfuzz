@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -32,6 +32,13 @@ interface PermissionRequest {
   reason: string;
 }
 
+interface CheckpointView {
+  checkpoint_id: string;
+  turn_number: number;
+  message_count_before: number;
+  preview: string;
+}
+
 // Mirrors hf_agent::AgentEvent (serde tag = "type", snake_case).
 type AgentEvent =
   | { type: "started" }
@@ -54,6 +61,8 @@ export function ChatView() {
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
   const [agents, setAgents] = useState<CallableAgent[]>([]);
   const [agentId, setAgentId] = useState<string>(() => localStorage.getItem(ACTIVE_AGENT_KEY) || "orchestrator");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Listen for guardrail approval requests from the agent (high-risk actions
@@ -183,6 +192,30 @@ export function ChatView() {
       }
     }
     setMessages((m) => m.slice(0, -2));
+  }
+
+  // Open the per-turn checkpoint picker (load the turn list from the backend).
+  async function openPicker() {
+    if (!sessionId) return;
+    try {
+      setCheckpoints(await getTransport().invoke<CheckpointView[]>("chat_checkpoints", { sessionId }));
+      setPickerOpen(true);
+    } catch {
+      setCheckpoints([]);
+    }
+  }
+
+  // Roll back to a specific turn: remove that turn and everything after it.
+  async function rollbackTo(cp: CheckpointView) {
+    setPickerOpen(false);
+    if (sessionId) {
+      try {
+        await getTransport().invoke("chat_rollback_to", { sessionId, checkpointId: cp.checkpoint_id });
+      } catch {
+        /* best-effort; still truncate locally */
+      }
+    }
+    setMessages((m) => m.slice(0, cp.message_count_before));
   }
 
   async function send() {
@@ -490,6 +523,42 @@ export function ChatView() {
                   title="Undo last turn (rollback)"
                   onClick={rollbackLast}
                 />
+              )}
+              {sessionId && messages.length >= 2 && !busy && (
+                <div className="relative">
+                  <ToolbarIconButton
+                    icon={<History size={16} />}
+                    title="Roll back to an earlier turn"
+                    onClick={() => (pickerOpen ? setPickerOpen(false) : void openPicker())}
+                  />
+                  {pickerOpen && (
+                    <div
+                      className="absolute bottom-full mb-2 left-0 z-20 rounded-md border border-border shadow-lg overflow-hidden"
+                      style={{ background: "var(--surface-secondary)", width: "300px", maxHeight: "260px" }}
+                    >
+                      <div className="text-xs text-text-muted px-3 py-2 border-b border-border" style={{ fontWeight: 600, letterSpacing: "0.04em" }}>
+                        ROLL BACK TO BEFORE…
+                      </div>
+                      <div className="overflow-y-auto" style={{ maxHeight: "220px" }}>
+                        {checkpoints.length === 0 && (
+                          <div className="text-xs text-text-muted px-3 py-3">No earlier turns.</div>
+                        )}
+                        {checkpoints.map((cp) => (
+                          <button
+                            key={cp.checkpoint_id}
+                            onClick={() => void rollbackTo(cp)}
+                            className="flex items-start gap-2 w-full text-left px-3 py-2 hover:bg-surface-hover border-b border-border last:border-0"
+                          >
+                            <span className="text-xs font-mono shrink-0" style={{ color: "var(--accent)", minWidth: "44px" }}>
+                              turn {cp.turn_number}
+                            </span>
+                            <span className="text-xs text-text-secondary truncate">{cp.preview || "(no preview)"}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             <div className="flex items-center gap-2">

@@ -10,6 +10,19 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use hf_core::session::{ChatCheckpoint, ChatCheckpointStore, SessionError};
 use hf_core::types::SessionId;
+use serde::Serialize;
+
+/// A checkpoint surfaced to the GUI turn picker.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointView {
+    pub checkpoint_id: String,
+    /// 1-indexed turn this checkpoint precedes.
+    pub turn_number: u32,
+    /// Transcript length before this turn -- rolling back truncates to here.
+    pub message_count_before: u32,
+    /// Preview of the user message that started this turn.
+    pub preview: String,
+}
 
 /// A non-persistent [`ChatCheckpointStore`].
 #[derive(Default)]
