@@ -837,11 +837,19 @@ pub fn delete_agent(id: String) -> Result<(), String> {
 pub async fn create_session(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Option<String>, String> {
-    let Some(sessions) = state.container.session_store() else {
+    let Some(manager) = state.container.session_manager() else {
         return Ok(None);
     };
-    let id = sessions.create(None).await.map_err(|e| e.to_string())?;
-    Ok(Some(id.0.to_string()))
+    let node = manager
+        .create_session(hf_core::session::CreateSessionOptions {
+            parent_id: None,
+            session_type: hf_core::session::SessionType::Main,
+            agent_id: None,
+            title: Some("Chat".to_owned()),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(node.id.0))
 }
 
 /// Run an autonomous agent turn over the active project.
@@ -868,12 +876,14 @@ pub async fn chat_agent(
     // Resolve a persistent session if one was requested and available.
     let session = session_id
         .filter(|s| !s.is_empty())
-        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-        .map(hf_core::types::Id)
-        .zip(state.container.session_store());
+        .map(hf_core::types::SessionId)
+        .zip(state.container.session_manager());
 
-    let history: Vec<hf_core::types::Message> = if let Some((id, sessions)) = session {
-        sessions.history(id).await.map_err(|e| e.to_string())?
+    let history: Vec<hf_core::types::Message> = if let Some((id, manager)) = &session {
+        manager
+            .read_transcript(id)
+            .await
+            .map_err(|e| e.to_string())?
     } else {
         history
             .unwrap_or_default()
@@ -908,12 +918,12 @@ pub async fn chat_agent(
         .map_err(|e| e.to_string())?;
 
     // Persist the turn (user + assistant) when a session is active.
-    if let Some((id, sessions)) = session {
-        let _ = sessions
-            .append(id, hf_core::types::Message::user(message))
+    if let Some((id, manager)) = &session {
+        let _ = manager
+            .append_message(id, &hf_core::types::Message::user(message))
             .await;
-        let _ = sessions
-            .append(id, hf_core::types::Message::assistant(answer.clone()))
+        let _ = manager
+            .append_message(id, &hf_core::types::Message::assistant(answer.clone()))
             .await;
     }
 
