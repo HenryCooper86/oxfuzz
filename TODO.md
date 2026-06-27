@@ -44,6 +44,13 @@ Status legend: [x] done - [~] partial - [ ] not started.
   corpus, and triaged crashes (CASR severity + bug reports). Surfaced via CLI
   `report --out`, hf-web `POST /report`, and a GUI Triage "Download Report"
   button (native save dialog; browser download in web mode).
+- [x] hf-service: AI-composed professional report -- the deterministic
+  graph-bearing fact-sheet (Mermaid severity/kind pies + coverage chart +
+  Unicode bars) is fed to the LLM, which writes the narrative (exec summary,
+  methodology, per-finding impact + remediation, risk, recommendations) with
+  strict fact-grounding; falls back to the fact-sheet without a provider.
+- [x] hf-gui: report preview pane (react-markdown + mermaid) with rendered
+  graphs, Copy/Download; "View Report" in Triage; lazy-loaded chunk.
 
 ## Phase 5: Orchestration, Safety & Polish
 
