@@ -1,10 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
-import { Bug, Loader2, ChevronRight, FileDown } from "lucide-react";
+import { Bug, Loader2, ChevronRight, FileDown, FileText } from "lucide-react";
+
+// The report preview pulls in react-markdown + mermaid (heavy); load it only
+// when the user opens a report, keeping it out of the initial bundle.
+const ReportPreview = lazy(() =>
+  import("../components/ReportPreview").then((m) => ({ default: m.ReportPreview })),
+);
 
 // CASR exploitability badge styling, keyed by the serialized CrashSeverity.
 const SEVERITY_STYLE: Record<string, { label: string; bg: string; fg: string }> = {
@@ -38,6 +44,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [selected, setSelected] = useState<number | null>(null);
   const [reporting, setReporting] = useState(false);
   const [reportMsg, setReportMsg] = useState<string | null>(null);
+  const [reportMd, setReportMd] = useState<string | null>(null);
 
   // Whether the last run produced crashes (null = no run yet this session).
   const ranWithCrashes = summary ? summary.crashes > 0 : null;
@@ -59,38 +66,68 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     }
   }, [activeProject, lastTarget, markDone, markSkipped]);
 
-  // Compose the full Markdown campaign report and save it via a native dialog.
-  // Falls back to an in-browser download when running in web mode (no Tauri
-  // save dialog / filesystem).
-  const downloadReport = useCallback(async () => {
+  const reportArgs = useCallback(
+    () => ({ project: activeProject || ".", target: lastTarget }),
+    [activeProject, lastTarget],
+  );
+
+  // Browser blob download (web mode, or when the native dialog is unavailable).
+  const browserDownload = useCallback(
+    (md: string) => {
+      const blob = new Blob([md], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `hobot_fuzz_report_${(lastTarget || "target").replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    [lastTarget],
+  );
+
+  // Compose the report (AI-authored when a provider is configured) and open the
+  // preview pane with the rendered Markdown + graphs.
+  const previewReport = useCallback(async () => {
     setReporting(true);
     setReportMsg(null);
-    const args = { project: activeProject || ".", target: lastTarget };
     try {
-      const saved = await getTransport().invoke<string | null>("save_report", args);
-      if (saved) {
-        setReportMsg(`Saved to ${saved}`);
+      const md = await getTransport().invoke<string>("generate_report", reportArgs());
+      if (md) {
+        setReportMd(md);
       } else {
-        // Either the user cancelled the native dialog, or we are in web mode
-        // (save_report resolves to undefined there) -- try a browser download.
-        const md = await getTransport().invoke<string>("generate_report", args);
-        if (md) {
-          const blob = new Blob([md], { type: "text/markdown" });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = `hobot_fuzz_report_${(lastTarget || "target").replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
-          a.click();
-          URL.revokeObjectURL(url);
-          setReportMsg("Report downloaded.");
-        }
+        setReportMsg("Report generation is only available in the desktop app.");
       }
     } catch (e) {
       setReportMsg(`Report failed: ${e}`);
     } finally {
       setReporting(false);
     }
-  }, [activeProject, lastTarget]);
+  }, [reportArgs]);
+
+  // Save the report to disk: native dialog in the desktop app, blob download in
+  // web mode. Uses the already-composed Markdown when previewing.
+  const saveReport = useCallback(async () => {
+    setReportMsg(null);
+    try {
+      const saved = await getTransport().invoke<string | null>("save_report", reportArgs());
+      if (saved) {
+        setReportMsg(`Saved to ${saved}`);
+      } else if (reportMd) {
+        // save_report unavailable (web) or cancelled: fall back to a download of
+        // the report we already have.
+        browserDownload(reportMd);
+        setReportMsg("Report downloaded.");
+      } else {
+        const md = await getTransport().invoke<string>("generate_report", reportArgs());
+        if (md) {
+          browserDownload(md);
+          setReportMsg("Report downloaded.");
+        }
+      }
+    } catch (e) {
+      setReportMsg(`Report failed: ${e}`);
+    }
+  }, [reportArgs, reportMd, browserDownload]);
 
   // Auto-triage: once a run completes with crashes, ingest + dedup them
   // automatically (once per run) so the user doesn't have to click Scan. The
@@ -117,11 +154,11 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           </div>
         )}
         <div className="flex items-center gap-2">
-          {/* Download a full Markdown report of the campaign. Enabled once a run
-              has happened (a target is known); summarizes target, coverage,
-              corpus, and every triaged crash. */}
+          {/* Compose a full report of the campaign (AI-authored when a provider
+              is configured) and open it in a preview pane with rendered graphs.
+              Enabled once a run has happened (a target is known). */}
           <button
-            onClick={() => void downloadReport()}
+            onClick={() => void previewReport()}
             disabled={reporting || !lastTarget}
             className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
             style={{
@@ -131,10 +168,25 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             }}
             onMouseEnter={(e) => !reporting && (e.currentTarget.style.opacity = "0.85")}
             onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
-            title="Compose and download a detailed Markdown report"
+            title="Compose a detailed report and preview it"
           >
-            {reporting ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />}
-            {reporting ? "Composing..." : "Download Report"}
+            {reporting ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
+            {reporting ? "Composing..." : "View Report"}
+          </button>
+          <button
+            onClick={() => void saveReport()}
+            disabled={reporting || !lastTarget}
+            className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
+            style={{
+              background: "transparent",
+              color: "var(--text-secondary)",
+              borderColor: "var(--border)",
+            }}
+            onMouseEnter={(e) => !reporting && (e.currentTarget.style.opacity = "0.85")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            title="Compose and download the report as Markdown"
+          >
+            <FileDown size={14} />
           </button>
           <button
             onClick={triage}
@@ -225,6 +277,16 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             </div>
           )}
         </div>
+      )}
+
+      {reportMd !== null && (
+        <Suspense fallback={null}>
+          <ReportPreview
+            markdown={reportMd}
+            onClose={() => setReportMd(null)}
+            onDownload={() => void saveReport()}
+          />
+        </Suspense>
       )}
     </div>
   );
