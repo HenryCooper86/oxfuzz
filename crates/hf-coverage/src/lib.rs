@@ -6,6 +6,9 @@ use std::time::Instant;
 
 use hf_core::coverage::CoverageReport;
 
+mod summary;
+pub use summary::{parse_llvm_cov_summary, CoverageSummary};
+
 /// A proposal when coverage stagnates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StagnationProposal {
