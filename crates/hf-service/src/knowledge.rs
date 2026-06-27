@@ -1,9 +1,15 @@
 //! Project knowledge base backed by `hf-knowledge` (BM25 retrieval).
 //!
 //! Indexes a project's source files into a per-project [`HybridRetriever`] so
-//! the GUI Knowledge view (and, later, the agent) can search the codebase. The
-//! index is held in a process-global cache keyed by project path; it is rebuilt
-//! on demand via [`index_project`].
+//! the GUI Knowledge view and the agent's `KnowledgeSearch` tool can search the
+//! codebase. The index is held in a process-global cache keyed by project path;
+//! it is rebuilt on demand via [`index_project`].
+//!
+//! hf-knowledge's tokenizer targets natural language: it strips code punctuation
+//! without splitting on it (so `copy_chunk(const` becomes one mangled token). We
+//! therefore index a *code-normalized* copy of each chunk (punctuation -> spaces)
+//! and normalize queries the same way, while keeping the original text for the
+//! snippet shown to the user.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,16 +18,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use hf_core::error::ClassifiedError;
 use hf_knowledge::chunking::{ChunkLevel, ChunkMetadata, ChunkingStrategy};
 use hf_knowledge::config::KnowledgeConfig;
-use hf_knowledge::retrieval::{HybridRetriever, RetrievalFilter};
+use hf_knowledge::retrieval::{HybridRetriever, RetrievalConfig, RetrievalFilter, SearchStrategy};
 use hf_knowledge::tokenizer::AutoTokenizer;
 use ignore::WalkBuilder;
 use serde::Serialize;
 
-type Index = Arc<HybridRetriever<AutoTokenizer>>;
+/// A built per-project index: the BM25 retriever (over normalized text) plus a
+/// map from chunk id to the original source text for display.
+struct ProjectIndex {
+    retriever: HybridRetriever<AutoTokenizer>,
+    originals: HashMap<String, String>,
+}
 
-/// Process-global per-project BM25 index cache.
-fn cache() -> &'static Mutex<HashMap<String, Index>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Index>>> = OnceLock::new();
+/// Process-global per-project index cache.
+fn cache() -> &'static Mutex<HashMap<String, Arc<ProjectIndex>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<ProjectIndex>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -44,8 +55,23 @@ pub struct KnowledgeHit {
     pub file: String,
     /// Blended relevance score.
     pub score: f64,
-    /// A short snippet of the matched chunk.
+    /// A short snippet of the matched chunk (original source text).
     pub snippet: String,
+}
+
+/// Replace every character that is not alphanumeric or `_` with a space, so the
+/// natural-language tokenizer splits code tokens on punctuation while keeping
+/// identifiers (incl. `snake_case`) intact.
+fn code_normalize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect()
 }
 
 /// Index a project's source files into a BM25 knowledge base, replacing any
@@ -55,7 +81,18 @@ pub struct KnowledgeHit {
 /// Returns `ClassifiedError` if the project tree cannot be walked.
 pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> {
     let chunker = ChunkingStrategy::new(KnowledgeConfig::default());
-    let mut retriever = HybridRetriever::new(AutoTokenizer::new());
+    // Pure keyword (BM25) retrieval -- no embeddings here -- with the similarity
+    // threshold disabled, since raw BM25 scores are not on the 0..1 scale the
+    // default 0.65 threshold assumes (which would discard every keyword hit).
+    let mut retriever = HybridRetriever::with_config(
+        AutoTokenizer::new(),
+        RetrievalConfig {
+            strategy: SearchStrategy::KeywordSearch,
+            min_similarity_threshold: 0.0,
+            ..Default::default()
+        },
+    );
+    let mut originals: HashMap<String, String> = HashMap::new();
     let mut files = 0usize;
     let mut chunks = 0usize;
 
@@ -92,15 +129,22 @@ pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> 
             title: rel.clone(),
             ..Default::default()
         };
-        for chunk in chunker.chunk(&rel, &content, ChunkLevel::L2, &meta) {
+        for mut chunk in chunker.chunk(&rel, &content, ChunkLevel::L2, &meta) {
+            // Keep the original text for the snippet; index a normalized copy.
+            originals.insert(chunk.id.clone(), chunk.content.clone());
+            chunk.content = code_normalize(&chunk.content);
             retriever.index(chunk);
             chunks += 1;
         }
     }
 
+    let index = Arc::new(ProjectIndex {
+        retriever,
+        originals,
+    });
     let key = project.to_string_lossy().to_string();
     if let Ok(mut map) = cache().lock() {
-        map.insert(key, Arc::new(retriever));
+        map.insert(key, index);
     }
     Ok(KnowledgeStats { files, chunks })
 }
@@ -125,13 +169,55 @@ pub fn search_project(project: &Path, query: &str, limit: usize) -> Vec<Knowledg
         limit,
         ..Default::default()
     };
+    let normalized = code_normalize(query);
     index
-        .search(query, &filter)
+        .retriever
+        .search(&normalized, &filter)
         .into_iter()
-        .map(|r| KnowledgeHit {
-            file: r.chunk.metadata.source,
-            score: r.relevance,
-            snippet: r.chunk.content.chars().take(240).collect(),
+        .map(|r| {
+            let snippet = index
+                .originals
+                .get(&r.chunk.id)
+                .unwrap_or(&r.chunk.content)
+                .chars()
+                .take(240)
+                .collect();
+            KnowledgeHit {
+                file: r.chunk.metadata.source,
+                score: r.relevance,
+                snippet,
+            }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_and_search_finds_code_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("chunk.c"),
+            "int copy_chunk(const unsigned char *data, unsigned long len) { return 0; }",
+        )
+        .unwrap();
+
+        let stats = index_project(dir.path()).unwrap();
+        assert_eq!(stats.files, 1);
+        assert!(stats.chunks >= 1);
+
+        let hits = search_project(dir.path(), "copy_chunk", 10);
+        assert!(!hits.is_empty(), "expected a hit for copy_chunk");
+        assert_eq!(hits[0].file, "chunk.c");
+        // The snippet preserves the original source (punctuation intact).
+        assert!(hits[0].snippet.contains("copy_chunk(const"));
+    }
+
+    #[test]
+    fn search_unindexed_project_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(search_project(dir.path(), "anything", 10).is_empty());
+    }
 }
