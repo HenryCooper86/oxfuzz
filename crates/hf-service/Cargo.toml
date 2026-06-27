@@ -14,6 +14,7 @@ hf-crash = { workspace = true }
 hf-corpus = { workspace = true }
 hf-provider = { workspace = true }
 hf-knowledge = { workspace = true }
+hf-diagnostics = { workspace = true }
 ignore = { workspace = true }
 hf-session = { workspace = true }
 hf-storage = { workspace = true }

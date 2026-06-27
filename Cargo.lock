@@ -2670,6 +2670,7 @@ dependencies = [
  "hf-core",
  "hf-corpus",
  "hf-crash",
+ "hf-diagnostics",
  "hf-discovery",
  "hf-engine",
  "hf-guardrails",
