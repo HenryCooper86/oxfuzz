@@ -107,27 +107,29 @@ fn container_input_path(workspace: &Path, host_path: &Path) -> String {
 /// Copy likely crash inputs from a fuzzer `out` dir into a clean staging dir,
 /// skipping coverage maps and sanitizer logs that engines interleave there.
 /// Returns the number of inputs staged.
-fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
-    /// Extensions and name fragments that are never crash inputs.
-    fn is_noise(path: &Path) -> bool {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if ext == "cov" || ext == "log" {
-            return true;
-        }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        name.contains("honggfuzz")
-            || name.contains("sanitizer")
-            || name.starts_with("hf.")
-            || name == "fuzzer_stats"
+/// Extensions and name fragments that are engine bookkeeping, never crash
+/// inputs (coverage maps, logs, sanitizer dumps, fuzzer stats).
+fn is_crash_noise(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext == "cov" || ext == "log" {
+        return true;
     }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.contains("honggfuzz")
+        || name.contains("sanitizer")
+        || name.starts_with("hf.")
+        || name == "fuzzer_stats"
+}
+
+fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
     if std::fs::create_dir_all(staging).is_err() {
         return 0;
     }
@@ -143,7 +145,7 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if is_noise(&path) {
+        if is_crash_noise(&path) {
             continue;
         }
         if std::fs::copy(&path, staging.join(name)).is_ok() {
@@ -151,6 +153,34 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
         }
     }
     staged
+}
+
+/// Collect crash input file paths from a run output directory, skipping engine
+/// bookkeeping. Looks both at the top level (flat-output engines) and one level
+/// down under `<instance>/crashes/` (AFL++ output layout).
+fn collect_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
+    let mut inputs = Vec::new();
+    let push_files = |dir: &Path, inputs: &mut Vec<PathBuf>| {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && !is_crash_noise(&path) {
+                    inputs.push(path);
+                }
+            }
+        }
+    };
+    push_files(out_dir, &mut inputs);
+    // AFL++ nests crashes under out/<instance>/crashes/.
+    if let Ok(entries) = std::fs::read_dir(out_dir) {
+        for entry in entries.flatten() {
+            let crashes = entry.path().join("crashes");
+            if crashes.is_dir() {
+                push_files(&crashes, &mut inputs);
+            }
+        }
+    }
+    inputs
 }
 
 /// Cache value: the signature the covered set was computed for + the set.
@@ -1592,6 +1622,47 @@ impl ServiceContainer {
         let corpus = hf_corpus::list(&corpus_dir)?;
         let pruned = hf_corpus::prune(corpus)?;
         Ok(pruned.entries.len())
+    }
+
+    /// Feed triaged crash reproducers back into the corpus.
+    ///
+    /// Closes the run -> triage -> corpus loop: every crash-triggering input
+    /// surfaced by the most recent triage (persisted crashes for the project's
+    /// latest run, falling back to scanning the run output directory) is copied
+    /// into the corpus, deduplicated by content, so the harness keeps exercising
+    /// the paths that already broke it. Returns the number of inputs newly
+    /// added.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the corpus cannot be read or written.
+    pub async fn corpus_absorb_crashes(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<usize, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+
+        // Prefer the deduplicated crash set triage persisted for the latest run;
+        // fall back to whatever crash inputs are staged under the run output.
+        let mut inputs: Vec<PathBuf> = Vec::new();
+        if let Some(store) = &self.store {
+            let (run_id, _engine) = self.latest_run(project).await;
+            if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
+                inputs.extend(crashes.into_iter().map(|c| c.input_path));
+            }
+        }
+        if inputs.is_empty() {
+            inputs = collect_crash_inputs(&workspace.join("out"));
+        }
+
+        let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        corpus.target_id = target_id;
+        self.persist_corpus(target_id, &corpus).await;
+        Ok(added)
     }
 
     /// Coverage-guided corpus minimization.
