@@ -852,6 +852,17 @@ pub async fn create_session(
     Ok(Some(node.id.0))
 }
 
+/// Roll back the most recent chat turn for a session, truncating the persisted
+/// transcript. Returns the number of messages removed.
+#[tauri::command]
+pub async fn chat_rollback(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+) -> Result<usize, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state.container.chat_rollback_last(&id).await)
+}
+
 /// Run an autonomous agent turn over the active project.
 ///
 /// The agent reasons and calls fuzzing tools (discover/harness/run/triage/
@@ -891,6 +902,8 @@ pub async fn chat_agent(
             .map(|t| hf_core::types::Message::new(parse_role(&t.role), t.content))
             .collect()
     };
+    // Transcript length before this turn -- a rollback restores to here.
+    let message_count_before = u32::try_from(history.len()).unwrap_or(u32::MAX);
 
     // Run with an interactive guardrail gate: high-risk tool calls (e.g. run a
     // fuzzer) prompt the user via `chat:permission_request` before executing.
@@ -917,8 +930,13 @@ pub async fn chat_agent(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Persist the turn (user + assistant) when a session is active.
+    // Persist the turn (user + assistant) when a session is active, checkpointing
+    // the pre-turn state first so the turn can be rolled back.
     if let Some((id, manager)) = &session {
+        state
+            .container
+            .chat_create_checkpoint(id, message_count_before)
+            .await;
         let _ = manager
             .append_message(id, &hf_core::types::Message::user(message))
             .await;
