@@ -11,6 +11,7 @@
 pub mod chat_session;
 pub mod config;
 pub mod container;
+pub mod diagnostics;
 pub mod init;
 pub mod knowledge;
 

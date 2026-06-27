@@ -543,6 +543,14 @@ pub async fn knowledge_summary(
     })
 }
 
+/// Aggregated LLM cost/usage recorded this session (diagnostics).
+#[tauri::command]
+pub async fn diagnostics_cost_summary(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<hf_service::diagnostics::CostSummary, String> {
+    Ok(state.container.cost_summary().await)
+}
+
 /// Index a project's source files into its BM25 knowledge base.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]

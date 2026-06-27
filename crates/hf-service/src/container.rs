@@ -282,6 +282,16 @@ pub struct ServiceContainer {
     store: Option<Arc<Store>>,
     session_store: Option<ChatSessionStore>,
     guardrails: Guardrails,
+    diagnostics: Arc<crate::diagnostics::DiagnosticsRecorder>,
+}
+
+/// Build the per-model cost table (`model -> (per-1k-in, per-1k-out)`) from the
+/// configured providers, for LLM cost diagnostics.
+fn build_cost_map() -> std::collections::HashMap<String, (f64, f64)> {
+    crate::config::get_providers()
+        .into_iter()
+        .map(|p| (p.model, (p.cost_per_1k_input, p.cost_per_1k_output)))
+        .collect()
 }
 
 impl ServiceContainer {
@@ -297,7 +307,21 @@ impl ServiceContainer {
             store: None,
             session_store: None,
             guardrails: Guardrails::permissive(),
+            diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
+                build_cost_map(),
+            )),
         }
+    }
+
+    /// The LLM cost/trace diagnostics recorder for this session.
+    #[must_use]
+    pub fn diagnostics(&self) -> &Arc<crate::diagnostics::DiagnosticsRecorder> {
+        &self.diagnostics
+    }
+
+    /// Aggregated LLM cost/usage recorded this session.
+    pub async fn cost_summary(&self) -> crate::diagnostics::CostSummary {
+        self.diagnostics.summary().await
     }
 
     /// Attach a persistence store (and a session store derived from it),
@@ -363,6 +387,9 @@ impl ServiceContainer {
             store,
             session_store,
             guardrails: Guardrails::from_env(),
+            diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
+                build_cost_map(),
+            )),
         }
     }
 
@@ -410,7 +437,8 @@ impl ServiceContainer {
         let pool = self.provider_pool.as_ref().ok_or_else(|| {
             ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
         })?;
-        let bridge = LlmProviderBridge::new(Arc::clone(pool));
+        let bridge = LlmProviderBridge::new(Arc::clone(pool))
+            .with_diagnostics(Arc::clone(&self.diagnostics), "rank");
         let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
         if let Some(store) = &self.store {
             if let Err(e) = store.save_inventory(&ranked, Utc::now()).await {
@@ -446,7 +474,8 @@ impl ServiceContainer {
             .clone();
 
         if let Some(pool) = &self.provider_pool {
-            let provider = LlmProviderBridge::new(Arc::clone(pool));
+            let provider = LlmProviderBridge::new(Arc::clone(pool))
+                .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             match hf_harness::draft(&candidate, engine, Box::new(provider)).await {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down, auth,
@@ -787,7 +816,8 @@ impl ServiceContainer {
         if let Some(pool) = &self.provider_pool {
             let unique = deduped.len();
             for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
-                let bridge = LlmProviderBridge::new(Arc::clone(pool));
+                let bridge = LlmProviderBridge::new(Arc::clone(pool))
+                    .with_diagnostics(Arc::clone(&self.diagnostics), "triage_report");
                 let log = logs
                     .get(&crash.input_path)
                     .filter(|l| !l.trim().is_empty())
@@ -1131,6 +1161,9 @@ impl ServiceContainer {
                 &RouteRequest::with_tags(&["general", "reasoning", "code"]),
             )
             .await?;
+        self.diagnostics
+            .record("chat", &resp.model, &resp.usage)
+            .await;
         Ok(resp.text().to_owned())
     }
 }
@@ -1242,6 +1275,9 @@ pub struct RunSummary {
 struct LlmProviderBridge {
     pool: Arc<dyn ProviderPool>,
     meta: hf_core::provider::ProviderMetadata,
+    /// When set, each completion is recorded as a cost/trace diagnostic under
+    /// the given operation label.
+    diag: Option<(Arc<crate::diagnostics::DiagnosticsRecorder>, String)>,
 }
 
 impl LlmProviderBridge {
@@ -1261,7 +1297,21 @@ impl LlmProviderBridge {
             cost_per_1k_output: 0.0,
             tool_calling_mode: ToolCallingMode::PromptBased,
         };
-        Self { pool, meta }
+        Self {
+            pool,
+            meta,
+            diag: None,
+        }
+    }
+
+    /// Record completions through this bridge as diagnostics under `op`.
+    fn with_diagnostics(
+        mut self,
+        recorder: Arc<crate::diagnostics::DiagnosticsRecorder>,
+        op: &str,
+    ) -> Self {
+        self.diag = Some((recorder, op.to_owned()));
+        self
     }
 }
 
@@ -1271,9 +1321,14 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
         &self,
         request: &hf_core::provider::ChatRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
-        self.pool
+        let response = self
+            .pool
             .chat_completion(request, &hf_core::provider::RouteRequest::default())
-            .await
+            .await?;
+        if let Some((recorder, op)) = &self.diag {
+            recorder.record(op, &response.model, &response.usage).await;
+        }
+        Ok(response)
     }
 
     async fn chat_completion_stream(
