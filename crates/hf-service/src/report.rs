@@ -70,6 +70,7 @@ pub fn render_markdown(data: &ReportData) -> String {
     let _ = writeln!(md);
 
     render_executive_summary(&mut md, data);
+    render_visual_summary(&mut md, data);
     render_target(&mut md, data);
     render_run(&mut md, data);
     render_coverage(&mut md, data);
@@ -140,6 +141,104 @@ fn render_executive_summary(md: &mut String, data: &ReportData) {
         human_bytes(data.corpus.total_bytes)
     );
     let _ = writeln!(md);
+}
+
+/// Visual summary: graphs that render in any Markdown tool (Mermaid charts for
+/// rich viewers, plus Unicode bars that render literally everywhere).
+fn render_visual_summary(md: &mut String, data: &ReportData) {
+    let _ = writeln!(md, "## Visual Summary");
+    let _ = writeln!(md);
+
+    // Coverage bars (universal) first, then Mermaid charts (rich viewers).
+    if let Some(c) = data.coverage {
+        let _ = writeln!(md, "**Coverage**");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "```text");
+        let _ = writeln!(md, "Lines     {}", coverage_bar(c.line_percent()));
+        let _ = writeln!(md, "Functions {}", coverage_bar(c.function_percent()));
+        let _ = writeln!(md, "Regions   {}", coverage_bar(c.region_percent()));
+        let _ = writeln!(md, "```");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "{}", coverage_mermaid(c));
+        let _ = writeln!(md);
+    }
+
+    // Severity distribution pie (only meaningful with crashes).
+    if !data.crashes.is_empty() {
+        let _ = writeln!(md, "{}", severity_pie_mermaid(&data.crashes));
+        let _ = writeln!(md);
+        let _ = writeln!(md, "{}", kind_pie_mermaid(&data.crashes));
+        let _ = writeln!(md);
+    }
+}
+
+/// A 20-cell Unicode block bar with a trailing percentage, e.g.
+/// `████████████░░░░░░░░  60.0%`.
+fn coverage_bar(percent: f64) -> String {
+    const CELLS: usize = 20;
+    let filled = ((percent / 100.0) * CELLS as f64).round() as usize;
+    let filled = filled.min(CELLS);
+    let bar: String = "█".repeat(filled) + &"░".repeat(CELLS - filled);
+    format!("{bar}  {percent:.1}%")
+}
+
+/// A Mermaid bar chart of coverage percentages.
+fn coverage_mermaid(c: CoverageSummary) -> String {
+    format!(
+        "```mermaid\n\
+         xychart-beta\n\
+         \x20   title \"Coverage (%)\"\n\
+         \x20   x-axis [Lines, Functions, Regions]\n\
+         \x20   y-axis \"Percent covered\" 0 --> 100\n\
+         \x20   bar [{:.1}, {:.1}, {:.1}]\n\
+         ```",
+        c.line_percent(),
+        c.function_percent(),
+        c.region_percent()
+    )
+}
+
+/// A Mermaid pie chart of crash exploitability (CASR severity).
+fn severity_pie_mermaid(crashes: &[Crash]) -> String {
+    let mut exploitable = 0;
+    let mut probably = 0;
+    let mut not_exploitable = 0;
+    let mut undefined = 0;
+    for c in crashes {
+        match c.casr.as_ref().map(|r| r.severity) {
+            Some(CrashSeverity::Exploitable) => exploitable += 1,
+            Some(CrashSeverity::ProbablyExploitable) => probably += 1,
+            Some(CrashSeverity::NotExploitable) => not_exploitable += 1,
+            _ => undefined += 1,
+        }
+    }
+    let mut out = String::from("```mermaid\npie showData\n    title Crash severity\n");
+    for (label, n) in [
+        ("Exploitable", exploitable),
+        ("Probably exploitable", probably),
+        ("Not exploitable", not_exploitable),
+        ("Undefined", undefined),
+    ] {
+        if n > 0 {
+            let _ = writeln!(out, "    \"{label}\" : {n}");
+        }
+    }
+    out.push_str("```");
+    out
+}
+
+/// A Mermaid pie chart of crash kinds (ASan/UBSan/SEGV/...).
+fn kind_pie_mermaid(crashes: &[Crash]) -> String {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for c in crashes {
+        *counts.entry(format!("{:?}", c.kind)).or_default() += 1;
+    }
+    let mut out = String::from("```mermaid\npie showData\n    title Crash kinds\n");
+    for (label, n) in counts {
+        let _ = writeln!(out, "    \"{label}\" : {n}");
+    }
+    out.push_str("```");
+    out
 }
 
 fn render_target(md: &mut String, data: &ReportData) {
@@ -371,6 +470,80 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
         }
     }
     let _ = writeln!(md);
+}
+
+// -- AI composition ----------------------------------------------------------
+
+/// System prompt for the LLM that composes the professional narrative report.
+#[must_use]
+pub fn report_system_prompt() -> &'static str {
+    "You are a senior security engineer writing a professional fuzzing campaign \
+     report for an engineering and security audience. You write clearly and \
+     authoritatively, with concrete, actionable analysis. You NEVER invent facts: \
+     every number, severity, file path, and stack frame must come verbatim from \
+     the data you are given. If a figure is absent, say it was not measured \
+     rather than guessing."
+}
+
+/// Build the user prompt: the grounded fact-sheet plus composition rules.
+///
+/// The fact-sheet (`facts`) is the deterministic [`render_markdown`] output --
+/// every real number and the pre-rendered Mermaid graphs -- so the model has no
+/// reason to fabricate. The rules pin structure and require the graphs be kept.
+#[must_use]
+pub fn report_user_prompt(facts: &str, data: &ReportData) -> String {
+    format!(
+        "Compose a comprehensive, professional fuzzing report in GitHub-flavored \
+         Markdown for target `{target}` in project `{project}`.\n\n\
+         Use ONLY the facts and figures in the data sheet below. Do not invent \
+         crash counts, severities, coverage numbers, file paths, or stack frames. \
+         Preserve every ```mermaid``` code block and Markdown table from the data \
+         sheet verbatim, placing them in the most relevant section.\n\n\
+         Structure the report with these sections (use `##` headings):\n\
+         1. Executive Summary - audience-appropriate overview of risk and outcome.\n\
+         2. Methodology - engine, sanitizer, duration, corpus, coverage approach.\n\
+         3. Coverage Analysis - interpret the coverage figures and what they imply \
+         about untested code; include the coverage graphs.\n\
+         4. Findings - for EACH crash: a clear title, impact, likely root cause, \
+         exploitability rationale (from the CASR severity), and concrete \
+         remediation guidance. Include the severity graphs.\n\
+         5. Risk Assessment - prioritize the findings and state residual risk.\n\
+         6. Recommendations - prioritized, actionable next steps (fixes, more \
+         fuzzing, harness/corpus improvements).\n\
+         7. Conclusion.\n\n\
+         Write in prose, not just bullet lists. Be specific and technical. If \
+         there are no crashes, focus on coverage achieved, residual risk, and how \
+         to drive deeper.\n\n\
+         Output ONLY the Markdown report, starting with a single `#` title. Do not \
+         wrap the whole thing in a code fence.\n\n\
+         ---\n\
+         # DATA SHEET (ground truth)\n\n\
+         {facts}",
+        target = data.target,
+        project = data.project,
+    )
+}
+
+/// Guarantee the report carries the campaign graphs: if the model's output
+/// dropped the Mermaid blocks, append a deterministic Visual Summary so graphs
+/// are always present. Also stamps the generator footer.
+#[must_use]
+pub fn ensure_graphs(ai_markdown: &str, data: &ReportData) -> String {
+    let mut out = ai_markdown.trim_end().to_owned();
+    if !out.contains("```mermaid") {
+        let mut visual = String::new();
+        render_visual_summary(&mut visual, data);
+        if visual.contains("```mermaid") || visual.contains('█') {
+            out.push_str("\n\n");
+            out.push_str(&visual);
+        }
+    }
+    let _ = write!(
+        out,
+        "\n---\n\n_Composed by hobot_fuzz {} on {}._\n",
+        data.tool_version, data.generated_at
+    );
+    out
 }
 
 // -- formatting helpers ------------------------------------------------------
