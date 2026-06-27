@@ -86,6 +86,7 @@ pub async fn compile(
         max_cpus: 2,
         max_duration_secs: 120,
         env: std::collections::HashMap::new(),
+        ptrace: false,
     };
     let result = rt.run_command(&cmd, workspace, &limits).await?;
     if result.exit_code != 0 {
@@ -133,6 +134,7 @@ pub async fn smoke_fuzz(
         max_cpus: 1,
         max_duration_secs: 90,
         env: std::collections::HashMap::new(),
+        ptrace: false,
     };
     let result = rt.run_command(&cmd, workspace, &limits).await?;
     // libFuzzer writes progress/crashes to stderr; parse both streams.

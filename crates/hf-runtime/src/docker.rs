@@ -17,7 +17,12 @@ use crate::config::RuntimeConfig;
 /// This is a pure function with no side effects, making it testable without
 /// a Docker daemon.
 #[must_use]
-pub fn build_exec_args(cfg: &RuntimeConfig, command: &[String], timeout: Duration) -> Vec<String> {
+pub fn build_exec_args(
+    cfg: &RuntimeConfig,
+    command: &[String],
+    timeout: Duration,
+    ptrace: bool,
+) -> Vec<String> {
     let mut args = vec![
         "run".to_owned(),
         "--rm".to_owned(),
@@ -48,6 +53,15 @@ pub fn build_exec_args(cfg: &RuntimeConfig, command: &[String], timeout: Duratio
 
     // Network disabled for fuzz runs by default.
     args.push("--network=none".to_owned());
+
+    // CASR's crash analysis uses ptrace, which needs SYS_PTRACE and an
+    // unconfined seccomp profile. Granted per-call (triage only); the container
+    // is still network-isolated, resource-limited, and ephemeral.
+    if ptrace {
+        args.push("--cap-add=SYS_PTRACE".to_owned());
+        args.push("--security-opt".to_owned());
+        args.push("seccomp=unconfined".to_owned());
+    }
 
     // Image.
     args.push(cfg.image.clone());
@@ -96,7 +110,7 @@ impl RuntimeAdapter for DockerRuntime {
         use tokio::process::Command;
 
         let timeout = Duration::from_secs(limits.max_duration_secs);
-        let mut args = build_exec_args(&self.cfg, cmd, timeout);
+        let mut args = build_exec_args(&self.cfg, cmd, timeout, limits.ptrace);
         // Replace the placeholder host workspace with the real cwd.
         let placeholder = "/tmp/hobot_fuzz_workspace";
         for a in &mut args {
@@ -156,7 +170,7 @@ impl RuntimeAdapter for DockerRuntime {
         use tokio::process::Command;
 
         let timeout = Duration::from_secs(limits.max_duration_secs);
-        let mut args = build_exec_args(&self.cfg, cmd, timeout);
+        let mut args = build_exec_args(&self.cfg, cmd, timeout, limits.ptrace);
         let placeholder = "/tmp/hobot_fuzz_workspace";
         for a in &mut args {
             if a == &format!("{placeholder}:{}", self.cfg.container_workspace) {

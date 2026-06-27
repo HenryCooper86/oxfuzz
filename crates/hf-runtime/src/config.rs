@@ -38,6 +38,7 @@ impl Default for RuntimeConfig {
                 max_cpus: 2,
                 max_duration_secs: 7200,
                 env: HashMap::new(),
+                ptrace: false,
             },
         }
     }
