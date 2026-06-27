@@ -1461,7 +1461,52 @@ impl ServiceContainer {
             covered_functions,
             corpus,
         };
-        Ok(render_markdown(&data))
+
+        // The deterministic fact-sheet is always correct and carries the graphs;
+        // it is the no-provider fallback AND the grounded input for the LLM.
+        let facts = render_markdown(&data);
+
+        // When a provider is configured, have the LLM compose a professional
+        // narrative grounded in those facts. On any failure, fall back to the
+        // deterministic fact-sheet so a report is always produced.
+        if let Some(pool) = &self.provider_pool {
+            match self.compose_ai_report(pool, &facts, &data).await {
+                Ok(report) => return Ok(report),
+                Err(e) => tracing::warn!("AI report composition failed, using fact-sheet: {e}"),
+            }
+        }
+        Ok(facts)
+    }
+
+    /// Compose the narrative report with the LLM, grounded in the fact-sheet.
+    async fn compose_ai_report(
+        &self,
+        pool: &Arc<dyn ProviderPool>,
+        facts: &str,
+        data: &crate::report::ReportData,
+    ) -> Result<String, ClassifiedError> {
+        use hf_core::provider::{ChatRequest, RouteRequest};
+        use hf_core::types::Message;
+
+        let messages = vec![
+            Message::system(crate::report::report_system_prompt()),
+            Message::user(crate::report::report_user_prompt(facts, data)),
+        ];
+        let req = ChatRequest::from_messages(messages);
+        let resp = pool
+            .chat_completion(&req, &RouteRequest::with_tags(&["reasoning", "code", "general"]))
+            .await?;
+        self.diagnostics
+            .record("report", &resp.model, &resp.usage)
+            .await;
+        let text = resp.text().trim();
+        if text.is_empty() {
+            return Err(ClassifiedError::Provider(
+                "empty report from provider".to_owned(),
+            ));
+        }
+        // Guarantee the campaign graphs survive even if the model dropped them.
+        Ok(crate::report::ensure_graphs(text, data))
     }
 
     /// Summarize corpus composition for the report, preferring the persisted
