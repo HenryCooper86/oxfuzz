@@ -34,7 +34,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] hf-crash: crash ingestion, stack-signature dedup.
 - [x] hf-crash: minimization + LLM bug-report drafting (wired into triage).
 - [x] hf-corpus: seed, grow, prune, merge operations.
+- [x] hf-corpus: coverage-guided minimization (cmin) + crash-to-corpus
+  feedback loop (`absorb`); CLI `corpus --op minimize|absorb`.
 - [x] hf-coverage: coverage delta tracking and stagnation alerts.
+- [x] hf-coverage: line/region/function coverage summary (`CoverageSummary`
+  from `llvm-cov export` totals); CLI `coverage`.
 
 ## Phase 5: Orchestration, Safety & Polish
 
@@ -59,8 +63,10 @@ Status legend: [x] done - [~] partial - [ ] not started.
   `ProviderPool::stream` + agent Token events. (Deferred: low value through the
   ReAct JSON tool-protocol loop; would benefit from a native function-calling
   redesign first.)
-- [ ] Run cancellation: cooperative cancel of an in-flight `run_fuzzer`
-  (needs cancellation-token support in `hf-runtime`/`EngineRunner`).
+- [x] Run cancellation: cooperative cancel of an in-flight `run_fuzzer` via a
+  `CancellationToken` threaded through `hf-runtime`/`EngineRunner`;
+  `ServiceContainer::cancel_run`/`cancel_all_runs`/`active_run_ids`; CLI Ctrl-C;
+  `RunStatus::Cancelled`. (GUI/web Stop button wiring is a follow-up.)
 - [ ] Diagnostics/Observability panels: instrument the provider pool and expose
   `hf-diagnostics::CostTracker` via a command (panels currently mocked).
 - [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
