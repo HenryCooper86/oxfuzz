@@ -929,6 +929,19 @@ pub async fn chat_history(
         .collect())
 }
 
+/// Functions covered by a fuzz run of `target`, for the call-tree overlay.
+#[tauri::command]
+pub async fn coverage_functions(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> Result<Vec<String>, String> {
+    Ok(state
+        .container
+        .coverage_functions(std::path::Path::new(&project), &target)
+        .await)
+}
+
 /// List the sessions in a conversation tree (the branch switcher).
 #[tauri::command]
 pub async fn chat_branches(

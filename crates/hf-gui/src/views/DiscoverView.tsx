@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
@@ -125,7 +125,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             {inventory.candidates
               .sort((a, b) => b.fit_score - a.fit_score)
               .map((c) => (
-                <CandidateCard key={c.id} candidate={c} callGraph={inventory.call_graph ?? {}} />
+                <CandidateCard key={c.id} candidate={c} callGraph={inventory.call_graph ?? {}} project={project} />
               ))}
           </div>
         </div>
@@ -134,11 +134,30 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   );
 }
 
-function CandidateCard({ candidate: c, callGraph }: { candidate: TargetCandidate; callGraph: Record<string, string[]> }) {
+function CandidateCard({ candidate: c, callGraph, project }: { candidate: TargetCandidate; callGraph: Record<string, string[]>; project: string }) {
   const fitColor = c.fit_score > 0.8 ? "var(--accent)" : c.fit_score > 0.6 ? "var(--warning)" : "var(--text-muted)";
   const reaches = c.reachable_functions?.length ?? 0;
   const hasTree = (callGraph[c.symbol]?.length ?? 0) > 0;
   const [treeOpen, setTreeOpen] = useState(false);
+  // Per-function coverage overlay: null = not loaded, Set = covered functions
+  // (rebuilds a coverage harness + replays the corpus; only if a run happened).
+  const [covered, setCovered] = useState<Set<string> | null>(null);
+  const [covLoading, setCovLoading] = useState(false);
+
+  useEffect(() => {
+    if (!treeOpen || covered !== null || covLoading || !project) return;
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCovLoading(true);
+    getTransport()
+      .invoke<string[]>("coverage_functions", { project, target: c.symbol })
+      .then((fns) => !cancelled && setCovered(new Set(fns)))
+      .catch(() => !cancelled && setCovered(new Set()))
+      .finally(() => !cancelled && setCovLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [treeOpen, covered, covLoading, project, c.symbol]);
   return (
     <div className="surface-card flex flex-col" style={{ padding: 0 }}>
     <div
@@ -196,11 +215,23 @@ function CandidateCard({ candidate: c, callGraph }: { candidate: TargetCandidate
     </div>
     {treeOpen && hasTree && (
       <div style={{ padding: "0 var(--space-md) var(--space-md) calc(var(--space-md) + 22px)", borderTop: "1px solid var(--border)" }}>
-        <div className="text-xs text-text-muted uppercase mt-2 mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-          Call Tree
+        <div className="flex items-center gap-2 mt-2 mb-1">
+          <span className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+            Call Tree
+          </span>
+          {covLoading && <Loader2 size={11} className="animate-spin text-text-muted" />}
+          {covered && covered.size > 0 && (
+            <span className="text-xs text-text-muted flex items-center gap-2">
+              <span style={{ color: "var(--success, #16a34a)" }}>● covered</span>
+              <span style={{ color: "var(--text-muted)" }}>○ not covered</span>
+            </span>
+          )}
+          {covered && covered.size === 0 && !covLoading && (
+            <span className="text-xs text-text-muted">no coverage yet — run a campaign for this target</span>
+          )}
         </div>
         {(callGraph[c.symbol] ?? []).map((child) => (
-          <CallTreeNode key={child} name={child} graph={callGraph} ancestors={new Set([c.symbol])} depth={1} />
+          <CallTreeNode key={child} name={child} graph={callGraph} ancestors={new Set([c.symbol])} depth={1} covered={covered} />
         ))}
       </div>
     )}
@@ -215,16 +246,28 @@ function CallTreeNode({
   graph,
   ancestors,
   depth,
+  covered,
 }: {
   name: string;
   graph: Record<string, string[]>;
   ancestors: Set<string>;
   depth: number;
+  covered: Set<string> | null;
 }) {
   const isCycle = ancestors.has(name);
   const children = isCycle ? [] : graph[name] ?? [];
   const hasChildren = children.length > 0;
   const [open, setOpen] = useState(depth < 2);
+  // When coverage data is loaded, color by hit/not-hit; otherwise neutral.
+  const hasCoverage = covered !== null && covered.size > 0;
+  const isCovered = covered?.has(name) ?? false;
+  const nameColor = hasCoverage
+    ? isCovered
+      ? "var(--success, #16a34a)"
+      : "var(--text-muted)"
+    : hasChildren
+      ? "var(--text-primary)"
+      : "var(--text-secondary)";
   return (
     <div>
       <div className="flex items-center gap-1 text-xs font-mono" style={{ padding: "1px 0" }}>
@@ -235,7 +278,8 @@ function CallTreeNode({
         ) : (
           <span style={{ width: "12px" }} />
         )}
-        <span style={{ color: hasChildren ? "var(--text-primary)" : "var(--text-secondary)" }}>
+        {hasCoverage && <span style={{ color: nameColor, fontSize: "9px" }}>{isCovered ? "●" : "○"}</span>}
+        <span style={{ color: nameColor }}>
           {name}
           {isCycle ? " ↻" : ""}
         </span>
@@ -243,7 +287,7 @@ function CallTreeNode({
       {open && hasChildren && (
         <div style={{ marginLeft: "5px", borderLeft: "1px solid var(--border)", paddingLeft: "8px" }}>
           {children.map((child) => (
-            <CallTreeNode key={child} name={child} graph={graph} ancestors={new Set([...ancestors, name])} depth={depth + 1} />
+            <CallTreeNode key={child} name={child} graph={graph} ancestors={new Set([...ancestors, name])} depth={depth + 1} covered={covered} />
           ))}
         </div>
       )}
