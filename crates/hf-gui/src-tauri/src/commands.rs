@@ -542,6 +542,29 @@ pub async fn knowledge_summary(
     })
 }
 
+/// Index a project's source files into its BM25 knowledge base.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn knowledge_index(project: String) -> Result<hf_service::knowledge::KnowledgeStats, String> {
+    hf_service::knowledge::index_project(std::path::Path::new(&project)).map_err(|e| e.to_string())
+}
+
+/// Search a project's knowledge base (returns empty until indexed).
+#[tauri::command]
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn knowledge_search(
+    project: String,
+    query: String,
+    limit: Option<usize>,
+) -> Vec<hf_service::knowledge::KnowledgeHit> {
+    hf_service::knowledge::search_project(
+        std::path::Path::new(&project),
+        &query,
+        limit.unwrap_or(10),
+    )
+}
+
 /// The AI agent's identity: configured model, guardrail mode, and the tools it
 /// can call. Powers the Agents view.
 #[derive(Debug, Serialize)]
