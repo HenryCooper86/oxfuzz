@@ -55,7 +55,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             Target Discovery
           </h1>
           <p className="text-sm text-text-secondary">
-            Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, and parser heuristics.
+            Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability.
           </p>
         </>
       )}
@@ -136,6 +136,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
 
 function CandidateCard({ candidate: c }: { candidate: TargetCandidate }) {
   const fitColor = c.fit_score > 0.8 ? "var(--accent)" : c.fit_score > 0.6 ? "var(--warning)" : "var(--text-muted)";
+  const reaches = c.reachable_functions?.length ?? 0;
   return (
     <div
       className="surface-card flex items-center gap-3 transition-all duration-150"
@@ -173,6 +174,15 @@ function CandidateCard({ candidate: c }: { candidate: TargetCandidate }) {
           {c.fit_score.toFixed(3)}
         </span>
         <span className="text-xs text-text-muted">complexity: {c.complexity}</span>
+        {reaches > 0 && (
+          <span
+            className="text-xs px-1.5 py-0.5 rounded-sm"
+            style={{ background: "var(--accent-subtle)", color: "var(--accent)", fontSize: "10px", fontWeight: 500 }}
+            title={`Reaches ${reaches} project function${reaches === 1 ? "" : "s"}:\n${(c.reachable_functions ?? []).join(", ")}`}
+          >
+            reaches {reaches} · acc {c.accumulated_complexity ?? c.complexity}
+          </span>
+        )}
       </div>
     </div>
   );

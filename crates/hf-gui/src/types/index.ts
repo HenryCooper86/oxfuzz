@@ -29,6 +29,8 @@ export interface TargetCandidate {
   fit_score: number;
   sanitizers: string[];
   rationale: string;
+  reachable_functions?: string[];
+  accumulated_complexity?: number;
 }
 
 export interface TargetInventory {
