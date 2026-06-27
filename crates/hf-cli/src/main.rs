@@ -200,7 +200,7 @@ async fn cmd_run(
     let engine_kind = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
     let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
-    let container = ServiceContainer::bootstrap().await;
+    let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
 
     let draft = container
         .harness_draft(&project, target, engine_kind, lang)
@@ -216,15 +216,34 @@ async fn cmd_run(
         eprintln!("warning: could not generate seed corpus: {e}");
     }
 
-    println!("\n--- Running {engine} for {duration_secs}s (live) ---");
-    let on_progress = |p: hf_core::engine::FuzzProgress| match p {
-        hf_core::engine::FuzzProgress::LogLine(line) => println!("  {line}"),
-        hf_core::engine::FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
-        _ => {}
+    println!("\n--- Running {engine} for {duration_secs}s (live, Ctrl-C to stop) ---");
+    // Run on a task so a Ctrl-C can cancel it cooperatively: the run keeps
+    // executing long enough to tear down the sandbox cleanly and return its
+    // partial results, rather than being dropped mid-flight.
+    let mut handle = {
+        let container = std::sync::Arc::clone(&container);
+        let project = project.clone();
+        let target = target.to_owned();
+        tokio::spawn(async move {
+            let on_progress = |p: hf_core::engine::FuzzProgress| match p {
+                hf_core::engine::FuzzProgress::LogLine(line) => println!("  {line}"),
+                hf_core::engine::FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
+                _ => {}
+            };
+            container
+                .run_fuzzer(&project, &target, engine_kind, duration_secs, &on_progress)
+                .await
+        })
     };
-    let summary = container
-        .run_fuzzer(&project, target, engine_kind, duration_secs, &on_progress)
-        .await?;
+
+    let summary = tokio::select! {
+        res = &mut handle => res?,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\n--- Ctrl-C received: cancelling run ---");
+            container.cancel_all_runs();
+            handle.await?
+        }
+    }?;
     println!("\n--- Run summary ---");
     println!("  execs/sec: {:.0}", summary.execs);
     println!("  crashes detected: {}", summary.crashes);

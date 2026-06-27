@@ -43,9 +43,12 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Run a command, delivering each stdout/stderr line to `on_line` as it
     /// arrives, for live progress.
     ///
-    /// The default implementation runs the command to completion and replays
-    /// the captured output line-by-line (no live streaming); adapters that can
-    /// stream (e.g. Docker) override this.
+    /// The run is cooperatively cancellable: when `cancel` fires, an adapter
+    /// that supports it tears down the in-flight command and returns whatever
+    /// output it had streamed so far. The default implementation runs the
+    /// command to completion and replays the captured output line-by-line (no
+    /// live streaming, no mid-run cancellation); adapters that can stream
+    /// (e.g. Docker) override this.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the command fails to run.
@@ -54,8 +57,18 @@ pub trait RuntimeAdapter: Send + Sync {
         cmd: &[String],
         cwd: &std::path::Path,
         limits: &ResourceLimits,
+        cancel: &tokio_util::sync::CancellationToken,
         on_line: &LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
+        // A run cancelled before it starts does no work.
+        if cancel.is_cancelled() {
+            return Ok(CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+            });
+        }
         let result = self.run_command(cmd, cwd, limits).await?;
         for line in result.stdout.lines().chain(result.stderr.lines()) {
             on_line(line);

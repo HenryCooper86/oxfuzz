@@ -56,8 +56,19 @@ impl EngineRunner {
         rt: &dyn RuntimeAdapter,
         workspace: &Path,
     ) -> Result<RunResult, ClassifiedError> {
-        self.run_streaming(engine, cfg, binary, corpus, out, rt, workspace, &|_| {})
-            .await
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.run_streaming(
+            engine,
+            cfg,
+            binary,
+            corpus,
+            out,
+            rt,
+            workspace,
+            &cancel,
+            &|_| {},
+        )
+        .await
     }
 
     /// Run a fuzz campaign, invoking `on_progress` for each event **as the
@@ -79,6 +90,7 @@ impl EngineRunner {
         out: &str,
         rt: &dyn RuntimeAdapter,
         workspace: &Path,
+        cancel: &tokio_util::sync::CancellationToken,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunResult, ClassifiedError> {
         let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out);
@@ -111,8 +123,19 @@ impl EngineRunner {
             }
         };
         let result = rt
-            .run_command_streaming(&args, workspace, &limits, &on_line)
+            .run_command_streaming(&args, workspace, &limits, cancel, &on_line)
             .await?;
+
+        // A cancelled run stops wherever the user interrupted it; its exit code
+        // is meaningless, so skip validation and return the partial results.
+        if cancel.is_cancelled() {
+            let run_id = Uuid::new_v4();
+            let combined = combined.into_inner().unwrap_or_default();
+            let progress = parse_progress(&combined);
+            let coverage = parse_coverage(&combined, run_id);
+            on_progress(FuzzProgress::Done);
+            return Ok(RunResult { progress, coverage });
+        }
 
         let mut combined = combined.into_inner().unwrap_or_default();
         if combined.trim().is_empty() {
