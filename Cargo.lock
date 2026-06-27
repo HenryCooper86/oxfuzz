@@ -2678,6 +2678,7 @@ dependencies = [
  "hf-knowledge",
  "hf-provider",
  "hf-runtime",
+ "hf-scheduler",
  "hf-session",
  "hf-storage",
  "ignore",

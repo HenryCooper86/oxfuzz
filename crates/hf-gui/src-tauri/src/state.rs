@@ -42,15 +42,21 @@ pub struct AppState {
     pub container: ServiceContainer,
     /// In-flight HITL approval requests awaiting a user decision.
     pub pending_approvals: Arc<PendingApprovals>,
+    /// Background scheduler driving recurring/one-time fuzz campaigns.
+    pub scheduler: Arc<hf_service::scheduler::CampaignScheduler>,
 }
 
 impl AppState {
     /// Create a new `AppState`.
     #[must_use]
-    pub fn new(container: ServiceContainer) -> Self {
+    pub fn new(
+        container: ServiceContainer,
+        scheduler: Arc<hf_service::scheduler::CampaignScheduler>,
+    ) -> Self {
         Self {
             container,
             pending_approvals: Arc::new(PendingApprovals::default()),
+            scheduler,
         }
     }
 }

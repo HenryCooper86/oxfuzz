@@ -17,7 +17,8 @@ use commands::{
     ensure_docker, generate_seeds, get_agent, get_providers, harness_compile, harness_draft,
     host_arch, knowledge_index, knowledge_search, knowledge_summary, list_agents, list_configs,
     list_models, list_skills, open_file_dialog, open_folder_dialog, provider_test, read_config,
-    read_skill, run_fuzzer, run_syzkaller, save_agent, save_skill, set_providers, show_window,
+    read_skill, run_fuzzer, run_syzkaller, save_agent, save_skill, schedule_create,
+    schedule_delete, schedule_list, schedule_set_enabled, set_providers, show_window,
     system_status_cmd, triage, write_config,
 };
 
@@ -65,6 +66,10 @@ pub fn run() {
             chat_answer_permission,
             knowledge_summary,
             diagnostics_cost_summary,
+            schedule_list,
+            schedule_create,
+            schedule_delete,
+            schedule_set_enabled,
             knowledge_index,
             knowledge_search,
             agent_info,
@@ -122,8 +127,16 @@ pub fn run() {
 /// API use.
 fn build_app_state() -> AppState {
     ensure_writable_data_paths();
-    let container = tauri::async_runtime::block_on(hf_service::ServiceContainer::bootstrap());
-    AppState::new(container)
+    tauri::async_runtime::block_on(async {
+        let container = hf_service::ServiceContainer::bootstrap().await;
+        // The scheduler runs campaigns headlessly; persist schedules under the
+        // user data dir so they survive restarts.
+        let store_path = hf_service::init::user_app_dir().join("schedules.json");
+        let scheduler = std::sync::Arc::new(
+            hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path).await,
+        );
+        AppState::new(container, scheduler)
+    })
 }
 
 /// When the app runs as an installed bundle (no source checkout), a
