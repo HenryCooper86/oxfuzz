@@ -121,6 +121,7 @@ async fn crash_and_corpus_roundtrip() {
         summary: "heap-buffer-overflow".to_owned(),
         minimized: true,
         bug_report: None,
+        casr: None,
     };
     store.upsert_crash(&crash).await.unwrap();
     let crashes = store.list_crashes_by_run(run_id).await.unwrap();

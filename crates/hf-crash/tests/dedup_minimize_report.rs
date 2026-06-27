@@ -22,6 +22,7 @@ fn crash(sig: &str, kind: CrashKind) -> Crash {
         summary: "test crash".to_owned(),
         minimized: false,
         bug_report: None,
+        casr: None,
     }
 }
 
