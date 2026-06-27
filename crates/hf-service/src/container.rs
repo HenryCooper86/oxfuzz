@@ -1400,6 +1400,111 @@ impl ServiceContainer {
         }
     }
 
+    /// Compose a detailed Markdown campaign report for a target.
+    ///
+    /// Aggregates the discovered target, the most recent run, its triaged
+    /// crashes (with CASR severity + LLM bug reports), line/region coverage, and
+    /// corpus composition into a single self-contained Markdown document the
+    /// user can download and paste into any Markdown tool. Pulls persisted data
+    /// from the store and computes coverage live; degrades gracefully (honest
+    /// "not available" sections) when a store, run, or coverage tooling is
+    /// absent.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` only on an unexpected internal failure; missing
+    /// data is rendered as empty sections rather than an error.
+    pub async fn generate_report(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<String, ClassifiedError> {
+        use crate::report::{render_markdown, ReportData};
+
+        // Resolve the target candidate (best-effort) and its id.
+        let candidate = self
+            .discover(project, TargetLanguage::C)
+            .await
+            .ok()
+            .and_then(|inv| inv.candidates.into_iter().find(|c| c.symbol == target));
+        let target_id = candidate.as_ref().map_or_else(Uuid::nil, |c| c.id);
+
+        // Latest run + its crashes from the store, when persistence is wired.
+        let (run, crashes) = if let Some(store) = &self.store {
+            let run = store
+                .list_runs(Some(&project.to_string_lossy()))
+                .await
+                .ok()
+                .and_then(|runs| runs.into_iter().next());
+            let crashes = match &run {
+                Some(r) => store.list_crashes_by_run(r.id).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            (run, crashes)
+        } else {
+            (None, Vec::new())
+        };
+
+        // Live coverage (best-effort) and corpus composition.
+        let coverage = self.coverage_summary(project, target).await;
+        let covered_functions = self.coverage_functions(project, target).await.len();
+        let corpus = self.collect_corpus_stats(project, target, target_id).await;
+
+        let data = ReportData {
+            generated_at: Utc::now().to_rfc3339(),
+            project: project.to_string_lossy().to_string(),
+            target: target.to_owned(),
+            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+            candidate,
+            run,
+            crashes,
+            coverage,
+            covered_functions,
+            corpus,
+        };
+        Ok(render_markdown(&data))
+    }
+
+    /// Summarize corpus composition for the report, preferring the persisted
+    /// entries (richer source tags) and falling back to the workspace listing.
+    async fn collect_corpus_stats(
+        &self,
+        project: &Path,
+        target: &str,
+        target_id: Uuid,
+    ) -> crate::report::CorpusStats {
+        use hf_core::corpus::CorpusSource;
+
+        let entries = match &self.store {
+            Some(store) if target_id != Uuid::nil() => store
+                .list_corpus_entries(target_id)
+                .await
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let entries = if entries.is_empty() {
+            // No persisted entries: read the live corpus directory.
+            let workspace = workspace_dir(project, target);
+            hf_corpus::list(&workspace.join("corpus"))
+                .map(|c| c.entries)
+                .unwrap_or_default()
+        } else {
+            entries
+        };
+
+        let mut stats = crate::report::CorpusStats::default();
+        for e in &entries {
+            stats.count += 1;
+            stats.total_bytes += e.size;
+            match e.source {
+                CorpusSource::Seed => stats.seeds += 1,
+                CorpusSource::Fuzzer => stats.from_fuzzer += 1,
+                CorpusSource::Minimized => stats.minimized += 1,
+                CorpusSource::Manual => {}
+            }
+        }
+        stats
+    }
+
     /// Replay a single crash input through the compiled harness in the sandbox
     /// and return the combined stdout+stderr (the sanitizer trace). Best-effort:
     /// returns an empty string if the binary is missing or the run fails.

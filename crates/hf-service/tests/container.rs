@@ -218,6 +218,29 @@ async fn corpus_absorb_crashes_feeds_reproducers_back_in() {
 }
 
 #[tokio::test]
+async fn generate_report_produces_a_titled_markdown_doc() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("report_proj");
+    std::fs::create_dir_all(&project).unwrap();
+
+    // A store-less, stub-runtime container still produces an honest report:
+    // headings present, missing data rendered as "not available" sections.
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let md = container
+        .generate_report(&project, "some_target")
+        .await
+        .unwrap();
+
+    assert!(md.starts_with("# Fuzzing Report"), "has an H1 title");
+    assert!(md.contains("some_target"));
+    assert!(md.contains("## Findings"));
+    assert!(
+        md.contains("No crashes were found"),
+        "honest empty findings"
+    );
+}
+
+#[tokio::test]
 async fn session_manager_persists_chat_transcript() {
     use hf_core::session::{CreateSessionOptions, SessionType};
     use hf_core::types::Message;
