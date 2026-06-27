@@ -25,6 +25,37 @@ async fn store_wiring_is_optional() {
 }
 
 #[tokio::test]
+async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
+    use std::fs;
+
+    // A unique project name keeps this test's workspace isolated.
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("minimize_fallback_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+
+    // Lay down a workspace with a harness and a two-entry corpus.
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(workspace.join("harness.c"), b"int main(){return 0;}").unwrap();
+    fs::write(corpus.join("a"), b"aaa").unwrap();
+    fs::write(corpus.join("b"), b"bbb").unwrap();
+
+    // The stub runtime errors on every sandbox command, so minimization cannot
+    // run; the corpus must be preserved rather than wiped.
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let outcome = container.corpus_minimize(&project, target).await.unwrap();
+
+    assert_eq!(outcome.before, 2);
+    assert_eq!(outcome.after, 2, "corpus preserved on tooling failure");
+    assert!(corpus.join("a").exists());
+    assert!(corpus.join("b").exists());
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
 async fn session_manager_persists_chat_transcript() {
     use hf_core::session::{CreateSessionOptions, SessionType};
     use hf_core::types::Message;

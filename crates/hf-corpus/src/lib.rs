@@ -108,6 +108,49 @@ pub fn prune(mut corpus: Corpus) -> Result<Corpus, ClassifiedError> {
     Ok(corpus)
 }
 
+/// Adopt a coverage-minimized input set as the live corpus.
+///
+/// `minimized_dir` holds the survivors of an out-of-band coverage-guided merge
+/// (e.g. libFuzzer `-merge=1`). Every file in `corpus_root` that is not part of
+/// the minimized set is deleted, the minimized inputs are written into
+/// `corpus_root`, and the returned `Corpus` tags each survivor
+/// `CorpusSource::Minimized`. Inputs already present (by content) are left in
+/// place; only redundant ones are dropped.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the directories cannot be read or written.
+pub fn minimize(corpus_root: &Path, minimized_dir: &Path) -> Result<Corpus, ClassifiedError> {
+    // Hashes of the inputs the merge decided to keep.
+    let kept = list(minimized_dir)?;
+    let kept_hashes: HashSet<String> = kept.entries.iter().map(|e| e.sha256.clone()).collect();
+
+    // Drop any live input whose content is not in the minimized set.
+    for entry in list(corpus_root)?.entries {
+        if !kept_hashes.contains(&entry.sha256) {
+            let _ = std::fs::remove_file(&entry.path);
+        }
+    }
+
+    // Make sure every kept input exists in the live corpus directory.
+    let mut entries = Vec::new();
+    for entry in kept.entries {
+        let dest = corpus_root.join(entry.path.file_name().unwrap_or(entry.path.as_os_str()));
+        if !dest.exists() {
+            std::fs::copy(&entry.path, &dest)
+                .map_err(|e| ClassifiedError::Internal(format!("copy minimized: {e}")))?;
+        }
+        let data = std::fs::read(&dest)
+            .map_err(|e| ClassifiedError::Internal(format!("read minimized: {e}")))?;
+        entries.push(make_entry(&dest, &data, CorpusSource::Minimized));
+    }
+    Ok(Corpus {
+        id: Uuid::new_v4(),
+        target_id: Uuid::nil(),
+        root: corpus_root.to_path_buf(),
+        entries,
+    })
+}
+
 /// Merge two corpora, deduplicating by sha256.
 pub fn merge(a: Corpus, b: Corpus) -> Result<Corpus, ClassifiedError> {
     let mut seen = HashSet::new();
