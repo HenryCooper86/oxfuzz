@@ -409,15 +409,22 @@ impl ServiceContainer {
                 }
             }
         }
+        // Persist diagnostics to the database when one is configured, so LLM
+        // cost/usage accumulates across restarts; otherwise keep it in-memory.
+        let diagnostics = Arc::new(match &store {
+            Some(store) => crate::diagnostics::DiagnosticsRecorder::with_store(
+                build_cost_map(),
+                Arc::new(hf_diagnostics::SqliteTraceStore::new(store.pool().clone())),
+            ),
+            None => crate::diagnostics::DiagnosticsRecorder::new(build_cost_map()),
+        });
         Self {
             runtime,
             provider_pool,
             store,
             session_store,
             guardrails: Guardrails::from_env(),
-            diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
-                build_cost_map(),
-            )),
+            diagnostics,
             run_journal,
         }
     }

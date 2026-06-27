@@ -18,6 +18,9 @@ use hf_diagnostics::{InMemoryTraceStore, TraceStore};
 use serde::Serialize;
 use uuid::Uuid;
 
+/// A trace store the recorder writes to (in-memory or `SQLite`-backed).
+pub type SharedTraceStore = Arc<dyn TraceStore>;
+
 /// Per-model cost/usage rollup.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ModelCost {
@@ -40,18 +43,26 @@ pub struct CostSummary {
 
 /// Records LLM generations as diagnostics traces and aggregates their cost.
 pub struct DiagnosticsRecorder {
-    store: Arc<InMemoryTraceStore>,
+    store: SharedTraceStore,
     /// `model -> (cost_per_1k_input, cost_per_1k_output)` from provider config.
     costs: HashMap<String, (f64, f64)>,
     session_id: Uuid,
 }
 
 impl DiagnosticsRecorder {
-    /// Build a recorder with a per-model cost table.
+    /// Build a recorder backed by an ephemeral in-memory store (resets per run).
     #[must_use]
     pub fn new(costs: HashMap<String, (f64, f64)>) -> Self {
+        Self::with_store(costs, Arc::new(InMemoryTraceStore::new()))
+    }
+
+    /// Build a recorder backed by a specific (e.g. `SQLite`) trace store, so
+    /// cost/usage persists across restarts. `summary` aggregates every trace in
+    /// the store -- i.e. cumulative across sessions when persisted.
+    #[must_use]
+    pub fn with_store(costs: HashMap<String, (f64, f64)>, store: SharedTraceStore) -> Self {
         Self {
-            store: Arc::new(InMemoryTraceStore::new()),
+            store,
             costs,
             session_id: Uuid::new_v4(),
         }
