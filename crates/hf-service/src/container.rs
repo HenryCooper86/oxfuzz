@@ -105,6 +105,55 @@ fn container_input_path(workspace: &Path, host_path: &Path) -> String {
     )
 }
 
+/// Copy likely crash inputs from a fuzzer `out` dir into a clean staging dir,
+/// skipping coverage maps and sanitizer logs that engines interleave there.
+/// Returns the number of inputs staged.
+fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
+    /// Extensions and name fragments that are never crash inputs.
+    fn is_noise(path: &Path) -> bool {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext == "cov" || ext == "log" {
+            return true;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        name.contains("honggfuzz")
+            || name.contains("sanitizer")
+            || name.starts_with("hf.")
+            || name == "fuzzer_stats"
+    }
+    if std::fs::create_dir_all(staging).is_err() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(out_dir) else {
+        return 0;
+    };
+    let mut staged = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if is_noise(&path) {
+            continue;
+        }
+        if std::fs::copy(&path, staging.join(name)).is_ok() {
+            staged += 1;
+        }
+    }
+    staged
+}
+
 /// Recursively collect and parse every `.casrep` report under `dir`.
 fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrReport)> {
     let mut out = Vec::new();
@@ -833,13 +882,21 @@ impl ServiceContainer {
         if !out_dir.exists() {
             return None;
         }
+        // Stage only crash inputs into a clean dir: engines (esp. honggfuzz) mix
+        // coverage maps and sanitizer logs into `out`, and CASR would otherwise
+        // replay every one of them. Bail to the fallback if there are none.
+        let staging = workspace.join("casr_in");
+        let _ = std::fs::remove_dir_all(&staging);
+        if stage_crash_inputs(&out_dir, &staging) == 0 {
+            return None;
+        }
         // Fresh CASR output directory each pass.
         let casr_host = workspace.join("casr_out");
         let _ = std::fs::remove_dir_all(&casr_host);
         let cmd = hf_crash::casr_command(
             engine,
             &format!("/work/{bin}"),
-            "/work/out",
+            "/work/casr_in",
             "/work/casr_out",
             30,
         );
