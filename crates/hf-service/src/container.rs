@@ -1526,6 +1526,83 @@ impl ServiceContainer {
         Ok(pruned.entries.len())
     }
 
+    /// Coverage-guided corpus minimization.
+    ///
+    /// Builds a libFuzzer coverage binary from the workspace sources in the
+    /// sandbox and runs the canonical `-merge=1` pass, which keeps only inputs
+    /// that contribute new coverage, into a fresh directory; the survivors then
+    /// replace the live corpus (tagged `CorpusSource::Minimized`). Engine-
+    /// agnostic: it compiles its own coverage binary rather than reusing the
+    /// run's. Returns the entry counts before and after. When the coverage
+    /// tooling is unavailable the corpus is left untouched and the two counts
+    /// are equal.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the corpus directory cannot be read or
+    /// rewritten.
+    pub async fn corpus_minimize(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<MinimizeOutcome, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let before = hf_corpus::list(&corpus_dir)?.entries.len();
+        if !workspace.join("harness.c").exists() || before == 0 {
+            return Ok(MinimizeOutcome {
+                before,
+                after: before,
+            });
+        }
+        // Build the coverage binary and run libFuzzer's coverage-guided merge
+        // into a clean directory, all inside the sandbox.
+        let min_host = workspace.join("corpus_min");
+        let _ = std::fs::remove_dir_all(&min_host);
+        let pipeline = "clang -g -O1 -fsanitize=fuzzer,address *.c -o fuzz_min 2>/dev/null \
+             && rm -rf corpus_min && mkdir -p corpus_min \
+             && ./fuzz_min -merge=1 corpus_min corpus 2>/dev/null";
+        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 4096,
+            max_cpus: 2,
+            max_duration_secs: 300,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        // If the sandbox build/merge fails or yields nothing, leave the corpus
+        // untouched rather than wiping it on tooling failure.
+        match self.runtime.run_command(&cmd, &workspace, &limits).await {
+            Ok(_)
+                if min_host.is_dir()
+                    && std::fs::read_dir(&min_host).is_ok_and(|mut d| d.next().is_some()) => {}
+            Ok(_) => {
+                tracing::info!("corpus minimize produced no merged set; leaving corpus untouched");
+                return Ok(MinimizeOutcome {
+                    before,
+                    after: before,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("corpus minimize failed: {e}");
+                return Ok(MinimizeOutcome {
+                    before,
+                    after: before,
+                });
+            }
+        }
+        let mut minimized = hf_corpus::minimize(&corpus_dir, &min_host)?;
+        let _ = std::fs::remove_dir_all(&min_host);
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        minimized.target_id = target_id;
+        self.persist_corpus(target_id, &minimized).await;
+        Ok(MinimizeOutcome {
+            before,
+            after: minimized.entries.len(),
+        })
+    }
+
     // -- Chat -------------------------------------------------------------
 
     /// Send a chat message to the LLM provider pool.
@@ -1652,6 +1729,13 @@ pub struct SeedEntry {
     pub name: String,
     pub size: usize,
     pub sha256: String,
+}
+
+/// The result of a corpus minimization pass: entry counts before and after.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct MinimizeOutcome {
+    pub before: usize,
+    pub after: usize,
 }
 
 /// A fuzz run summary.

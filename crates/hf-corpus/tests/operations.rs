@@ -1,7 +1,7 @@
 //! Tests for corpus management operations.
 
 use hf_core::corpus::CorpusSource;
-use hf_corpus::{grow, list, merge, prune, seed};
+use hf_corpus::{grow, list, merge, minimize, prune, seed};
 use std::fs;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -102,6 +102,40 @@ async fn merge_combines_without_duplicates() {
     let merged = merge(a, b).unwrap();
     // file1 and file1_dup have the same sha256 -> deduped. file2 is unique.
     assert_eq!(merged.entries.len(), 2, "should merge to 2 unique entries");
+}
+
+#[tokio::test]
+async fn minimize_swaps_in_the_minimized_set_and_tags_it() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let minimized = dir.path().join("corpus_min");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&minimized).unwrap();
+    // The live corpus has three inputs.
+    fs::write(corpus_root.join("a"), b"aaa").unwrap();
+    fs::write(corpus_root.join("b"), b"bbb").unwrap();
+    fs::write(corpus_root.join("c"), b"ccc").unwrap();
+    // A coverage-guided merge kept only the two that contribute coverage.
+    fs::write(minimized.join("a"), b"aaa").unwrap();
+    fs::write(minimized.join("c"), b"ccc").unwrap();
+
+    let result = minimize(&corpus_root, &minimized).unwrap();
+
+    assert_eq!(
+        result.entries.len(),
+        2,
+        "should keep only the minimized set"
+    );
+    assert!(corpus_root.join("a").exists());
+    assert!(corpus_root.join("c").exists());
+    assert!(!corpus_root.join("b").exists(), "redundant input removed");
+    assert!(
+        result
+            .entries
+            .iter()
+            .all(|e| matches!(e.source, CorpusSource::Minimized)),
+        "survivors tagged Minimized"
+    );
 }
 
 #[tokio::test]
