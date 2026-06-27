@@ -482,6 +482,82 @@ impl ServiceContainer {
         0
     }
 
+    /// Fork a conversation: create a branch session off `parent`, copying the
+    /// parent's transcript up to `fork_message_count` so the branch can diverge
+    /// independently. Returns the new session id.
+    pub async fn chat_branch(
+        &self,
+        parent: &hf_core::types::SessionId,
+        fork_message_count: u32,
+        title: Option<String>,
+    ) -> Option<String> {
+        let sessions = self.session_manager.as_ref()?;
+        let branch = sessions.branch(parent, title).await.ok()?;
+        let parent_transcript = sessions.read_transcript(parent).await.unwrap_or_default();
+        for message in parent_transcript
+            .into_iter()
+            .take(fork_message_count as usize)
+        {
+            if let Err(e) = sessions.append_message(&branch.id, &message).await {
+                tracing::warn!("branch copy failed: {e}");
+            }
+        }
+        Some(branch.id.0)
+    }
+
+    /// The context transcript (LLM-facing messages) of a session, for loading a
+    /// branch into the chat view.
+    pub async fn chat_history(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Vec<hf_core::types::Message> {
+        match &self.session_manager {
+            Some(sessions) => sessions.read_transcript(session).await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// All sessions in the same conversation tree as `session` (the main session
+    /// plus every branch), for the branch switcher.
+    pub async fn chat_branches(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Vec<crate::checkpoints::BranchView> {
+        use hf_core::session::{SessionFilter, SessionType};
+        let Some(sessions) = &self.session_manager else {
+            return Vec::new();
+        };
+        let Ok(node) = sessions.get_session(session).await else {
+            return Vec::new();
+        };
+        let filter = SessionFilter {
+            root_id: Some(node.root_id.clone()),
+            ..SessionFilter::default()
+        };
+        let mut nodes = sessions.list_sessions(&filter).await.unwrap_or_default();
+        nodes.sort_by_key(|n| (n.depth, n.created_at));
+        nodes
+            .into_iter()
+            .map(|n| {
+                let is_main = n.session_type == SessionType::Main;
+                let active = n.id == *session;
+                crate::checkpoints::BranchView {
+                    title: n.title.unwrap_or_else(|| {
+                        if is_main {
+                            "Main".to_owned()
+                        } else {
+                            format!("Branch (depth {})", n.depth)
+                        }
+                    }),
+                    id: n.id.0,
+                    depth: n.depth,
+                    is_main,
+                    active,
+                }
+            })
+            .collect()
+    }
+
     /// The conversation session manager (if a database is configured): the
     /// `hf-session` tree model with display + context transcripts.
     #[must_use]
