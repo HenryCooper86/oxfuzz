@@ -8,7 +8,6 @@
 //! business logic out of presentation crates (AGENTS.md 2.9) and routing every
 //! build/run through `hf-runtime` sandboxing (AGENTS.md 2.12).
 
-pub mod chat_session;
 pub mod config;
 pub mod container;
 pub mod diagnostics;
