@@ -61,10 +61,7 @@ async fn stop_button_cancels_a_real_fuzz_run() {
 
     // Real Docker-backed container (new() = permissive guardrails, so the
     // RunFuzzer action auto-approves headlessly).
-    let container = Arc::new(ServiceContainer::new(
-        hf_service::runtime_from_env(),
-        None,
-    ));
+    let container = Arc::new(ServiceContainer::new(hf_service::runtime_from_env(), None));
 
     // Start a 600s campaign; without cancellation it would run for ten minutes.
     let runner = {

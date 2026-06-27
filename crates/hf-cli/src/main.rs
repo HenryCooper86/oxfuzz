@@ -99,6 +99,17 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    /// Compose a detailed Markdown campaign report for a target.
+    Report {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Start the web server (REST API).
     Serve {
         /// Port to listen on.
@@ -347,6 +358,23 @@ async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_report(
+    project: PathBuf,
+    target: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let markdown = container.generate_report(&project, target).await?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &markdown)?;
+            println!("Report written to {}", path.display());
+        }
+        None => println!("{markdown}"),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -393,6 +421,11 @@ async fn main() -> anyhow::Result<()> {
             op,
         } => cmd_corpus(project, &target, &op).await?,
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
+        Commands::Report {
+            project,
+            target,
+            out,
+        } => cmd_report(project, &target, out.as_deref()).await?,
         Commands::Serve { port } => {
             let app = hf_web::build_bootstrapped().await;
             let addr = format!("0.0.0.0:{port}");
