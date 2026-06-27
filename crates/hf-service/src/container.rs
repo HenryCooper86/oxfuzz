@@ -434,6 +434,54 @@ impl ServiceContainer {
         0
     }
 
+    /// List the (still-valid) per-turn checkpoints for a session, each with a
+    /// preview of the user message that started the turn.
+    pub async fn chat_checkpoints(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Vec<crate::checkpoints::CheckpointView> {
+        let (Some(checkpoints), Some(sessions)) = (&self.checkpoint_manager, &self.session_manager)
+        else {
+            return Vec::new();
+        };
+        let list = checkpoints
+            .list_checkpoints(session)
+            .await
+            .unwrap_or_default();
+        let transcript = sessions.read_transcript(session).await.unwrap_or_default();
+        list.into_iter()
+            .filter(|c| !c.invalidated)
+            .map(|c| {
+                let preview = transcript
+                    .get(c.message_count_before as usize)
+                    .map(|m| m.content.chars().take(80).collect())
+                    .unwrap_or_default();
+                crate::checkpoints::CheckpointView {
+                    checkpoint_id: c.checkpoint_id,
+                    turn_number: c.turn_number,
+                    message_count_before: c.message_count_before,
+                    preview,
+                }
+            })
+            .collect()
+    }
+
+    /// Roll back to a specific checkpoint (removing that turn and everything
+    /// after). Returns the number of messages removed.
+    pub async fn chat_rollback_to(
+        &self,
+        session: &hf_core::types::SessionId,
+        checkpoint_id: &str,
+    ) -> usize {
+        if let Some(manager) = &self.checkpoint_manager {
+            match manager.rollback_to(session, checkpoint_id).await {
+                Ok(result) => return result.messages_removed,
+                Err(e) => tracing::warn!("chat rollback_to failed: {e}"),
+            }
+        }
+        0
+    }
+
     /// The conversation session manager (if a database is configured): the
     /// `hf-session` tree model with display + context transcripts.
     #[must_use]

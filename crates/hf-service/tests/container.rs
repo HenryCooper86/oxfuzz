@@ -121,3 +121,67 @@ async fn chat_rollback_undoes_last_turn() {
     assert_eq!(transcript.len(), 2);
     assert_eq!(transcript[1].content, "a1");
 }
+
+#[tokio::test]
+async fn chat_checkpoint_picker_rolls_back_to_turn() {
+    use hf_core::session::{CreateSessionOptions, SessionType};
+    use hf_core::types::Message;
+
+    let rt = Arc::new(hf_runtime::StubRuntime);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("pick.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = ServiceContainer::new(rt, None).with_store(store);
+    let manager = container.session_manager().expect("session manager");
+
+    let node = manager
+        .create_session(CreateSessionOptions {
+            parent_id: None,
+            session_type: SessionType::Main,
+            agent_id: None,
+            title: None,
+        })
+        .await
+        .unwrap();
+
+    // Three turns, each checkpointed before its messages are appended.
+    for (i, (q, a)) in [("q1", "a1"), ("q2", "a2"), ("q3", "a3")]
+        .iter()
+        .enumerate()
+    {
+        container
+            .chat_create_checkpoint(&node.id, u32::try_from(i * 2).unwrap())
+            .await;
+        manager
+            .append_message(&node.id, &Message::user(*q))
+            .await
+            .unwrap();
+        manager
+            .append_message(&node.id, &Message::assistant(*a))
+            .await
+            .unwrap();
+    }
+
+    // The picker lists three turns, each previewing its user message.
+    let checkpoints = container.chat_checkpoints(&node.id).await;
+    assert_eq!(checkpoints.len(), 3);
+    assert_eq!(checkpoints[0].turn_number, 1);
+    assert_eq!(checkpoints[0].preview, "q1");
+    assert_eq!(checkpoints[1].preview, "q2");
+
+    // Roll back to turn 2 -> keep turn 1, drop turns 2 and 3.
+    let turn2 = &checkpoints[1];
+    let removed = container
+        .chat_rollback_to(&node.id, &turn2.checkpoint_id)
+        .await;
+    assert_eq!(removed, 4, "turns 2 and 3 (4 messages) removed");
+    let transcript = manager.read_transcript(&node.id).await.unwrap();
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(transcript[1].content, "a1");
+
+    // Only turn 1's checkpoint remains valid.
+    assert_eq!(container.chat_checkpoints(&node.id).await.len(), 1);
+}
