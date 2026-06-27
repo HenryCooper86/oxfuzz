@@ -66,7 +66,8 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] Run cancellation: cooperative cancel of an in-flight `run_fuzzer` via a
   `CancellationToken` threaded through `hf-runtime`/`EngineRunner`;
   `ServiceContainer::cancel_run`/`cancel_all_runs`/`active_run_ids`; CLI Ctrl-C;
-  `RunStatus::Cancelled`. (GUI/web Stop button wiring is a follow-up.)
+  `RunStatus::Cancelled`; GUI Stop button (`cancel_run` Tauri command +
+  RunView). syzkaller (separate streaming path) not yet cancellable.
 - [ ] Diagnostics/Observability panels: instrument the provider pool and expose
   `hf-diagnostics::CostTracker` via a command (panels currently mocked).
 - [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
