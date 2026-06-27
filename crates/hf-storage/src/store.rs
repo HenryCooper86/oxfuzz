@@ -415,6 +415,74 @@ impl Store {
         rows.iter().map(|r| json_col(r, "data_json")).collect()
     }
 
+    // -- scheduler execution history ---------------------------------------
+
+    /// Insert or update a persisted scheduler execution record.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn upsert_schedule_execution(
+        &self,
+        id: &str,
+        schedule_id: &str,
+        triggered_at: &str,
+        status: &str,
+        data_json: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO schedule_executions
+                (id, schedule_id, triggered_at, status, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(id)
+        .bind(schedule_id)
+        .bind(triggered_at)
+        .bind(status)
+        .bind(data_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The most recent persisted executions (their `data_json`), newest first.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn list_schedule_executions(&self, limit: i64) -> Result<Vec<String>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT data_json FROM schedule_executions ORDER BY triggered_at DESC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<String, _>("data_json"))
+            .collect())
+    }
+
+    /// The latest fire time per schedule: `(schedule_id, triggered_at)`.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn latest_schedule_fires(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT schedule_id, MAX(triggered_at) AS last FROM schedule_executions
+             GROUP BY schedule_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("schedule_id"),
+                    r.get::<String, _>("last"),
+                )
+            })
+            .collect())
+    }
+
     // -- corpus -------------------------------------------------------------
 
     /// Insert or update a corpus entry, keyed by `(target_id, sha256)`.

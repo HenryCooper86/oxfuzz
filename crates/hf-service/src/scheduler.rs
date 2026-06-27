@@ -14,10 +14,59 @@ use async_trait::async_trait;
 use hf_core::engine::{EngineKind, FuzzProgress};
 use hf_guardrails::Guardrails;
 use hf_scheduler::dispatcher::{DispatchError, DispatchResult, WorkflowDispatcher};
-use hf_scheduler::{Schedule, ScheduleExecution, SchedulerManager, TriggerConfig};
+use hf_scheduler::{
+    PersistenceError, Schedule, ScheduleExecution, SchedulerManager, SchedulerPersistence,
+    TriggerConfig,
+};
+use hf_storage::Store;
 use serde::{Deserialize, Serialize};
 
 use crate::container::ServiceContainer;
+
+/// Persists scheduler executions to the database so history survives restarts.
+struct DbSchedulerPersistence {
+    store: Arc<Store>,
+}
+
+impl DbSchedulerPersistence {
+    async fn upsert(&self, ex: &ScheduleExecution) -> Result<(), PersistenceError> {
+        let data = serde_json::to_string(ex).map_err(|e| PersistenceError::new(e.to_string()))?;
+        self.store
+            .upsert_schedule_execution(
+                &ex.execution_id,
+                &ex.schedule_id,
+                &ex.triggered_at.to_rfc3339(),
+                &ex.status.to_string(),
+                &data,
+            )
+            .await
+            .map_err(|e| PersistenceError::new(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl SchedulerPersistence for DbSchedulerPersistence {
+    async fn record_execution(
+        &self,
+        execution: &ScheduleExecution,
+    ) -> Result<(), PersistenceError> {
+        self.upsert(execution).await
+    }
+    async fn update_execution(
+        &self,
+        execution: &ScheduleExecution,
+    ) -> Result<(), PersistenceError> {
+        self.upsert(execution).await
+    }
+    async fn update_last_fire(
+        &self,
+        _schedule_id: &str,
+        _last_fire: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), PersistenceError> {
+        // last_fire is derived from the persisted executions, not stored separately.
+        Ok(())
+    }
+}
 
 /// How often the scheduler evaluates triggers.
 const TICK: Duration = Duration::from_secs(30);
@@ -65,7 +114,9 @@ pub struct ExecutionView {
     pub summary: String,
 }
 
-/// Map a [`ScheduleExecution`] to an [`ExecutionView`].
+/// Map a [`ScheduleExecution`] to an [`ExecutionView`]. The campaign name is
+/// read from the execution's own request summary (so history survives the
+/// schedule being deleted), falling back to `campaign`.
 fn view_of_execution(ex: &ScheduleExecution, campaign: &str) -> ExecutionView {
     let summary = ex
         .error_message
@@ -77,10 +128,16 @@ fn view_of_execution(ex: &ScheduleExecution, campaign: &str) -> ExecutionView {
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_default();
+    let name = ex
+        .request_summary
+        .get("schedule_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| campaign.to_owned(), ToOwned::to_owned);
     ExecutionView {
         execution_id: ex.execution_id.clone(),
         schedule_id: ex.schedule_id.clone(),
-        campaign: campaign.to_owned(),
+        campaign: name,
         triggered_at: ex.triggered_at.to_rfc3339(),
         status: ex.status.to_string(),
         summary,
@@ -219,6 +276,8 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
 pub struct CampaignScheduler {
     manager: Arc<SchedulerManager>,
     store_path: PathBuf,
+    /// Database for persisted execution history (when configured).
+    store: Option<Arc<Store>>,
 }
 
 impl CampaignScheduler {
@@ -227,10 +286,20 @@ impl CampaignScheduler {
     /// schedule is the human authorization for its future headless runs.
     pub async fn start(container: ServiceContainer, store_path: PathBuf) -> Self {
         let manager = Arc::new(SchedulerManager::with_defaults());
+        // Grab the DB handle (for persisted execution history) before the
+        // container is moved into the dispatcher.
+        let store = container.store().cloned();
         let dispatcher = Arc::new(FuzzCampaignDispatcher {
             container: container.with_guardrails(Guardrails::permissive()),
         });
         manager.set_dispatcher(dispatcher).await;
+        if let Some(store) = &store {
+            manager
+                .set_persistence(Arc::new(DbSchedulerPersistence {
+                    store: Arc::clone(store),
+                }))
+                .await;
+        }
         for schedule in load_schedules(&store_path) {
             manager.register(schedule).await;
         }
@@ -238,6 +307,7 @@ impl CampaignScheduler {
         Self {
             manager,
             store_path,
+            store,
         }
     }
 
@@ -246,18 +316,48 @@ impl CampaignScheduler {
         self.manager.list_schedules().await
     }
 
-    /// All scheduled campaigns as GUI-friendly views.
+    /// All scheduled campaigns as GUI-friendly views. After a restart the
+    /// in-memory `last_fire` is gone, so it is back-filled from the latest
+    /// persisted execution per schedule.
     pub async fn list_views(&self) -> Vec<CampaignView> {
-        self.manager
-            .list_schedules()
-            .await
+        let schedules = self.manager.list_schedules().await;
+        let fires: std::collections::HashMap<String, String> = match &self.store {
+            Some(store) => store
+                .latest_schedule_fires()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            None => std::collections::HashMap::new(),
+        };
+        schedules
             .iter()
-            .map(view_of)
+            .map(|s| {
+                let mut view = view_of(s);
+                if view.last_fire.is_none() {
+                    view.last_fire = fires.get(&s.id).cloned();
+                }
+                view
+            })
             .collect()
     }
 
-    /// Recent campaign executions across all schedules, newest first.
+    /// Recent campaign executions, newest first. Reads persisted history (which
+    /// survives restarts) when a database is configured, else the in-memory log.
     pub async fn recent_executions(&self, limit: usize) -> Vec<ExecutionView> {
+        if let Some(store) = &self.store {
+            if let Ok(rows) = store
+                .list_schedule_executions(i64::try_from(limit).unwrap_or(50))
+                .await
+            {
+                return rows
+                    .iter()
+                    .filter_map(|j| serde_json::from_str::<ScheduleExecution>(j).ok())
+                    .map(|ex| view_of_execution(&ex, ""))
+                    .collect();
+            }
+        }
+        // In-memory fallback (no database configured).
         let schedules = self.manager.list_schedules().await;
         let names: std::collections::HashMap<String, String> = schedules
             .iter()
