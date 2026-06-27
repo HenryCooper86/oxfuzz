@@ -863,6 +863,27 @@ pub async fn chat_rollback(
     Ok(state.container.chat_rollback_last(&id).await)
 }
 
+/// List the per-turn checkpoints for a chat session (the rollback picker).
+#[tauri::command]
+pub async fn chat_checkpoints(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+) -> Result<Vec<hf_service::checkpoints::CheckpointView>, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state.container.chat_checkpoints(&id).await)
+}
+
+/// Roll back a chat session to a specific checkpoint. Returns messages removed.
+#[tauri::command]
+pub async fn chat_rollback_to(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+    checkpoint_id: String,
+) -> Result<usize, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state.container.chat_rollback_to(&id, &checkpoint_id).await)
+}
+
 /// Run an autonomous agent turn over the active project.
 ///
 /// The agent reasons and calls fuzzing tools (discover/harness/run/triage/
