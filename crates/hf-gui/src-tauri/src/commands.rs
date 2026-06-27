@@ -402,7 +402,7 @@ pub async fn chat_send(
 }
 
 /// A prior chat message passed from the frontend as agent history.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChatTurn {
     pub role: String,
     pub content: String,
@@ -882,6 +882,61 @@ pub async fn chat_rollback_to(
 ) -> Result<usize, String> {
     let id = hf_core::types::SessionId(session_id);
     Ok(state.container.chat_rollback_to(&id, &checkpoint_id).await)
+}
+
+/// Wire string for a message role.
+fn role_to_str(role: hf_core::types::Role) -> &'static str {
+    match role {
+        hf_core::types::Role::System => "system",
+        hf_core::types::Role::Assistant => "assistant",
+        hf_core::types::Role::Tool => "tool",
+        hf_core::types::Role::User => "user",
+    }
+}
+
+/// Fork the conversation into a new branch, copying `fork_count` messages from
+/// the current session. Returns the new branch session id.
+#[tauri::command]
+pub async fn chat_branch(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+    fork_count: u32,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state
+        .container
+        .chat_branch(&id, fork_count, title.filter(|t| !t.is_empty()))
+        .await)
+}
+
+/// Load a session's transcript as chat turns (for switching branches).
+#[tauri::command]
+pub async fn chat_history(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+) -> Result<Vec<ChatTurn>, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state
+        .container
+        .chat_history(&id)
+        .await
+        .into_iter()
+        .map(|m| ChatTurn {
+            role: role_to_str(m.role).to_owned(),
+            content: m.content,
+        })
+        .collect())
+}
+
+/// List the sessions in a conversation tree (the branch switcher).
+#[tauri::command]
+pub async fn chat_branches(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+) -> Result<Vec<hf_service::checkpoints::BranchView>, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state.container.chat_branches(&id).await)
 }
 
 /// Run an autonomous agent turn over the active project.

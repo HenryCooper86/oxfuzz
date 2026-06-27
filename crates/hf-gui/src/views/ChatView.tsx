@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -39,6 +39,14 @@ interface CheckpointView {
   preview: string;
 }
 
+interface BranchView {
+  id: string;
+  title: string;
+  depth: number;
+  is_main: boolean;
+  active: boolean;
+}
+
 // Mirrors hf_agent::AgentEvent (serde tag = "type", snake_case).
 type AgentEvent =
   | { type: "started" }
@@ -63,6 +71,8 @@ export function ChatView() {
   const [agentId, setAgentId] = useState<string>(() => localStorage.getItem(ACTIVE_AGENT_KEY) || "orchestrator");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
+  const [branchesOpen, setBranchesOpen] = useState(false);
+  const [branches, setBranches] = useState<BranchView[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Listen for guardrail approval requests from the agent (high-risk actions
@@ -216,6 +226,54 @@ export function ChatView() {
       }
     }
     setMessages((m) => m.slice(0, cp.message_count_before));
+  }
+
+  // Fork the current conversation into a new branch and switch to it. The
+  // visible thread stays (the branch starts as a copy); future turns diverge.
+  async function branchFromHere() {
+    if (!sessionId || busy) return;
+    try {
+      const id = await getTransport().invoke<string | null>("chat_branch", {
+        sessionId,
+        forkCount: messages.length,
+        title: null,
+      });
+      if (id) setSessionId(id);
+    } catch {
+      /* no-op; branching unavailable */
+    }
+  }
+
+  // Open the branch switcher (load the conversation tree).
+  async function openBranches() {
+    if (!sessionId) return;
+    try {
+      setBranches(await getTransport().invoke<BranchView[]>("chat_branches", { sessionId }));
+      setBranchesOpen(true);
+    } catch {
+      setBranches([]);
+    }
+  }
+
+  // Switch to another branch: load its transcript into the thread.
+  async function switchBranch(b: BranchView) {
+    setBranchesOpen(false);
+    if (b.active) return;
+    try {
+      const hist = await getTransport().invoke<{ role: string; content: string }[]>("chat_history", {
+        sessionId: b.id,
+      });
+      setSessionId(b.id);
+      setMessages(
+        hist.map((t) => ({
+          role: t.role === "assistant" ? "assistant" : t.role === "system" ? "system" : "user",
+          content: t.content,
+          timestamp: new Date().toISOString(),
+        })),
+      );
+    } catch {
+      /* no-op */
+    }
   }
 
   async function send() {
@@ -553,6 +611,52 @@ export function ChatView() {
                               turn {cp.turn_number}
                             </span>
                             <span className="text-xs text-text-secondary truncate">{cp.preview || "(no preview)"}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {sessionId && messages.length >= 2 && !busy && (
+                <div className="relative">
+                  <ToolbarIconButton
+                    icon={<GitBranch size={16} />}
+                    title="Branches (fork / switch)"
+                    onClick={() => (branchesOpen ? setBranchesOpen(false) : void openBranches())}
+                  />
+                  {branchesOpen && (
+                    <div
+                      className="absolute bottom-full mb-2 left-0 z-20 rounded-md border border-border shadow-lg overflow-hidden"
+                      style={{ background: "var(--surface-secondary)", width: "280px" }}
+                    >
+                      <button
+                        onClick={() => {
+                          setBranchesOpen(false);
+                          void branchFromHere();
+                        }}
+                        className="flex items-center gap-2 w-full text-left px-3 py-2 hover:bg-surface-hover border-b border-border text-xs font-medium"
+                        style={{ color: "var(--accent)" }}
+                      >
+                        <GitBranch size={13} /> Branch from here
+                      </button>
+                      <div className="text-xs text-text-muted px-3 py-1.5 border-b border-border" style={{ fontWeight: 600, letterSpacing: "0.04em" }}>
+                        CONVERSATION TREE
+                      </div>
+                      <div className="overflow-y-auto" style={{ maxHeight: "180px" }}>
+                        {branches.map((b) => (
+                          <button
+                            key={b.id}
+                            onClick={() => void switchBranch(b)}
+                            className="flex items-center w-full text-left px-3 py-2 hover:bg-surface-hover border-b border-border last:border-0 text-xs"
+                            style={{ background: b.active ? "var(--surface-active)" : "transparent" }}
+                          >
+                            <span style={{ width: `${b.depth * 12}px` }} />
+                            <span className="truncate" style={{ color: b.active ? "var(--accent)" : "var(--text-secondary)" }}>
+                              {b.is_main ? "● " : "└ "}
+                              {b.title}
+                              {b.active ? " · current" : ""}
+                            </span>
                           </button>
                         ))}
                       </div>
