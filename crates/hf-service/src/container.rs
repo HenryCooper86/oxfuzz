@@ -105,6 +105,43 @@ fn container_input_path(workspace: &Path, host_path: &Path) -> String {
     )
 }
 
+/// Recursively collect and parse every `.casrep` report under `dir`.
+fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrReport)> {
+    let mut out = Vec::new();
+    collect_casreps_into(dir, &mut out);
+    out
+}
+
+fn collect_casreps_into(dir: &Path, out: &mut Vec<(PathBuf, hf_core::crash::CasrReport)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_casreps_into(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("casrep") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(report) = hf_crash::parse_casrep(&content) {
+                    out.push((path, report));
+                }
+            }
+        }
+    }
+}
+
+/// Map a `.casrep` path back to the crash input it analyzed: CASR names each
+/// report after its input (`crash-abc.casrep` -> `out/crash-abc`). Falls back to
+/// the report path when no matching input exists.
+fn casrep_input_path(out_dir: &Path, casrep: &Path) -> PathBuf {
+    casrep
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|stem| out_dir.join(stem))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| casrep.to_path_buf())
+}
+
 /// Copy C/C++ source and header files from a project into the workspace
 /// so the sandbox can compile the harness + target together.
 pub fn copy_project_sources(project: &Path, workspace: &Path) {
@@ -663,11 +700,6 @@ impl ServiceContainer {
         /// calls. Crashes beyond the cap are still ingested and persisted, just
         /// without a drafted report.
         const MAX_BUG_REPORT_DRAFTS: usize = 20;
-        /// Hard cap on sandbox crash replays per triage pass.
-        const MAX_REPRODUCE: usize = 300;
-        /// Stop reproducing once this many consecutive crashes yield no new
-        /// stack signature (the distinct-bug set has saturated).
-        const SIGNATURE_STAGNATION: usize = 40;
 
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
@@ -675,70 +707,31 @@ impl ServiceContainer {
         let target_id = self
             .resolve_target_id(project, target, TargetLanguage::C)
             .await;
-        // Link crashes to the run that produced them. The most recent run for
-        // this project is the one whose `out` dir we are triaging; using a fresh
-        // UUID here would orphan every crash (crashes.run_id is NOT NULL and
-        // indexed for `list_crashes_by_run`, which could then never match).
-        let run_id = match &self.store {
-            Some(store) => store
-                .list_runs(Some(&project.to_string_lossy()))
-                .await
-                .ok()
-                .and_then(|runs| runs.into_iter().next())
-                .map_or_else(Uuid::new_v4, |run| run.id),
-            None => Uuid::new_v4(),
+        // Link crashes to the run that produced them, and learn its engine to
+        // pick the right CASR driver. The most recent run for this project is the
+        // one whose `out` dir we are triaging; a fresh UUID would orphan every
+        // crash (crashes.run_id is NOT NULL and indexed for `list_crashes_by_run`).
+        let (run_id, engine) = self.latest_run(project).await;
+
+        // Prefer CASR: it reproduces each crash, classifies exploitability and
+        // severity, and clusters/deduplicates -- all in the sandbox. Fall back to
+        // the built-in reproduce/classify/dedup path when CASR is unavailable (no
+        // harness binary, native runtime without casr, or the tool errored). The
+        // captured sanitizer traces (`logs`) feed bug-report drafting; CASR-path
+        // crashes carry their summary instead.
+        let (mut deduped, logs): (
+            Vec<hf_core::crash::Crash>,
+            std::collections::HashMap<PathBuf, String>,
+        ) = match self
+            .run_casr_triage(&workspace, target, engine, run_id, target_id)
+            .await
+        {
+            Some(crashes) if !crashes.is_empty() => (crashes, std::collections::HashMap::new()),
+            _ => {
+                self.legacy_triage(&out_dir, &workspace, target, run_id, target_id)
+                    .await?
+            }
         };
-        let crashes = hf_crash::ingest(&out_dir, run_id, target_id)?;
-        let total_ingested = crashes.len();
-
-        // Reproduce crashes by replaying each input through the harness binary in
-        // the sandbox to capture the sanitizer trace, then classify it (kind +
-        // stack signature) so dedup can tell distinct bugs apart. A fuzzer can
-        // emit tens of thousands of crash inputs for the same handful of bugs, so
-        // replaying every one is needlessly expensive (one sandbox run each).
-        // Reproduce only until the set of distinct signatures saturates -- no new
-        // signature seen for `SIGNATURE_STAGNATION` consecutive crashes -- or a
-        // hard cap is hit. That surfaces every distinct bug while skipping the
-        // long tail of duplicates. Crashes are written by the engine roughly in
-        // discovery order, so distinct bugs are interleaved rather than segregated,
-        // which is what makes the stagnation window reliable.
-        let mut logs: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
-        let mut reproduced: Vec<hf_core::crash::Crash> = Vec::new();
-        let mut seen_signatures: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut since_new_signature = 0usize;
-        for mut crash in crashes {
-            if reproduced.len() >= MAX_REPRODUCE || since_new_signature >= SIGNATURE_STAGNATION {
-                break;
-            }
-            let log = self
-                .reproduce_crash(&workspace, target, &crash.input_path)
-                .await;
-            if log.trim().is_empty() {
-                since_new_signature += 1;
-            } else {
-                let (kind, sig, summary) = hf_crash::classify(&log);
-                crash.kind = kind;
-                crash.summary = summary;
-                if seen_signatures.insert(sig.clone()) {
-                    since_new_signature = 0;
-                } else {
-                    since_new_signature += 1;
-                }
-                crash.stack_signature = sig;
-            }
-            logs.insert(crash.input_path.clone(), log);
-            reproduced.push(crash);
-        }
-        if reproduced.len() < total_ingested {
-            tracing::info!(
-                "reproduced {} of {total_ingested} crash inputs ({} distinct signatures) before saturating",
-                reproduced.len(),
-                seen_signatures.len()
-            );
-        }
-
-        let mut deduped = hf_crash::dedup(reproduced);
 
         // Draft an LLM bug report for each unique crash when a provider is
         // configured, using the captured sanitizer trace (capped, see above).
@@ -803,6 +796,172 @@ impl ServiceContainer {
                 String::new()
             }
         }
+    }
+
+    /// Most recent run id + engine for a project (defaults when none exists).
+    async fn latest_run(&self, project: &Path) -> (Uuid, EngineKind) {
+        match &self.store {
+            Some(store) => store
+                .list_runs(Some(&project.to_string_lossy()))
+                .await
+                .ok()
+                .and_then(|runs| runs.into_iter().next())
+                .map_or_else(
+                    || (Uuid::new_v4(), EngineKind::LibFuzzer),
+                    |run| (run.id, run.engine),
+                ),
+            None => (Uuid::new_v4(), EngineKind::LibFuzzer),
+        }
+    }
+
+    /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
+    /// unique (clustered) report with its severity/analysis. Returns `None` when
+    /// CASR is unavailable or produced nothing, so the caller can fall back.
+    async fn run_casr_triage(
+        &self,
+        workspace: &Path,
+        target: &str,
+        engine: EngineKind,
+        run_id: Uuid,
+        target_id: Uuid,
+    ) -> Option<Vec<hf_core::crash::Crash>> {
+        let bin = format!("fuzz_{target}");
+        if !workspace.join(&bin).exists() {
+            return None;
+        }
+        let out_dir = workspace.join("out");
+        if !out_dir.exists() {
+            return None;
+        }
+        // Fresh CASR output directory each pass.
+        let casr_host = workspace.join("casr_out");
+        let _ = std::fs::remove_dir_all(&casr_host);
+        let cmd = hf_crash::casr_command(
+            engine,
+            &format!("/work/{bin}"),
+            "/work/out",
+            "/work/casr_out",
+            30,
+        );
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 4096,
+            max_cpus: 2,
+            max_duration_secs: 900,
+            env: std::collections::HashMap::new(),
+            ptrace: true,
+        };
+        match self.runtime.run_command(&cmd, workspace, &limits).await {
+            Ok(r) if r.exit_code != 0 => {
+                tracing::warn!(
+                    "casr exited {}: {}",
+                    r.exit_code,
+                    r.stderr.lines().last().unwrap_or_default()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("casr run failed, falling back to built-in triage: {e}");
+                return None;
+            }
+        }
+        let reports = collect_casreps(&casr_host);
+        if reports.is_empty() {
+            tracing::info!("casr produced no reports; falling back to built-in triage");
+            return None;
+        }
+        let crashes = reports
+            .into_iter()
+            .map(|(path, casr)| {
+                let input_path = casrep_input_path(&out_dir, &path);
+                let signature = if casr.crashline.is_empty() {
+                    casr.stack.first().cloned().unwrap_or_default()
+                } else {
+                    casr.crashline.clone()
+                };
+                let summary = if casr.severity_short.is_empty() {
+                    casr.crashline.clone()
+                } else {
+                    format!("{} at {}", casr.severity_short, casr.crashline)
+                };
+                hf_core::crash::Crash {
+                    id: Uuid::new_v4(),
+                    run_id,
+                    target_id,
+                    input_path,
+                    stack_signature: signature,
+                    kind: hf_crash::kind_from_short(&casr.severity_short),
+                    summary,
+                    minimized: false,
+                    bug_report: None,
+                    casr: Some(casr),
+                }
+            })
+            .collect::<Vec<_>>();
+        tracing::info!("casr triaged {} unique crash(es)", crashes.len());
+        Some(crashes)
+    }
+
+    /// Built-in triage fallback: replay crashes in the sandbox until the set of
+    /// distinct stack signatures saturates, classify, and dedup. Returns the
+    /// deduped crashes plus captured sanitizer traces for bug-report drafting.
+    async fn legacy_triage(
+        &self,
+        out_dir: &Path,
+        workspace: &Path,
+        target: &str,
+        run_id: Uuid,
+        target_id: Uuid,
+    ) -> Result<
+        (
+            Vec<hf_core::crash::Crash>,
+            std::collections::HashMap<PathBuf, String>,
+        ),
+        ClassifiedError,
+    > {
+        /// Hard cap on sandbox crash replays per triage pass.
+        const MAX_REPRODUCE: usize = 300;
+        /// Stop reproducing after this many consecutive crashes with no new
+        /// stack signature (the distinct-bug set has saturated).
+        const SIGNATURE_STAGNATION: usize = 40;
+
+        let crashes = hf_crash::ingest(out_dir, run_id, target_id)?;
+        let total_ingested = crashes.len();
+        let mut logs: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+        let mut reproduced: Vec<hf_core::crash::Crash> = Vec::new();
+        let mut seen_signatures: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut since_new_signature = 0usize;
+        for mut crash in crashes {
+            if reproduced.len() >= MAX_REPRODUCE || since_new_signature >= SIGNATURE_STAGNATION {
+                break;
+            }
+            let log = self
+                .reproduce_crash(workspace, target, &crash.input_path)
+                .await;
+            if log.trim().is_empty() {
+                since_new_signature += 1;
+            } else {
+                let (kind, sig, summary) = hf_crash::classify(&log);
+                crash.kind = kind;
+                crash.summary = summary;
+                if seen_signatures.insert(sig.clone()) {
+                    since_new_signature = 0;
+                } else {
+                    since_new_signature += 1;
+                }
+                crash.stack_signature = sig;
+            }
+            logs.insert(crash.input_path.clone(), log);
+            reproduced.push(crash);
+        }
+        if reproduced.len() < total_ingested {
+            tracing::info!(
+                "reproduced {} of {total_ingested} crash inputs ({} distinct signatures) before saturating",
+                reproduced.len(),
+                seen_signatures.len()
+            );
+        }
+        Ok((hf_crash::dedup(reproduced), logs))
     }
 
     // -- Corpus -----------------------------------------------------------

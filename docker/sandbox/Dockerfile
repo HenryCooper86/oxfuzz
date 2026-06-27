@@ -73,9 +73,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /opt/syzkaller/bin/syz-manager /usr/local/bin/syz-manager \
     && rm -rf /var/lib/apt/lists/*
 
+# ---------------------------------------------------------------------------
+# CASR (Crash Analysis and Severity Report) -- crash triage: exploitability
+# classification (EXPLOITABLE/PROBABLY/NOT), severity, crash line, and
+# stack-trace clustering/dedup. casr-* run the (sanitizer/gdb) harness under
+# ptrace, so hf-runtime invokes the sandbox with SYS_PTRACE + unconfined
+# seccomp for triage. gdb + lsb-release are CASR runtime deps.
+#
+# casr is installed from crates.io via a temporary Rust toolchain whose
+# binaries land in /usr/local/bin; the toolchain + caches are then removed to
+# keep the image slim. pkg-config/libssl-dev satisfy the build.
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gdb \
+    lsb-release \
+    curl \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal \
+    && . "$HOME/.cargo/env" \
+    && cargo install casr --root /usr/local --locked \
+    && rustup self uninstall -y \
+    && rm -rf "$HOME/.cargo" "$HOME/.rustup"
+
 # Verify tools are present.
 RUN clang --version && afl-fuzz --version && honggfuzz --version 2>&1 || true
 RUN syz-manager --help 2>&1 | head -1 || true
+RUN casr-san --help 2>&1 | head -1 && casr-cluster --help 2>&1 | head -1 || true
 
 WORKDIR /work
 

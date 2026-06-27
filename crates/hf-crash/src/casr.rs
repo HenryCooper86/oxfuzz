@@ -5,7 +5,68 @@
 //! normalized stack trace. We extract the fields hobot surfaces into
 //! [`CasrReport`]; the report contains many more fields we ignore.
 
-use hf_core::crash::{CasrReport, CrashSeverity};
+use hf_core::crash::{CasrReport, CrashKind, CrashSeverity};
+use hf_core::engine::EngineKind;
+
+/// Build the CASR triage command to run inside the sandbox over a crash dir.
+///
+/// `casr-afl` is used for AFL++ output trees; `casr-libfuzzer` for libFuzzer /
+/// honggfuzz and everything else (their harnesses share the libFuzzer file-arg
+/// ABI). Both reproduce each crash, classify severity, and cluster/deduplicate,
+/// writing `.casrep` reports under `out_dir`. Paths are container paths.
+#[must_use]
+pub fn casr_command(
+    engine: EngineKind,
+    bin: &str,
+    crash_dir: &str,
+    out_dir: &str,
+    timeout_secs: u64,
+) -> Vec<String> {
+    match engine {
+        EngineKind::AflPlusPlus => vec![
+            "casr-afl".to_owned(),
+            "-i".to_owned(),
+            crash_dir.to_owned(),
+            "-o".to_owned(),
+            out_dir.to_owned(),
+            "--".to_owned(),
+            bin.to_owned(),
+            "@@".to_owned(),
+        ],
+        _ => vec![
+            "casr-libfuzzer".to_owned(),
+            "-t".to_owned(),
+            timeout_secs.to_string(),
+            "-i".to_owned(),
+            crash_dir.to_owned(),
+            "-o".to_owned(),
+            out_dir.to_owned(),
+            "--".to_owned(),
+            bin.to_owned(),
+        ],
+    }
+}
+
+/// Infer hobot's [`CrashKind`] from a CASR short description.
+#[must_use]
+pub fn kind_from_short(short: &str) -> CrashKind {
+    let s = short.to_ascii_lowercase();
+    if s.contains("overflow")
+        || s.contains("use-after")
+        || s.contains("asan")
+        || s.contains("sanitizer")
+    {
+        CrashKind::Asan
+    } else if s.contains("undefined") || s.contains("ubsan") {
+        CrashKind::Ubsan
+    } else if s.contains("segv") || s.contains("segmentation") || s.contains("access-violation") {
+        CrashKind::Segv
+    } else if s.contains("abort") || s.contains("assert") {
+        CrashKind::Abort
+    } else {
+        CrashKind::Other
+    }
+}
 
 /// The subset of the `.casrep` JSON we consume.
 #[derive(serde::Deserialize)]
@@ -99,6 +160,50 @@ mod tests {
         assert_eq!(r.severity, CrashSeverity::Undefined);
         assert!(r.severity_short.is_empty());
         assert!(r.stack.is_empty());
+    }
+
+    #[test]
+    fn libfuzzer_and_afl_commands_differ() {
+        let lf = casr_command(
+            EngineKind::LibFuzzer,
+            "/work/fuzz_t",
+            "/work/out",
+            "/work/casr",
+            30,
+        );
+        assert_eq!(lf[0], "casr-libfuzzer");
+        assert!(lf.contains(&"/work/fuzz_t".to_owned()) && lf.contains(&"30".to_owned()));
+        assert!(lf.ends_with(&["--".to_owned(), "/work/fuzz_t".to_owned()]));
+
+        let hf = casr_command(
+            EngineKind::Honggfuzz,
+            "/work/fuzz_t",
+            "/work/out",
+            "/work/casr",
+            30,
+        );
+        assert_eq!(hf[0], "casr-libfuzzer");
+
+        let afl = casr_command(
+            EngineKind::AflPlusPlus,
+            "/work/fuzz_t",
+            "/work/out",
+            "/work/casr",
+            30,
+        );
+        assert_eq!(afl[0], "casr-afl");
+        assert_eq!(afl.last().unwrap(), "@@");
+    }
+
+    #[test]
+    fn kind_inference_from_short() {
+        assert_eq!(
+            kind_from_short("heap-buffer-overflow(write)"),
+            CrashKind::Asan
+        );
+        assert_eq!(kind_from_short("SEGV on unknown address"), CrashKind::Segv);
+        assert_eq!(kind_from_short("abort"), CrashKind::Abort);
+        assert_eq!(kind_from_short("something else"), CrashKind::Other);
     }
 
     #[test]
