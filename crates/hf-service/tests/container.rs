@@ -56,6 +56,46 @@ async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
 }
 
 #[tokio::test]
+async fn corpus_absorb_crashes_feeds_reproducers_back_in() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("absorb_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+
+    // Seed a workspace: an existing corpus plus crash inputs under out/.
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    let out = workspace.join("out");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::create_dir_all(&out).unwrap();
+    fs::write(corpus.join("seed"), b"seed-input").unwrap();
+    fs::write(out.join("crash-abc"), b"crashing-bytes").unwrap();
+    // Engine bookkeeping that must be ignored.
+    fs::write(out.join("fuzzer_stats"), b"stats").unwrap();
+
+    // No store: absorb falls back to scanning the run output directory.
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let added = container
+        .corpus_absorb_crashes(&project, target)
+        .await
+        .unwrap();
+
+    assert_eq!(added, 1, "the one crash input is absorbed, stats ignored");
+    let entries = container.corpus_list(&project, target).unwrap().entries;
+    assert_eq!(entries.len(), 2, "seed + absorbed crash");
+    assert!(
+        entries
+            .iter()
+            .any(|e| fs::read(&e.path).unwrap() == b"crashing-bytes"),
+        "crash reproducer now in corpus"
+    );
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
 async fn session_manager_persists_chat_transcript() {
     use hf_core::session::{CreateSessionOptions, SessionType};
     use hf_core::types::Message;
