@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X } from "lucide-react";
+import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search } from "lucide-react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -834,6 +834,111 @@ interface KnowledgeSummary {
 
 const shortProject = (p: string) => p.split("/").filter(Boolean).pop() || p;
 
+interface KnowledgeHit {
+  file: string;
+  score: number;
+  snippet: string;
+}
+interface KnowledgeStats {
+  files: number;
+  chunks: number;
+}
+
+// BM25 search over the active project's source, backed by hf-knowledge.
+function KnowledgeBaseSearch() {
+  const { activeProject } = useProject();
+  const [stats, setStats] = useState<KnowledgeStats | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  async function index() {
+    if (!activeProject) return;
+    setIndexing(true);
+    setHits(null);
+    try {
+      setStats(await getTransport().invoke<KnowledgeStats>("knowledge_index", { project: activeProject }));
+    } catch {
+      setStats(null);
+    } finally {
+      setIndexing(false);
+    }
+  }
+
+  async function search() {
+    if (!activeProject || !query.trim() || !stats) return;
+    setSearching(true);
+    try {
+      setHits(await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project: activeProject, query, limit: 10 }));
+    } catch {
+      setHits([]);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  return (
+    <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Database size={14} style={{ color: "var(--accent)" }} />
+          <span className="text-sm font-medium">Knowledge Base</span>
+          {stats && (
+            <span className="text-xs text-text-muted">
+              indexed {stats.files} files · {stats.chunks} chunks
+            </span>
+          )}
+        </div>
+        <button
+          onClick={index}
+          disabled={indexing || !activeProject}
+          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+        >
+          {indexing ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
+          {indexing ? "Indexing…" : "Index project"}
+        </button>
+      </div>
+      <p className="text-xs text-text-muted">
+        BM25 search over this project's source. Index first, then search for functions, patterns, or symbols.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void search()}
+          placeholder={stats ? "Search the codebase…" : "Index the project to enable search"}
+          disabled={!stats}
+          className="flex-1 rounded-md border border-border bg-surface-primary px-3 py-1.5 text-xs outline-none disabled:opacity-55"
+        />
+        <button
+          onClick={search}
+          disabled={searching || !stats || !query.trim()}
+          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-55"
+          style={{ background: "var(--accent)", color: "var(--accent-contrast)" }}
+        >
+          {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+          Search
+        </button>
+      </div>
+      {hits && hits.length === 0 && <p className="text-xs text-text-muted">No matches.</p>}
+      {hits && hits.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          {hits.map((h, i) => (
+            <div key={i} className="rounded-md" style={{ padding: "var(--space-sm)", background: "var(--surface-code)" }}>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono truncate" style={{ color: "var(--accent)" }}>{h.file}</span>
+                <span className="text-xs text-text-muted shrink-0">score {h.score.toFixed(2)}</span>
+              </div>
+              <pre className="text-xs text-text-secondary mt-1 whitespace-pre-wrap font-mono" style={{ margin: 0 }}>{h.snippet}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function KnowledgeView() {
   const [data, setData] = useState<KnowledgeSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -874,6 +979,8 @@ export function KnowledgeView() {
           Refresh
         </button>
       </div>
+
+      <KnowledgeBaseSearch />
 
       {data && !data.db_configured && (
         <EmptyState icon={<BookOpen size={20} />} hint="No database configured (HF_DB_PATH). Run `hobot-fuzz init` or run a campaign to start accumulating knowledge." />
