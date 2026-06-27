@@ -4,6 +4,128 @@ use std::sync::Arc;
 
 use hf_service::ServiceContainer;
 
+/// A runtime whose streamed command blocks until the run is cancelled, so a
+/// test can observe and drive the cancellation path deterministically.
+struct BlockingRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+        })
+    }
+
+    async fn run_command_streaming(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+        cancel: &tokio_util::sync::CancellationToken,
+        _on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        // Run until the caller cancels, mimicking a live fuzzer.
+        cancel.cancelled().await;
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+        })
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+async fn cancel_run_stops_an_in_flight_fuzz_run() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("cancel_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_entry";
+
+    // run_fuzzer requires a compiled harness binary and a corpus dir.
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("c.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = Arc::new(
+        ServiceContainer::new(Arc::new(BlockingRuntime), None).with_store(Arc::clone(&store)),
+    );
+
+    // Start the run; it will block in the runtime until cancelled.
+    let runner = {
+        let container = Arc::clone(&container);
+        let project = project.clone();
+        tokio::spawn(async move {
+            container
+                .run_fuzzer(
+                    &project,
+                    target,
+                    hf_core::engine::EngineKind::LibFuzzer,
+                    60,
+                    &|_| {},
+                )
+                .await
+        })
+    };
+
+    // Wait for the run to register, then cancel it.
+    let mut run_id = None;
+    for _ in 0..200 {
+        if let Some(id) = container.active_run_ids().into_iter().next() {
+            run_id = Some(id);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let run_id = run_id.expect("run should register as active");
+    assert!(container.cancel_run(run_id), "cancel should find the run");
+
+    // The run returns promptly and is recorded as cancelled.
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+        .await
+        .expect("run should finish after cancel")
+        .expect("task join")
+        .expect("run_fuzzer ok");
+    assert_eq!(summary.crashes, 0);
+    assert!(container.active_run_ids().is_empty(), "registry cleaned up");
+
+    let run = store.get_run(run_id).await.unwrap().expect("run persisted");
+    assert_eq!(run.status, hf_storage::RunStatus::Cancelled);
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
 #[tokio::test]
 async fn store_wiring_is_optional() {
     let rt = Arc::new(hf_runtime::StubRuntime);

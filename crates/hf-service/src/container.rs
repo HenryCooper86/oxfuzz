@@ -20,6 +20,7 @@ use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguag
 use hf_guardrails::{Action, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{RunRecord, RunStatus, Store};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -402,6 +403,10 @@ pub struct ServiceContainer {
     guardrails: Guardrails,
     diagnostics: Arc<crate::diagnostics::DiagnosticsRecorder>,
     run_journal: Arc<crate::recovery::RunJournal>,
+    /// Cancellation tokens for in-flight fuzz runs, keyed by run id. A run
+    /// registers its token on start and removes it on completion;
+    /// [`Self::cancel_run`] fires the token to stop the run cooperatively.
+    active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
 }
 
 /// Build the per-model cost table (`model -> (per-1k-in, per-1k-out)`) from the
@@ -474,6 +479,7 @@ impl ServiceContainer {
                 build_cost_map(),
             )),
             run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
+            active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -762,6 +768,7 @@ impl ServiceContainer {
             checkpoint_manager,
             diagnostics,
             run_journal,
+            active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1021,6 +1028,48 @@ impl ServiceContainer {
 
     // -- Run --------------------------------------------------------------
 
+    /// Cancel an in-flight fuzz run by id.
+    ///
+    /// Fires the run's cancellation token, which cooperatively tears down the
+    /// sandboxed fuzzer (the container is killed) and lets [`Self::run_fuzzer`]
+    /// return with the partial results it collected, marking the run
+    /// `Cancelled`. Returns `true` if a matching active run was found.
+    #[must_use]
+    pub fn cancel_run(&self, run_id: Uuid) -> bool {
+        let Ok(runs) = self.active_runs.lock() else {
+            return false;
+        };
+        if let Some(token) = runs.get(&run_id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancel every in-flight fuzz run, returning how many were signalled.
+    ///
+    /// Used for a blanket stop (e.g. a CLI Ctrl-C) where the caller does not
+    /// track individual run ids.
+    pub fn cancel_all_runs(&self) -> usize {
+        let Ok(runs) = self.active_runs.lock() else {
+            return 0;
+        };
+        for token in runs.values() {
+            token.cancel();
+        }
+        runs.len()
+    }
+
+    /// The ids of fuzz runs currently in flight.
+    #[must_use]
+    pub fn active_run_ids(&self) -> Vec<Uuid> {
+        self.active_runs
+            .lock()
+            .map(|runs| runs.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// Run a fuzz campaign via `hf-engine::runner::EngineRunner`.
     ///
     /// `on_progress` is called for each parsed `FuzzProgress` event so the
@@ -1092,6 +1141,13 @@ impl ServiceContainer {
         let run_id = run_record.as_ref().map_or_else(Uuid::new_v4, |rec| rec.id);
         self.run_journal.open_run(run_id, project, target, engine);
 
+        // Register a cancellation token so `cancel_run(run_id)` can stop this
+        // run cooperatively; it is removed again as soon as the run returns.
+        let cancel = CancellationToken::new();
+        if let Ok(mut runs) = self.active_runs.lock() {
+            runs.insert(run_id, cancel.clone());
+        }
+
         let runner = hf_engine::runner::EngineRunner::new();
         // Stream progress live: `on_progress` fires for each output line and
         // stat as the fuzzer runs, not post-hoc.
@@ -1104,11 +1160,18 @@ impl ServiceContainer {
                 "/work/out",
                 self.runtime.as_ref(),
                 &workspace,
+                &cancel,
                 on_progress,
             )
             .await;
+        if let Ok(mut runs) = self.active_runs.lock() {
+            runs.remove(&run_id);
+        }
+        let was_cancelled = cancel.is_cancelled();
         if let (Some(store), Some(rec)) = (&self.store, &run_record) {
-            let status = if run_result.is_ok() {
+            let status = if was_cancelled {
+                RunStatus::Cancelled
+            } else if run_result.is_ok() {
                 RunStatus::Done
             } else {
                 RunStatus::Failed
@@ -1117,8 +1180,8 @@ impl ServiceContainer {
                 tracing::warn!("failed to record run end: {e}");
             }
         }
-        // Close the run's journal scope: it completed (whether ok or errored),
-        // so it is no longer a recovery candidate.
+        // Close the run's journal scope: it completed (whether ok, errored, or
+        // cancelled), so it is no longer a recovery candidate.
         self.run_journal.close_run(run_id);
         let result = run_result?;
         // Summarize from the parsed events. Live streaming already forwarded

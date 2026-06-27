@@ -163,11 +163,30 @@ impl RuntimeAdapter for DockerRuntime {
         cmd: &[String],
         cwd: &Path,
         limits: &ResourceLimits,
+        cancel: &tokio_util::sync::CancellationToken,
         on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command;
+
+        // Outcome of the read loop: ran to completion, hit the deadline, or was
+        // cancelled by the caller.
+        enum Stop {
+            Completed,
+            TimedOut,
+            Cancelled,
+        }
+
+        // A run cancelled before it starts launches no container.
+        if cancel.is_cancelled() {
+            return Ok(CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+            });
+        }
 
         let timeout = Duration::from_secs(limits.max_duration_secs);
         let mut args = build_exec_args(&self.cfg, cmd, timeout, limits.ptrace);
@@ -177,6 +196,11 @@ impl RuntimeAdapter for DockerRuntime {
                 *a = format!("{}:{}", cwd.display(), self.cfg.container_workspace);
             }
         }
+        // Name the container so a cancel can `docker kill` it explicitly:
+        // dropping the client process alone leaves the container running.
+        // `args[0]` is "run"; the name must precede the image/command.
+        let container_name = format!("hf-run-{}", uuid::Uuid::new_v4());
+        args.insert(1, format!("--name={container_name}"));
 
         let mut docker = Command::new(crate::docker_bin());
         docker
@@ -212,12 +236,13 @@ impl RuntimeAdapter for DockerRuntime {
 
         // Read both pipes line-by-line as the fuzzer runs. libFuzzer writes its
         // progress to stderr (unbuffered in C), so this surfaces live activity.
-        let timed_out = loop {
+        let stop = loop {
             if out_done && err_done {
-                break false;
+                break Stop::Completed;
             }
             tokio::select! {
-                () = &mut deadline => break true,
+                () = &mut deadline => break Stop::TimedOut,
+                () = cancel.cancelled() => break Stop::Cancelled,
                 line = out_lines.next_line(), if !out_done => match line {
                     Ok(Some(l)) => {
                         on_line(l.as_str());
@@ -237,14 +262,27 @@ impl RuntimeAdapter for DockerRuntime {
             }
         };
 
-        // A fuzzer reaching its time limit self-exits; a hard deadline kill is
-        // also a normal outcome (we keep whatever output we streamed).
-        let exit_code = if timed_out {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            0
-        } else {
-            child.wait().await.map_or(-1, |s| s.code().unwrap_or(0))
+        // A fuzzer reaching its time limit self-exits; a hard deadline kill and
+        // a user cancel are also normal outcomes (we keep what we streamed). A
+        // cancel additionally `docker kill`s the named container, since killing
+        // the client process alone would leave it running.
+        let exit_code = match stop {
+            Stop::Completed => child.wait().await.map_or(-1, |s| s.code().unwrap_or(0)),
+            Stop::TimedOut => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                0
+            }
+            Stop::Cancelled => {
+                let _ = Command::new(crate::docker_bin())
+                    .arg("kill")
+                    .arg(&container_name)
+                    .output()
+                    .await;
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                0
+            }
         };
 
         Ok(CommandResult {

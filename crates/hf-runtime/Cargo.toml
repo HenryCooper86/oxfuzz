@@ -8,6 +8,7 @@ description = "Sandbox (Docker/native) for harness builds and fuzz runs"
 [dependencies]
 hf-core = { workspace = true }
 async-trait = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
