@@ -1072,24 +1072,47 @@ interface CampaignView {
   last_fire: string | null;
 }
 
+interface ExecutionView {
+  execution_id: string;
+  schedule_id: string;
+  campaign: string;
+  triggered_at: string;
+  status: string;
+  summary: string;
+}
+
+const EXEC_STATUS_COLOR: Record<string, string> = {
+  completed: "var(--accent)",
+  running: "#d97706",
+  failed: "var(--error)",
+  skipped: "var(--text-muted)",
+  pending: "var(--text-muted)",
+};
+
 export function AutomationView() {
   const { activeProject } = useProject();
   const { target, engine } = useTarget();
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
+  const [history, setHistory] = useState<ExecutionView[]>([]);
   const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
   const [triggerValue, setTriggerValue] = useState("3600");
   const [duration, setDuration] = useState(60);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load + light poll so last-run times update as campaigns fire.
+  // Load + light poll so last-run times and execution history update as
+  // campaigns fire.
   useEffect(() => {
     let cancelled = false;
-    const tick = () =>
-      getTransport()
-        .invoke<CampaignView[]>("schedule_list")
+    const tick = () => {
+      const T = getTransport();
+      T.invoke<CampaignView[]>("schedule_list")
         .then((c) => !cancelled && setCampaigns(c))
         .catch(() => !cancelled && setCampaigns([]));
+      T.invoke<ExecutionView[]>("schedule_history", { limit: 20 })
+        .then((h) => !cancelled && setHistory(h))
+        .catch(() => !cancelled && setHistory([]));
+    };
     tick();
     const id = setInterval(tick, 10000);
     return () => {
@@ -1200,6 +1223,27 @@ export function AutomationView() {
           </div>
         ))}
       </div>
+
+      {/* Execution history */}
+      {history.length > 0 && (
+        <div className="surface-card flex flex-col" style={{ padding: "var(--space-md)" }}>
+          <div className="text-xs text-text-muted uppercase mb-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+            Recent Runs
+          </div>
+          <div className="flex flex-col">
+            {history.map((h) => (
+              <div key={h.execution_id} className="flex items-center gap-3 py-1.5 border-b border-border last:border-0 text-xs">
+                <span className="font-semibold shrink-0" style={{ color: EXEC_STATUS_COLOR[h.status] ?? "var(--text-muted)", minWidth: "72px", textTransform: "uppercase", letterSpacing: "0.03em" }}>
+                  {h.status}
+                </span>
+                <span className="font-mono truncate" style={{ minWidth: "120px" }}>{h.campaign}</span>
+                <span className="text-text-secondary flex-1 truncate">{h.summary}</span>
+                <span className="text-text-muted font-mono shrink-0">{new Date(h.triggered_at).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

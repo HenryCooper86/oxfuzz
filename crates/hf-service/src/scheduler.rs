@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use hf_core::engine::{EngineKind, FuzzProgress};
 use hf_guardrails::Guardrails;
 use hf_scheduler::dispatcher::{DispatchError, DispatchResult, WorkflowDispatcher};
-use hf_scheduler::{Schedule, SchedulerManager, TriggerConfig};
+use hf_scheduler::{Schedule, ScheduleExecution, SchedulerManager, TriggerConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::container::ServiceContainer;
@@ -48,6 +48,43 @@ pub struct CampaignView {
     pub duration_secs: u64,
     /// Last time the campaign fired (RFC3339), if ever.
     pub last_fire: Option<String>,
+}
+
+/// A past campaign execution for the GUI history view.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionView {
+    pub execution_id: String,
+    pub schedule_id: String,
+    /// Campaign name (resolved from the schedule).
+    pub campaign: String,
+    /// When the trigger fired (RFC3339).
+    pub triggered_at: String,
+    /// "pending" | "running" | "completed" | "failed" | "skipped".
+    pub status: String,
+    /// Result summary (e.g. "3 crashes, 120 edges") or the error message.
+    pub summary: String,
+}
+
+/// Map a [`ScheduleExecution`] to an [`ExecutionView`].
+fn view_of_execution(ex: &ScheduleExecution, campaign: &str) -> ExecutionView {
+    let summary = ex
+        .error_message
+        .clone()
+        .or_else(|| {
+            ex.response_summary
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default();
+    ExecutionView {
+        execution_id: ex.execution_id.clone(),
+        schedule_id: ex.schedule_id.clone(),
+        campaign: campaign.to_owned(),
+        triggered_at: ex.triggered_at.to_rfc3339(),
+        status: ex.status.to_string(),
+        summary,
+    }
 }
 
 /// Map a stored [`Schedule`] to a [`CampaignView`].
@@ -217,6 +254,25 @@ impl CampaignScheduler {
             .iter()
             .map(view_of)
             .collect()
+    }
+
+    /// Recent campaign executions across all schedules, newest first.
+    pub async fn recent_executions(&self, limit: usize) -> Vec<ExecutionView> {
+        let schedules = self.manager.list_schedules().await;
+        let names: std::collections::HashMap<String, String> = schedules
+            .iter()
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect();
+        let mut all = Vec::new();
+        for schedule in &schedules {
+            for ex in self.manager.execution_history(&schedule.id).await {
+                let name = names.get(&ex.schedule_id).map_or("", String::as_str);
+                all.push(view_of_execution(&ex, name));
+            }
+        }
+        all.sort_by(|a, b| b.triggered_at.cmp(&a.triggered_at));
+        all.truncate(limit);
+        all
     }
 
     /// Create + register + persist a new campaign schedule.
