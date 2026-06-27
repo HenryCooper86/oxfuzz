@@ -44,6 +44,17 @@ export interface CorpusEntry {
   coverage_hash: string | null;
 }
 
+export type CrashSeverity = "Exploitable" | "ProbablyExploitable" | "NotExploitable" | "Undefined";
+
+/** CASR crash-analysis report attached to a triaged crash. */
+export interface CasrReport {
+  severity: CrashSeverity;
+  severity_short: string;
+  crashline: string;
+  stack: string[];
+  cluster: number | null;
+}
+
 export interface Crash {
   id: string;
   run_id: string;
@@ -54,6 +65,7 @@ export interface Crash {
   summary: string;
   minimized: boolean;
   bug_report: { title: string; summary: string; repro_steps: string; stack: string; severity_guess: string } | null;
+  casr: CasrReport | null;
 }
 
 export interface FuzzProgress {
