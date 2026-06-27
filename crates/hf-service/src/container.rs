@@ -280,6 +280,7 @@ pub struct ServiceContainer {
     provider_pool: Option<Arc<dyn ProviderPool>>,
     store: Option<Arc<Store>>,
     session_manager: Option<Arc<hf_session::SessionManager>>,
+    checkpoint_manager: Option<Arc<hf_session::ChatCheckpointManager>>,
     guardrails: Guardrails,
     diagnostics: Arc<crate::diagnostics::DiagnosticsRecorder>,
     run_journal: Arc<crate::recovery::RunJournal>,
@@ -294,19 +295,47 @@ fn build_cost_map() -> std::collections::HashMap<String, (f64, f64)> {
         .collect()
 }
 
-/// Build the `hf-session` [`SessionManager`](hf_session::SessionManager) over a
-/// database store: the `SQLite` session tree plus `JSONL` display + context
-/// transcripts under the user data dir (separate subdirs so they don't collide).
-fn build_session_manager(store: &Arc<Store>) -> Arc<hf_session::SessionManager> {
+/// Build the `hf-session` managers over a database store: the [`SessionManager`]
+/// (`SQLite` session tree + `JSONL` display/context transcripts) and a
+/// [`ChatCheckpointManager`] sharing the same stores for turn-level rollback
+/// (checkpoints are in-memory -- a session-lifetime undo buffer).
+///
+/// [`SessionManager`]: hf_session::SessionManager
+/// [`ChatCheckpointManager`]: hf_session::ChatCheckpointManager
+fn build_session_managers(
+    store: &Arc<Store>,
+) -> (
+    Arc<hf_session::SessionManager>,
+    Arc<hf_session::ChatCheckpointManager>,
+) {
+    use hf_core::session::{
+        ChatCheckpointStore, DisplayTranscriptStore, SessionStore, TranscriptStore,
+    };
+
     let base = crate::init::user_app_dir().join("transcripts");
-    Arc::new(hf_session::SessionManager::new(
-        Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone())),
-        Arc::new(hf_storage::JsonlTranscriptStore::new(base.join("context"))),
-        Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(
-            base.join("display"),
-        )),
+    let session_store: Arc<dyn SessionStore> =
+        Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()));
+    let transcript: Arc<dyn TranscriptStore> =
+        Arc::new(hf_storage::JsonlTranscriptStore::new(base.join("context")));
+    let display: Arc<dyn DisplayTranscriptStore> = Arc::new(
+        hf_storage::JsonlDisplayTranscriptStore::new(base.join("display")),
+    );
+    let checkpoint_store: Arc<dyn ChatCheckpointStore> =
+        Arc::new(crate::checkpoints::InMemoryChatCheckpointStore::default());
+
+    let manager = Arc::new(hf_session::SessionManager::new(
+        Arc::clone(&session_store),
+        Arc::clone(&transcript),
+        Arc::clone(&display),
         hf_session::SessionConfig::default(),
-    ))
+    ));
+    let checkpoints = Arc::new(hf_session::ChatCheckpointManager::new(
+        transcript,
+        display,
+        checkpoint_store,
+        session_store,
+    ));
+    (manager, checkpoints)
 }
 
 impl ServiceContainer {
@@ -321,6 +350,7 @@ impl ServiceContainer {
             provider_pool,
             store: None,
             session_manager: None,
+            checkpoint_manager: None,
             guardrails: Guardrails::permissive(),
             diagnostics: Arc::new(crate::diagnostics::DiagnosticsRecorder::new(
                 build_cost_map(),
@@ -355,9 +385,53 @@ impl ServiceContainer {
     /// returning the updated container.
     #[must_use]
     pub fn with_store(mut self, store: Arc<Store>) -> Self {
-        self.session_manager = Some(build_session_manager(&store));
+        let (sessions, checkpoints) = build_session_managers(&store);
+        self.session_manager = Some(sessions);
+        self.checkpoint_manager = Some(checkpoints);
         self.store = Some(store);
         self
+    }
+
+    /// The chat checkpoint manager (turn-level rollback), if a database is
+    /// configured.
+    #[must_use]
+    pub fn checkpoint_manager(&self) -> Option<&Arc<hf_session::ChatCheckpointManager>> {
+        self.checkpoint_manager.as_ref()
+    }
+
+    /// Create a turn checkpoint recording the transcript length before this
+    /// turn (so a later rollback restores the pre-turn state). Best-effort.
+    pub async fn chat_create_checkpoint(
+        &self,
+        session: &hf_core::types::SessionId,
+        message_count_before: u32,
+    ) {
+        if let Some(manager) = &self.checkpoint_manager {
+            let turn = manager.current_turn(session).await.unwrap_or(0) + 1;
+            if let Err(e) = manager
+                .create_checkpoint(
+                    session,
+                    turn,
+                    message_count_before,
+                    Uuid::new_v4().to_string(),
+                )
+                .await
+            {
+                tracing::warn!("chat checkpoint create failed: {e}");
+            }
+        }
+    }
+
+    /// Roll back the most recent chat turn, truncating the transcript. Returns
+    /// the number of messages removed (0 if nothing to roll back).
+    pub async fn chat_rollback_last(&self, session: &hf_core::types::SessionId) -> usize {
+        if let Some(manager) = &self.checkpoint_manager {
+            match manager.rollback_last(session).await {
+                Ok(result) => return result.messages_removed,
+                Err(e) => tracing::warn!("chat rollback failed: {e}"),
+            }
+        }
+        0
     }
 
     /// The conversation session manager (if a database is configured): the
@@ -408,7 +482,11 @@ impl ServiceContainer {
                 None
             }
         };
-        let session_manager = store.as_ref().map(build_session_manager);
+        let (session_manager, checkpoint_manager) = match store.as_ref().map(build_session_managers)
+        {
+            Some((sessions, checkpoints)) => (Some(sessions), Some(checkpoints)),
+            None => (None, None),
+        };
         // Open the persistent run journal and detect runs interrupted by a prior
         // crash/quit (scopes opened but never closed). Reconcile the DB so those
         // runs are not left stuck as `Running` forever.
@@ -439,6 +517,7 @@ impl ServiceContainer {
             store,
             session_manager,
             guardrails: Guardrails::from_env(),
+            checkpoint_manager,
             diagnostics,
             run_journal,
         }

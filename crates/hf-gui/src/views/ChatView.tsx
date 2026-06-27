@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -169,6 +169,20 @@ export function ChatView() {
       setAttached(path);
       setActiveProject(path);
     }
+  }
+
+  // Undo the most recent turn: truncate the persisted transcript (when a
+  // session is active) and drop the last exchange from the visible thread.
+  async function rollbackLast() {
+    if (busy || messages.length < 2) return;
+    if (sessionId) {
+      try {
+        await getTransport().invoke("chat_rollback", { sessionId });
+      } catch {
+        /* best-effort; still undo locally */
+      }
+    }
+    setMessages((m) => m.slice(0, -2));
   }
 
   async function send() {
@@ -469,6 +483,13 @@ export function ChatView() {
               />
               {agents.length > 0 && (
                 <AgentDropdown agents={agents} value={agentId} onSelect={setAgentId} />
+              )}
+              {messages.length >= 2 && !busy && (
+                <ToolbarIconButton
+                  icon={<RotateCcw size={16} />}
+                  title="Undo last turn (rollback)"
+                  onClick={rollbackLast}
+                />
               )}
             </div>
             <div className="flex items-center gap-2">
