@@ -824,6 +824,7 @@ interface KnowledgeCrash {
   kind: string;
   summary: string;
   signature: string;
+  severity?: string | null;
 }
 interface KnowledgeSummary {
   db_configured: boolean;
@@ -1005,7 +1006,7 @@ export function KnowledgeView() {
 
           <KnowledgeSection title="Crashes" count={data.crashes.length} icon={<Bug size={14} />}>
             {data.crashes.slice(0, 40).map((c, i) => (
-              <Row key={i} left={c.kind} mid={c.summary.length > 80 ? c.summary.slice(0, 80) + "…" : c.summary} right={c.signature ? c.signature.slice(0, 12) : ""} danger />
+              <Row key={i} left={c.kind} mid={c.summary.length > 80 ? c.summary.slice(0, 80) + "…" : c.summary} right={c.signature ? c.signature.slice(0, 12) : ""} badge={c.severity ? <SeverityChip severity={c.severity} /> : undefined} danger />
             ))}
           </KnowledgeSection>
         </>
@@ -1028,13 +1029,31 @@ function KnowledgeSection({ title, count, icon, children }: { title: string; cou
   );
 }
 
-function Row({ left, mid, right, danger }: { left: string; mid: string; right: string; danger?: boolean }) {
+function Row({ left, mid, right, danger, badge }: { left: string; mid: string; right: string; danger?: boolean; badge?: ReactNode }) {
   return (
     <div className="flex items-center gap-3 px-3 py-2 border-b border-border last:border-0 text-xs">
       <span className="font-mono shrink-0" style={{ color: danger ? "var(--error)" : "var(--text-primary)", minWidth: "120px" }}>{left}</span>
+      {badge}
       <span className="text-text-secondary flex-1 truncate">{mid}</span>
       <span className="text-text-muted font-mono shrink-0 truncate" style={{ maxWidth: "240px" }}>{right}</span>
     </div>
+  );
+}
+
+// Compact CASR exploitability chip for the Knowledge crash rows.
+const KNOWLEDGE_SEVERITY: Record<string, { label: string; bg: string; fg: string }> = {
+  Exploitable: { label: "EXPLOITABLE", bg: "var(--error-subtle)", fg: "var(--error)" },
+  ProbablyExploitable: { label: "PROBABLY", bg: "rgba(217,119,6,0.16)", fg: "#d97706" },
+  NotExploitable: { label: "NOT EXPL.", bg: "var(--surface-active)", fg: "var(--text-secondary)" },
+  Undefined: { label: "UNCLASSIFIED", bg: "var(--surface-active)", fg: "var(--text-muted)" },
+};
+
+function SeverityChip({ severity }: { severity: string }) {
+  const s = KNOWLEDGE_SEVERITY[severity] ?? KNOWLEDGE_SEVERITY.Undefined;
+  return (
+    <span className="text-xs px-1.5 py-0.5 rounded-sm font-semibold shrink-0" style={{ background: s.bg, color: s.fg, letterSpacing: "0.03em" }}>
+      {s.label}
+    </span>
   );
 }
 
