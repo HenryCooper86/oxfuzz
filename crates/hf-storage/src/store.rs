@@ -55,6 +55,8 @@ pub enum RunStatus {
     Done,
     /// Terminated with an error.
     Failed,
+    /// Cancelled by the user before completing.
+    Cancelled,
 }
 
 /// A persisted fuzz-run record.

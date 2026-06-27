@@ -8,6 +8,7 @@ description = "FuzzEngine adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite
 [dependencies]
 hf-core = { workspace = true }
 async-trait = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -18,6 +19,7 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util = { workspace = true }
 futures = { workspace = true }
 tempfile = { workspace = true }
 
