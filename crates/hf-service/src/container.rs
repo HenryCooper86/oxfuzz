@@ -153,6 +153,50 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
     staged
 }
 
+/// Cache value: the signature the covered set was computed for + the set.
+type CoverageCache = std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<String>)>>;
+
+/// Process-global cache of covered-function sets, keyed by `project::target`,
+/// each tagged with the corpus+harness signature it was computed for.
+fn coverage_cache() -> &'static CoverageCache {
+    static CACHE: std::sync::OnceLock<CoverageCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// A cheap fingerprint of the inputs that affect coverage: the corpus file count
+/// and the latest mtime across the corpus and `harness.c`. Changes when a run
+/// grows the corpus or the harness is rebuilt, invalidating the cache.
+fn coverage_signature(workspace: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::time::UNIX_EPOCH;
+
+    let mtime_secs = |meta: &std::fs::Metadata| -> u64 {
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    };
+
+    let mut count = 0u64;
+    let mut max_mtime = 0u64;
+    if let Ok(entries) = std::fs::read_dir(workspace.join("corpus")) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                count += 1;
+                max_mtime = max_mtime.max(mtime_secs(&meta));
+            }
+        }
+    }
+    if let Ok(meta) = std::fs::metadata(workspace.join("harness.c")) {
+        max_mtime = max_mtime.max(mtime_secs(&meta));
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    count.hash(&mut hasher);
+    max_mtime.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Parse `llvm-cov export` JSON, returning the names of functions with a
 /// non-zero execution count (the covered set).
 fn parse_covered_functions(json: &str) -> Vec<String> {
@@ -1139,20 +1183,30 @@ impl ServiceContainer {
         Ok(deduped)
     }
 
-    /// Replay a single crash input through the compiled harness in the sandbox
-    /// and return the combined stdout+stderr (the sanitizer trace). Best-effort:
-    /// returns an empty string if the binary is missing or the run fails.
     /// Functions covered by a fuzz run, for the call-tree coverage overlay.
     ///
     /// Builds a source-based-coverage harness from the workspace sources,
     /// replays the accumulated corpus through it in the sandbox, and exports
     /// per-function execution counts with `llvm-cov` -- engine-agnostic, since
     /// it compiles its own coverage binary rather than reusing the run's. Empty
-    /// when no harness was built or coverage tooling is unavailable.
+    /// when no harness was built or coverage tooling is unavailable. Results are
+    /// cached per target, keyed by a corpus+harness signature so they refresh
+    /// automatically when a run grows the corpus or the harness is rebuilt.
     pub async fn coverage_functions(&self, project: &Path, target: &str) -> Vec<String> {
         let workspace = workspace_dir(project, target);
         if !workspace.join("harness.c").exists() {
             return Vec::new();
+        }
+        let cache_key = format!("{}::{target}", project.display());
+        let signature = coverage_signature(&workspace);
+        if let Some((cached_sig, cached)) = coverage_cache()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&cache_key).cloned())
+        {
+            if cached_sig == signature {
+                return cached;
+            }
         }
         // One sandbox shell pipeline: coverage build -> replay corpus -> export.
         let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
@@ -1169,7 +1223,15 @@ impl ServiceContainer {
             ptrace: false,
         };
         match self.runtime.run_command(&cmd, &workspace, &limits).await {
-            Ok(result) => parse_covered_functions(&result.stdout),
+            // Cache successful runs (even empty -- the signature invalidates them
+            // when the corpus changes); do not cache infra failures, so they retry.
+            Ok(result) => {
+                let covered = parse_covered_functions(&result.stdout);
+                if let Ok(mut map) = coverage_cache().lock() {
+                    map.insert(cache_key, (signature, covered.clone()));
+                }
+                covered
+            }
             Err(e) => {
                 tracing::warn!("coverage collection failed: {e}");
                 Vec::new()
@@ -1177,6 +1239,9 @@ impl ServiceContainer {
         }
     }
 
+    /// Replay a single crash input through the compiled harness in the sandbox
+    /// and return the combined stdout+stderr (the sanitizer trace). Best-effort:
+    /// returns an empty string if the binary is missing or the run fails.
     async fn reproduce_crash(
         &self,
         workspace: &Path,
@@ -1841,5 +1906,22 @@ mod coverage_tests {
     fn parse_handles_garbage() {
         assert!(parse_covered_functions("not json").is_empty());
         assert!(parse_covered_functions("{}").is_empty());
+    }
+
+    #[test]
+    fn coverage_signature_changes_when_corpus_grows() {
+        use super::coverage_signature;
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("harness.c"), "x").unwrap();
+        std::fs::create_dir_all(ws.join("corpus")).unwrap();
+        std::fs::write(ws.join("corpus/a"), "1").unwrap();
+
+        let sig1 = coverage_signature(ws);
+        // Same inputs -> same signature (cache hit).
+        assert_eq!(sig1, coverage_signature(ws));
+        // A new corpus file -> different signature (cache invalidated).
+        std::fs::write(ws.join("corpus/b"), "2").unwrap();
+        assert_ne!(sig1, coverage_signature(ws));
     }
 }
