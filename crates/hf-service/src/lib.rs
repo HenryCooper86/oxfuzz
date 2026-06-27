@@ -14,6 +14,7 @@ pub mod container;
 pub mod diagnostics;
 pub mod init;
 pub mod knowledge;
+pub mod scheduler;
 
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, provider_pool_from_config,

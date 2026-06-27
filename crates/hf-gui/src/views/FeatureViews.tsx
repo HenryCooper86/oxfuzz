@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search } from "lucide-react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
-import { usePrefs } from "../providers/PrefsContext";
 
 // ---------------------------------------------------------------------------
 // Shared scaffolding
@@ -1061,154 +1060,145 @@ function SeverityChip({ severity }: { severity: string }) {
 // Automation
 // ---------------------------------------------------------------------------
 
-interface Campaign {
+interface CampaignView {
   id: string;
   name: string;
+  enabled: boolean;
+  trigger: string;
   project: string;
   target: string;
   engine: string;
-  duration: number;
-}
-
-const CAMPAIGNS_KEY = "hf_campaigns";
-
-function loadCampaigns(): Campaign[] {
-  try {
-    return JSON.parse(localStorage.getItem(CAMPAIGNS_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
+  duration_secs: number;
+  last_fire: string | null;
 }
 
 export function AutomationView() {
   const { activeProject } = useProject();
   const { target, engine } = useTarget();
-  const { sandboxArch } = usePrefs();
-  const [campaigns, setCampaigns] = useState<Campaign[]>(loadCampaigns);
-  const [runningOnce, setRunningOnce] = useState<string | null>(null);
-  const [activeIds, setActiveIds] = useState<string[]>([]);
-  const activeRef = useRef<Set<string>>(new Set());
+  const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
+  const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
+  const [triggerValue, setTriggerValue] = useState("3600");
+  const [duration, setDuration] = useState(60);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Stop any continuous loops when leaving the view.
-  useEffect(() => () => activeRef.current.clear(), []);
-
-  const persist = (next: Campaign[]) => {
-    setCampaigns(next);
-    localStorage.setItem(CAMPAIGNS_KEY, JSON.stringify(next));
-  };
-
-  const canSave = activeProject && target;
-  function saveCurrent() {
-    if (!canSave) return;
-    const c: Campaign = {
-      id: `${Date.now()}`,
-      name: `${shortProject(activeProject)} / ${target}`,
-      project: activeProject,
-      target,
-      engine: engine || "libfuzzer",
-      duration: 60,
+  // Load + light poll so last-run times update as campaigns fire.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () =>
+      getTransport()
+        .invoke<CampaignView[]>("schedule_list")
+        .then((c) => !cancelled && setCampaigns(c))
+        .catch(() => !cancelled && setCampaigns([]));
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
     };
-    persist([c, ...campaigns]);
-  }
-  function remove(id: string) {
-    activeRef.current.delete(id);
-    setActiveIds([...activeRef.current]);
-    persist(campaigns.filter((c) => c.id !== id));
-  }
+  }, []);
 
-  const runOne = (c: Campaign) =>
-    getTransport().invoke("run_fuzzer", {
-      project: c.project,
-      target: c.target,
-      engine: c.engine,
-      duration: c.duration,
-      arch: sandboxArch,
-    });
-
-  async function runOnce(c: Campaign) {
-    setRunningOnce(c.id);
+  const canSave = !!activeProject && !!target;
+  async function save() {
+    if (!canSave) return;
+    setBusy(true);
+    setError(null);
     try {
-      await runOne(c);
-    } catch {
-      /* surfaced in Run view */
+      const next = await getTransport().invoke<CampaignView[]>("schedule_create", {
+        name: `${shortProject(activeProject)} / ${target}`,
+        project: activeProject,
+        target,
+        engine: engine || "libfuzzer",
+        durationSecs: duration,
+        triggerKind,
+        triggerValue,
+      });
+      setCampaigns(next);
+    } catch (e) {
+      setError(String(e));
     } finally {
-      setRunningOnce(null);
+      setBusy(false);
     }
+  }
+  async function remove(id: string) {
+    setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_delete", { id }));
+  }
+  async function toggle(id: string, enabled: boolean) {
+    setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_set_enabled", { id, enabled }));
   }
 
-  async function loop(c: Campaign) {
-    while (activeRef.current.has(c.id)) {
-      try {
-        await runOne(c);
-      } catch {
-        /* keep going */
-      }
-      if (!activeRef.current.has(c.id)) break;
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-  }
-  function toggleContinuous(c: Campaign) {
-    if (activeRef.current.has(c.id)) {
-      activeRef.current.delete(c.id);
-    } else {
-      activeRef.current.add(c.id);
-      void loop(c);
-    }
-    setActiveIds([...activeRef.current]);
-  }
+  const placeholder =
+    triggerKind === "interval"
+      ? "seconds, e.g. 3600"
+      : triggerKind === "cron"
+        ? "cron, e.g. 0 2 * * *"
+        : "RFC3339, e.g. 2026-07-01T02:00:00Z";
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <div className="flex items-center justify-between">
-        <ViewHeader title="Automation" description="Save fuzz campaigns and re-run them — one-shot or continuously (re-runs while this view is open, growing the corpus each pass)." />
-        <button
-          onClick={saveCurrent}
-          disabled={!canSave}
-          title={canSave ? "Save the current project + target as a campaign" : "Pick a project and target first (Discover/Harness)"}
-          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50"
-          style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }}
-        >
-          <Plus size={13} />
-          Save current
-        </button>
+      <ViewHeader title="Automation" description="Schedule fuzz campaigns to run automatically — on an interval, a cron expression, or once at a set time. They run headlessly in the background and persist across restarts." />
+
+      {/* New campaign form */}
+      <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+        <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>New Campaign</div>
+        <div className="text-xs text-text-secondary">
+          {canSave ? (
+            <>Target: <span className="font-mono text-text-primary">{shortProject(activeProject)} / {target}</span> · <span className="font-mono">{engine || "libfuzzer"}</span></>
+          ) : (
+            "Pick a project + target first (Discover/Harness)."
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={triggerKind} onChange={(e) => setTriggerKind(e.target.value as typeof triggerKind)}
+            className="rounded-md border border-border bg-surface-primary px-2 py-1.5 text-xs outline-none">
+            <option value="interval">Interval</option>
+            <option value="cron">Cron</option>
+            <option value="once">Once</option>
+          </select>
+          <input value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
+            className="flex-1 min-w-[180px] rounded-md border border-border bg-surface-primary px-2 py-1.5 text-xs font-mono outline-none" />
+          <label className="text-xs text-text-muted flex items-center gap-1">
+            run
+            <input type="number" min={10} value={duration} onChange={(e) => setDuration(Math.max(10, Number(e.target.value) || 60))}
+              className="w-16 rounded-md border border-border bg-surface-primary px-2 py-1.5 text-xs font-mono outline-none" />
+            s
+          </label>
+          <button onClick={save} disabled={!canSave || busy || !triggerValue.trim()}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50"
+            style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }}>
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+            Schedule
+          </button>
+        </div>
+        {error && <span className="text-xs" style={{ color: "var(--error)" }}>{error}</span>}
       </div>
 
       {campaigns.length === 0 && (
-        <EmptyState icon={<Zap size={20} />} hint="No saved campaigns. Pick a project + target (Discover/Harness), then 'Save current' to create a repeatable fuzz campaign." />
+        <EmptyState icon={<Zap size={20} />} hint="No scheduled campaigns yet. Pick a project + target, choose a trigger, and Schedule it to fuzz on autopilot." />
       )}
 
       <div className="flex flex-col gap-2">
-        {campaigns.map((c) => {
-          const continuous = activeIds.includes(c.id);
-          return (
-            <div key={c.id} className="surface-card flex items-center gap-3" style={{ padding: "var(--space-md)", borderLeft: continuous ? "3px solid var(--accent)" : "3px solid transparent" }}>
-              <div className="flex flex-col min-w-0 flex-1">
-                <span className="text-sm font-medium truncate">{c.name}</span>
-                <span className="text-xs text-text-muted font-mono">{c.engine} · {c.duration}s{continuous ? " · running…" : ""}</span>
-              </div>
-              <button
-                onClick={() => runOnce(c)}
-                disabled={runningOnce === c.id || continuous}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-50"
-              >
-                {runningOnce === c.id ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-                Run
-              </button>
-              <button
-                onClick={() => toggleContinuous(c)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border"
-                style={continuous ? { background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" } : { borderColor: "var(--border)", background: "var(--surface-primary)", color: "var(--text-secondary)" }}
-                title="Continuously re-run while this view is open"
-              >
-                {continuous ? <Square size={13} /> : <RotateCw size={13} />}
-                {continuous ? "Stop" : "Continuous"}
-              </button>
-              <button onClick={() => remove(c.id)} className="inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:text-error hover:bg-surface-hover" title="Delete campaign">
-                <Trash2 size={14} />
-              </button>
+        {campaigns.map((c) => (
+          <div key={c.id} className="surface-card flex items-center gap-3" style={{ padding: "var(--space-md)", borderLeft: c.enabled ? "3px solid var(--accent)" : "3px solid transparent", opacity: c.enabled ? 1 : 0.6 }}>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="text-sm font-medium truncate">{c.name}</span>
+              <span className="text-xs text-text-muted font-mono">
+                {c.trigger} · {c.engine} · {c.duration_secs}s
+                {c.last_fire ? ` · last ${new Date(c.last_fire).toLocaleString()}` : " · never run"}
+              </span>
             </div>
-          );
-        })}
+            <button onClick={() => toggle(c.id, !c.enabled)}
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border"
+              style={c.enabled ? { borderColor: "var(--border)", background: "var(--surface-primary)", color: "var(--text-secondary)" } : { background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
+              title={c.enabled ? "Pause this campaign" : "Resume this campaign"}>
+              {c.enabled ? <Square size={13} /> : <Play size={13} />}
+              {c.enabled ? "Pause" : "Resume"}
+            </button>
+            <button onClick={() => remove(c.id)} className="inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:text-error hover:bg-surface-hover" title="Delete campaign">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );

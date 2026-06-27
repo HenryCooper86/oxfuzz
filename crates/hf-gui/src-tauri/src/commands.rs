@@ -551,6 +551,59 @@ pub async fn diagnostics_cost_summary(
     Ok(state.container.cost_summary().await)
 }
 
+/// List all scheduled fuzz campaigns.
+#[tauri::command]
+pub async fn schedule_list(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
+    Ok(state.scheduler.list_views().await)
+}
+
+/// Create a scheduled fuzz campaign; returns the updated list.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn schedule_create(
+    state: tauri::State<'_, crate::state::AppState>,
+    name: String,
+    project: String,
+    target: String,
+    engine: String,
+    duration_secs: u64,
+    trigger_kind: String,
+    trigger_value: String,
+) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
+    let trigger = hf_service::scheduler::parse_trigger(&trigger_kind, &trigger_value)?;
+    let params = hf_service::scheduler::CampaignParams {
+        project,
+        target,
+        engine,
+        duration_secs,
+    };
+    state.scheduler.create(&name, &params, trigger).await;
+    Ok(state.scheduler.list_views().await)
+}
+
+/// Delete a scheduled campaign; returns the updated list.
+#[tauri::command]
+pub async fn schedule_delete(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
+    state.scheduler.remove(&id).await;
+    Ok(state.scheduler.list_views().await)
+}
+
+/// Enable or disable a scheduled campaign; returns the updated list.
+#[tauri::command]
+pub async fn schedule_set_enabled(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
+    state.scheduler.set_enabled(&id, enabled).await;
+    Ok(state.scheduler.list_views().await)
+}
+
 /// Index a project's source files into its BM25 knowledge base.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
