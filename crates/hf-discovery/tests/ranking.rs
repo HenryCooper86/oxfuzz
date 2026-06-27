@@ -100,6 +100,7 @@ async fn rank_merges_llm_rationale_and_scores() {
     let inv = TargetInventory {
         project_root: PathBuf::from("/p"),
         candidates: vec![cand("parse_value"), cand("parse_array"), cand("skip_ws")],
+        call_graph: std::collections::HashMap::new(),
     };
     let ranked = rank(inv, Box::new(llm)).await.expect("rank should succeed");
     let pv = ranked
@@ -136,6 +137,7 @@ async fn rank_falls_back_on_invalid_json() {
     let inv = TargetInventory {
         project_root: PathBuf::from("/p"),
         candidates: vec![cand("parse_value")],
+        call_graph: std::collections::HashMap::new(),
     };
     let ranked = rank(inv, Box::new(llm))
         .await
