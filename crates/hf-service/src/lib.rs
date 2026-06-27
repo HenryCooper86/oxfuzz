@@ -14,6 +14,7 @@ pub mod container;
 pub mod diagnostics;
 pub mod init;
 pub mod knowledge;
+pub mod recovery;
 pub mod scheduler;
 
 pub use container::{
