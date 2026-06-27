@@ -39,6 +39,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] hf-coverage: coverage delta tracking and stagnation alerts.
 - [x] hf-coverage: line/region/function coverage summary (`CoverageSummary`
   from `llvm-cov export` totals); CLI `coverage`.
+- [x] hf-service: detailed Markdown campaign report (`report::render_markdown`
+  + `ServiceContainer::generate_report`) aggregating target, run, coverage,
+  corpus, and triaged crashes (CASR severity + bug reports). Surfaced via CLI
+  `report --out`, hf-web `POST /report`, and a GUI Triage "Download Report"
+  button (native save dialog; browser download in web mode).
 
 ## Phase 5: Orchestration, Safety & Polish
 
