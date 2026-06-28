@@ -17,6 +17,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   triage: { method: "POST", path: "/triage" },
   generate_report: { method: "POST", path: "/report" },
   clear_knowledge: { method: "POST", path: "/knowledge/clear" },
+  system_snapshot: { method: "GET", path: "/system/snapshot" },
   system_status: { method: "GET", path: "/health" },
   system_status_cmd: { method: "GET", path: "/health" },
   // ChatView invokes `chat_agent`; the web router exposes the chat handler at
