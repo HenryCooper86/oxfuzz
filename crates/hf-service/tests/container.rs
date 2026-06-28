@@ -236,6 +236,28 @@ async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
 }
 
 #[tokio::test]
+async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("s.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+
+    let snap = container.system_snapshot().await;
+
+    // No provider pool -> no provider cards; agent pool empty by default.
+    assert!(snap.providers.is_empty());
+    assert_eq!(snap.agents.active_instances, 0);
+    assert!(snap.agents.instances.is_empty());
+    // Memory counters are real and start at zero on a fresh store.
+    assert_eq!(snap.memory.pending_runs, 0);
+    assert_eq!(snap.memory.targets, 0);
+    assert_eq!(snap.memory.crashes, 0);
+}
+
+#[tokio::test]
 async fn artifact_summary_reports_on_disk_state() {
     use std::fs;
 

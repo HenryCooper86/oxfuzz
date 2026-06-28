@@ -1,36 +1,151 @@
-// Observability panel -- live provider health plus fuzz-run progress.
+// Observability panel -- live system state (providers, agent pool, memory).
 //
-// Provider health (freeze state, in-flight + total requests, errors) comes from
-// the provider pool via the `provider_statuses` command. Active runs are driven
-// from the shared RunOutput context (the same live stats the Run view streams).
+// Ported from y-agent's panel, re-typed to hobot's `system_snapshot` command:
+// per-provider health + usage (concurrency, requests/errors, tokens, cost),
+// the agent pool, and runtime memory counters. Polls every 5s. Rendered inside
+// the app's PanelShell (which supplies the title/close chrome).
 
 import { useEffect, useState } from "react";
-import { Gauge, Container, Cpu } from "lucide-react";
-import { Badge } from "../ui/Badge";
+import { Server, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { getTransport } from "../../lib";
-import { useRunOutput } from "../../providers/RunOutputContext";
+import "./ObservabilityPanel.css";
 
-interface ProviderStatus {
+interface ProviderSnapshot {
   id: string;
-  frozen: boolean;
-  freeze_reason: string | null;
+  model: string;
+  tags: string[];
+  is_frozen: boolean;
   active_requests: number;
+  max_concurrency: number;
   total_requests: number;
   total_errors: number;
+  error_rate: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  estimated_cost_usd: number;
+}
+interface AgentInstanceSnapshot {
+  instance_id: string;
+  agent_name: string;
+  state: string;
+  elapsed_ms: number;
+  iterations: number;
+  tokens_used: number;
+}
+interface AgentPoolSnapshot {
+  active_instances: number;
+  available_slots: number;
+  total_instances: number;
+  instances: AgentInstanceSnapshot[];
+}
+interface MemorySnapshot {
+  pending_runs: number;
+  interrupted_runs: number;
+  llm_calls: number;
+  targets: number;
+  crashes: number;
+}
+interface SystemSnapshot {
+  providers: ProviderSnapshot[];
+  agents: AgentPoolSnapshot;
+  memory: MemorySnapshot;
+}
+
+const n = (v: number) => v.toLocaleString();
+
+function ProviderCard({ p }: { p: ProviderSnapshot }) {
+  const pct = p.max_concurrency > 0 ? (p.active_requests / p.max_concurrency) * 100 : 0;
+  const fillClass = pct >= 100 ? "full" : pct >= 75 ? "high" : "";
+  return (
+    <div className="obs-provider-card">
+      <div className="obs-provider-identity">
+        <div className="obs-provider-icon">
+          <Server size={12} />
+        </div>
+        <span className="obs-provider-name">{p.id}</span>
+        <span className="obs-provider-model">{p.model}</span>
+        <span className={`obs-badge ${p.is_frozen ? "obs-badge-frozen" : "obs-badge-healthy"}`}>
+          {p.is_frozen ? "FROZEN" : "OK"}
+        </span>
+      </div>
+
+      {p.tags.length > 0 && (
+        <div className="obs-tags">
+          {p.tags.map((tag) => (
+            <span key={tag} className="obs-tag">{tag}</span>
+          ))}
+        </div>
+      )}
+
+      <div className="obs-concurrency">
+        <div className="obs-concurrency-label">
+          <span className="obs-concurrency-text">CONCURRENCY</span>
+          <span className="obs-concurrency-text">{p.active_requests} / {p.max_concurrency}</span>
+        </div>
+        <div className="obs-concurrency-bar">
+          <div className={`obs-concurrency-fill ${fillClass}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+        </div>
+      </div>
+
+      <div className="obs-metrics">
+        <Metric label="Requests" value={n(p.total_requests)} />
+        <Metric label="Errors" value={n(p.total_errors)} />
+        <Metric label="Err Rate" value={`${(p.error_rate * 100).toFixed(1)}%`} />
+        <Metric label="In Tokens" value={n(p.total_input_tokens)} />
+        <Metric label="Out Tokens" value={n(p.total_output_tokens)} />
+        <Metric label="Cost" value={`$${p.estimated_cost_usd.toFixed(4)}`} />
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="obs-metric">
+      <span className="obs-metric-label">{label}</span>
+      <span className="obs-metric-value">{value}</span>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  count,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  count?: number;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="obs-section">
+      <div className="obs-section-header" onClick={onToggle}>
+        <span className="obs-section-chevron">{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+        <span className="obs-section-title">{title}</span>
+        {count !== undefined && <span className="obs-section-count">{count}</span>}
+      </div>
+      {open && children}
+    </div>
+  );
 }
 
 export function ObservabilityPanel() {
-  const { running, stats, summary, lastTarget, lastEngine } = useRunOutput();
-  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [snap, setSnap] = useState<SystemSnapshot | null>(null);
+  const [providersOpen, setProvidersOpen] = useState(true);
+  const [agentsOpen, setAgentsOpen] = useState(true);
+  const [memoryOpen, setMemoryOpen] = useState(false);
 
-  // Poll provider health so freeze/error state stays current as the agent works.
   useEffect(() => {
     let cancelled = false;
     const tick = () => {
       getTransport()
-        .invoke<ProviderStatus[]>("provider_statuses")
-        .then((d) => !cancelled && setProviders(d ?? []))
-        .catch(() => !cancelled && setProviders([]));
+        .invoke<SystemSnapshot>("system_snapshot")
+        .then((d) => !cancelled && d && setSnap(d))
+        .catch(() => !cancelled && setSnap(null));
     };
     tick();
     const id = setInterval(tick, 5000);
@@ -40,77 +155,77 @@ export function ObservabilityPanel() {
     };
   }, []);
 
-  // Show a card while a run streams, and keep the last completed run visible.
-  const hasRun = running || summary !== null;
-  const liveStats = running ? stats : summary ?? stats;
+  const providerCount = snap?.providers.length ?? 0;
+  const activeAgents = snap?.agents.active_instances ?? 0;
+  const slots = snap?.agents.available_slots ?? 0;
 
   return (
-    <div className="flex flex-col h-full" style={{ background: "var(--surface-secondary)" }}>
-      <div className="flex items-center gap-2 p-2 border-b border-border">
-        <Gauge size={14} style={{ color: "var(--accent)" }} />
-        <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>Observability</span>
+    <div className="obs-panel">
+      {/* Summary bar */}
+      <div className="obs-summary">
+        <div className="obs-summary-item">
+          <span className="obs-summary-value">{providerCount}</span>
+          <span className="obs-summary-label">providers</span>
+        </div>
+        <div className="obs-summary-item">
+          <span className="obs-summary-value">{activeAgents}</span>
+          <span className="obs-summary-label">agents</span>
+        </div>
+        <div className="obs-summary-item">
+          <span className="obs-summary-value">{slots}</span>
+          <span className="obs-summary-label">slots</span>
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
-        {/* Provider health -- live from the provider pool */}
-        <div>
-          <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Providers</div>
-          {providers.length === 0 ? (
-            <div className="surface-card p-2 text-xs text-text-muted">
-              No LLM provider configured.
-            </div>
-          ) : (
-            providers.map((p) => (
-              <div key={p.id} className="surface-card p-2 mb-1">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-mono text-text-primary">{p.id}</span>
-                  <Badge variant={p.frozen ? "error" : "success"}>{p.frozen ? "frozen" : "ready"}</Badge>
-                </div>
-                <div className="flex justify-between text-xs text-text-muted">
-                  <span>in-flight: {p.active_requests}</span>
-                  <span>reqs: {p.total_requests}</span>
-                  <span style={{ color: p.total_errors > 0 ? "var(--error)" : "var(--text-muted)" }}>
-                    errs: {p.total_errors}
-                  </span>
-                </div>
-                {p.frozen && p.freeze_reason && (
-                  <div className="text-xs mt-1" style={{ color: "var(--error)" }}>{p.freeze_reason}</div>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Active Fuzz Runs */}
-        <div>
-          <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            <Cpu size={11} /> Active Runs
+      <div className="obs-content">
+        {!snap ? (
+          <div className="obs-empty">
+            <Server size={24} className="obs-empty-icon" />
+            <p className="obs-empty-text">Loading system state...</p>
           </div>
-          {hasRun ? (
-            <div className="surface-card p-2 mb-1">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-mono text-text-primary">{lastTarget || "—"}</span>
-                <Badge variant={running ? "success" : "default"}>{lastEngine || "fuzzer"}</Badge>
-              </div>
-              <div className="flex items-center gap-1 mb-1">
-                <Container size={9} className="text-text-muted" />
-                <div className="flex-1 rounded-sm overflow-hidden" style={{ height: "4px", background: "var(--surface-active)" }}>
-                  <div style={{ width: "100%", height: "100%", background: running ? "var(--success)" : "var(--text-muted)" }} />
+        ) : (
+          <>
+            <Section title="Provider Pool" count={providerCount} open={providersOpen} onToggle={() => setProvidersOpen(!providersOpen)}>
+              {snap.providers.length === 0 ? (
+                <div className="obs-no-items">No LLM provider configured</div>
+              ) : (
+                snap.providers.map((p) => <ProviderCard key={p.id} p={p} />)
+              )}
+            </Section>
+
+            <Section title="Agent Pool" count={snap.agents.total_instances} open={agentsOpen} onToggle={() => setAgentsOpen(!agentsOpen)}>
+              {snap.agents.instances.length === 0 ? (
+                <div className="obs-no-items">
+                  No active agent instances ({slots} available)
                 </div>
-                <span className="text-xs text-text-muted">{running ? "running" : "done"}</span>
+              ) : (
+                snap.agents.instances.map((a) => (
+                  <div key={a.instance_id} className="obs-agent-card">
+                    <div className="obs-agent-header">
+                      <div className="obs-agent-icon">
+                        <Bot size={12} />
+                      </div>
+                      <span className="obs-agent-name">{a.agent_name}</span>
+                      <span className="obs-agent-state">{a.state}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </Section>
+
+            <Section title="Memory" open={memoryOpen} onToggle={() => setMemoryOpen(!memoryOpen)}>
+              <div className="obs-provider-card">
+                <div className="obs-metrics">
+                  <Metric label="Pending Runs" value={n(snap.memory.pending_runs)} />
+                  <Metric label="Interrupted Runs" value={n(snap.memory.interrupted_runs)} />
+                  <Metric label="LLM Calls" value={n(snap.memory.llm_calls)} />
+                  <Metric label="Targets" value={n(snap.memory.targets)} />
+                  <Metric label="Crashes" value={n(snap.memory.crashes)} />
+                </div>
               </div>
-              <div className="flex justify-between text-xs text-text-muted">
-                <span>execs/s: {liveStats.execs}</span>
-                <span>edges: {liveStats.edges}</span>
-                <span style={{ color: liveStats.crashes > 0 ? "var(--error)" : "var(--text-muted)" }}>crashes: {liveStats.crashes}</span>
-              </div>
-            </div>
-          ) : (
-            <div className="surface-card p-2 text-xs text-text-muted">
-              No active runs. Start a campaign in the Run view.
-            </div>
-          )}
-        </div>
+            </Section>
+          </>
+        )}
       </div>
     </div>
   );

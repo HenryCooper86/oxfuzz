@@ -566,6 +566,20 @@ pub async fn provider_statuses(
         .collect())
 }
 
+/// Live system snapshot for the Observability panel: providers, agent pool, and
+/// memory. Fills the agent pool's available slots from the agent registry (the
+/// service layer does not load it).
+#[tauri::command]
+pub async fn system_snapshot(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<hf_service::SystemSnapshot, String> {
+    let mut snapshot = state.container.system_snapshot().await;
+    let agent_count = hf_agent::AgentRegistry::with_user_dir(agents_dir()).list().len();
+    snapshot.agents.available_slots = agent_count;
+    snapshot.agents.total_instances = snapshot.agents.instances.len();
+    Ok(snapshot)
+}
+
 /// Cheap on-disk artifact snapshot (harness built?, corpus size, crash inputs)
 /// for the Info panel.
 #[tauri::command]
