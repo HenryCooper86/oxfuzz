@@ -31,7 +31,21 @@ function loadRecents(): string[] {
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [recentProjects, setRecentProjects] = useState<string[]>(loadRecents);
-  const [activeProject, setActiveProjectState] = useState<string>(() => localStorage.getItem(ACTIVE_KEY) ?? "");
+  // Self-heal a dangling active project: if the saved active folder is no longer
+  // in recents (e.g. removed by an older build that did not clear focus), drop
+  // it so stale per-project progress/run state does not surface.
+  const [activeProject, setActiveProjectState] = useState<string>(() => {
+    const saved = localStorage.getItem(ACTIVE_KEY) ?? "";
+    if (saved && !loadRecents().includes(saved)) {
+      try {
+        localStorage.removeItem(ACTIVE_KEY);
+      } catch {
+        /* ignore */
+      }
+      return "";
+    }
+    return saved;
+  });
 
   const persistRecents = useCallback((next: string[]) => {
     setRecentProjects(next);
