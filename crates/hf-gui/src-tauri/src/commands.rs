@@ -377,25 +377,17 @@ pub fn host_arch() -> String {
 // Chat (LLM-backed)
 // ---------------------------------------------------------------------------
 
-/// Clone the service container, always preferring the current provider config
-/// from disk. This makes Settings -> Providers edits (key, base URL, model)
-/// take effect on the next chat without restarting the app, even if the startup
-/// bootstrap had cached a different (or broken) provider.
-fn container_with_provider(state: &crate::state::AppState) -> hf_service::ServiceContainer {
-    let container = state.container.clone();
-    if let Some(pool) = hf_service::provider_pool_from_config() {
-        return container.with_provider_pool(pool);
-    }
-    container
-}
-
 /// Send a single-turn chat message to the LLM provider pool (no tools).
+///
+/// Uses the shared container's live provider pool, which `set_providers` swaps
+/// in whenever Settings are saved -- so provider edits apply without a restart.
 #[tauri::command]
 pub async fn chat_send(
     state: tauri::State<'_, crate::state::AppState>,
     message: String,
 ) -> Result<String, String> {
-    container_with_provider(&state)
+    state
+        .container
         .chat_send(&message)
         .await
         .map_err(|e| e.to_string())
@@ -1015,7 +1007,7 @@ pub async fn chat_agent(
     });
     let guardrails =
         hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
-    let container = container_with_provider(&state).with_guardrails(guardrails);
+    let container = state.container.clone().with_guardrails(guardrails);
 
     // Drive the chat with the chosen agent (default: orchestrator). Its
     // definition sets the system prompt, the callable tools, model routing, and
@@ -1545,11 +1537,18 @@ pub fn get_providers() -> Vec<ProviderConfig> {
     hf_service::config::get_providers()
 }
 
-/// Persist the provider pool from the settings form back to `providers.toml`.
+/// Persist the provider pool from the settings form back to `providers.toml`,
+/// then reload it into the live container so the change applies immediately --
+/// no app restart needed.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn set_providers(providers: Vec<ProviderConfig>) -> Result<(), String> {
-    hf_service::config::set_providers(&providers)
+pub fn set_providers(
+    state: tauri::State<'_, crate::state::AppState>,
+    providers: Vec<ProviderConfig>,
+) -> Result<(), String> {
+    hf_service::config::set_providers(&providers)?;
+    state.container.reload_providers();
+    Ok(())
 }
 
 /// Test a provider configuration with a live probe request.

@@ -396,7 +396,11 @@ pub fn repo_root() -> Option<PathBuf> {
 #[derive(Clone)]
 pub struct ServiceContainer {
     runtime: Arc<dyn RuntimeAdapter>,
-    provider_pool: Option<Arc<dyn ProviderPool>>,
+    /// The LLM provider pool, held in a shared swappable cell so it can be
+    /// reloaded from config at runtime ([`Self::reload_providers`]) and the new
+    /// pool is seen by every clone of this container (and thus every consumer)
+    /// without a restart.
+    provider_pool: Arc<std::sync::RwLock<Option<Arc<dyn ProviderPool>>>>,
     store: Option<Arc<Store>>,
     session_manager: Option<Arc<hf_session::SessionManager>>,
     checkpoint_manager: Option<Arc<hf_session::ChatCheckpointManager>>,
@@ -470,7 +474,7 @@ impl ServiceContainer {
     ) -> Self {
         Self {
             runtime,
-            provider_pool,
+            provider_pool: Arc::new(std::sync::RwLock::new(provider_pool)),
             store: None,
             session_manager: None,
             checkpoint_manager: None,
@@ -701,9 +705,24 @@ impl ServiceContainer {
     /// container. Lets a command pick up a freshly-configured provider without
     /// an app restart.
     #[must_use]
-    pub fn with_provider_pool(mut self, pool: Arc<dyn ProviderPool>) -> Self {
-        self.provider_pool = Some(pool);
+    pub fn with_provider_pool(self, pool: Arc<dyn ProviderPool>) -> Self {
+        if let Ok(mut guard) = self.provider_pool.write() {
+            *guard = Some(pool);
+        }
         self
+    }
+
+    /// Reload the provider pool from the current on-disk config, swapping it in
+    /// for every consumer of this container (and its clones) so Settings edits
+    /// apply live without a restart. Returns `true` if a pool was loaded (i.e.
+    /// the config has at least one enabled provider).
+    pub fn reload_providers(&self) -> bool {
+        let pool = provider_pool_from_config();
+        let loaded = pool.is_some();
+        if let Ok(mut guard) = self.provider_pool.write() {
+            *guard = pool;
+        }
+        loaded
     }
 
     /// The active guardrail engine.
@@ -761,7 +780,7 @@ impl ServiceContainer {
         });
         Self {
             runtime,
-            provider_pool,
+            provider_pool: Arc::new(std::sync::RwLock::new(provider_pool)),
             store,
             session_manager,
             guardrails: Guardrails::from_env(),
@@ -772,10 +791,12 @@ impl ServiceContainer {
         }
     }
 
-    /// The provider pool (if an LLM is configured).
+    /// The current provider pool (if an LLM is configured). Returns an owned
+    /// handle snapshotted from the swappable cell, so a concurrent
+    /// [`Self::reload_providers`] never invalidates it mid-use.
     #[must_use]
-    pub fn provider_pool(&self) -> Option<&dyn ProviderPool> {
-        self.provider_pool.as_deref()
+    pub fn provider_pool(&self) -> Option<Arc<dyn ProviderPool>> {
+        self.provider_pool.read().ok().and_then(|g| g.clone())
     }
 
     /// The persistence store (if a database is configured).
@@ -829,10 +850,10 @@ impl ServiceContainer {
         &self,
         inventory: TargetInventory,
     ) -> Result<TargetInventory, ClassifiedError> {
-        let pool = self.provider_pool.as_ref().ok_or_else(|| {
+        let pool = self.provider_pool().ok_or_else(|| {
             ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
         })?;
-        let bridge = LlmProviderBridge::new(Arc::clone(pool))
+        let bridge = LlmProviderBridge::new(pool)
             .with_diagnostics(Arc::clone(&self.diagnostics), "rank");
         let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
         if let Some(store) = &self.store {
@@ -868,8 +889,8 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
-        if let Some(pool) = &self.provider_pool {
-            let provider = LlmProviderBridge::new(Arc::clone(pool))
+        if let Some(pool) = self.provider_pool() {
+            let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
             match hf_harness::draft(&candidate, engine, Box::new(provider)).await {
                 Ok(draft) => Ok(draft),
@@ -1271,10 +1292,10 @@ impl ServiceContainer {
 
         // Draft an LLM bug report for each unique crash when a provider is
         // configured, using the captured sanitizer trace (capped, see above).
-        if let Some(pool) = &self.provider_pool {
+        if let Some(pool) = self.provider_pool() {
             let unique = deduped.len();
             for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
-                let bridge = LlmProviderBridge::new(Arc::clone(pool))
+                let bridge = LlmProviderBridge::new(Arc::clone(&pool))
                     .with_diagnostics(Arc::clone(&self.diagnostics), "triage_report");
                 let log = logs
                     .get(&crash.input_path)
@@ -1485,8 +1506,8 @@ impl ServiceContainer {
         // When a provider is configured, have the LLM compose a professional
         // narrative grounded in those facts. On any failure, fall back to the
         // deterministic fact-sheet so a report is always produced.
-        if let Some(pool) = &self.provider_pool {
-            match self.compose_ai_report(pool, &facts, &data).await {
+        if let Some(pool) = self.provider_pool() {
+            match self.compose_ai_report(&pool, &facts, &data).await {
                 Ok(report) => return Ok(report),
                 Err(e) => tracing::warn!("AI report composition failed, using fact-sheet: {e}"),
             }
@@ -1985,8 +2006,7 @@ impl ServiceContainer {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
         let pool = self
-            .provider_pool
-            .as_deref()
+            .provider_pool()
             .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
         let messages = vec![
             Message::system(
