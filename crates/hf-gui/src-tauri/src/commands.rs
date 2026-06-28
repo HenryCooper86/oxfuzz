@@ -535,6 +535,51 @@ pub async fn knowledge_summary(
     })
 }
 
+/// Per-provider health for the Observability panel.
+#[derive(Debug, Serialize)]
+pub struct ProviderStatusDto {
+    id: String,
+    frozen: bool,
+    freeze_reason: Option<String>,
+    active_requests: usize,
+    total_requests: u64,
+    total_errors: u64,
+}
+
+/// Live provider health/usage (freeze state, in-flight + total requests,
+/// errors). Empty when no provider pool is configured.
+#[tauri::command]
+pub async fn provider_statuses(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<Vec<ProviderStatusDto>, String> {
+    let statuses = state.container.provider_statuses().await;
+    Ok(statuses
+        .into_iter()
+        .map(|s| ProviderStatusDto {
+            id: s.id.0,
+            frozen: s.is_frozen,
+            freeze_reason: s.freeze_reason,
+            active_requests: s.active_requests,
+            total_requests: s.total_requests,
+            total_errors: s.total_errors,
+        })
+        .collect())
+}
+
+/// Cheap on-disk artifact snapshot (harness built?, corpus size, crash inputs)
+/// for the Info panel.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn artifact_summary(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+) -> hf_service::ArtifactSummary {
+    state
+        .container
+        .artifact_summary(std::path::Path::new(&project), &target)
+}
+
 /// Clear learned knowledge (discovered targets, runs, crashes). Corpus inputs
 /// and configuration are untouched.
 #[tauri::command]
