@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "./ProjectContext";
+import { pruneToKeys } from "../lib/projectState";
 
 // Owns the output of a fuzz run -- the live log, rolling stats, final summary --
 // and the `run:progress` listener. Persistent output is kept per fuzzing target
@@ -88,7 +89,7 @@ function loadSummaries(): Record<string, RunData> {
 }
 
 export function RunOutputProvider({ children }: { children: React.ReactNode }) {
-  const { activeProject } = useProject();
+  const { activeProject, recentProjects } = useProject();
   const key = activeProject || "__none__";
   // The always-mounted progress listener writes to whichever target is active.
   const keyRef = useRef(key);
@@ -101,12 +102,13 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   const [cancelling, setCancelling] = useState(false);
   const cur = byProject[key] ?? EMPTY;
 
-  // Persist the summary/stats subset (never the log) when it changes.
+  // Persist the summary/stats subset (never the log), pruned to projects still
+  // in the recents list so a removed project's run output does not linger.
   const lastWriteRef = useRef("");
   useEffect(() => {
     try {
       const persisted: Record<string, PersistedRun> = {};
-      for (const [k, d] of Object.entries(byProject)) {
+      for (const [k, d] of Object.entries(pruneToKeys(byProject, recentProjects))) {
         persisted[k] = {
           stats: d.stats,
           summary: d.summary,
@@ -122,7 +124,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // Best-effort: localStorage may be unavailable or full.
     }
-  }, [byProject]);
+  }, [byProject, recentProjects]);
 
   const patch = useCallback((k: string, fn: (d: RunData) => RunData) => {
     setByProject((prev) => ({ ...prev, [k]: fn(prev[k] ?? EMPTY) }));

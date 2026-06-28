@@ -76,8 +76,18 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const removeRecent = useCallback(
     (path: string) => {
       persistRecents(recentProjects.filter((x) => x !== path));
+      // Removing the active project drops focus, so per-project views (pipeline
+      // progress, run output) stop showing the gone project's state.
+      if (path === activeProject) {
+        setActiveProjectState("");
+        try {
+          localStorage.removeItem(ACTIVE_KEY);
+        } catch {
+          /* ignore */
+        }
+      }
     },
-    [persistRecents, recentProjects],
+    [persistRecents, recentProjects, activeProject],
   );
 
   const value = useMemo(
