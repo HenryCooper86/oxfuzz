@@ -40,7 +40,7 @@ export function createHttpTransport(): Transport {
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "ensure_docker", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report", "provider_statuses", "artifact_summary"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "ensure_docker", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report", "provider_statuses", "artifact_summary", "knowledge_ingest"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {

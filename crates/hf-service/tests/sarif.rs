@@ -30,15 +30,33 @@ fn crash(kind: CrashKind, severity: CrashSeverity, short: &str, crashline: &str)
 #[test]
 fn cwe_mapping_is_specific() {
     assert_eq!(
-        cwe_for(&crash(CrashKind::Asan, CrashSeverity::Exploitable, "heap-buffer-overflow(write)", "")).id,
+        cwe_for(&crash(
+            CrashKind::Asan,
+            CrashSeverity::Exploitable,
+            "heap-buffer-overflow(write)",
+            ""
+        ))
+        .id,
         "CWE-787"
     );
     assert_eq!(
-        cwe_for(&crash(CrashKind::Asan, CrashSeverity::Undefined, "heap-buffer-overflow(read)", "")).id,
+        cwe_for(&crash(
+            CrashKind::Asan,
+            CrashSeverity::Undefined,
+            "heap-buffer-overflow(read)",
+            ""
+        ))
+        .id,
         "CWE-125"
     );
     assert_eq!(
-        cwe_for(&crash(CrashKind::Asan, CrashSeverity::Exploitable, "heap-use-after-free", "")).id,
+        cwe_for(&crash(
+            CrashKind::Asan,
+            CrashSeverity::Exploitable,
+            "heap-use-after-free",
+            ""
+        ))
+        .id,
         "CWE-416"
     );
     assert_eq!(
@@ -58,7 +76,12 @@ fn severity_tracks_exploitability() {
 #[test]
 fn sarif_document_is_well_formed() {
     let crashes = vec![
-        crash(CrashKind::Asan, CrashSeverity::Exploitable, "heap-buffer-overflow(write)", "src/parse.c:42:5"),
+        crash(
+            CrashKind::Asan,
+            CrashSeverity::Exploitable,
+            "heap-buffer-overflow(write)",
+            "src/parse.c:42:5",
+        ),
         crash(CrashKind::Segv, CrashSeverity::Undefined, "SEGV", ""),
     ];
     let doc = crashes_to_sarif(&crashes, "9.9.9");
@@ -73,12 +96,21 @@ fn sarif_document_is_well_formed() {
         results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
         "src/parse.c"
     );
-    assert_eq!(results[0]["locations"][0]["physicalLocation"]["region"]["startLine"], 42);
+    assert_eq!(
+        results[0]["locations"][0]["physicalLocation"]["region"]["startLine"],
+        42
+    );
     assert_eq!(results[0]["ruleId"], "CWE-787");
     assert_eq!(results[0]["level"], "error");
     assert_eq!(results[0]["properties"]["security-severity"], "9.0");
     // Rules are deduped per CWE (787 + 476 = 2 rules).
-    assert_eq!(doc["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        doc["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]

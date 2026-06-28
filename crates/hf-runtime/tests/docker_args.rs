@@ -132,9 +132,15 @@ fn build_exec_args_applies_hardening_baseline() {
     let args =
         hf_runtime::docker::build_exec_args(&cfg, &["x".to_owned()], Duration::from_secs(5), false);
     let joined = args.join(" ");
-    assert!(joined.contains("--network=none"), "missing network isolation");
+    assert!(
+        joined.contains("--network=none"),
+        "missing network isolation"
+    );
     assert!(joined.contains("--cap-drop=ALL"), "missing cap-drop");
-    assert!(joined.contains("no-new-privileges"), "missing no-new-privileges");
+    assert!(
+        joined.contains("no-new-privileges"),
+        "missing no-new-privileges"
+    );
     assert!(joined.contains("--pids-limit=512"), "missing pids-limit");
     // Baseline (non-triage) must NOT weaken seccomp.
     assert!(
