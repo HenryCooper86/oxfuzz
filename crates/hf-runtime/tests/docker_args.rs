@@ -21,6 +21,7 @@ fn build_exec_args_includes_image_and_command() {
             env: HashMap::new(),
             ptrace: false,
         },
+        max_pids: 512,
     };
     let args = hf_runtime::docker::build_exec_args(
         &cfg,
@@ -48,6 +49,7 @@ fn build_exec_args_applies_memory_and_cpu_limits() {
             env: HashMap::new(),
             ptrace: false,
         },
+        max_pids: 512,
     };
     let args = hf_runtime::docker::build_exec_args(
         &cfg,
@@ -76,6 +78,7 @@ fn build_exec_args_mounts_workspace() {
             env: HashMap::new(),
             ptrace: false,
         },
+        max_pids: 512,
     };
     let args = hf_runtime::docker::build_exec_args(
         &cfg,
@@ -101,6 +104,7 @@ fn build_exec_args_adds_ptrace_caps_when_requested() {
             env: HashMap::new(),
             ptrace: false,
         },
+        max_pids: 512,
     };
     let with =
         hf_runtime::docker::build_exec_args(&cfg, &["x".to_owned()], Duration::from_secs(5), true);
@@ -119,5 +123,22 @@ fn build_exec_args_adds_ptrace_caps_when_requested() {
     assert!(
         !without.join(" ").contains("SYS_PTRACE"),
         "ptrace caps leaked when not requested"
+    );
+}
+
+#[test]
+fn build_exec_args_applies_hardening_baseline() {
+    let cfg = RuntimeConfig::default();
+    let args =
+        hf_runtime::docker::build_exec_args(&cfg, &["x".to_owned()], Duration::from_secs(5), false);
+    let joined = args.join(" ");
+    assert!(joined.contains("--network=none"), "missing network isolation");
+    assert!(joined.contains("--cap-drop=ALL"), "missing cap-drop");
+    assert!(joined.contains("no-new-privileges"), "missing no-new-privileges");
+    assert!(joined.contains("--pids-limit=512"), "missing pids-limit");
+    // Baseline (non-triage) must NOT weaken seccomp.
+    assert!(
+        !joined.contains("seccomp=unconfined"),
+        "seccomp weakened on a normal run"
     );
 }
