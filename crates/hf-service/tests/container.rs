@@ -258,6 +258,38 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
 }
 
 #[tokio::test]
+async fn verify_regressions_replays_stored_crash_inputs() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("regress_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "demo";
+
+    // A workspace with a harness binary and a staged crash input.
+    let ws = hf_service::workspace_dir(&project, target);
+    let out = ws.join("out");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(ws.join(format!("fuzz_{target}")), b"bin").unwrap();
+    fs::write(out.join("crash-1"), b"boom").unwrap();
+
+    // Stub runtime can't actually reproduce, so replay yields no crash -> the
+    // crash is reported as fixed. (The real value is the replay plumbing.)
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let results = container.verify_regressions(&project, target).await.unwrap();
+    assert_eq!(results.len(), 1, "the staged crash input is replayed");
+    assert!(!results[0].still_crashes);
+    assert!(results[0].input.ends_with("crash-1"));
+
+    // Without a compiled harness it errors clearly.
+    let bare = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let err = bare.verify_regressions(&project, "missing").await;
+    assert!(err.is_err());
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
 async fn artifact_summary_reports_on_disk_state() {
     use std::fs;
 
