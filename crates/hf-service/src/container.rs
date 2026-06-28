@@ -784,6 +784,22 @@ impl ServiceContainer {
         self.store.as_ref()
     }
 
+    /// Clear learned knowledge: all discovered targets, runs, and crashes.
+    /// Corpus inputs on disk and configuration are left untouched. A no-op when
+    /// no store is configured.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the delete fails.
+    pub async fn clear_knowledge(&self) -> Result<(), ClassifiedError> {
+        if let Some(store) = &self.store {
+            store
+                .clear_knowledge()
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("clear knowledge: {e}")))?;
+        }
+        Ok(())
+    }
+
     // -- Discovery --------------------------------------------------------
 
     /// Discover fuzzing targets in a project.

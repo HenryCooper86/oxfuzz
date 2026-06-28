@@ -543,6 +543,19 @@ pub async fn knowledge_summary(
     })
 }
 
+/// Clear learned knowledge (discovered targets, runs, crashes). Corpus inputs
+/// and configuration are untouched.
+#[tauri::command]
+pub async fn clear_knowledge(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    state
+        .container
+        .clear_knowledge()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Aggregated LLM cost/usage recorded this session (diagnostics).
 #[tauri::command]
 pub async fn diagnostics_cost_summary(
