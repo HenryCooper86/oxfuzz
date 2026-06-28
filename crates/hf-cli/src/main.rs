@@ -99,7 +99,28 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
-    /// Export the latest run's crashes as SARIF (GitHub code scanning).
+    /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
+    /// if any crash is found. Intended for PR pipelines.
+    Ci {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Fuzzing engine. Defaults to libfuzzer.
+        #[arg(long, default_value = "libfuzzer")]
+        engine: String,
+        /// Target language (c, cpp). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
+        /// Fuzz duration (e.g. 120s, 5m). Defaults to 120s.
+        #[arg(long, default_value = "120s")]
+        duration: String,
+        /// SARIF output path. Defaults to `hobot_fuzz.sarif`.
+        #[arg(long, default_value = "hobot_fuzz.sarif")]
+        sarif: PathBuf,
+    },
+    /// Export the latest run's crashes as SARIF (`GitHub` code scanning).
     Sarif {
         /// Project root path.
         project: PathBuf,
@@ -377,6 +398,69 @@ async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_ci(
+    project: PathBuf,
+    target: &str,
+    engine: &str,
+    lang: &str,
+    duration: &str,
+    sarif: &std::path::Path,
+) -> anyhow::Result<()> {
+    let engine_kind = parse_engine(engine)?;
+    let lang = parse_lang(lang)?;
+    let duration_secs = parse_duration(duration)?;
+    // CI is a non-interactive, deliberately-automated run. Set permissive
+    // guardrails for this process so the high-risk run/triage steps proceed
+    // without an interactive approval (safe-by-default still applies elsewhere).
+    if std::env::var_os("HF_GUARDRAILS").is_none() {
+        std::env::set_var("HF_GUARDRAILS", "permissive");
+    }
+    let container = ServiceContainer::bootstrap().await;
+
+    println!("[ci] drafting + compiling harness for {target}...");
+    let draft = container
+        .harness_draft(&project, target, engine_kind, lang)
+        .await?;
+    let outcome = container
+        .harness_compile(draft.source, &project, engine_kind, target, lang)
+        .await?;
+    println!("[ci] compile: {:?}", outcome.status);
+    if let Err(e) = container.generate_seeds(&project, target) {
+        eprintln!("[ci] warning: seed generation failed: {e}");
+    }
+
+    println!("[ci] fuzzing {target} for {duration_secs}s...");
+    let on_progress = |p: hf_core::engine::FuzzProgress| {
+        if let hf_core::engine::FuzzProgress::CrashesFound(_) = p {
+            println!("[ci] >> crash found");
+        }
+    };
+    container
+        .run_fuzzer(&project, target, engine_kind, duration_secs, &on_progress)
+        .await?;
+
+    println!("[ci] triaging...");
+    let crashes = container.triage(&project, target).await?;
+
+    // Always emit SARIF (even with zero results) so code scanning can clear
+    // stale alerts when a bug is fixed.
+    let doc = container.export_sarif(&project, target).await?;
+    std::fs::write(sarif, &doc)?;
+    println!("[ci] SARIF written to {}", sarif.display());
+
+    if crashes.is_empty() {
+        println!("[ci] PASS: no crashes found.");
+        Ok(())
+    } else {
+        eprintln!("[ci] FAIL: {} crash(es) found.", crashes.len());
+        for c in &crashes {
+            eprintln!("[ci]   {:?}: {}", c.kind, c.summary);
+        }
+        // Non-zero exit gates the PR; SARIF was already written + can be uploaded.
+        std::process::exit(1);
+    }
+}
+
 async fn cmd_sarif(project: PathBuf, target: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     let sarif = container.export_sarif(&project, target).await?;
@@ -478,6 +562,14 @@ async fn main() -> anyhow::Result<()> {
             op,
         } => cmd_corpus(project, &target, &op).await?,
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
+        Commands::Ci {
+            project,
+            target,
+            engine,
+            lang,
+            duration,
+            sarif,
+        } => cmd_ci(project, &target, &engine, &lang, &duration, &sarif).await?,
         Commands::Regress { project, target } => cmd_regress(project, &target).await?,
         Commands::Sarif {
             project,
