@@ -1635,6 +1635,40 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError` only on an unexpected internal failure; missing
     /// data is rendered as empty sections rather than an error.
+    /// The persisted crashes for a project's most recent run (empty without a
+    /// store or runs).
+    async fn crashes_for_latest_run(&self, project: &Path) -> Vec<hf_core::crash::Crash> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        let run = store
+            .list_runs(Some(&project.to_string_lossy()))
+            .await
+            .ok()
+            .and_then(|runs| runs.into_iter().next());
+        match run {
+            Some(r) => store.list_crashes_by_run(r.id).await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Export the latest run's crashes as a SARIF 2.1.0 document (string),
+    /// for `GitHub` code scanning / security dashboards. Empty `results` when
+    /// there are no crashes.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` only on an unexpected serialization failure.
+    pub async fn export_sarif(
+        &self,
+        project: &Path,
+        _target: &str,
+    ) -> Result<String, ClassifiedError> {
+        let crashes = self.crashes_for_latest_run(project).await;
+        let sarif = crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"));
+        serde_json::to_string_pretty(&sarif)
+            .map_err(|e| ClassifiedError::Internal(format!("serialize sarif: {e}")))
+    }
+
     pub async fn generate_report(
         &self,
         project: &Path,

@@ -122,6 +122,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
         .route("/report", post(report))
+        .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/providers/status", get(provider_statuses))
         .route("/system/snapshot", get(system_snapshot))
@@ -351,6 +352,18 @@ async fn clear_knowledge(State(state): State<AppState>) -> ApiResult<serde_json:
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({ "cleared": true })))
+}
+
+async fn sarif(
+    State(state): State<AppState>,
+    Json(req): Json<TriageRequest>,
+) -> ApiResult<String> {
+    let doc = state
+        .container
+        .export_sarif(std::path::Path::new(&req.project), &req.target)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(doc))
 }
 
 async fn report(
