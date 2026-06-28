@@ -22,6 +22,6 @@ pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, provider_pool_from_config,
     provider_pool_from_env, repo_root, runtime_from_env, workspace_dir, AgentInstanceSnapshot,
     AgentPoolSnapshot, ArtifactSummary, CompileOutcome, MemorySnapshot, MinimizeOutcome,
-    ProviderSnapshot, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot,
+    ProviderSnapshot, RegressionResult, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot,
 };
 pub use init::{init_at, init_workspace, InitReport};

@@ -99,6 +99,14 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    /// Replay stored crashes against the current harness (regression check).
+    Regress {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+    },
     /// Compose a detailed Markdown campaign report for a target.
     Report {
         /// Project root path.
@@ -358,6 +366,31 @@ async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let results = container.verify_regressions(&project, target).await?;
+    if results.is_empty() {
+        println!("No stored crashes to replay.");
+        return Ok(());
+    }
+    let still = results.iter().filter(|r| r.still_crashes).count();
+    println!(
+        "Replayed {} crash(es): {still} still crashing, {} fixed.",
+        results.len(),
+        results.len() - still
+    );
+    for r in &results {
+        let tag = if r.still_crashes { "STILL CRASHES" } else { "fixed" };
+        let id = if r.crash_id.is_empty() {
+            ""
+        } else {
+            &r.crash_id[..r.crash_id.len().min(8)]
+        };
+        println!("  [{tag}] {id} {} -- {}", r.input, r.summary);
+    }
+    Ok(())
+}
+
 async fn cmd_report(
     project: PathBuf,
     target: &str,
@@ -421,6 +454,7 @@ async fn main() -> anyhow::Result<()> {
             op,
         } => cmd_corpus(project, &target, &op).await?,
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
+        Commands::Regress { project, target } => cmd_regress(project, &target).await?,
         Commands::Report {
             project,
             target,
