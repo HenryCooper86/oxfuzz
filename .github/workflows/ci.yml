@@ -26,3 +26,12 @@ jobs:
         run: cargo check --workspace
       - name: cargo test
         run: cargo test --workspace
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Dependency vulnerability, license, and ban gate (uses deny.toml).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
