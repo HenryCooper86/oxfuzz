@@ -123,6 +123,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/triage", post(triage))
         .route("/report", post(report))
         .route("/knowledge/clear", post(clear_knowledge))
+        .route("/providers/status", get(provider_statuses))
         .route("/chat/send", post(chat_send))
         .route("/config/models", get(list_models))
         .route("/config/sections", get(list_configs))
@@ -317,6 +318,24 @@ async fn triage(
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::to_value(&deduped).unwrap_or_default()))
+}
+
+async fn provider_statuses(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    let statuses = state.container.provider_statuses().await;
+    let arr: Vec<serde_json::Value> = statuses
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id.0,
+                "frozen": s.is_frozen,
+                "freeze_reason": s.freeze_reason,
+                "active_requests": s.active_requests,
+                "total_requests": s.total_requests,
+                "total_errors": s.total_errors,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::Value::Array(arr)))
 }
 
 async fn clear_knowledge(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
