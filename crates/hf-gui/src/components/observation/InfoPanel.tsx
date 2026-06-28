@@ -1,20 +1,30 @@
-// Info panel -- shows the campaign plan and iteration loop.
+// Info panel -- shows campaign artifacts, the plan, and the iteration loop.
 //
-// The plan and loop status are driven from real in-app state: the shared
-// pipeline progress (which stages are done/skipped), the selected target/
-// engine, and the live RunOutput context. Generated-artifact tracking has no
-// backend feed yet, so that section shows an honest empty state instead of a
-// fabricated file list.
+// Everything here is driven from real in-app state: artifact counts (compiled
+// harness, corpus, crash inputs) come from the `artifact_summary` command for
+// the active project/target; the plan and loop status from the shared pipeline
+// progress, the selected target/engine, and the live RunOutput context.
 
+import { useEffect, useState } from "react";
 import { FileCode, ListChecks, Repeat, Target as TargetIcon } from "lucide-react";
+import { getTransport } from "../../lib";
 import { PIPELINE_STAGES, usePipeline } from "../../providers/PipelineContext";
+import { useProject } from "../../providers/ProjectContext";
 import { useTarget } from "../../providers/TargetContext";
 import { useRunOutput } from "../../providers/RunOutputContext";
 
+interface ArtifactSummary {
+  harness_built: boolean;
+  corpus_count: number;
+  crash_count: number;
+}
+
 export function InfoPanel() {
   const { isDone, isSkipped, currentStage } = usePipeline();
+  const { activeProject } = useProject();
   const { target, engine } = useTarget();
   const { running, lastTarget, lastEngine } = useRunOutput();
+  const [artifacts, setArtifacts] = useState<ArtifactSummary | null>(null);
 
   const planSteps = PIPELINE_STAGES.map((s) => ({
     label: s.label,
@@ -28,6 +38,28 @@ export function InfoPanel() {
   const activeTarget = lastTarget || target;
   const activeEngine = lastEngine || engine;
 
+  // Artifact counts for the active project/target; refresh while a run streams
+  // (corpus/crashes grow) and when the target changes.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      if (!activeProject || !activeTarget) {
+        if (!cancelled) setArtifacts(null);
+        return;
+      }
+      getTransport()
+        .invoke<ArtifactSummary>("artifact_summary", { project: activeProject, target: activeTarget })
+        .then((d) => !cancelled && setArtifacts(d))
+        .catch(() => !cancelled && setArtifacts(null));
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [activeProject, activeTarget, running]);
+
   return (
     <div className="flex flex-col h-full" style={{ background: "var(--surface-secondary)" }}>
       <div className="flex items-center gap-2 p-2 border-b border-border">
@@ -36,12 +68,35 @@ export function InfoPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
-        {/* Generated Artifacts -- no backend feed yet */}
+        {/* Generated Artifacts -- live counts for the active target */}
         <div>
           <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
             <FileCode size={11} /> Artifacts
           </div>
-          <div className="text-xs text-text-muted py-1">Artifact tracking is not instrumented yet.</div>
+          {artifacts ? (
+            <div className="surface-card p-2 flex flex-col gap-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-text-muted">Harness</span>
+                <span style={{ color: artifacts.harness_built ? "var(--success)" : "var(--text-muted)" }}>
+                  {artifacts.harness_built ? "compiled" : "not built"}
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-text-muted">Corpus inputs</span>
+                <span className="text-text-primary">{artifacts.corpus_count}</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-text-muted">Crash inputs</span>
+                <span style={{ color: artifacts.crash_count > 0 ? "var(--error)" : "var(--text-primary)" }}>
+                  {artifacts.crash_count}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-text-muted py-1">
+              Pick a project and target to see artifacts.
+            </div>
+          )}
         </div>
 
         {/* Campaign Plan */}
