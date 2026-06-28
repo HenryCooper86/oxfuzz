@@ -142,7 +142,7 @@ pub fn run() {
 /// the `HF_DB_PATH` persistence store -- the same construction the CLI and web
 /// API use.
 fn build_app_state() -> AppState {
-    ensure_writable_data_paths();
+    pin_user_data_dirs();
     tauri::async_runtime::block_on(async {
         let container = hf_service::ServiceContainer::bootstrap().await;
         // The scheduler runs campaigns headlessly; persist schedules under the
@@ -155,16 +155,42 @@ fn build_app_state() -> AppState {
     })
 }
 
-/// When the app runs as an installed bundle (no source checkout), a
-/// Finder-launched process has cwd `/`, so the relative `data/hobot_fuzz.db`
-/// default would target the read-only system volume and persistence silently
-/// fails. Point `HF_DB_PATH` at the writable per-user data directory instead.
-/// In a dev checkout (`repo_root()` resolves) the repo-relative paths are kept.
-fn ensure_writable_data_paths() {
-    if hf_service::repo_root().is_some() {
-        return;
+/// Pin the desktop app's config and data to the writable per-user directory so
+/// the Settings panel is the single source of truth.
+///
+/// The desktop app is the user-facing surface: whatever its Settings panel saves
+/// must be exactly what the app loads. Without this, `config_dir()` prefers
+/// `<repo>/config` whenever the binary sits inside a source checkout (e.g. a
+/// bundle built into `target/`), so Settings edits (written under Application
+/// Support) would be silently ignored. Pinning `HF_CONFIG_DIR` + `HF_DB_PATH`
+/// here makes reads and writes align on the per-user directory in every launch
+/// mode. Explicit env overrides are respected. The CLI/web do not run this, so
+/// they keep using `<repo>/config` for development.
+///
+/// On first run the per-user config is seeded from `<repo>/config` when present,
+/// so a developer's existing providers carry over into the GUI.
+fn pin_user_data_dirs() {
+    let base = hf_service::init::user_app_dir();
+
+    let cfg_dir = base.join("config");
+    if std::env::var_os("HF_CONFIG_DIR").is_none() {
+        let _ = std::fs::create_dir_all(&cfg_dir);
+        // Seed from the source checkout's config on first run (only when the
+        // per-user file does not exist yet -- never clobber the user's edits).
+        let user_providers = cfg_dir.join("providers.toml");
+        if !user_providers.exists() {
+            if let Some(repo_providers) =
+                hf_service::repo_root().map(|r| r.join("config").join("providers.toml"))
+            {
+                if repo_providers.exists() {
+                    let _ = std::fs::copy(&repo_providers, &user_providers);
+                }
+            }
+        }
+        std::env::set_var("HF_CONFIG_DIR", &cfg_dir);
     }
-    let data = hf_service::init::user_app_dir().join("data");
+
+    let data = base.join("data");
     let _ = std::fs::create_dir_all(&data);
     if std::env::var_os("HF_DB_PATH").is_none() {
         std::env::set_var("HF_DB_PATH", data.join("hobot_fuzz.db"));
