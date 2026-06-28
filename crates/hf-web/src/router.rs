@@ -393,10 +393,7 @@ async fn clear_knowledge(State(state): State<AppState>) -> ApiResult<serde_json:
     Ok(Json(serde_json::json!({ "cleared": true })))
 }
 
-async fn sarif(
-    State(state): State<AppState>,
-    Json(req): Json<TriageRequest>,
-) -> ApiResult<String> {
+async fn sarif(State(state): State<AppState>, Json(req): Json<TriageRequest>) -> ApiResult<String> {
     let doc = state
         .container
         .export_sarif(std::path::Path::new(&req.project), &req.target)

@@ -574,7 +574,9 @@ pub async fn system_snapshot(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<hf_service::SystemSnapshot, String> {
     let mut snapshot = state.container.system_snapshot().await;
-    let agent_count = hf_agent::AgentRegistry::with_user_dir(agents_dir()).list().len();
+    let agent_count = hf_agent::AgentRegistry::with_user_dir(agents_dir())
+        .list()
+        .len();
     snapshot.agents.available_slots = agent_count;
     snapshot.agents.total_instances = snapshot.agents.instances.len();
     Ok(snapshot)
@@ -703,6 +705,22 @@ pub async fn schedule_set_enabled(
 #[allow(clippy::needless_pass_by_value)]
 pub fn knowledge_index(project: String) -> Result<hf_service::knowledge::KnowledgeStats, String> {
     hf_service::knowledge::index_project(std::path::Path::new(&project)).map_err(|e| e.to_string())
+}
+
+/// Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
+/// sandbox and index it into the project knowledge base.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn knowledge_ingest(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    file: String,
+) -> Result<hf_service::knowledge::KnowledgeStats, String> {
+    state
+        .container
+        .ingest_document(std::path::Path::new(&project), std::path::Path::new(&file))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Search a project's knowledge base (returns empty until indexed).

@@ -28,6 +28,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuzzer-18-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# markitdown: convert documents (PDF/Office/HTML/CSV) to Markdown for the
+# knowledge base. Offline formats only -- runs under --network=none.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip python3-venv \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
+       'markitdown[pdf,docx,pptx,xlsx]' \
+    && rm -rf /var/lib/apt/lists/*
+
 # Build honggfuzz from source (not in Ubuntu repos).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libbfd-dev \

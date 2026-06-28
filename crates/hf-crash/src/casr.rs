@@ -237,10 +237,7 @@ mod tests {
             None
         );
         // A 'class' dir must not be mistaken for a cluster.
-        assert_eq!(
-            cluster_from_path(Path::new("/work/classes/x.casrep")),
-            None
-        );
+        assert_eq!(cluster_from_path(Path::new("/work/classes/x.casrep")), None);
     }
 
     #[test]

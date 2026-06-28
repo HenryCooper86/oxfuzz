@@ -100,7 +100,9 @@ mod tests {
         let trace = "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nSUMMARY: AddressSanitizer: heap-buffer-overflow";
         assert!(looks_like_crash(trace));
         assert!(looks_like_crash("==42==ERROR: libFuzzer: deadly signal"));
-        assert!(looks_like_crash("src/x.c:3:5: runtime error: signed integer overflow"));
+        assert!(looks_like_crash(
+            "src/x.c:3:5: runtime error: signed integer overflow"
+        ));
     }
 
     #[test]
