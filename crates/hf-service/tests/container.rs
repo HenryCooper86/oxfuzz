@@ -146,6 +146,64 @@ async fn store_wiring_is_optional() {
     assert!(with_store.store().is_some());
 }
 
+/// A no-op provider pool, just enough to occupy the container's pool cell.
+struct MockPool;
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for MockPool {
+    async fn chat_completion(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "mock".to_owned(),
+        })
+    }
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "mock".to_owned(),
+        })
+    }
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn provider_pool_swap_is_visible_across_container_clones() {
+    // Live reload swaps the pool in a shared cell, so a change applied to one
+    // handle must be observed by every clone (every consumer) -- the property
+    // that lets a Settings save take effect app-wide without a restart.
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let clone = container.clone();
+    assert!(clone.provider_pool().is_none(), "no provider initially");
+
+    let updated = container.with_provider_pool(Arc::new(MockPool));
+    assert!(updated.provider_pool().is_some());
+    assert!(
+        clone.provider_pool().is_some(),
+        "the earlier clone observes the swapped-in pool"
+    );
+}
+
 #[tokio::test]
 async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
     use std::fs;

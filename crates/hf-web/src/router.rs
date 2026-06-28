@@ -404,10 +404,13 @@ async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {
 }
 
 async fn set_providers(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<Vec<hf_service::config::ProviderConfig>>,
 ) -> ApiResult<()> {
     hf_service::config::set_providers(&req).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    // Apply the new providers to the live pool so the change takes effect without
+    // restarting the server.
+    state.container.reload_providers();
     Ok(Json(()))
 }
 
