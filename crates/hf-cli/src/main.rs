@@ -99,6 +99,17 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    /// Export the latest run's crashes as SARIF (GitHub code scanning).
+    Sarif {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Write SARIF to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Replay stored crashes against the current harness (regression check).
     Regress {
         /// Project root path.
@@ -366,6 +377,19 @@ async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_sarif(project: PathBuf, target: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let sarif = container.export_sarif(&project, target).await?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &sarif)?;
+            println!("SARIF written to {}", path.display());
+        }
+        None => println!("{sarif}"),
+    }
+    Ok(())
+}
+
 async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     let results = container.verify_regressions(&project, target).await?;
@@ -455,6 +479,11 @@ async fn main() -> anyhow::Result<()> {
         } => cmd_corpus(project, &target, &op).await?,
         Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
         Commands::Regress { project, target } => cmd_regress(project, &target).await?,
+        Commands::Sarif {
+            project,
+            target,
+            out,
+        } => cmd_sarif(project, &target, out.as_deref()).await?,
         Commands::Report {
             project,
             target,
