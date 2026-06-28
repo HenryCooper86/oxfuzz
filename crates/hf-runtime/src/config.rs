@@ -25,6 +25,9 @@ pub struct RuntimeConfig {
     pub image: String,
     pub container_workspace: String,
     pub default_limits: ResourceLimits,
+    /// Max process count inside the sandbox (`--pids-limit`), to blunt fork
+    /// bombs. Generous enough for parallel compile + multi-threaded fuzzers.
+    pub max_pids: u32,
 }
 
 impl Default for RuntimeConfig {
@@ -40,6 +43,7 @@ impl Default for RuntimeConfig {
                 env: HashMap::new(),
                 ptrace: false,
             },
+            max_pids: 512,
         }
     }
 }

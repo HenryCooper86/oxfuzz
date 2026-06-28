@@ -54,9 +54,18 @@ pub fn build_exec_args(
     // Network disabled for fuzz runs by default.
     args.push("--network=none".to_owned());
 
+    // Hardening: drop all Linux capabilities by default (re-added per-run only
+    // when needed), forbid privilege escalation, and cap process count to blunt
+    // fork bombs from a malicious harness. The container is also network-
+    // isolated, resource-limited, and ephemeral.
+    args.push("--cap-drop=ALL".to_owned());
+    args.push("--security-opt".to_owned());
+    args.push("no-new-privileges".to_owned());
+    args.push(format!("--pids-limit={}", cfg.max_pids));
+
     // CASR's crash analysis uses ptrace, which needs SYS_PTRACE and an
-    // unconfined seccomp profile. Granted per-call (triage only); the container
-    // is still network-isolated, resource-limited, and ephemeral.
+    // unconfined seccomp profile. Granted per-call (triage only); even then the
+    // baseline cap-drop=ALL means only SYS_PTRACE is added back.
     if ptrace {
         args.push("--cap-add=SYS_PTRACE".to_owned());
         args.push("--security-opt".to_owned());

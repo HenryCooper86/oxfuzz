@@ -113,6 +113,12 @@ pub async fn build_bootstrapped() -> Router {
 
 /// Build the router with a given `AppState` (for testing or custom containers).
 pub fn build_with_state(state: AppState) -> Router {
+    if std::env::var("HF_WEB_TOKEN").map_or(true, |t| t.is_empty()) {
+        tracing::warn!(
+            "hf-web: HF_WEB_TOKEN is not set -- the API is UNAUTHENTICATED. \
+             Set HF_WEB_TOKEN to require an Authorization: Bearer <token> header."
+        );
+    }
     Router::new()
         .route("/health", get(health))
         .route("/discover", post(discover))
@@ -135,7 +141,40 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/system/paths", get(app_paths))
         .route("/system/arch", get(host_arch))
         .route("/events", get(event_stream))
+        // Auth + audit wraps every route above (layers apply to routes added
+        // before them).
+        .layer(axum::middleware::from_fn(auth_audit))
         .with_state(state)
+}
+
+/// Bearer-token auth + request audit middleware.
+///
+/// When `HF_WEB_TOKEN` is set, every request except `/health` must carry a
+/// matching `Authorization: Bearer <token>` header; otherwise it is rejected
+/// 401. When unset the API is open (a startup warning is logged) for local dev.
+/// Every request is logged (method + path) as a lightweight audit trail.
+async fn auth_audit(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_owned();
+    let method = req.method().clone();
+
+    // Liveness probes stay open.
+    if path != "/health" {
+        if let Ok(expected) = std::env::var("HF_WEB_TOKEN") {
+            if !expected.is_empty() {
+                let presented = req
+                    .headers()
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "));
+                if presented != Some(expected.as_str()) {
+                    tracing::warn!(%method, %path, "hf-web: rejected unauthorized request");
+                    return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+                }
+            }
+        }
+    }
+    tracing::info!(%method, %path, "hf-web request");
+    next.run(req).await
 }
 
 // ---------------------------------------------------------------------------
