@@ -13,17 +13,15 @@ use tauri::Manager;
 use commands::{
     agent_info, agent_tools, app_paths, cancel_run, chat_agent, chat_answer_permission,
     chat_branch, chat_branches, chat_checkpoints, chat_history, chat_rollback, chat_rollback_to,
-    clear_knowledge,
-    chat_send, config_toml_to_value, config_value_to_toml, corpus_grow, corpus_list, corpus_prune,
-    corpus_seed, coverage_functions, create_session, delete_agent, delete_skill,
-    diagnostics_cost_summary, discover, dismiss_interrupted_run, ensure_docker, generate_report,
-    generate_seeds, get_agent, get_providers, harness_compile, harness_draft, host_arch,
-    interrupted_runs,
-    knowledge_index, knowledge_search, knowledge_summary, list_agents, list_configs, list_models,
-    list_skills, open_file_dialog, open_folder_dialog, provider_test, read_config, read_skill,
-    run_fuzzer, run_syzkaller, save_agent, save_report, save_skill, schedule_create, schedule_delete,
-    schedule_history, schedule_list, schedule_set_enabled, set_providers, show_window,
-    system_status_cmd, triage, write_config,
+    chat_send, clear_knowledge, config_toml_to_value, config_value_to_toml, corpus_grow,
+    corpus_list, corpus_prune, corpus_seed, coverage_functions, create_session, delete_agent,
+    delete_skill, diagnostics_cost_summary, discover, dismiss_interrupted_run, ensure_docker,
+    generate_report, generate_seeds, get_agent, get_providers, harness_compile, harness_draft,
+    host_arch, interrupted_runs, knowledge_index, knowledge_search, knowledge_summary, list_agents,
+    list_configs, list_models, list_skills, open_file_dialog, open_folder_dialog, provider_test,
+    read_config, read_skill, run_fuzzer, run_syzkaller, save_agent, save_report, save_skill,
+    schedule_create, schedule_delete, schedule_history, schedule_list, schedule_set_enabled,
+    set_providers, show_window, system_status_cmd, triage, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

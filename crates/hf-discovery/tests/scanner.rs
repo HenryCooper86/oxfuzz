@@ -21,6 +21,20 @@ async fn discover_returns_non_empty_inventory() {
 }
 
 #[tokio::test]
+async fn candidates_carry_their_project_root() {
+    let root = fixture_root();
+    let inv = hf_discovery::discover(&root, TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    // Every candidate must know which project it belongs to, so persistence can
+    // dedup by (project, symbol) and reports can attribute targets.
+    assert!(
+        inv.candidates.iter().all(|c| c.project_root == root),
+        "all candidates should carry the project root"
+    );
+}
+
+#[tokio::test]
 async fn discover_finds_parse_value() {
     let inv = hf_discovery::discover(&fixture_root(), TargetLanguage::C)
         .await

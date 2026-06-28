@@ -27,7 +27,7 @@ pub async fn discover(
     lang: TargetLanguage,
 ) -> Result<TargetInventory, ClassifiedError> {
     tokio::task::yield_now().await;
-    let (candidates, call_graph) = match lang {
+    let (mut candidates, call_graph) = match lang {
         TargetLanguage::C | TargetLanguage::Cpp => scan_c(project_root, lang)?,
         _ => {
             return Err(ClassifiedError::Validation(format!(
@@ -35,6 +35,13 @@ pub async fn discover(
             )));
         }
     };
+    // Stamp the project root onto every candidate so downstream consumers
+    // (persistence dedup keyed on (project, symbol), reports, ranking) can tell
+    // which project a target belongs to. The scanner builds candidates without
+    // it, so set it once here in the single discovery entry point.
+    for c in &mut candidates {
+        c.project_root = project_root.to_path_buf();
+    }
     Ok(TargetInventory {
         project_root: project_root.to_path_buf(),
         candidates,

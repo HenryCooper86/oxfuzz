@@ -172,10 +172,7 @@ fn render_visual_summary(md: &mut String, data: &ReportData) {
     }
 
     if data.coverage.is_none() && data.crashes.is_empty() {
-        let _ = writeln!(
-            md,
-            "_No coverage or crash data yet to visualize._"
-        );
+        let _ = writeln!(md, "_No coverage or crash data yet to visualize._");
         let _ = writeln!(md);
     }
 }
