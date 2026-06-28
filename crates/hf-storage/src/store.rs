@@ -245,13 +245,23 @@ impl Store {
         t: &TargetCandidate,
         discovered_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
+        let project = t.project_root.to_string_lossy().to_string();
+        // Identity is (project, symbol), not the row id: the scanner assigns a
+        // fresh UUID to a candidate on every discovery pass, so keying only on
+        // id would let the same symbol accumulate duplicate rows. Drop any prior
+        // row for this symbol before inserting the latest.
+        sqlx::query("DELETE FROM targets WHERE project_root = ?1 AND symbol = ?2")
+            .bind(&project)
+            .bind(&t.symbol)
+            .execute(&self.pool)
+            .await?;
         sqlx::query(
             "INSERT OR REPLACE INTO targets
                 (id, project_root, symbol, language, fit_score, rationale, discovered_at, data_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(t.id.to_string())
-        .bind(t.project_root.to_string_lossy().to_string())
+        .bind(&project)
         .bind(&t.symbol)
         .bind(enum_str(&t.language))
         .bind(t.fit_score)
@@ -260,6 +270,22 @@ impl Store {
         .bind(serde_json::to_string(t)?)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Clear learned campaign knowledge: all discovered targets, fuzz runs, and
+    /// crashes. Corpus inputs and configuration are left untouched.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn clear_knowledge(&self) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        for table in ["crashes", "runs", "targets"] {
+            sqlx::query(&format!("DELETE FROM {table}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

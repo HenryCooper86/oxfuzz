@@ -122,6 +122,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
         .route("/report", post(report))
+        .route("/knowledge/clear", post(clear_knowledge))
         .route("/chat/send", post(chat_send))
         .route("/config/models", get(list_models))
         .route("/config/sections", get(list_configs))
@@ -316,6 +317,15 @@ async fn triage(
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::to_value(&deduped).unwrap_or_default()))
+}
+
+async fn clear_knowledge(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    state
+        .container
+        .clear_knowledge()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({ "cleared": true })))
 }
 
 async fn report(
