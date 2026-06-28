@@ -1510,7 +1510,10 @@ impl ServiceContainer {
         ];
         let req = ChatRequest::from_messages(messages);
         let resp = pool
-            .chat_completion(&req, &RouteRequest::with_tags(&["reasoning", "code", "general"]))
+            .chat_completion(
+                &req,
+                &RouteRequest::with_tags(&["reasoning", "code", "general"]),
+            )
             .await?;
         self.diagnostics
             .record("report", &resp.model, &resp.usage)
