@@ -52,6 +52,25 @@ pub fn casr_command(
     }
 }
 
+/// Derive a CASR cluster id from a `.casrep` path.
+///
+/// `casr-libfuzzer`/`casr-afl` group equivalent crashes into `cl<N>`
+/// subdirectories. We read the cluster id from any `cl<digits>` path component,
+/// so crashes CASR considers the same bug share a cluster id. Returns `None`
+/// when the report was not clustered (e.g. a single crash, or CASR ran without
+/// clustering) -- callers then fall back to stack-signature dedup.
+#[must_use]
+pub fn cluster_from_path(path: &std::path::Path) -> Option<u32> {
+    path.components().rev().find_map(|c| {
+        let name = c.as_os_str().to_str()?;
+        let digits = name.strip_prefix("cl")?;
+        if digits.is_empty() {
+            return None;
+        }
+        digits.parse::<u32>().ok()
+    })
+}
+
 /// Infer hobot's [`CrashKind`] from a CASR short description.
 #[must_use]
 pub fn kind_from_short(short: &str) -> CrashKind {
@@ -199,6 +218,29 @@ mod tests {
         assert_eq!(afl[0], "casr-afl");
         assert!(afl.contains(&"--ignore-cmdline".to_owned()));
         assert_eq!(afl.last().unwrap(), "@@");
+    }
+
+    #[test]
+    fn cluster_id_from_casrep_path() {
+        use std::path::Path;
+        assert_eq!(
+            cluster_from_path(Path::new("/work/casr_out/cl3/crash-abc.casrep")),
+            Some(3)
+        );
+        assert_eq!(
+            cluster_from_path(Path::new("/work/casr_out/cl12/x.casrep")),
+            Some(12)
+        );
+        // No cluster directory -> None (falls back to signature dedup).
+        assert_eq!(
+            cluster_from_path(Path::new("/work/casr_out/crash-abc.casrep")),
+            None
+        );
+        // A 'class' dir must not be mistaken for a cluster.
+        assert_eq!(
+            cluster_from_path(Path::new("/work/classes/x.casrep")),
+            None
+        );
     }
 
     #[test]

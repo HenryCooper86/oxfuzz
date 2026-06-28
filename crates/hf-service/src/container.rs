@@ -273,6 +273,21 @@ fn parse_covered_functions(json: &str) -> Vec<String> {
 }
 
 /// Recursively collect and parse every `.casrep` report under `dir`.
+/// Collapse crashes that CASR placed in the same cluster to one representative
+/// (the first seen). Crashes without a cluster id pass through unchanged, so
+/// this only ever tightens dedup, never loses an un-clustered crash.
+fn bucket_by_cluster(crashes: Vec<hf_core::crash::Crash>) -> Vec<hf_core::crash::Crash> {
+    let mut seen_clusters = std::collections::HashSet::new();
+    let mut kept = Vec::with_capacity(crashes.len());
+    for crash in crashes {
+        match crash.casr.as_ref().and_then(|c| c.cluster) {
+            Some(cluster) if !seen_clusters.insert(cluster) => {} // duplicate cluster -> drop
+            _ => kept.push(crash),
+        }
+    }
+    kept
+}
+
 fn collect_casreps(dir: &Path) -> Vec<(PathBuf, hf_core::crash::CasrReport)> {
     let mut out = Vec::new();
     collect_casreps_into(dir, &mut out);
@@ -289,7 +304,10 @@ fn collect_casreps_into(dir: &Path, out: &mut Vec<(PathBuf, hf_core::crash::Casr
             collect_casreps_into(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("casrep") {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(report) = hf_crash::parse_casrep(&content) {
+                if let Ok(mut report) = hf_crash::parse_casrep(&content) {
+                    // CASR groups equivalent crashes into `cl<N>` dirs; carry the
+                    // cluster id so triage can bucket by it.
+                    report.cluster = hf_crash::cluster_from_path(&path);
                     out.push((path, report));
                 }
             }
@@ -1798,7 +1816,7 @@ impl ServiceContainer {
             tracing::info!("casr produced no reports; falling back to built-in triage");
             return None;
         }
-        let crashes = reports
+        let mut crashes = reports
             .into_iter()
             .map(|(path, casr)| {
                 let input_path = casrep_input_path(&out_dir, &path);
@@ -1826,6 +1844,10 @@ impl ServiceContainer {
                 }
             })
             .collect::<Vec<_>>();
+        // Bucket by CASR cluster: keep one representative per cluster (clusters
+        // are CASR's own "same bug" grouping, stronger than our stack signature).
+        // Crashes CASR did not cluster (cluster=None) all pass through.
+        crashes = bucket_by_cluster(crashes);
         tracing::info!("casr triaged {} unique crash(es)", crashes.len());
         Some(crashes)
     }
