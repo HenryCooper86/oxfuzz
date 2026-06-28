@@ -722,6 +722,69 @@ impl ServiceContainer {
         }
     }
 
+    /// A live system snapshot for the Observability panel: per-provider health
+    /// and usage, the agent pool, and runtime memory counters. Merges live
+    /// provider stats (concurrency/requests/errors) with the provider config
+    /// (model/tags/limits) and cumulative diagnostics (tokens/cost by model).
+    /// `agents.available_slots` is left for the caller to fill from the agent
+    /// registry.
+    pub async fn system_snapshot(&self) -> SystemSnapshot {
+        let statuses = self.provider_statuses().await;
+        let configs = crate::config::get_providers();
+        let cost = self.diagnostics.summary().await;
+
+        let providers = statuses
+            .into_iter()
+            .map(|s| {
+                let cfg = configs.iter().find(|c| c.id == s.id.0);
+                let model = cfg.map(|c| c.model.clone()).unwrap_or_default();
+                let by_model = cost.by_model.iter().find(|m| m.model == model);
+                #[allow(clippy::cast_precision_loss)]
+                let error_rate = if s.total_requests > 0 {
+                    s.total_errors as f64 / s.total_requests as f64
+                } else {
+                    0.0
+                };
+                ProviderSnapshot {
+                    id: s.id.0,
+                    model,
+                    tags: cfg.map(|c| c.tags.clone()).unwrap_or_default(),
+                    is_frozen: s.is_frozen,
+                    active_requests: s.active_requests,
+                    max_concurrency: cfg.map_or(0, |c| c.max_concurrency),
+                    total_requests: s.total_requests,
+                    total_errors: s.total_errors,
+                    error_rate,
+                    total_input_tokens: by_model.map_or(0, |m| m.input_tokens),
+                    total_output_tokens: by_model.map_or(0, |m| m.output_tokens),
+                    estimated_cost_usd: by_model.map_or(0.0, |m| m.cost_usd),
+                }
+            })
+            .collect();
+
+        let (targets, crashes) = if let Some(store) = &self.store {
+            (
+                store.list_all_targets().await.map_or(0, |t| t.len()),
+                store.list_all_crashes().await.map_or(0, |c| c.len()),
+            )
+        } else {
+            (0, 0)
+        };
+        let memory = MemorySnapshot {
+            pending_runs: self.active_run_ids().len(),
+            interrupted_runs: self.interrupted_runs().len(),
+            llm_calls: cost.calls,
+            targets,
+            crashes,
+        };
+
+        SystemSnapshot {
+            providers,
+            agents: AgentPoolSnapshot::default(),
+            memory,
+        }
+    }
+
     /// A cheap snapshot of a target's on-disk artifacts (compiled harness,
     /// corpus size, crash inputs) for the Info panel. Pure filesystem reads --
     /// no sandbox, no LLM.
@@ -2154,6 +2217,64 @@ pub struct SeedEntry {
 pub struct MinimizeOutcome {
     pub before: usize,
     pub after: usize,
+}
+
+/// Per-provider health + usage for the Observability panel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderSnapshot {
+    pub id: String,
+    pub model: String,
+    pub tags: Vec<String>,
+    pub is_frozen: bool,
+    pub active_requests: usize,
+    pub max_concurrency: usize,
+    pub total_requests: u64,
+    pub total_errors: u64,
+    pub error_rate: f64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub estimated_cost_usd: f64,
+}
+
+/// A single running agent instance (hobot has no live agent pool yet, so this is
+/// reserved for forward compatibility and always empty for now).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentInstanceSnapshot {
+    pub instance_id: String,
+    pub agent_name: String,
+    pub state: String,
+    pub elapsed_ms: u64,
+    pub iterations: u32,
+    pub tokens_used: u64,
+}
+
+/// Agent pool state. `available_slots` is the number of agent definitions that
+/// can be run; hobot runs agents per-turn rather than as a persistent pool, so
+/// `active`/`total`/`instances` stay zero/empty until that lands.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AgentPoolSnapshot {
+    pub active_instances: usize,
+    pub available_slots: usize,
+    pub total_instances: usize,
+    pub instances: Vec<AgentInstanceSnapshot>,
+}
+
+/// Runtime/state counters for the Observability panel's Memory section.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct MemorySnapshot {
+    pub pending_runs: usize,
+    pub interrupted_runs: usize,
+    pub llm_calls: u64,
+    pub targets: usize,
+    pub crashes: usize,
+}
+
+/// A live snapshot of system state for the Observability panel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SystemSnapshot {
+    pub providers: Vec<ProviderSnapshot>,
+    pub agents: AgentPoolSnapshot,
+    pub memory: MemorySnapshot,
 }
 
 /// A cheap snapshot of a target's on-disk artifacts, for the Info panel.

@@ -124,6 +124,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/report", post(report))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/providers/status", get(provider_statuses))
+        .route("/system/snapshot", get(system_snapshot))
         .route("/chat/send", post(chat_send))
         .route("/config/models", get(list_models))
         .route("/config/sections", get(list_configs))
@@ -318,6 +319,11 @@ async fn triage(
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::to_value(&deduped).unwrap_or_default()))
+}
+
+async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    let snapshot = state.container.system_snapshot().await;
+    Ok(Json(serde_json::to_value(&snapshot).unwrap_or_default()))
 }
 
 async fn provider_statuses(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

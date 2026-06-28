@@ -23,7 +23,7 @@ use commands::{
     provider_test,
     read_config, read_skill, run_fuzzer, run_syzkaller, save_agent, save_report, save_skill,
     schedule_create, schedule_delete, schedule_history, schedule_list, schedule_set_enabled,
-    set_providers, show_window, system_status_cmd, triage, write_config,
+    set_providers, show_window, system_snapshot, system_status_cmd, triage, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -83,6 +83,7 @@ pub fn run() {
             diagnostics_cost_summary,
             provider_statuses,
             artifact_summary,
+            system_snapshot,
             interrupted_runs,
             dismiss_interrupted_run,
             schedule_list,
