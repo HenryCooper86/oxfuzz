@@ -820,6 +820,73 @@ impl ServiceContainer {
         }
     }
 
+    /// Ingest a document into a project's knowledge base.
+    ///
+    /// Converts the file (PDF, Office, HTML, CSV, ...) to Markdown with
+    /// `markitdown` inside the sandbox (offline; network-isolated), stores the
+    /// Markdown under the per-project knowledge docs dir, and re-indexes the
+    /// project so the harness-author and triage agents can search it (specs,
+    /// RFCs, threat models). Returns the post-index stats.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the file is missing, the sandbox conversion
+    /// fails, or the Markdown cannot be written.
+    pub async fn ingest_document(
+        &self,
+        project: &Path,
+        file: &Path,
+    ) -> Result<crate::knowledge::KnowledgeStats, ClassifiedError> {
+        if !file.is_file() {
+            return Err(ClassifiedError::Validation(format!(
+                "document not found: {}",
+                file.display()
+            )));
+        }
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| ClassifiedError::Validation("invalid document name".to_owned()))?;
+
+        // Stage the document in a clean dir mounted as /work, then convert it.
+        let docs = crate::knowledge::docs_dir(project);
+        let staging = docs.join(".staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir staging: {e}")))?;
+        std::fs::copy(file, staging.join(name))
+            .map_err(|e| ClassifiedError::Internal(format!("stage document: {e}")))?;
+
+        let cmd = vec!["markitdown".to_owned(), format!("/work/{name}")];
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 120,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        let result = self.runtime.run_command(&cmd, &staging, &limits).await?;
+        let _ = std::fs::remove_dir_all(&staging);
+        if result.exit_code != 0 || result.stdout.trim().is_empty() {
+            return Err(ClassifiedError::Internal(format!(
+                "markitdown failed (exit {}): {}",
+                result.exit_code,
+                result.stderr.lines().last().unwrap_or_default()
+            )));
+        }
+
+        // Persist the Markdown under the docs dir, then re-index.
+        std::fs::create_dir_all(&docs)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir docs: {e}")))?;
+        let stem = Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
+        std::fs::write(docs.join(format!("{stem}.md")), &result.stdout)
+            .map_err(|e| ClassifiedError::Internal(format!("write doc markdown: {e}")))?;
+
+        crate::knowledge::index_project(project)
+    }
+
     /// Reload the provider pool from the current on-disk config, swapping it in
     /// for every consumer of this container (and its clones) so Settings edits
     /// apply live without a restart. Returns `true` if a pool was loaded (i.e.
@@ -961,8 +1028,8 @@ impl ServiceContainer {
         let pool = self.provider_pool().ok_or_else(|| {
             ClassifiedError::Provider("no LLM provider configured for ranking".to_owned())
         })?;
-        let bridge = LlmProviderBridge::new(pool)
-            .with_diagnostics(Arc::clone(&self.diagnostics), "rank");
+        let bridge =
+            LlmProviderBridge::new(pool).with_diagnostics(Arc::clone(&self.diagnostics), "rank");
         let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
         if let Some(store) = &self.store {
             if let Err(e) = store.save_inventory(&ranked, Utc::now()).await {

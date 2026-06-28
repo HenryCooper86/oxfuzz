@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search } from "lucide-react";
-import { getTransport } from "../lib";
+import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
+import { getTransport, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 
@@ -852,6 +852,24 @@ function KnowledgeBaseSearch() {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [ingesting, setIngesting] = useState(false);
+
+  // Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
+  // sandbox and add it to this project's knowledge base.
+  async function ingest() {
+    if (!activeProject || ingesting) return;
+    const file = await pickFile("Select a document to ingest (PDF, Office, HTML, ...)");
+    if (!file) return;
+    setIngesting(true);
+    setHits(null);
+    try {
+      setStats(await getTransport().invoke<KnowledgeStats>("knowledge_ingest", { project: activeProject, file }));
+    } catch {
+      /* surfaced by the empty state / stats not updating */
+    } finally {
+      setIngesting(false);
+    }
+  }
 
   async function index() {
     if (!activeProject) return;
@@ -890,17 +908,28 @@ function KnowledgeBaseSearch() {
             </span>
           )}
         </div>
-        <button
-          onClick={index}
-          disabled={indexing || !activeProject}
-          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
-        >
-          {indexing ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
-          {indexing ? "Indexing…" : "Index project"}
-        </button>
+        <div className="shrink-0 flex items-center gap-2">
+          <button
+            onClick={ingest}
+            disabled={ingesting || !activeProject}
+            title="Convert a document (PDF/Office/HTML) to Markdown and index it"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+          >
+            {ingesting ? <Loader2 size={13} className="animate-spin" /> : <FilePlus size={13} />}
+            {ingesting ? "Ingesting…" : "Add document"}
+          </button>
+          <button
+            onClick={index}
+            disabled={indexing || !activeProject}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+          >
+            {indexing ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
+            {indexing ? "Indexing…" : "Index project"}
+          </button>
+        </div>
       </div>
       <p className="text-xs text-text-muted">
-        BM25 search over this project's source. Index first, then search for functions, patterns, or symbols.
+        BM25 search over this project's source and ingested documents (specs, RFCs). Index or add a document, then search.
       </p>
       <div className="flex items-center gap-2">
         <input

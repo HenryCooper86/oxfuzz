@@ -243,7 +243,8 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
             .await
             .expect("connect store"),
     );
-    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+    let container =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
 
     let snap = container.system_snapshot().await;
 
@@ -276,7 +277,10 @@ async fn verify_regressions_replays_stored_crash_inputs() {
     // Stub runtime can't actually reproduce, so replay yields no crash -> the
     // crash is reported as fixed. (The real value is the replay plumbing.)
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
-    let results = container.verify_regressions(&project, target).await.unwrap();
+    let results = container
+        .verify_regressions(&project, target)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1, "the staged crash input is replayed");
     assert!(!results[0].still_crashes);
     assert!(results[0].input.ends_with("crash-1"));

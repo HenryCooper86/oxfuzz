@@ -139,6 +139,14 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    /// Ingest a document (PDF/Office/HTML/...) into the project knowledge base.
+    Ingest {
+        /// Project root path.
+        project: PathBuf,
+        /// Document file to convert and index.
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Compose a detailed Markdown campaign report for a target.
     Report {
         /// Project root path.
@@ -461,7 +469,11 @@ async fn cmd_ci(
     }
 }
 
-async fn cmd_sarif(project: PathBuf, target: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
+async fn cmd_sarif(
+    project: PathBuf,
+    target: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     let sarif = container.export_sarif(&project, target).await?;
     match out {
@@ -471,6 +483,18 @@ async fn cmd_sarif(project: PathBuf, target: &str, out: Option<&std::path::Path>
         }
         None => println!("{sarif}"),
     }
+    Ok(())
+}
+
+async fn cmd_ingest(project: PathBuf, file: &std::path::Path) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let stats = container.ingest_document(&project, file).await?;
+    println!(
+        "Ingested {} -> knowledge base now has {} file(s), {} chunk(s).",
+        file.display(),
+        stats.files,
+        stats.chunks
+    );
     Ok(())
 }
 
@@ -488,7 +512,11 @@ async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
         results.len() - still
     );
     for r in &results {
-        let tag = if r.still_crashes { "STILL CRASHES" } else { "fixed" };
+        let tag = if r.still_crashes {
+            "STILL CRASHES"
+        } else {
+            "fixed"
+        };
         let id = if r.crash_id.is_empty() {
             ""
         } else {
@@ -571,6 +599,7 @@ async fn main() -> anyhow::Result<()> {
             sarif,
         } => cmd_ci(project, &target, &engine, &lang, &duration, &sarif).await?,
         Commands::Regress { project, target } => cmd_regress(project, &target).await?,
+        Commands::Ingest { project, file } => cmd_ingest(project, &file).await?,
         Commands::Sarif {
             project,
             target,

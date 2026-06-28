@@ -138,6 +138,16 @@ pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> 
         }
     }
 
+    // Also index any documents ingested for this project (markitdown output).
+    index_docs_dir(
+        &docs_dir(project),
+        &chunker,
+        &mut retriever,
+        &mut originals,
+        &mut files,
+        &mut chunks,
+    );
+
     let index = Arc::new(ProjectIndex {
         retriever,
         originals,
@@ -147,6 +157,64 @@ pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> 
         map.insert(key, index);
     }
     Ok(KnowledgeStats { files, chunks })
+}
+
+/// The per-project directory holding ingested documents (converted to Markdown
+/// by markitdown). Kept under the app data dir, not in the user's repo, so
+/// ingested specs/RFCs persist and are picked up by [`index_project`].
+#[must_use]
+pub fn docs_dir(project: &Path) -> std::path::PathBuf {
+    let key: String = project
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    crate::init::user_app_dir().join("knowledge").join(key)
+}
+
+/// Index Markdown/text files from a directory into the retriever, labelled
+/// `doc:<filename>`. Used for ingested documents that live outside the project.
+fn index_docs_dir(
+    dir: &Path,
+    chunker: &ChunkingStrategy,
+    retriever: &mut HybridRetriever<AutoTokenizer>,
+    originals: &mut HashMap<String, String>,
+    files: &mut usize,
+    chunks: &mut usize,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "md" && ext != "txt" {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        *files += 1;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("doc");
+        let source = format!("doc:{name}");
+        let meta = ChunkMetadata {
+            source: source.clone(),
+            title: source.clone(),
+            ..Default::default()
+        };
+        for mut chunk in chunker.chunk(&source, &content, ChunkLevel::L2, &meta) {
+            originals.insert(chunk.id.clone(), chunk.content.clone());
+            chunk.content = code_normalize(&chunk.content);
+            retriever.index(chunk);
+            *chunks += 1;
+        }
+    }
 }
 
 /// Whether a project has an index built this session.
@@ -219,5 +287,27 @@ mod tests {
     fn search_unindexed_project_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(search_project(dir.path(), "anything", 10).is_empty());
+    }
+
+    #[test]
+    fn ingested_documents_are_indexed_and_searchable() {
+        // A unique tempdir project gives a unique (and isolated) docs dir.
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_dir(dir.path());
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("spec.md"),
+            "# Protocol Spec\nThe frobnicate opcode triggers a reticulation handshake.",
+        )
+        .unwrap();
+
+        let stats = index_project(dir.path()).unwrap();
+        assert!(stats.files >= 1, "ingested doc counted");
+
+        let hits = search_project(dir.path(), "frobnicate", 10);
+        assert!(!hits.is_empty(), "ingested doc is searchable");
+        assert!(hits[0].file.starts_with("doc:"), "labelled as a document");
+
+        let _ = std::fs::remove_dir_all(&docs);
     }
 }
