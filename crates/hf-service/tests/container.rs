@@ -236,6 +236,40 @@ async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
 }
 
 #[tokio::test]
+async fn artifact_summary_reports_on_disk_state() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("artifact_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "demo";
+
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    // Nothing on disk yet.
+    let empty = container.artifact_summary(&project, target);
+    assert!(!empty.harness_built);
+    assert_eq!(empty.corpus_count, 0);
+    assert_eq!(empty.crash_count, 0);
+
+    // Lay down a harness binary, two corpus inputs, and a crash input.
+    let ws = hf_service::workspace_dir(&project, target);
+    fs::create_dir_all(ws.join("corpus")).unwrap();
+    fs::create_dir_all(ws.join("out")).unwrap();
+    fs::write(ws.join(format!("fuzz_{target}")), b"bin").unwrap();
+    fs::write(ws.join("corpus").join("a"), b"a").unwrap();
+    fs::write(ws.join("corpus").join("b"), b"b").unwrap();
+    fs::write(ws.join("out").join("crash-1"), b"boom").unwrap();
+
+    let s = container.artifact_summary(&project, target);
+    assert!(s.harness_built, "harness detected");
+    assert_eq!(s.corpus_count, 2);
+    assert_eq!(s.crash_count, 1);
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
 async fn corpus_absorb_crashes_feeds_reproducers_back_in() {
     use std::fs;
 

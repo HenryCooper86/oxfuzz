@@ -712,6 +712,33 @@ impl ServiceContainer {
         self
     }
 
+    /// Per-provider health/usage for the Observability panel: freeze state,
+    /// in-flight and total requests, and error counts. Empty when no provider
+    /// pool is configured.
+    pub async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        match self.provider_pool() {
+            Some(pool) => pool.provider_statuses().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// A cheap snapshot of a target's on-disk artifacts (compiled harness,
+    /// corpus size, crash inputs) for the Info panel. Pure filesystem reads --
+    /// no sandbox, no LLM.
+    #[must_use]
+    pub fn artifact_summary(&self, project: &Path, target: &str) -> ArtifactSummary {
+        let workspace = workspace_dir(project, target);
+        let harness_built = workspace.join(format!("fuzz_{target}")).exists();
+        let corpus_count =
+            hf_corpus::list(&workspace.join("corpus")).map_or(0, |c| c.entries.len());
+        let crash_count = collect_crash_inputs(&workspace.join("out")).len();
+        ArtifactSummary {
+            harness_built,
+            corpus_count,
+            crash_count,
+        }
+    }
+
     /// Reload the provider pool from the current on-disk config, swapping it in
     /// for every consumer of this container (and its clones) so Settings edits
     /// apply live without a restart. Returns `true` if a pool was loaded (i.e.
@@ -2127,6 +2154,17 @@ pub struct SeedEntry {
 pub struct MinimizeOutcome {
     pub before: usize,
     pub after: usize,
+}
+
+/// A cheap snapshot of a target's on-disk artifacts, for the Info panel.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct ArtifactSummary {
+    /// Whether the compiled harness binary (`fuzz_<target>`) exists.
+    pub harness_built: bool,
+    /// Number of corpus inputs on disk.
+    pub corpus_count: usize,
+    /// Number of crash inputs staged in the run output directory.
+    pub crash_count: usize,
 }
 
 /// A fuzz run summary.
