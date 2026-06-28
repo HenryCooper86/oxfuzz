@@ -1432,6 +1432,83 @@ impl ServiceContainer {
         Ok(deduped)
     }
 
+    /// Regression check: replay stored crash inputs against the current harness
+    /// and report which ones still crash.
+    ///
+    /// The workflow is: fix the bug, recompile the harness, then run this to
+    /// confirm the fix (and catch re-introductions). Prefers the persisted
+    /// crashes for the project's latest run; falls back to crash inputs staged
+    /// under the run output directory. Requires a compiled harness binary.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the harness is missing or the action is
+    /// denied by guardrails.
+    pub async fn verify_regressions(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<Vec<RegressionResult>, ClassifiedError> {
+        // Replaying crash inputs runs the (untrusted) harness in the sandbox --
+        // gate it like triage.
+        self.guardrails.authorize(Action::Triage).await?;
+        let workspace = workspace_dir(project, target);
+        if !workspace.join(format!("fuzz_{target}")).exists() {
+            return Err(ClassifiedError::Validation(format!(
+                "Compiled harness 'fuzz_{target}' not found -- compile the harness first."
+            )));
+        }
+
+        // (crash_id, input_path) pairs: persisted crashes first, else staged.
+        let mut inputs: Vec<(String, PathBuf)> = Vec::new();
+        if let Some(store) = &self.store {
+            let (run_id, _engine) = self.latest_run(project).await;
+            if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
+                inputs.extend(
+                    crashes
+                        .into_iter()
+                        .map(|c| (c.id.to_string(), c.input_path)),
+                );
+            }
+        }
+        if inputs.is_empty() {
+            inputs = collect_crash_inputs(&workspace.join("out"))
+                .into_iter()
+                .map(|p| (String::new(), p))
+                .collect();
+        }
+
+        let mut results = Vec::with_capacity(inputs.len());
+        for (crash_id, input) in inputs {
+            if !input.is_file() {
+                continue;
+            }
+            let trace = self.reproduce_crash(&workspace, target, &input).await;
+            let still_crashes = hf_crash::looks_like_crash(&trace);
+            let summary = if still_crashes {
+                trace
+                    .lines()
+                    .find(|l| {
+                        let s = l.to_ascii_lowercase();
+                        s.contains("error") || s.contains("summary")
+                    })
+                    .unwrap_or("still crashes")
+                    .trim()
+                    .chars()
+                    .take(200)
+                    .collect()
+            } else {
+                "no crash on replay (fixed)".to_owned()
+            };
+            results.push(RegressionResult {
+                crash_id,
+                input: input.display().to_string(),
+                still_crashes,
+                summary,
+            });
+        }
+        Ok(results)
+    }
+
     /// Functions covered by a fuzz run, for the call-tree coverage overlay.
     ///
     /// Builds a source-based-coverage harness from the workspace sources,
@@ -2239,6 +2316,19 @@ pub struct SeedEntry {
 pub struct MinimizeOutcome {
     pub before: usize,
     pub after: usize,
+}
+
+/// Outcome of replaying one stored crash input against the current harness.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegressionResult {
+    /// Persisted crash id (empty if the input came from the output dir).
+    pub crash_id: String,
+    /// The crash input that was replayed.
+    pub input: String,
+    /// True if the input still triggers a crash (a regression / unfixed bug).
+    pub still_crashes: bool,
+    /// A short trace/summary line from the replay.
+    pub summary: String,
 }
 
 /// Per-provider health + usage for the Observability panel.
