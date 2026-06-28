@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useProject } from "./ProjectContext";
+import { pruneToKeys } from "../lib/projectState";
 
 export const PIPELINE_STAGES = [
   { id: "discover", label: "Discover targets" },
@@ -50,18 +51,21 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   // Progress is kept per fuzzing target (project path), so switching between
   // targets retains each one's pipeline state instead of resetting it, and it
   // is persisted to localStorage so it survives an app restart.
-  const { activeProject } = useProject();
+  const { activeProject, recentProjects } = useProject();
   const key = activeProject || "__none__";
   const [byProject, setByProject] = useState<Record<string, Progress>>(loadProgress);
   const cur = byProject[key] ?? EMPTY;
 
+  // Persist progress, but only for projects still in the recents list -- a
+  // removed project's completed pipeline must not linger on disk. The active
+  // project is cleared on removal, so the live view already drops it.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(byProject));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(pruneToKeys(byProject, recentProjects)));
     } catch {
       // Best-effort: localStorage may be unavailable or full.
     }
-  }, [byProject]);
+  }, [byProject, recentProjects]);
 
   const update = useCallback(
     (fn: (p: Progress) => Progress) => {
