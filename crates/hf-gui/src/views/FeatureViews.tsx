@@ -942,6 +942,7 @@ function KnowledgeBaseSearch() {
 export function KnowledgeView() {
   const [data, setData] = useState<KnowledgeSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -950,6 +951,27 @@ export function KnowledgeView() {
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
+  };
+
+  const clear = async () => {
+    const total =
+      (data?.targets.length ?? 0) + (data?.runs.length ?? 0) + (data?.crashes.length ?? 0);
+    if (
+      !window.confirm(
+        `Clear all learned knowledge (${total} entries: discovered targets, runs, and crashes)?\n\nCorpus inputs and configuration are not affected. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await getTransport().invoke("clear_knowledge");
+      load();
+    } catch {
+      /* surfaced by the empty state on reload */
+    } finally {
+      setClearing(false);
+    }
   };
 
   // Initial load (no synchronous setState in the effect body).
@@ -971,13 +993,25 @@ export function KnowledgeView() {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
         <ViewHeader title="Knowledge" description="What hobot_fuzz has learned about your projects — discovered targets, fuzz runs, and crashes found." />
-        <button
-          onClick={load}
-          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary"
-        >
-          {loading ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
-          Refresh
-        </button>
+        <div className="shrink-0 flex items-center gap-2">
+          <button
+            onClick={load}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+          >
+            {loading ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
+            Refresh
+          </button>
+          <button
+            onClick={() => void clear()}
+            disabled={clearing || !!empty || !data?.db_configured}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-solid bg-surface-primary transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+            style={{ borderColor: "var(--border)", color: "var(--error)" }}
+            title="Delete all discovered targets, runs, and crashes"
+          >
+            {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            Clear
+          </button>
+        </div>
       </div>
 
       <KnowledgeBaseSearch />

@@ -13,6 +13,7 @@ use tauri::Manager;
 use commands::{
     agent_info, agent_tools, app_paths, cancel_run, chat_agent, chat_answer_permission,
     chat_branch, chat_branches, chat_checkpoints, chat_history, chat_rollback, chat_rollback_to,
+    clear_knowledge,
     chat_send, config_toml_to_value, config_value_to_toml, corpus_grow, corpus_list, corpus_prune,
     corpus_seed, coverage_functions, create_session, delete_agent, delete_skill,
     diagnostics_cost_summary, discover, dismiss_interrupted_run, ensure_docker, generate_report,
@@ -78,6 +79,7 @@ pub fn run() {
             coverage_functions,
             chat_history,
             knowledge_summary,
+            clear_knowledge,
             diagnostics_cost_summary,
             interrupted_runs,
             dismiss_interrupted_run,

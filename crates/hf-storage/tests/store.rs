@@ -109,6 +109,61 @@ async fn target_and_harness_roundtrip() {
 }
 
 #[tokio::test]
+async fn rediscovering_a_symbol_does_not_accumulate_duplicates() {
+    let (store, _dir) = temp_store().await;
+
+    // Each discovery pass assigns a fresh id to the same symbol (as the scanner
+    // does). The store must keep one row per (project, symbol), not pile up.
+    for _ in 0..5 {
+        let mut t = sample_target("/proj");
+        t.id = Uuid::new_v4();
+        store.upsert_target(&t, Utc::now()).await.unwrap();
+    }
+    let targets = store.list_targets("/proj").await.unwrap();
+    assert_eq!(targets.len(), 1, "same symbol must collapse to one row");
+    assert_eq!(targets[0].symbol, "parse_value");
+
+    // A different symbol in the same project is kept separately.
+    let mut other = sample_target("/proj");
+    other.id = Uuid::new_v4();
+    other.symbol = "parse_header".to_owned();
+    store.upsert_target(&other, Utc::now()).await.unwrap();
+    assert_eq!(store.list_targets("/proj").await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn clear_knowledge_empties_targets_runs_and_crashes() {
+    let (store, _dir) = temp_store().await;
+
+    // Seed one of each.
+    store
+        .upsert_target(&sample_target("/proj"), Utc::now())
+        .await
+        .unwrap();
+    let run = RunRecord::new("/proj".to_owned(), EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    let crash = Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: Uuid::new_v4(),
+        input_path: PathBuf::from("out/crash-1"),
+        stack_signature: "sig".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "boom".to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    };
+    store.upsert_crash(&crash).await.unwrap();
+
+    store.clear_knowledge().await.unwrap();
+
+    assert!(store.list_targets("/proj").await.unwrap().is_empty());
+    assert!(store.list_runs(Some("/proj")).await.unwrap().is_empty());
+    assert!(store.list_crashes_by_run(run.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn crash_and_corpus_roundtrip() {
     let (store, _dir) = temp_store().await;
     let run_id = Uuid::new_v4();
