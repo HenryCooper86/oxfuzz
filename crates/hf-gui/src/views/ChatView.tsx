@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
+import { useRunOutput } from "../providers/RunOutputContext";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -24,6 +25,20 @@ interface CallableAgent {
 }
 
 const ACTIVE_AGENT_KEY = "hf_active_agent";
+const CHAT_MODE_KEY = "hf_chat_mode";
+
+/** Composer mode. `plan` prepends a planning instruction to the message. */
+export type ChatMode = "auto" | "plan";
+
+/** Instruction prepended in Plan mode (no backend -- pure prompt steering). */
+const PLAN_PREFIX =
+  "[Plan mode] Before taking any action or calling tools, lay out a concise, " +
+  "numbered step-by-step plan for how you will approach this. Then proceed.";
+
+/** Build the message actually sent to the agent for a given mode. */
+export function applyMode(text: string, mode: ChatMode): string {
+  return mode === "plan" ? `${PLAN_PREFIX}\n\n${text}` : text;
+}
 
 // A pending guardrail approval request (mirrors the backend payload).
 interface PermissionRequest {
@@ -59,6 +74,9 @@ type AgentEvent =
 export function ChatView() {
   const { activeProject, recentProjects, setActiveProject } = useProject();
   const { sendOnEnter } = usePrefs();
+  // In-flight fuzz runs surface as the composer's task count.
+  const { running } = useRunOutput();
+  const taskCount = running ? 1 : 0;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -73,7 +91,16 @@ export function ChatView() {
   const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [branches, setBranches] = useState<BranchView[]>([]);
+  // Composer mode: "auto" sends the message as-is; "plan" asks the agent to
+  // outline a step-by-step plan before acting (a prompt prefix -- no new
+  // backend). Persisted across sessions.
+  const [mode, setMode] = useState<ChatMode>(() => (localStorage.getItem(CHAT_MODE_KEY) as ChatMode) || "auto");
+  const [expanded, setExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_MODE_KEY, mode);
+  }, [mode]);
 
   // Listen for guardrail approval requests from the agent (high-risk actions
   // like running a fuzzer) and surface an approve/deny prompt.
@@ -312,7 +339,7 @@ export function ChatView() {
       });
 
       const responseText = await transport.invoke<string>("chat_agent", {
-        message: text,
+        message: applyMode(text, mode),
         project: activeProject || null,
         history,
         sessionId,
@@ -552,14 +579,14 @@ export function ChatView() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Write a message…"
+            placeholder={mode === "plan" ? "Describe the goal — the agent will plan first…" : "Type a message…"}
             rows={1}
             className="w-full text-sm bg-transparent border-none outline-none text-text-primary resize-none"
             style={{
               fontFamily: "var(--font-sans)",
               lineHeight: 1.5,
-              minHeight: "24px",
-              maxHeight: "160px",
+              minHeight: expanded ? "200px" : "24px",
+              maxHeight: expanded ? "50vh" : "160px",
               padding: "4px 2px",
             }}
           />
@@ -567,6 +594,7 @@ export function ChatView() {
           {/* Toolbar */}
           <div className="flex items-center justify-between mt-1">
             <div className="flex items-center gap-1">
+              <ModeToggle mode={mode} onChange={setMode} />
               <ToolbarIconButton
                 icon={<FolderPlus size={17} />}
                 title="Attach project folder"
@@ -666,6 +694,14 @@ export function ChatView() {
               )}
             </div>
             <div className="flex items-center gap-2">
+              <span className="text-xs text-text-muted" title="In-flight fuzz runs" style={{ whiteSpace: "nowrap" }}>
+                {taskCount} task{taskCount === 1 ? "" : "s"}
+              </span>
+              <ToolbarIconButton
+                icon={expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                title={expanded ? "Collapse input" : "Expand input"}
+                onClick={() => setExpanded((e) => !e)}
+              />
               {models.length > 0 ? (
                 <Dropdown value={model} options={models} onSelect={setModel} subtle />
               ) : (
@@ -787,6 +823,36 @@ function WelcomeProjectSelector({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/** Auto / Plan composer mode toggle, styled as a pair of pills. */
+function ModeToggle({ mode, onChange }: { mode: ChatMode; onChange: (m: ChatMode) => void }) {
+  const pill = (m: ChatMode, label: string, icon: React.ReactNode, title: string) => {
+    const active = mode === m;
+    return (
+      <button
+        onClick={() => onChange(m)}
+        title={title}
+        className="inline-flex items-center gap-1 rounded-md text-xs font-medium transition-colors duration-150"
+        style={{
+          padding: "4px 8px",
+          background: active ? "var(--accent-subtle)" : "transparent",
+          color: active ? "var(--accent)" : "var(--text-muted)",
+          border: "none",
+          cursor: "pointer",
+        }}
+      >
+        {icon}
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div className="inline-flex items-center rounded-md" style={{ background: "var(--surface-active)", padding: "2px" }}>
+      {pill("auto", "Auto", <Sparkles size={13} />, "Auto: send the message as-is")}
+      {pill("plan", "Plan", <ListChecks size={13} />, "Plan: the agent outlines a plan before acting")}
     </div>
   );
 }
