@@ -2,7 +2,7 @@
 //!
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md`.
 
-use hf_core::engine::{BuildArtifact, EngineKind, FuzzRunConfig};
+use hf_core::engine::FuzzRunConfig;
 
 /// Construct the `honggfuzz` argument list for a fuzz run.
 #[must_use]
@@ -30,68 +30,6 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     args
 }
 
-/// The honggfuzz engine adapter (stub for the `FuzzEngine` trait).
+/// The honggfuzz engine adapter. See [`build_run_args`] and the
+/// [`EngineAdapter`](crate::registry::EngineAdapter) impl in `registry`.
 pub struct Honggfuzz;
-
-impl Honggfuzz {
-    #[must_use]
-    pub const fn kind() -> EngineKind {
-        EngineKind::Honggfuzz
-    }
-}
-
-use async_trait::async_trait;
-use hf_core::coverage::CoverageReport;
-use hf_core::crash::Crash;
-use hf_core::engine::{FuzzEngine, FuzzRunHandle};
-use hf_core::error::ClassifiedError;
-use hf_core::harness::Harness;
-use hf_core::runtime::RuntimeAdapter;
-use hf_core::target::{Sanitizer, TargetLanguage};
-
-#[async_trait]
-impl FuzzEngine for Honggfuzz {
-    fn kind(&self) -> EngineKind {
-        EngineKind::Honggfuzz
-    }
-
-    fn supports(&self, lang: TargetLanguage, _san: Sanitizer) -> bool {
-        matches!(lang, TargetLanguage::C | TargetLanguage::Cpp)
-    }
-
-    async fn build(
-        &self,
-        _h: &Harness,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<BuildArtifact, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "honggfuzz build: not implemented".to_owned(),
-        ))
-    }
-
-    async fn run(
-        &self,
-        _cfg: &FuzzRunConfig,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<FuzzRunHandle, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "honggfuzz run: not implemented".to_owned(),
-        ))
-    }
-
-    async fn minimize(
-        &self,
-        _c: &Crash,
-        _rt: &dyn RuntimeAdapter,
-    ) -> Result<Crash, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "honggfuzz minimize: not implemented".to_owned(),
-        ))
-    }
-
-    async fn coverage(&self, _run: &FuzzRunHandle) -> Result<CoverageReport, ClassifiedError> {
-        Err(ClassifiedError::Engine(
-            "honggfuzz coverage: not implemented".to_owned(),
-        ))
-    }
-}

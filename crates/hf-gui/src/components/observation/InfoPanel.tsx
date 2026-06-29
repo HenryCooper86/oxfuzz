@@ -1,27 +1,64 @@
-// Info panel -- shows generated artifacts, campaign plan, and iteration loop.
+// Info panel -- shows campaign artifacts, the plan, and the iteration loop.
+//
+// Everything here is driven from real in-app state: artifact counts (compiled
+// harness, corpus, crash inputs) come from the `artifact_summary` command for
+// the active project/target; the plan and loop status from the shared pipeline
+// progress, the selected target/engine, and the live RunOutput context.
 
+import { useEffect, useState } from "react";
 import { FileCode, ListChecks, Repeat, Target as TargetIcon } from "lucide-react";
-import { Badge } from "../ui/Badge";
+import { getTransport } from "../../lib";
+import { PIPELINE_STAGES, usePipeline } from "../../providers/PipelineContext";
+import { useProject } from "../../providers/ProjectContext";
+import { useTarget } from "../../providers/TargetContext";
+import { useRunOutput } from "../../providers/RunOutputContext";
+
+interface ArtifactSummary {
+  harness_built: boolean;
+  corpus_count: number;
+  crash_count: number;
+}
 
 export function InfoPanel() {
-  const artifacts = [
-    { name: "harness.c", type: "harness", size: "340b" },
-    { name: "seed_empty_obj", type: "seed", size: "2b" },
-    { name: "seed_array", type: "seed", size: "7b" },
-    { name: "seed_string", type: "seed", size: "8b" },
-    { name: "crash-abc123", type: "crash", size: "4b" },
-  ];
+  const { isDone, isSkipped, currentStage } = usePipeline();
+  const { activeProject } = useProject();
+  const { target, engine } = useTarget();
+  const { running, lastTarget, lastEngine } = useRunOutput();
+  const [artifacts, setArtifacts] = useState<ArtifactSummary | null>(null);
 
-  const planSteps = [
-    { label: "Discover targets", done: true },
-    { label: "Generate harness", done: true },
-    { label: "Compile in sandbox", done: true },
-    { label: "Generate seeds", done: true },
-    { label: "Run fuzzer", done: false },
-    { label: "Triage crashes", done: false },
-  ];
+  const planSteps = PIPELINE_STAGES.map((s) => ({
+    label: s.label,
+    done: isDone(s.id),
+    skipped: isSkipped(s.id),
+  }));
 
-  const loopStatus = { phase: "Run fuzzer", round: 1, target: "parse_value" };
+  const currentLabel = currentStage
+    ? PIPELINE_STAGES.find((s) => s.id === currentStage)?.label ?? "—"
+    : "All stages complete";
+  const activeTarget = lastTarget || target;
+  const activeEngine = lastEngine || engine;
+
+  // Artifact counts for the active project/target; refresh while a run streams
+  // (corpus/crashes grow) and when the target changes.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      if (!activeProject || !activeTarget) {
+        if (!cancelled) setArtifacts(null);
+        return;
+      }
+      getTransport()
+        .invoke<ArtifactSummary>("artifact_summary", { project: activeProject, target: activeTarget })
+        .then((d) => !cancelled && setArtifacts(d))
+        .catch(() => !cancelled && setArtifacts(null));
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [activeProject, activeTarget, running]);
 
   return (
     <div className="flex flex-col h-full" style={{ background: "var(--surface-secondary)" }}>
@@ -31,18 +68,35 @@ export function InfoPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
-        {/* Generated Artifacts */}
+        {/* Generated Artifacts -- live counts for the active target */}
         <div>
           <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
             <FileCode size={11} /> Artifacts
           </div>
-          {artifacts.map((a, i) => (
-            <div key={i} className="flex items-center gap-2 py-1 text-xs">
-              <span className="font-mono text-text-primary flex-1 truncate">{a.name}</span>
-              <Badge variant={a.type === "crash" ? "error" : a.type === "harness" ? "accent" : "default"}>{a.type}</Badge>
-              <span className="text-text-muted">{a.size}</span>
+          {artifacts ? (
+            <div className="surface-card p-2 flex flex-col gap-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-text-muted">Harness</span>
+                <span style={{ color: artifacts.harness_built ? "var(--success)" : "var(--text-muted)" }}>
+                  {artifacts.harness_built ? "compiled" : "not built"}
+                </span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-text-muted">Corpus inputs</span>
+                <span className="text-text-primary">{artifacts.corpus_count}</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-text-muted">Crash inputs</span>
+                <span style={{ color: artifacts.crash_count > 0 ? "var(--error)" : "var(--text-primary)" }}>
+                  {artifacts.crash_count}
+                </span>
+              </div>
             </div>
-          ))}
+          ) : (
+            <div className="text-xs text-text-muted py-1">
+              Pick a project and target to see artifacts.
+            </div>
+          )}
         </div>
 
         {/* Campaign Plan */}
@@ -64,9 +118,10 @@ export function InfoPanel() {
               >
                 {i + 1}
               </div>
-              <span style={{ color: s.done ? "var(--text-primary)" : "var(--text-muted)", textDecoration: s.done ? "line-through" : "none" }}>
+              <span style={{ color: s.done ? "var(--text-primary)" : "var(--text-muted)", textDecoration: s.done && !s.skipped ? "line-through" : "none" }}>
                 {s.label}
               </span>
+              {s.skipped && <span className="text-text-muted" style={{ fontSize: "10px" }}>(skipped)</span>}
             </div>
           ))}
         </div>
@@ -79,15 +134,15 @@ export function InfoPanel() {
           <div className="surface-card p-2 text-xs">
             <div className="flex justify-between mb-1">
               <span className="text-text-muted">Phase:</span>
-              <span className="text-accent">{loopStatus.phase}</span>
+              <span className="text-accent">{running ? "Run fuzzer" : currentLabel}</span>
             </div>
             <div className="flex justify-between mb-1">
-              <span className="text-text-muted">Round:</span>
-              <span className="text-text-primary">{loopStatus.round}</span>
+              <span className="text-text-muted">Engine:</span>
+              <span className="text-text-primary font-mono">{activeEngine || "—"}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-text-muted">Target:</span>
-              <span className="text-text-primary font-mono">{loopStatus.target}</span>
+              <span className="text-text-primary font-mono">{activeTarget || "—"}</span>
             </div>
           </div>
         </div>

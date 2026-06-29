@@ -21,6 +21,25 @@ pub fn classify(log: &str) -> (CrashKind, String, String) {
     (kind, sig, summary)
 }
 
+/// Whether a sandbox replay trace indicates the input still crashes.
+///
+/// Used by regression rerun ("does this crash still fire?"): a fixed target
+/// replays cleanly (no sanitizer/abort markers), a regressed one prints the
+/// usual sanitizer/`SUMMARY`/deadly-signal lines.
+#[must_use]
+pub fn looks_like_crash(log: &str) -> bool {
+    let l = log.to_ascii_lowercase();
+    l.contains("sanitizer")
+        || l.contains("runtime error")
+        || l.contains("summary:")
+        || l.contains("deadly signal")
+        || l.contains("sigsegv")
+        || l.contains("sigabrt")
+        || l.contains("segv on")
+        || l.contains("==error")
+        || l.contains("== error")
+}
+
 fn detect_kind(log: &str) -> CrashKind {
     let lower = log.to_ascii_lowercase();
     if lower.contains("addresssanitizer") || lower.contains("asan") {
@@ -70,4 +89,25 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
         }
     }
     format!("{kind:?} crash detected")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_crash;
+
+    #[test]
+    fn detects_a_still_firing_crash() {
+        let trace = "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nSUMMARY: AddressSanitizer: heap-buffer-overflow";
+        assert!(looks_like_crash(trace));
+        assert!(looks_like_crash("==42==ERROR: libFuzzer: deadly signal"));
+        assert!(looks_like_crash(
+            "src/x.c:3:5: runtime error: signed integer overflow"
+        ));
+    }
+
+    #[test]
+    fn clean_replay_is_not_a_crash() {
+        assert!(!looks_like_crash(""));
+        assert!(!looks_like_crash("Executed crash-abc in 2 ms\nDone 1 runs"));
+    }
 }

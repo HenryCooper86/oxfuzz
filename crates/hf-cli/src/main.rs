@@ -1,12 +1,15 @@
 //! hobot-fuzz CLI entry point.
+//!
+//! The CLI is a thin presentation layer (AGENTS.md 2.9): every command builds
+//! the canonical [`hf_service::ServiceContainer`] via `bootstrap()` and calls
+//! service methods through it. No domain logic lives here.
 
 mod tui;
 
 use clap::{Parser, Subcommand};
 use hf_core::engine::EngineKind;
-use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::target::TargetLanguage;
-use hf_provider::{OpenAiCompatProvider, ProviderConfig};
+use hf_service::ServiceContainer;
 use std::path::PathBuf;
 
 /// AI fuzzing agent.
@@ -42,6 +45,9 @@ enum Commands {
         /// Fuzzing engine (afl++, honggfuzz, libfuzzer, clusterfuzzlite).
         #[arg(long)]
         engine: String,
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
         /// Skip compile and smoke fuzz (draft only).
         #[arg(long)]
         draft_only: bool,
@@ -56,6 +62,9 @@ enum Commands {
         /// Fuzzing engine.
         #[arg(long)]
         engine: String,
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
         /// Duration (e.g. 60m).
         #[arg(long)]
         duration: Option<String>,
@@ -67,6 +76,9 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
     },
     /// Manage the fuzzing corpus for a target.
     Corpus {
@@ -75,9 +87,76 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Operation: seed, grow, prune, list.
+        /// Operation: seed, grow, prune, minimize, absorb, list.
         #[arg(long)]
         op: String,
+    },
+    /// Report line/function/region coverage for a target's corpus.
+    Coverage {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+    },
+    /// CI gate: harness + short fuzz + triage; write SARIF and exit non-zero
+    /// if any crash is found. Intended for PR pipelines.
+    Ci {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Fuzzing engine. Defaults to libfuzzer.
+        #[arg(long, default_value = "libfuzzer")]
+        engine: String,
+        /// Target language (c, cpp). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
+        /// Fuzz duration (e.g. 120s, 5m). Defaults to 120s.
+        #[arg(long, default_value = "120s")]
+        duration: String,
+        /// SARIF output path. Defaults to `hobot_fuzz.sarif`.
+        #[arg(long, default_value = "hobot_fuzz.sarif")]
+        sarif: PathBuf,
+    },
+    /// Export the latest run's crashes as SARIF (`GitHub` code scanning).
+    Sarif {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Write SARIF to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Replay stored crashes against the current harness (regression check).
+    Regress {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+    },
+    /// Ingest a document (PDF/Office/HTML/...) into the project knowledge base.
+    Ingest {
+        /// Project root path.
+        project: PathBuf,
+        /// Document file to convert and index.
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Compose a detailed Markdown campaign report for a target.
+    Report {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Start the web server (REST API).
     Serve {
@@ -90,211 +169,681 @@ enum Commands {
         /// Project root path.
         project: PathBuf,
     },
+    /// Run one autonomous agent turn over a project (the same agent loop the
+    /// GUI and web API use). Requires an LLM provider (`HF_PROVIDER_API_KEY`).
+    Agent {
+        /// The user message / instruction for the agent.
+        message: String,
+        /// Project root the agent operates on.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Agent definition id (default: the orchestrator).
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Knowledge-base operations (see also `ingest`).
+    Knowledge {
+        #[command(subcommand)]
+        op: KnowledgeOp,
+    },
+    /// Campaign scheduling for headless recurring runs.
+    Schedule {
+        #[command(subcommand)]
+        op: ScheduleOp,
+    },
+    /// Chat session management.
+    Session {
+        #[command(subcommand)]
+        op: SessionOp,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnowledgeOp {
+    /// Index a project's source files into its BM25 knowledge base.
+    Index { project: PathBuf },
+    /// Search a project's knowledge base.
+    Search {
+        project: PathBuf,
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleOp {
+    /// List scheduled campaigns.
+    List,
+    /// Show recent campaign execution history.
+    History {
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Create a scheduled campaign.
+    Create {
+        /// Display name.
+        name: String,
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: String,
+        #[arg(long, default_value = "libfuzzer")]
+        engine: String,
+        /// Trigger kind: interval | cron | once.
+        #[arg(long)]
+        trigger_kind: String,
+        /// Trigger value (interval seconds, a cron expr, or an RFC3339 time).
+        #[arg(long)]
+        trigger_value: String,
+        /// Per-run duration (e.g. 30m, 1h).
+        #[arg(long, default_value = "1h")]
+        duration: String,
+    },
+    /// Delete a scheduled campaign by id.
+    Delete { id: String },
+    /// Enable a scheduled campaign by id.
+    Enable { id: String },
+    /// Disable a scheduled campaign by id.
+    Disable { id: String },
+}
+
+#[derive(Subcommand)]
+enum SessionOp {
+    /// Create a new chat session, printing its id.
+    New {
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Print a session's transcript.
+    History { id: String },
+    /// List a session's per-turn checkpoints.
+    Checkpoints { id: String },
+    /// List the branches in a session's tree.
+    Branches { id: String },
+    /// Roll back the last turn of a session.
+    Rollback { id: String },
 }
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "c" => TargetLanguage::C,
-        "cpp" | "c++" => TargetLanguage::Cpp,
-        "rust" | "rs" => TargetLanguage::Rust,
-        "go" => TargetLanguage::Go,
-        "python" | "py" => TargetLanguage::Python,
-        other => anyhow::bail!("unsupported language: {other}"),
-    })
+    s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
 fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "afl++" | "aflplusplus" => EngineKind::AflPlusPlus,
-        "honggfuzz" | "hfuzz" => EngineKind::Honggfuzz,
-        "libfuzzer" | "libfuzz" => EngineKind::LibFuzzer,
-        "clusterfuzzlite" | "cfl" => EngineKind::ClusterFuzzLite,
-        other => anyhow::bail!("unsupported engine: {other}"),
-    })
-}
-
-/// Build a provider from env vars, if configured.
-fn provider_from_env() -> Option<OpenAiCompatProvider> {
-    let api_key = std::env::var("HF_PROVIDER_API_KEY").ok()?;
-    let model = std::env::var("HF_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
-    let base_url = std::env::var("HF_PROVIDER_BASE_URL")
-        .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
-    let cfg = ProviderConfig {
-        id: "cli".to_owned(),
-        model,
-        api_key,
-        base_url,
-        tags: vec![
-            "general".to_owned(),
-            "reasoning".to_owned(),
-            "code".to_owned(),
-        ],
-        max_concurrency: 1,
-        context_window: 128_000,
-    };
-    Some(OpenAiCompatProvider::new(cfg))
+    s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
 /// Parse a human duration string like "60m", "2h", "30s".
 fn parse_duration(s: &str) -> Result<u64, anyhow::Error> {
     let s = s.trim();
-    if let Some(n) = s.strip_suffix("s") {
+    if let Some(n) = s.strip_suffix('s') {
         return Ok(n.parse()?);
     }
-    if let Some(n) = s.strip_suffix("m") {
+    if let Some(n) = s.strip_suffix('m') {
         return Ok(n.parse::<u64>()? * 60);
     }
-    if let Some(n) = s.strip_suffix("h") {
+    if let Some(n) = s.strip_suffix('h') {
         return Ok(n.parse::<u64>()? * 3600);
     }
     // Fallback: parse as raw seconds.
     Ok(s.parse()?)
 }
 
-/// Build the sandbox runtime. Uses Docker if available, else falls back to
-/// the stub runtime (which returns errors for all operations).
-fn build_runtime(workspace: &std::path::Path) -> Box<dyn hf_core::runtime::RuntimeAdapter> {
-    let use_docker = std::env::var("HF_USE_DOCKER").map_or(true, |v| v != "0" && v != "false");
-    if use_docker && which_docker() {
-        let cfg = hf_runtime::RuntimeConfig::default();
-        Box::new(hf_runtime::docker::DockerRuntime::new(cfg, workspace))
-    } else {
-        eprintln!("warning: Docker not available; using StubRuntime (commands will fail)");
-        Box::new(hf_runtime::StubRuntime)
-    }
-}
+/// An [`EventSink`](hf_agent::EventSink) that renders agent progress to stderr,
+/// keeping stdout reserved for the final answer (so it can be piped).
+struct CliEventSink;
 
-fn which_docker() -> bool {
-    std::process::Command::new("docker")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
-/// Copy C/C++ source and header files from a project into the workspace
-/// so the sandbox can compile the harness + target together.
-fn copy_project_sources(project: &std::path::Path, workspace: &std::path::Path) {
-    let exts = ["c", "h", "cc", "cpp", "cxx", "hpp"];
-    if let Ok(entries) = std::fs::read_dir(project) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+#[async_trait::async_trait]
+impl hf_agent::EventSink for CliEventSink {
+    async fn emit(&self, event: hf_agent::AgentEvent) {
+        match event {
+            hf_agent::AgentEvent::Thinking { text } => eprintln!("[thinking] {text}"),
+            hf_agent::AgentEvent::ToolCall { name, args } => {
+                eprintln!("[tool] {name} {args}");
             }
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if exts.contains(&ext) {
-                    let dest = workspace.join(entry.file_name());
-                    let _ = std::fs::copy(&path, &dest);
-                }
+            hf_agent::AgentEvent::ToolResult { name, summary } => {
+                eprintln!("[result] {name}: {summary}");
             }
+            hf_agent::AgentEvent::Error { message } => eprintln!("[error] {message}"),
+            hf_agent::AgentEvent::Started | hf_agent::AgentEvent::Complete { .. } => {}
         }
     }
 }
 
-/// Handle the `run` subcommand: discover -> draft harness -> compile -> run engine.
-async fn run_command(
-    project: &std::path::Path,
+/// Resolve the user agent-definitions directory: `<repo>/agents`, else
+/// `./agents` (mirrors how `hf-agent` resolves skills).
+fn agents_dir() -> PathBuf {
+    hf_service::repo_root().map_or_else(|| PathBuf::from("agents"), |r| r.join("agents"))
+}
+
+async fn cmd_agent(
+    message: &str,
+    project: Option<PathBuf>,
+    agent: Option<&str>,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    if container.provider_pool().is_none() {
+        anyhow::bail!("agent requires an LLM provider; set HF_PROVIDER_API_KEY");
+    }
+    let sink = CliEventSink;
+    let answer = hf_agent::run_chat_turn(
+        container,
+        project,
+        agent,
+        agents_dir(),
+        None,
+        Vec::new(),
+        message,
+        &sink,
+    )
+    .await?;
+    println!("{answer}");
+    Ok(())
+}
+
+fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
+    match op {
+        KnowledgeOp::Index { project } => {
+            let stats = hf_service::knowledge::index_project(&project)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            println!(
+                "Indexed {} file(s), {} chunk(s).",
+                stats.files, stats.chunks
+            );
+        }
+        KnowledgeOp::Search {
+            project,
+            query,
+            limit,
+        } => {
+            // The BM25 index is process-local (in-memory), so a fresh CLI
+            // process must build it before searching -- a `knowledge index` run
+            // in a separate process left no on-disk index to reuse.
+            if !hf_service::knowledge::is_indexed(&project) {
+                hf_service::knowledge::index_project(&project)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            }
+            let hits = hf_service::knowledge::search_project(&project, &query, limit);
+            if hits.is_empty() {
+                println!("No results.");
+            }
+            for h in hits {
+                println!("{:.3}  {}", h.score, h.file);
+                println!("    {}", h.snippet.replace('\n', " "));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Start a campaign scheduler for a one-shot CLI operation. Background ticking
+/// stops when the process exits; persisted schedules live under the user data
+/// dir (shared with the GUI and web server).
+async fn start_scheduler() -> hf_service::scheduler::CampaignScheduler {
+    let container = ServiceContainer::bootstrap().await;
+    let store_path = hf_service::init::user_app_dir().join("schedules.json");
+    hf_service::scheduler::CampaignScheduler::start(container, store_path).await
+}
+
+async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
+    let scheduler = start_scheduler().await;
+    match op {
+        ScheduleOp::List => {
+            let views = scheduler.list_views().await;
+            if views.is_empty() {
+                println!("No scheduled campaigns.");
+            }
+            for v in views {
+                println!(
+                    "{}  {}  [{}]  {}  target={} engine={} {}s  last={}",
+                    v.id,
+                    v.name,
+                    if v.enabled { "enabled" } else { "disabled" },
+                    v.trigger,
+                    v.target,
+                    v.engine,
+                    v.duration_secs,
+                    v.last_fire.unwrap_or_else(|| "never".to_owned()),
+                );
+            }
+        }
+        ScheduleOp::History { limit } => {
+            for e in scheduler.recent_executions(limit).await {
+                println!(
+                    "{}  {}  {}  {}",
+                    e.triggered_at, e.campaign, e.status, e.summary
+                );
+            }
+        }
+        ScheduleOp::Create {
+            name,
+            project,
+            target,
+            engine,
+            trigger_kind,
+            trigger_value,
+            duration,
+        } => {
+            let trigger = hf_service::scheduler::parse_trigger(&trigger_kind, &trigger_value)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let params = hf_service::scheduler::CampaignParams {
+                project: project.display().to_string(),
+                target,
+                engine,
+                duration_secs: parse_duration(&duration)?,
+            };
+            scheduler.create(&name, &params, trigger).await;
+            println!("Created schedule '{name}'.");
+        }
+        ScheduleOp::Delete { id } => {
+            let msg = if scheduler.remove(&id).await {
+                "Deleted."
+            } else {
+                "No such schedule."
+            };
+            println!("{msg}");
+        }
+        ScheduleOp::Enable { id } => {
+            let msg = if scheduler.set_enabled(&id, true).await {
+                "Enabled."
+            } else {
+                "No such schedule."
+            };
+            println!("{msg}");
+        }
+        ScheduleOp::Disable { id } => {
+            let msg = if scheduler.set_enabled(&id, false).await {
+                "Disabled."
+            } else {
+                "No such schedule."
+            };
+            println!("{msg}");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match op {
+        SessionOp::New { title } => match container.create_chat_session(title).await {
+            Some(id) => println!("{id}"),
+            None => {
+                println!("No database configured (set HF_DB_PATH); cannot persist sessions.");
+            }
+        },
+        SessionOp::History { id } => {
+            let sid = hf_core::types::SessionId(id);
+            for m in container.chat_history(&sid).await {
+                println!("[{:?}] {}", m.role, m.content);
+            }
+        }
+        SessionOp::Checkpoints { id } => {
+            let sid = hf_core::types::SessionId(id);
+            for c in container.chat_checkpoints(&sid).await {
+                println!("{c:?}");
+            }
+        }
+        SessionOp::Branches { id } => {
+            let sid = hf_core::types::SessionId(id);
+            for b in container.chat_branches(&sid).await {
+                println!("{b:?}");
+            }
+        }
+        SessionOp::Rollback { id } => {
+            let sid = hf_core::types::SessionId(id);
+            let n = container.chat_rollback_last(&sid).await;
+            println!("Rolled back {n} message(s).");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Result<()> {
+    let lang = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let mut inv = container.discover(&project, lang).await?;
+    if rank {
+        if container.provider_pool().is_some() {
+            inv = container.rank(inv).await?;
+        } else {
+            eprintln!(
+                "warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"
+            );
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&inv)?);
+    Ok(())
+}
+
+async fn cmd_harness(
+    project: PathBuf,
     target: &str,
     engine: &str,
-    duration: Option<&str>,
-) -> Result<(), anyhow::Error> {
-    let engine_kind = parse_engine(engine)?;
-    let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
-    let inv = hf_discovery::discover(project, TargetLanguage::C).await?;
-    let candidate = inv
-        .candidates
-        .iter()
-        .find(|c| c.symbol == target)
-        .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in project"))?
-        .clone();
-    let provider = provider_from_env().ok_or_else(|| {
-        anyhow::anyhow!("no LLM provider configured; set HF_PROVIDER_API_KEY to generate a harness")
-    })?;
-    let draft = hf_harness::draft(&candidate, engine_kind, Box::new(provider)).await?;
-    let build_cmd =
-        hf_harness::build_command(engine_kind, candidate.language, &format!("fuzz_{target}"));
-    let harness = Harness {
-        id: uuid::Uuid::new_v4(),
-        target_id: candidate.id,
-        engine: engine_kind,
-        source: draft.source,
-        language: candidate.language,
-        build_cmd,
-        sanitizer: hf_core::target::Sanitizer::Address,
-        status: HarnessStatus::Draft,
-        smoke_run: None,
-    };
-    let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
-    std::fs::create_dir_all(&workspace)?;
-    let corpus_dir = workspace.join("corpus");
-    let out_dir = workspace.join("out");
-    std::fs::create_dir_all(&corpus_dir)?;
-    std::fs::create_dir_all(&out_dir)?;
-    std::fs::write(corpus_dir.join("seed_empty"), b"{}")?;
-    std::fs::write(corpus_dir.join("seed_array"), b"[1,2,3]")?;
-    std::fs::write(corpus_dir.join("seed_string"), b"\"hello\"")?;
-    copy_project_sources(project, &workspace);
-    let rt = build_runtime(&workspace);
-    println!("--- Compiling harness in sandbox ---");
-    let compiled = hf_harness::compile(harness, rt.as_ref(), &workspace).await?;
-    println!("compile: status={:?}", compiled.status);
-    let binary_name = compiled
-        .build_cmd
-        .output
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let binary = format!("/work/{binary_name}");
-    let run_cfg = hf_core::engine::FuzzRunConfig {
-        harness_id: compiled.id,
-        engine: engine_kind,
-        duration: Some(std::time::Duration::from_secs(duration_secs)),
-        max_mem_mb: 2048,
-        max_cpus: 1,
-        seed_corpus: Some(corpus_dir.clone()),
-        sanitizer: hf_core::target::Sanitizer::Address,
-        env: Vec::new(),
-        extra_args: Vec::new(),
-    };
-    println!("\n--- Running {engine} for {duration_secs}s ---");
-    let runner = hf_engine::runner::EngineRunner::new();
-    match runner
-        .run(
-            engine_kind,
-            &run_cfg,
-            &binary,
-            "/work/corpus",
-            "/work/out",
-            rt.as_ref(),
-            &workspace,
-        )
+    lang: &str,
+    draft_only: bool,
+) -> anyhow::Result<()> {
+    let engine = parse_engine(engine)?;
+    let lang = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let draft = container
+        .harness_draft(&project, target, engine, lang)
+        .await?;
+    println!("--- Harness draft ---");
+    println!("{}", draft.source);
+    if draft_only {
+        return Ok(());
+    }
+    println!("\n--- Compiling in sandbox ---");
+    let outcome = container
+        .harness_compile(draft.source, &project, engine, target, lang)
+        .await?;
+    println!("compile: status={:?}", outcome.status);
+    println!("\n--- Smoke fuzz ---");
+    match container
+        .harness_smoke(&project, target, engine, lang)
         .await
     {
-        Ok(result) => {
-            println!("\n--- Run summary ---");
-            let execs: Vec<f64> = result
-                .progress
-                .iter()
-                .filter_map(|p| match p {
-                    hf_core::engine::FuzzProgress::ExecsPerSec(e) => Some(*e),
-                    _ => None,
-                })
-                .collect();
-            let crashes = result
-                .progress
-                .iter()
-                .filter(|p| matches!(p, hf_core::engine::FuzzProgress::CrashesFound(_)))
-                .count();
-            if let Some(last) = execs.last() {
-                println!("  execs/sec: {last:.0}");
-            }
-            println!("  crashes detected: {crashes}");
-            println!("  edges covered: {}", result.coverage.edges);
+        Ok(sr) => println!(
+            "smoke: execs/sec={:.0} crashes={} passed={}",
+            sr.execs_per_sec, sr.crashes, sr.passed
+        ),
+        Err(e) => eprintln!("smoke fuzz failed: {e}"),
+    }
+    Ok(())
+}
+
+async fn cmd_run(
+    project: PathBuf,
+    target: &str,
+    engine: &str,
+    lang: &str,
+    duration: Option<&str>,
+) -> anyhow::Result<()> {
+    let engine_kind = parse_engine(engine)?;
+    let lang = parse_lang(lang)?;
+    let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
+    let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
+
+    let draft = container
+        .harness_draft(&project, target, engine_kind, lang)
+        .await?;
+    println!("--- Compiling harness in sandbox ---");
+    let outcome = container
+        .harness_compile(draft.source, &project, engine_kind, target, lang)
+        .await?;
+    println!("compile: status={:?}", outcome.status);
+    // Ensure a seed corpus exists before running. A failure here is not fatal
+    // (the engine can still run on an empty corpus) but must not be silent.
+    if let Err(e) = container.generate_seeds(&project, target) {
+        eprintln!("warning: could not generate seed corpus: {e}");
+    }
+
+    println!("\n--- Running {engine} for {duration_secs}s (live, Ctrl-C to stop) ---");
+    // Run on a task so a Ctrl-C can cancel it cooperatively: the run keeps
+    // executing long enough to tear down the sandbox cleanly and return its
+    // partial results, rather than being dropped mid-flight.
+    let mut handle = {
+        let container = std::sync::Arc::clone(&container);
+        let project = project.clone();
+        let target = target.to_owned();
+        tokio::spawn(async move {
+            let on_progress = |p: hf_core::engine::FuzzProgress| match p {
+                hf_core::engine::FuzzProgress::LogLine(line) => println!("  {line}"),
+                hf_core::engine::FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
+                _ => {}
+            };
+            container
+                .run_fuzzer(&project, &target, engine_kind, duration_secs, &on_progress)
+                .await
+        })
+    };
+
+    let summary = tokio::select! {
+        res = &mut handle => res?,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\n--- Ctrl-C received: cancelling run ---");
+            container.cancel_all_runs();
+            handle.await?
         }
-        Err(e) => eprintln!("run failed: {e}"),
+    }?;
+    println!("\n--- Run summary ---");
+    println!("  execs/sec: {:.0}", summary.execs);
+    println!("  crashes detected: {}", summary.crashes);
+    println!("  edges covered: {}", summary.edges);
+    Ok(())
+}
+
+async fn cmd_triage(project: PathBuf, target: &str, lang: &str) -> anyhow::Result<()> {
+    // Language is validated for a clear error, though triage works off the
+    // already-compiled workspace.
+    let _lang = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let crashes = container.triage(&project, target).await?;
+    if crashes.is_empty() {
+        println!("No crash artifacts found.");
+        return Ok(());
+    }
+    println!("{} unique crash(es) after dedup.", crashes.len());
+    let reports: Vec<serde_json::Value> = crashes
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "kind": format!("{:?}", c.kind),
+                "summary": c.summary,
+                "stack_signature": c.stack_signature,
+                "input_path": c.input_path,
+                "minimized": c.minimized,
+            })
+        })
+        .collect();
+    println!("\n{}", serde_json::to_string_pretty(&reports)?);
+    Ok(())
+}
+
+async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match op {
+        "seed" => {
+            let n = container.corpus_seed(&project, target).await?;
+            println!("Seeded {n} entries.");
+        }
+        "grow" => {
+            let n = container.corpus_grow(&project, target).await?;
+            println!("Corpus now has {n} entries.");
+        }
+        "prune" => {
+            let n = container.corpus_prune(&project, target)?;
+            println!("Pruned to {n} entries.");
+        }
+        "minimize" | "cmin" => {
+            let outcome = container.corpus_minimize(&project, target).await?;
+            println!("Minimized {} -> {} entries.", outcome.before, outcome.after);
+        }
+        "absorb" => {
+            let n = container.corpus_absorb_crashes(&project, target).await?;
+            println!("Absorbed {n} crash reproducer(s) into the corpus.");
+        }
+        "list" => {
+            let corpus = container.corpus_list(&project, target)?;
+            println!("{}", serde_json::to_string_pretty(&corpus.entries)?);
+        }
+        other => {
+            anyhow::bail!("unknown corpus op: {other} (use seed|grow|prune|minimize|absorb|list)")
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_coverage(project: PathBuf, target: &str) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match container.coverage_summary(&project, target).await {
+        Some(s) => {
+            println!("Coverage for {target}:");
+            println!(
+                "  lines:     {}/{} ({:.1}%)",
+                s.lines_covered,
+                s.lines_total,
+                s.line_percent()
+            );
+            println!(
+                "  functions: {}/{} ({:.1}%)",
+                s.functions_covered,
+                s.functions_total,
+                s.function_percent()
+            );
+            println!(
+                "  regions:   {}/{} ({:.1}%)",
+                s.regions_covered,
+                s.regions_total,
+                s.region_percent()
+            );
+        }
+        None => {
+            eprintln!(
+                "No coverage available -- compile a harness and build a corpus first, \
+                 and ensure the sandbox has clang/llvm-cov."
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_ci(
+    project: PathBuf,
+    target: &str,
+    engine: &str,
+    lang: &str,
+    duration: &str,
+    sarif: &std::path::Path,
+) -> anyhow::Result<()> {
+    let engine_kind = parse_engine(engine)?;
+    let lang = parse_lang(lang)?;
+    let duration_secs = parse_duration(duration)?;
+    // CI is a non-interactive, deliberately-automated run. Set permissive
+    // guardrails for this process so the high-risk run/triage steps proceed
+    // without an interactive approval (safe-by-default still applies elsewhere).
+    if std::env::var_os("HF_GUARDRAILS").is_none() {
+        std::env::set_var("HF_GUARDRAILS", "permissive");
+    }
+    let container = ServiceContainer::bootstrap().await;
+
+    println!("[ci] drafting + compiling harness for {target}...");
+    let draft = container
+        .harness_draft(&project, target, engine_kind, lang)
+        .await?;
+    let outcome = container
+        .harness_compile(draft.source, &project, engine_kind, target, lang)
+        .await?;
+    println!("[ci] compile: {:?}", outcome.status);
+    if let Err(e) = container.generate_seeds(&project, target) {
+        eprintln!("[ci] warning: seed generation failed: {e}");
+    }
+
+    println!("[ci] fuzzing {target} for {duration_secs}s...");
+    let on_progress = |p: hf_core::engine::FuzzProgress| {
+        if let hf_core::engine::FuzzProgress::CrashesFound(_) = p {
+            println!("[ci] >> crash found");
+        }
+    };
+    container
+        .run_fuzzer(&project, target, engine_kind, duration_secs, &on_progress)
+        .await?;
+
+    println!("[ci] triaging...");
+    let crashes = container.triage(&project, target).await?;
+
+    // Always emit SARIF (even with zero results) so code scanning can clear
+    // stale alerts when a bug is fixed.
+    let doc = container.export_sarif(&project, target).await?;
+    std::fs::write(sarif, &doc)?;
+    println!("[ci] SARIF written to {}", sarif.display());
+
+    if crashes.is_empty() {
+        println!("[ci] PASS: no crashes found.");
+        Ok(())
+    } else {
+        eprintln!("[ci] FAIL: {} crash(es) found.", crashes.len());
+        for c in &crashes {
+            eprintln!("[ci]   {:?}: {}", c.kind, c.summary);
+        }
+        // Non-zero exit gates the PR; SARIF was already written + can be uploaded.
+        std::process::exit(1);
+    }
+}
+
+async fn cmd_sarif(
+    project: PathBuf,
+    target: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let sarif = container.export_sarif(&project, target).await?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &sarif)?;
+            println!("SARIF written to {}", path.display());
+        }
+        None => println!("{sarif}"),
+    }
+    Ok(())
+}
+
+async fn cmd_ingest(project: PathBuf, file: &std::path::Path) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let stats = container.ingest_document(&project, file).await?;
+    println!(
+        "Ingested {} -> knowledge base now has {} file(s), {} chunk(s).",
+        file.display(),
+        stats.files,
+        stats.chunks
+    );
+    Ok(())
+}
+
+async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let results = container.verify_regressions(&project, target).await?;
+    if results.is_empty() {
+        println!("No stored crashes to replay.");
+        return Ok(());
+    }
+    let still = results.iter().filter(|r| r.still_crashes).count();
+    println!(
+        "Replayed {} crash(es): {still} still crashing, {} fixed.",
+        results.len(),
+        results.len() - still
+    );
+    for r in &results {
+        let tag = if r.still_crashes {
+            "STILL CRASHES"
+        } else {
+            "fixed"
+        };
+        let id = if r.crash_id.is_empty() {
+            ""
+        } else {
+            &r.crash_id[..r.crash_id.len().min(8)]
+        };
+        println!("  [{tag}] {id} {} -- {}", r.input, r.summary);
+    }
+    Ok(())
+}
+
+async fn cmd_report(
+    project: PathBuf,
+    target: &str,
+    out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let markdown = container.generate_report(&project, target).await?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &markdown)?;
+            println!("Report written to {}", path.display());
+        }
+        None => println!("{markdown}"),
     }
     Ok(())
 }
@@ -305,198 +854,68 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => {
-            println!("init: not implemented");
+            let report = hf_service::init_workspace().await?;
+            println!("Initialized hobot_fuzz workspace.");
+            println!("  config dir: {}", report.config_dir.display());
+            if report.created_configs.is_empty() {
+                println!("  config: all files already present");
+            } else {
+                println!("  created: {}", report.created_configs.join(", "));
+            }
+            println!("  database: {}", report.db_path.display());
         }
         Commands::Discover {
             project,
             lang,
             rank,
-        } => {
-            let lang = parse_lang(&lang)?;
-            let mut inv = hf_discovery::discover(&project, lang).await?;
-            if rank {
-                if let Some(provider) = provider_from_env() {
-                    inv = hf_discovery::rank(inv, Box::new(provider)).await?;
-                } else {
-                    eprintln!("warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only");
-                }
-            }
-            let json = serde_json::to_string_pretty(&inv)?;
-            println!("{json}");
-        }
+        } => cmd_discover(project, &lang, rank).await?,
         Commands::Harness {
             project,
             target,
             engine,
+            lang,
             draft_only,
-        } => {
-            let engine = parse_engine(&engine)?;
-            // Discover to find the target.
-            let inv = hf_discovery::discover(&project, TargetLanguage::C).await?;
-            let candidate = inv
-                .candidates
-                .iter()
-                .find(|c| c.symbol == target)
-                .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in project"))?
-                .clone();
-            // Draft using LLM if available.
-            let provider = provider_from_env().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no LLM provider configured; set HF_PROVIDER_API_KEY to generate a harness"
-                )
-            })?;
-            let draft = hf_harness::draft(&candidate, engine, Box::new(provider)).await?;
-            println!("--- Harness draft ---");
-            println!("{}", draft.source);
-            if draft_only {
-                return Ok(());
-            }
-            // Compile + smoke (requires sandbox).
-            let build_cmd: BuildCommand =
-                hf_harness::build_command(engine, candidate.language, &format!("fuzz_{target}"));
-            let harness = Harness {
-                id: uuid::Uuid::new_v4(),
-                target_id: candidate.id,
-                engine,
-                source: draft.source,
-                language: candidate.language,
-                build_cmd,
-                sanitizer: hf_core::target::Sanitizer::Address,
-                status: HarnessStatus::Draft,
-                smoke_run: None,
-            };
-            println!("\n--- Compiling in sandbox ---");
-            let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
-            std::fs::create_dir_all(&workspace)?;
-            let rt = build_runtime(&workspace);
-            match hf_harness::compile(harness, rt.as_ref(), &workspace).await {
-                Ok(h) => {
-                    println!("compile: status={:?}", h.status);
-                    println!("\n--- Smoke fuzz ---");
-                    match hf_harness::smoke_fuzz(h, rt.as_ref(), &workspace).await {
-                        Ok(h) => {
-                            println!("smoke: status={:?}", h.status);
-                            if let Some(sr) = &h.smoke_run {
-                                println!(
-                                    "  execs/sec={:.0} crashes={} passed={}",
-                                    sr.execs_per_sec, sr.crashes, sr.passed
-                                );
-                            }
-                        }
-                        Err(e) => eprintln!("smoke fuzz failed: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("compile failed: {e}"),
-            }
-        }
+        } => cmd_harness(project, &target, &engine, &lang, draft_only).await?,
         Commands::Run {
             project,
             target,
             engine,
+            lang,
             duration,
-        } => {
-            run_command(&project, &target, &engine, duration.as_deref()).await?;
-        }
-        Commands::Triage { project, target } => {
-            let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
-            let out_dir = workspace.join("out");
-            // Discover to find the target ID.
-            let inv = hf_discovery::discover(&project, TargetLanguage::C).await?;
-            let candidate = inv
-                .candidates
-                .iter()
-                .find(|c| c.symbol == target)
-                .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in project"))?;
-            let target_id = candidate.id;
-            let run_id = uuid::Uuid::new_v4();
-            println!("Scanning {} for crash artifacts...", out_dir.display());
-            let crashes = hf_crash::ingest(&out_dir, run_id, target_id)
-                .map_err(|e| anyhow::anyhow!("ingest failed: {e}"))?;
-            if crashes.is_empty() {
-                println!("No crash artifacts found in {}.", out_dir.display());
-                return Ok(());
-            }
-            println!(
-                "Found {} crash artifact(s); deduplicating...",
-                crashes.len()
-            );
-            let deduped = hf_crash::dedup(crashes);
-            println!("{} unique crash(es) after dedup.", deduped.len());
-            // Draft bug reports if LLM is configured.
-            let provider = provider_from_env();
-            let mut reports: Vec<serde_json::Value> = Vec::new();
-            for crash in &deduped {
-                if let Some(ref _provider) = provider {
-                    // Would call draft_report here; needs the crash log.
-                    // For now, just attach the crash metadata.
-                    reports.push(serde_json::json!({
-                        "id": crash.id,
-                        "kind": format!("{:?}", crash.kind),
-                        "summary": crash.summary,
-                        "stack_signature": crash.stack_signature,
-                        "input_path": crash.input_path,
-                        "minimized": crash.minimized,
-                    }));
-                } else {
-                    reports.push(serde_json::json!({
-                        "id": crash.id,
-                        "kind": format!("{:?}", crash.kind),
-                        "summary": crash.summary,
-                        "stack_signature": crash.stack_signature,
-                        "input_path": crash.input_path,
-                        "minimized": crash.minimized,
-                    }));
-                }
-            }
-            let json = serde_json::to_string_pretty(&reports)?;
-            println!("\n{json}");
-        }
+        } => cmd_run(project, &target, &engine, &lang, duration.as_deref()).await?,
+        Commands::Triage {
+            project,
+            target,
+            lang,
+        } => cmd_triage(project, &target, &lang).await?,
         Commands::Corpus {
             project,
             target,
             op,
-        } => {
-            let workspace = std::env::temp_dir().join("hobot_fuzz_workspace");
-            let corpus_dir = workspace.join("corpus");
-            let out_dir = workspace.join("out");
-            match op.as_str() {
-                "seed" => {
-                    std::fs::create_dir_all(&corpus_dir)?;
-                    let seeds = vec![
-                        (b"{}".to_vec(), "seed_empty".to_owned()),
-                        (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
-                        (b"\"hello\"".to_vec(), "seed_string".to_owned()),
-                    ];
-                    let corpus = hf_corpus::seed(uuid::Uuid::new_v4(), &corpus_dir, seeds)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("seed failed: {e}"))?;
-                    println!("Seeded {} entries.", corpus.entries.len());
-                }
-                "grow" => {
-                    let corpus = hf_corpus::grow(&corpus_dir, &out_dir)
-                        .map_err(|e| anyhow::anyhow!("grow failed: {e}"))?;
-                    println!("Corpus now has {} entries.", corpus.entries.len());
-                }
-                "prune" => {
-                    let corpus = hf_corpus::list(&corpus_dir)
-                        .map_err(|e| anyhow::anyhow!("list failed: {e}"))?;
-                    let pruned = hf_corpus::prune(corpus)
-                        .map_err(|e| anyhow::anyhow!("prune failed: {e}"))?;
-                    println!("Pruned to {} entries.", pruned.entries.len());
-                }
-                "list" => {
-                    let corpus = hf_corpus::list(&corpus_dir)
-                        .map_err(|e| anyhow::anyhow!("list failed: {e}"))?;
-                    let json = serde_json::to_string_pretty(&corpus.entries)?;
-                    println!("{json}");
-                }
-                other => anyhow::bail!("unknown corpus op: {other} (use seed|grow|prune|list)"),
-            }
-            let _ = &project;
-            let _ = &target;
-        }
+        } => cmd_corpus(project, &target, &op).await?,
+        Commands::Coverage { project, target } => cmd_coverage(project, &target).await?,
+        Commands::Ci {
+            project,
+            target,
+            engine,
+            lang,
+            duration,
+            sarif,
+        } => cmd_ci(project, &target, &engine, &lang, &duration, &sarif).await?,
+        Commands::Regress { project, target } => cmd_regress(project, &target).await?,
+        Commands::Ingest { project, file } => cmd_ingest(project, &file).await?,
+        Commands::Sarif {
+            project,
+            target,
+            out,
+        } => cmd_sarif(project, &target, out.as_deref()).await?,
+        Commands::Report {
+            project,
+            target,
+            out,
+        } => cmd_report(project, &target, out.as_deref()).await?,
         Commands::Serve { port } => {
-            let app = hf_web::build();
+            let app = hf_web::build_bootstrapped().await;
             let addr = format!("0.0.0.0:{port}");
             println!("hobot-fuzz web server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -505,6 +924,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tui { project } => {
             tui::Tui::run(&project).await?;
         }
+        Commands::Agent {
+            message,
+            project,
+            agent,
+        } => cmd_agent(&message, project, agent.as_deref()).await?,
+        Commands::Knowledge { op } => cmd_knowledge(op)?,
+        Commands::Schedule { op } => cmd_schedule(op).await?,
+        Commands::Session { op } => cmd_session(op).await?,
     }
     Ok(())
 }

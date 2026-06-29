@@ -2,9 +2,12 @@
 //!
 //! See `docs/design/corpus-coverage-design.md`.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hf_core::coverage::CoverageReport;
+
+mod summary;
+pub use summary::{parse_llvm_cov_summary, CoverageSummary};
 
 /// A proposal when coverage stagnates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +102,3 @@ pub fn propose_action(
         None
     }
 }
-
-#[allow(dead_code)]
-fn _ensure_duration_used(_d: Duration) {}

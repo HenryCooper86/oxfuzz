@@ -10,11 +10,17 @@ hf-core = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+tempfile = { workspace = true }
+sqlx = { workspace = true }
 
 [lints]
 workspace = true

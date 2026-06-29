@@ -8,14 +8,24 @@ description = "Agent loop, delegation, sub-agent pools"
 [dependencies]
 hf-core = { workspace = true }
 hf-service = { workspace = true }
+hf-context = { workspace = true }
+hf-tools = { workspace = true }
+hf-guardrails = { workspace = true }
+hf-skills = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+hf-runtime = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

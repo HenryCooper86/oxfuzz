@@ -1,32 +1,62 @@
-// Diagnostics panel -- shows LLM call timeline for harness generation / triage.
+// Diagnostics panel -- live LLM cost/usage for this session, backed by
+// hf-service::diagnostics (the DiagnosticsRecorder that every LLM call -- rank,
+// harness drafting, triage bug reports, chat -- reports into). Totals are
+// in-memory and cover the current app session.
 
-import { useState } from "react";
-import { Activity, ChevronRight, ChevronDown, Copy, Clock } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Activity, Loader2, RotateCw } from "lucide-react";
+import { getTransport } from "../../lib";
 import { Badge } from "../ui/Badge";
-import { Separator } from "../ui/Separator";
 
-interface DiagEntry {
-  id: string;
-  timestamp: string;
-  type: string;
-  duration_ms: number;
-  tokens_in: number;
-  tokens_out: number;
-  cost: number;
-  status: "ok" | "error";
-  summary: string;
-  detail?: string;
+interface ModelCost {
+  model: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+interface CostSummary {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  by_model: ModelCost[];
 }
 
-const mockEntries: DiagEntry[] = [
-  { id: "1", timestamp: "10:34:12", type: "llm.complete", duration_ms: 1200, tokens_in: 500, tokens_out: 120, cost: 0.003, status: "ok", summary: "Harness draft for parse_value", detail: "Generated LLVMFuzzerTestOneInput scaffold" },
-  { id: "2", timestamp: "10:34:15", type: "sandbox.compile", duration_ms: 3000, tokens_in: 0, tokens_out: 0, cost: 0, status: "ok", summary: "Compiled fuzz_parse_value in Docker" },
-  { id: "3", timestamp: "10:34:20", type: "engine.run", duration_ms: 15000, tokens_in: 0, tokens_out: 0, cost: 0, status: "ok", summary: "libFuzzer: 35 edges, 3 crashes in 15s" },
-];
+const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+const fmtCost = (n: number) => (n > 0 ? `$${n.toFixed(n < 0.01 ? 4 : 2)}` : "$0");
 
 export function DiagnosticsPanel() {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const entries = mockEntries;
+  const [data, setData] = useState<CostSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(() => {
+    getTransport()
+      .invoke<CostSummary>("diagnostics_cost_summary")
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  // Initial load + light polling so cost updates as the agent works.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      getTransport()
+        .invoke<CostSummary>("diagnostics_cost_summary")
+        .then((d) => !cancelled && setData(d))
+        .catch(() => !cancelled && setData(null))
+        .finally(() => !cancelled && setLoading(false));
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const empty = !data || data.calls === 0;
 
   return (
     <div className="flex flex-col h-full" style={{ background: "var(--surface-secondary)" }}>
@@ -35,50 +65,60 @@ export function DiagnosticsPanel() {
           <Activity size={14} style={{ color: "var(--accent)" }} />
           <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>Diagnostics</span>
         </div>
-        <Badge variant="accent">{entries.length}</Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="default">{data?.calls ?? 0}</Badge>
+          <button onClick={load} className="text-text-muted hover:text-text-primary" title="Refresh">
+            {loading ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
+          </button>
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-1">
-        {entries.map((e) => (
-          <div key={e.id} className="mb-1">
-            <button
-              onClick={() => setExpanded(expanded === e.id ? null : e.id)}
-              className="flex items-center gap-2 w-full text-left rounded-md p-2 transition-colors duration-100 hover:bg-surface-hover"
-              style={{ border: "none", background: "transparent", cursor: "pointer" }}
-            >
-              {expanded === e.id ? <ChevronDown size={12} className="text-text-muted shrink-0" /> : <ChevronRight size={12} className="text-text-muted shrink-0" />}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono text-text-primary truncate">{e.type}</span>
-                  {e.status === "ok" ? <Badge variant="success">ok</Badge> : <Badge variant="error">err</Badge>}
-                </div>
-                <span className="text-xs text-text-muted truncate block">{e.summary}</span>
-              </div>
-              <div className="flex flex-col items-end shrink-0">
-                <span className="text-xs text-text-muted flex items-center gap-1"><Clock size={9} />{e.duration_ms}ms</span>
-                {e.cost > 0 && <span className="text-xs text-text-muted">${e.cost.toFixed(4)}</span>}
-              </div>
-            </button>
-            {expanded === e.id && e.detail && (
-              <div className="ml-6 mt-1 mb-2 p-2 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-text-muted">Detail</span>
-                  <button onClick={() => navigator.clipboard.writeText(e.detail ?? "")} className="text-text-muted hover:text-text-primary" style={{ background: "transparent", border: "none", cursor: "pointer" }}>
-                    <Copy size={11} />
-                  </button>
-                </div>
-                <pre className="text-xs text-text-secondary" style={{ fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap" }}>{e.detail}</pre>
-                <Separator />
-                <div className="flex gap-3 mt-1 text-xs text-text-muted">
-                  <span>in: {e.tokens_in}</span>
-                  <span>out: {e.tokens_out}</span>
-                  <span>cost: ${e.cost.toFixed(4)}</span>
-                </div>
-              </div>
-            )}
+      {empty ? (
+        <div className="flex-1 overflow-y-auto p-2 flex items-center justify-center">
+          <div className="flex flex-col items-center text-center gap-1" style={{ opacity: 0.7 }}>
+            <Activity size={20} className="text-text-muted" style={{ opacity: 0.5 }} />
+            <span className="text-xs text-text-muted">No LLM calls yet</span>
+            <span className="text-xs text-text-muted" style={{ opacity: 0.7 }}>Rank, harness, triage, and chat are tracked here.</span>
           </div>
-        ))}
-      </div>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
+          {/* Session totals */}
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="Cost" value={fmtCost(data.cost_usd)} accent />
+            <Stat label="Calls" value={`${data.calls}`} />
+            <Stat label="Tokens" value={fmtTokens(data.input_tokens + data.output_tokens)} />
+          </div>
+
+          {/* Per-model breakdown */}
+          <div>
+            <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>By Model</div>
+            <div className="flex flex-col">
+              {data.by_model.map((m) => (
+                <div key={m.model} className="flex items-center gap-2 py-1.5 border-b border-border last:border-0 text-xs">
+                  <span className="font-mono flex-1 truncate" title={m.model}>{m.model}</span>
+                  <span className="text-text-muted">{m.calls}×</span>
+                  <span className="text-text-muted font-mono" style={{ minWidth: "52px", textAlign: "right" }}>
+                    {fmtTokens(m.input_tokens + m.output_tokens)} tok
+                  </span>
+                  <span className="font-mono" style={{ minWidth: "56px", textAlign: "right", color: m.cost_usd > 0 ? "var(--accent)" : "var(--text-muted)" }}>
+                    {fmtCost(m.cost_usd)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="rounded-md p-2" style={{ background: "var(--surface-code)" }}>
+      <div className="text-xs text-text-muted">{label}</div>
+      <div className="text-sm font-mono font-semibold" style={{ color: accent ? "var(--accent)" : "var(--text-primary)" }}>{value}</div>
     </div>
   );
 }
