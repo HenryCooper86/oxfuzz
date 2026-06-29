@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use hf_core::error::ClassifiedError;
 use hf_core::provider::{ChatRequest, RouteRequest};
-use hf_core::types::{Message, Role};
+use hf_core::types::{Message, Role, SessionId};
 use hf_guardrails::{LoopGuard, StepRecord};
 use hf_service::ServiceContainer;
 use hf_tools::registry::ToolRegistryImpl;
@@ -279,6 +279,73 @@ you receive its result and continue until you can give a final answer.",
 /// live here; built-in skills are embedded and always available.
 fn skills_dir() -> PathBuf {
     hf_service::repo_root().map_or_else(|| PathBuf::from("skills"), |r| r.join("skills"))
+}
+
+/// Run one chat turn through the agent loop, the single code path shared by
+/// every presentation layer (GUI/web/CLI) so they all drive the agent
+/// identically (AGENTS.md 2.9 -- orchestration lives here, not in the
+/// presentation crates).
+///
+/// History is resolved from the persistent session transcript when `session`
+/// names one and a database is configured; otherwise `history_fallback` is
+/// used. After a successful turn, when a session is active the pre-turn state is
+/// checkpointed and the user+assistant messages are appended so the turn can be
+/// rolled back. The `container` must already carry the desired guardrail policy
+/// (e.g. an interactive approval gate for the GUI).
+///
+/// # Errors
+/// Returns `ClassifiedError` if the session transcript cannot be read, no
+/// provider is configured, or an LLM call fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_chat_turn(
+    container: ServiceContainer,
+    project: Option<PathBuf>,
+    agent_id: Option<&str>,
+    agents_dir: PathBuf,
+    session: Option<SessionId>,
+    history_fallback: Vec<Message>,
+    message: &str,
+    sink: &dyn EventSink,
+) -> Result<String, ClassifiedError> {
+    // Resolve the conversation history: prefer the persisted transcript.
+    let has_session = session.is_some() && container.session_manager().is_some();
+    let history = if let (Some(id), Some(manager)) = (&session, container.session_manager()) {
+        manager
+            .read_transcript(id)
+            .await
+            .map_err(|e| ClassifiedError::Internal(format!("read transcript: {e}")))?
+    } else {
+        history_fallback
+    };
+    // Transcript length before this turn -- a rollback restores to here.
+    let message_count_before = u32::try_from(history.len()).unwrap_or(u32::MAX);
+
+    // Select the agent definition (default: orchestrator) and run the turn.
+    let registry = AgentRegistry::with_user_dir(agents_dir);
+    let definition = agent_id
+        .filter(|s| !s.is_empty())
+        .and_then(|id| registry.get(id).cloned())
+        .unwrap_or_else(|| registry.default_agent());
+    let agent = Agent::with_definition(container.clone(), project, definition);
+    let answer = agent.run_turn(history, message, sink).await?;
+
+    // Persist the turn (checkpoint + user/assistant messages) when a session is
+    // active, so the conversation survives and can be rolled back.
+    if has_session {
+        if let Some(id) = &session {
+            container
+                .chat_create_checkpoint(id, message_count_before)
+                .await;
+            if let Some(manager) = container.session_manager() {
+                let _ = manager.append_message(id, &Message::user(message)).await;
+                let _ = manager
+                    .append_message(id, &Message::assistant(answer.clone()))
+                    .await;
+            }
+        }
+    }
+
+    Ok(answer)
 }
 
 /// Parse a model reply into a [`Step`], tolerating code fences, surrounding
