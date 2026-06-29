@@ -12,7 +12,8 @@ use crate::classify::classify;
 ///
 /// libFuzzer writes `crash-*`, `leak-*`, `timeout-*` files.
 /// AFL++ writes to a `crashes/` subdirectory.
-/// honggfuzz writes to `HF_WORKSPACE`.
+/// honggfuzz writes `SIG<signal>.PC.*` crash files plus a `HONGGFUZZ.REPORT.TXT`
+/// alongside them in the run directory.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the directory cannot be read.
@@ -96,6 +97,19 @@ fn is_crash_artifact(name: &str) -> bool {
         || name.starts_with("leak-")
         || name.starts_with("timeout-")
         || name.starts_with("oom-")
+        // honggfuzz names crash files after the fatal signal, e.g.
+        // `SIGSEGV.PC.<...>.fuzz` / `SIGABRT.PC.<...>.fuzz`.
+        || is_honggfuzz_crash(name)
+}
+
+/// Whether `name` looks like a honggfuzz crash artifact (`SIG<signal>.*`).
+fn is_honggfuzz_crash(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("SIG") else {
+        return false;
+    };
+    // A signal name (uppercase letters/digits) followed by honggfuzz's
+    // `.PC.`/`.STACK.` detail fields -- not, say, a `SIGNALS.md` doc.
+    rest.starts_with(|c: char| c.is_ascii_uppercase()) && name.contains(".PC.")
 }
 
 /// Find a sanitizer report to classify a crash artifact from.
@@ -140,7 +154,9 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
             let is_text = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| e == "txt" || e == "log");
+                // honggfuzz writes an uppercase `HONGGFUZZ.REPORT.TXT`, so match
+                // the extension case-insensitively.
+                .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"));
             if !is_text {
                 continue;
             }
@@ -168,4 +184,7 @@ fn looks_like_sanitizer_report(s: &str) -> bool {
         || lower.contains("summary:")
         || lower.contains("asan")
         || lower.contains("ubsan")
+        // honggfuzz HONGGFUZZ.REPORT.TXT field markers.
+        || lower.contains("stack hash")
+        || lower.contains("fault address")
 }

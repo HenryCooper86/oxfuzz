@@ -106,6 +106,36 @@ pub fn parse_progress(stdout: &str) -> Vec<FuzzProgress> {
     stdout.lines().filter_map(parse_progress_line).collect()
 }
 
+/// Parse a `syz-manager` stdout buffer into final progress events.
+///
+/// syz-manager reports absolute, cumulative counters on each status line, so
+/// unlike [`parse_progress`] (which treats every `crashes N` token as one
+/// finding) this collapses the stream to the peak coverage and the peak crash
+/// count -- yielding at most one [`FuzzProgress::EdgesCovered`] and one
+/// [`FuzzProgress::CrashesFound`], matching how the service layer maxes edges
+/// and sums crash events.
+#[must_use]
+pub fn parse_syzkaller_progress(stdout: &str) -> Vec<FuzzProgress> {
+    let mut peak_cover = 0u64;
+    let mut peak_crashes = 0u64;
+    for line in stdout.lines() {
+        if let Some((cover, _executed, crashes)) = parse_syzkaller_status(line) {
+            peak_cover = peak_cover.max(cover);
+            peak_crashes = peak_crashes.max(crashes);
+        }
+    }
+    let mut events = Vec::new();
+    if peak_cover > 0 {
+        events.push(FuzzProgress::EdgesCovered(peak_cover));
+    }
+    if peak_crashes > 0 {
+        events.push(FuzzProgress::CrashesFound(
+            u32::try_from(peak_crashes).unwrap_or(u32::MAX),
+        ));
+    }
+    events
+}
+
 /// Parse a coverage report from engine stdout.
 ///
 /// `edges` is the peak edge/PC count reported in the stream, and `delta_edges`
@@ -229,5 +259,40 @@ mod tests {
     fn non_status_lines_return_none() {
         assert_eq!(parse_syzkaller_status("booting test machines..."), None);
         assert_eq!(parse_syzkaller_status("cover: 10 exec/s: 5"), None);
+    }
+
+    #[test]
+    fn syzkaller_progress_collapses_to_peak_cover_and_crashes() {
+        use super::parse_syzkaller_progress;
+        let log = "\
+booting test machines...
+VMs 2, executed 100, cover 50, signal 40, crashes 0, repro 0
+VMs 2, executed 5000, cover 6789, signal 5432, crashes 2, repro 0
+VMs 2, executed 9000, cover 6789, signal 5432, crashes 2, repro 0";
+        let events = parse_syzkaller_progress(log);
+        // Peak coverage, reported once.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, FuzzProgress::EdgesCovered(6789)))
+                .count(),
+            1
+        );
+        // The absolute crash count, not one-per-status-line.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, FuzzProgress::CrashesFound(2)))
+                .count(),
+            1
+        );
+        // No spurious extra crash events from the repeated status lines.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, FuzzProgress::CrashesFound(_)))
+                .count(),
+            1
+        );
     }
 }
