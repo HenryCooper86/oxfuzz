@@ -919,19 +919,7 @@ pub fn delete_agent(id: String) -> Result<(), String> {
 pub async fn create_session(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Option<String>, String> {
-    let Some(manager) = state.container.session_manager() else {
-        return Ok(None);
-    };
-    let node = manager
-        .create_session(hf_core::session::CreateSessionOptions {
-            parent_id: None,
-            session_type: hf_core::session::SessionType::Main,
-            agent_id: None,
-            title: Some("Chat".to_owned()),
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(node.id.0))
+    Ok(state.container.create_chat_session(None).await)
 }
 
 /// Roll back the most recent chat turn for a session, truncating the persisted
@@ -1054,27 +1042,15 @@ pub async fn chat_agent(
     agent_id: Option<String>,
 ) -> Result<String, String> {
     let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
-
-    // Resolve a persistent session if one was requested and available.
     let session = session_id
         .filter(|s| !s.is_empty())
-        .map(hf_core::types::SessionId)
-        .zip(state.container.session_manager());
-
-    let history: Vec<hf_core::types::Message> = if let Some((id, manager)) = &session {
-        manager
-            .read_transcript(id)
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        history
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| hf_core::types::Message::new(parse_role(&t.role), t.content))
-            .collect()
-    };
-    // Transcript length before this turn -- a rollback restores to here.
-    let message_count_before = u32::try_from(history.len()).unwrap_or(u32::MAX);
+        .map(hf_core::types::SessionId);
+    // Frontend-supplied history, used only when no persistent session applies.
+    let history_fallback: Vec<hf_core::types::Message> = history
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| hf_core::types::Message::new(parse_role(&t.role), t.content))
+        .collect();
 
     // Run with an interactive guardrail gate: high-risk tool calls (e.g. run a
     // fuzzer) prompt the user via `chat:permission_request` before executing.
@@ -1085,38 +1061,22 @@ pub async fn chat_agent(
     let guardrails =
         hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
     let container = state.container.clone().with_guardrails(guardrails);
-
-    // Drive the chat with the chosen agent (default: orchestrator). Its
-    // definition sets the system prompt, the callable tools, model routing, and
-    // the iteration budget.
-    let registry = hf_agent::AgentRegistry::with_user_dir(agents_dir());
-    let definition = agent_id
-        .filter(|s| !s.is_empty())
-        .and_then(|id| registry.get(&id).cloned())
-        .unwrap_or_else(|| registry.default_agent());
-    let agent = hf_agent::Agent::with_definition(container, project, definition);
     let sink = TauriEventSink { app };
-    let answer = agent
-        .run_turn(history, &message, &sink)
-        .await
-        .map_err(|e| e.to_string())?;
 
-    // Persist the turn (user + assistant) when a session is active, checkpointing
-    // the pre-turn state first so the turn can be rolled back.
-    if let Some((id, manager)) = &session {
-        state
-            .container
-            .chat_create_checkpoint(id, message_count_before)
-            .await;
-        let _ = manager
-            .append_message(id, &hf_core::types::Message::user(message))
-            .await;
-        let _ = manager
-            .append_message(id, &hf_core::types::Message::assistant(answer.clone()))
-            .await;
-    }
-
-    Ok(answer)
+    // Drive the turn through the shared service-layer orchestration so the GUI,
+    // web, and CLI all run the agent identically (AGENTS.md 2.9).
+    hf_agent::run_chat_turn(
+        container,
+        project,
+        agent_id.as_deref(),
+        agents_dir(),
+        session,
+        history_fallback,
+        &message,
+        &sink,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -11,11 +11,15 @@ path = "src/main.rs"
 
 [dependencies]
 # The CLI is a thin presentation layer: domain crates are reached through
-# hf-service, not depended on directly. hf-discovery is used only by the TUI.
+# hf-service, not depended on directly.
 hf-core = { workspace = true }
 hf-service = { workspace = true }
-hf-discovery = { workspace = true }
 hf-web = { workspace = true }
+# The agent loop lives in hf-agent (which depends on hf-service, so hf-service
+# cannot host it without a cycle); presentation layers call its shared
+# `run_chat_turn` entry point directly, as the GUI shell does.
+hf-agent = { workspace = true }
+async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
