@@ -1,6 +1,7 @@
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { pickFolder } from "../lib";
+import { EmptyState } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder } from "lucide-react";
 
 export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => void }) {
@@ -39,14 +40,23 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
       </div>
 
       {recentProjects.length === 0 ? (
-        <div
-          className="surface-card flex flex-col items-center justify-center"
-          style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
-        >
-          <Folder size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">No projects yet.</p>
-          <p className="text-xs text-text-muted mt-1">Add a C/C++ project folder to start discovering targets.</p>
-        </div>
+        <EmptyState
+          icon={<Folder size={20} />}
+          title="No projects yet"
+          hint="Add a C/C++ project folder to start discovering targets."
+          action={
+            <button
+              onClick={addProject}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none"
+              style={{ background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.85")}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            >
+              <FolderPlus size={14} />
+              Add project
+            </button>
+          }
+        />
       ) : (
         <div className="flex flex-col gap-1.5">
           {recentProjects.map((path) => {
