@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Minus, RotateCcw } from "lucide-react";
 import { usePipeline, PIPELINE_STAGES, type StageId } from "../providers/PipelineContext";
+import { useI18n } from "../i18n";
 
 export function ProgressPanel() {
   const { isDone, isSkipped, currentStage, completed, reset } = usePipeline();
+  const { t } = useI18n();
   const [open, setOpen] = useState(true);
   const total = PIPELINE_STAGES.length;
   const doneCount = completed.length;
@@ -32,7 +34,7 @@ export function ProgressPanel() {
             }}
           >
             <span className="flex items-center gap-2">
-              <span className="text-sm font-semibold">Progress</span>
+              <span className="text-sm font-semibold">{t("progress.title")}</span>
               <span className="text-xs text-text-muted">
                 {doneCount}/{total}
               </span>
@@ -61,7 +63,7 @@ export function ProgressPanel() {
                 <StepRow
                   key={stage.id}
                   index={i + 1}
-                  label={stage.label}
+                  label={t(`stage.${stage.id}`)}
                   done={isDone(stage.id as StageId)}
                   skipped={isSkipped(stage.id as StageId)}
                   current={currentStage === stage.id}
@@ -80,7 +82,7 @@ export function ProgressPanel() {
             onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
           >
             <RotateCcw size={12} />
-            Reset progress
+            {t("progress.reset")}
           </button>
         )}
       </div>
