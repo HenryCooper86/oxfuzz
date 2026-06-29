@@ -86,12 +86,15 @@ impl StandardError {
     /// Whether this error should NOT cause a provider freeze.
     ///
     /// Some errors (context window, content filter) are request-specific
-    /// and don't indicate a provider problem.
+    /// and don't indicate a provider problem, so they never freeze. Network
+    /// errors, by contrast, are transient provider issues ([`is_transient`])
+    /// with a defined [`freeze_duration`] (30s): they freeze briefly so the
+    /// pool fails over instead of hammering an unreachable provider.
+    ///
+    /// [`is_transient`]: Self::is_transient
+    /// [`freeze_duration`]: Self::freeze_duration
     pub fn should_freeze(&self) -> bool {
-        !matches!(
-            self,
-            Self::ContextWindowExceeded | Self::ContentFiltered | Self::NetworkError
-        )
+        !matches!(self, Self::ContextWindowExceeded | Self::ContentFiltered)
     }
 }
 
@@ -380,6 +383,14 @@ mod tests {
         assert!(!StandardError::ContentFiltered.should_freeze());
         assert!(StandardError::RateLimited { retry_after: None }.should_freeze());
         assert!(StandardError::KeyInvalid.should_freeze());
+        // Network errors are transient with a 30s freeze duration, so they must
+        // freeze (enabling failover) rather than being excluded.
+        assert!(StandardError::NetworkError.should_freeze());
+        assert!(StandardError::NetworkError.is_transient());
+        assert_eq!(
+            StandardError::NetworkError.freeze_duration(),
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]
