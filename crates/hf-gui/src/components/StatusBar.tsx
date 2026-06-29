@@ -29,6 +29,10 @@ export function StatusBar() {
   const { sandboxArch } = usePrefs();
   const { activeEngine } = useRunStatus();
   const [status, setStatus] = useState<SystemStatus | null>(null);
+  // Which engine kinds are enabled in settings (config/engines.toml). Disabled
+  // engines are dimmed below so the bar matches the Run panel. Empty until
+  // loaded -> treated as all-enabled to avoid a flash of dimmed dots.
+  const [enabledEngines, setEnabledEngines] = useState<Record<string, boolean>>({});
   const [dockerMsg, setDockerMsg] = useState<string | null>(null);
   const [time, setTime] = useState(new Date().toLocaleTimeString());
 
@@ -55,9 +59,31 @@ export function StatusBar() {
         t.invoke<SystemStatus>("system_status").then(setStatus).catch(() => setStatus(EMPTY_STATUS)),
       );
 
-    // Keep the indicators fresh (the daemon can stop/start under us).
+    // Read which engines are enabled in settings so disabled ones can be dimmed.
+    const refreshEnabled = () => {
+      t.invoke<string>("read_config", { name: "engines" })
+        .then((text) =>
+          t.invoke<{ engines?: { kind?: string; enabled?: boolean }[] }>("config_toml_to_value", {
+            content: text,
+          }),
+        )
+        .then((cfg) => {
+          const map: Record<string, boolean> = {};
+          for (const e of cfg.engines ?? []) {
+            // An entry with `enabled` unset defaults to enabled.
+            if (e.kind) map[e.kind] = e.enabled !== false;
+          }
+          setEnabledEngines(map);
+        })
+        .catch(() => {});
+    };
+    refreshEnabled();
+
+    // Keep the indicators fresh (the daemon can stop/start under us; engine
+    // enable/disable can change in Settings).
     const poll = setInterval(() => {
       t.invoke<SystemStatus>("system_status").then(setStatus).catch(() => {});
+      refreshEnabled();
     }, 5000);
 
     return () => {
@@ -84,14 +110,19 @@ export function StatusBar() {
             <StatusDot label="Docker" active={status.docker} icon={<Container size={11} />} />
             <StatusDot label="Sandbox" active={status.sandbox_image} icon={<Box size={11} />} />
             <span style={{ width: "1px", height: "12px", background: "var(--border)" }} />
-            {ENGINES.map((e) => (
-              <StatusDot
-                key={e.runId}
-                label={e.label}
-                active={Boolean(status[e.key])}
-                running={activeEngine === e.runId}
-              />
-            ))}
+            {ENGINES.map((e) => {
+              // Default to enabled until the config loads (avoids a dim flash).
+              const isEnabled = enabledEngines[e.runId] ?? true;
+              return (
+                <StatusDot
+                  key={e.runId}
+                  label={e.label}
+                  active={isEnabled && Boolean(status[e.key])}
+                  disabled={!isEnabled}
+                  running={activeEngine === e.runId}
+                />
+              );
+            })}
           </>
         )}
         {dockerMsg && !(status?.docker && status?.sandbox_image) && (
@@ -124,15 +155,29 @@ function StatusDot({
   active,
   icon,
   running,
+  disabled,
 }: {
   label: string;
   active: boolean;
   icon?: React.ReactNode;
   running?: boolean;
+  disabled?: boolean;
 }) {
   const color = running ? "var(--accent)" : active ? "var(--success)" : "var(--text-muted)";
+  const title = running
+    ? `${label} (running)`
+    : disabled
+      ? `${label} (disabled in settings)`
+      : active
+        ? label
+        : `${label} (unavailable)`;
   return (
-    <div className="flex items-center gap-1" title={running ? `${label} (running)` : label}>
+    <div
+      className="flex items-center gap-1"
+      title={title}
+      // Dim engines disabled in settings so they read as off, not ready.
+      style={{ opacity: disabled ? 0.4 : 1 }}
+    >
       {icon}
       <span style={{ color }}>{label}</span>
       <span
