@@ -11,7 +11,17 @@ use hf_core::error::ClassifiedError;
 use hf_core::runtime::RuntimeAdapter;
 use uuid::Uuid;
 
-use crate::progress::{parse_coverage, parse_progress};
+use crate::progress::{parse_coverage, parse_progress, parse_syzkaller_progress};
+
+/// Collapse a finished run's stdout into final progress events, dispatching to
+/// the syzkaller-specific parser (absolute counters) when appropriate.
+fn final_progress(engine: EngineKind, combined: &str) -> Vec<FuzzProgress> {
+    if engine == EngineKind::Syzkaller {
+        parse_syzkaller_progress(combined)
+    } else {
+        parse_progress(combined)
+    }
+}
 
 /// Extra wall-clock seconds the sandbox is allowed beyond the fuzzer's own
 /// `-max_total_time`, covering corpus loading and sanitizer shutdown.
@@ -109,6 +119,12 @@ impl EngineRunner {
             ptrace: false,
         };
 
+        // syz-manager reports absolute counters on its status lines, so it needs
+        // dedicated parsing rather than the generic per-line event extraction
+        // (which would miscount each `crashes N` token as a fresh finding).
+        let is_syzkaller = engine == EngineKind::Syzkaller;
+        let syz_crashes = std::sync::atomic::AtomicU64::new(0);
+
         // Accumulate the full output for the final coverage/validation pass
         // while forwarding each line live.
         let combined = std::sync::Mutex::new(String::new());
@@ -118,6 +134,20 @@ impl EngineRunner {
                 buf.push('\n');
             }
             on_progress(FuzzProgress::LogLine(line.to_owned()));
+            if is_syzkaller {
+                // Structured syzkaller progress comes only from status lines;
+                // emit coverage live and a crash event per newly-seen crash.
+                if let Some((cover, _executed, crashes)) =
+                    crate::progress::parse_syzkaller_status(line)
+                {
+                    on_progress(FuzzProgress::EdgesCovered(cover));
+                    let prev = syz_crashes.swap(crashes, std::sync::atomic::Ordering::Relaxed);
+                    for _ in prev..crashes {
+                        on_progress(FuzzProgress::CrashesFound(1));
+                    }
+                }
+                return;
+            }
             for event in crate::progress::parse_progress_events(line) {
                 on_progress(event);
             }
@@ -131,7 +161,7 @@ impl EngineRunner {
         if cancel.is_cancelled() {
             let run_id = Uuid::new_v4();
             let combined = combined.into_inner().unwrap_or_default();
-            let progress = parse_progress(&combined);
+            let progress = final_progress(engine, &combined);
             let coverage = parse_coverage(&combined, run_id);
             on_progress(FuzzProgress::Done);
             return Ok(RunResult { progress, coverage });
@@ -157,7 +187,7 @@ impl EngineRunner {
             )));
         }
         let run_id = Uuid::new_v4();
-        let progress = parse_progress(&combined);
+        let progress = final_progress(engine, &combined);
         let coverage = parse_coverage(&combined, run_id);
         on_progress(FuzzProgress::Done);
         Ok(RunResult { progress, coverage })
