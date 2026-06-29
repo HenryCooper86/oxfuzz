@@ -108,8 +108,9 @@ pub struct SystemStatus {
     pub docker: bool,
     /// The sandbox image is loaded locally.
     pub sandbox_image: bool,
-    // Fuzzing engines run inside the sandbox image, so their availability tracks
-    // whether that image is loaded (the Dockerfile bundles all of them).
+    // Fuzzing engines run inside the sandbox image; each flag reflects whether
+    // that engine's toolchain is actually present in the loaded image (probed
+    // per engine -- the image does not bundle every engine).
     pub libfuzzer: bool,
     pub aflplusplus: bool,
     pub honggfuzz: bool,
@@ -122,14 +123,22 @@ pub struct SystemStatus {
 pub fn system_status() -> SystemStatus {
     let docker = hf_runtime::docker_daemon_ready();
     let img = docker && hf_runtime::sandbox_image_present();
+    // Probe the image for each engine's toolchain rather than assuming it
+    // bundles all of them (e.g. ClusterFuzzLite is not installed). Cached and
+    // only re-run when the image changes.
+    let engines = if img {
+        hf_runtime::sandbox_engine_probe()
+    } else {
+        hf_runtime::SandboxEngines::default()
+    };
     SystemStatus {
         docker,
         sandbox_image: img,
-        libfuzzer: img,
-        aflplusplus: img,
-        honggfuzz: img,
-        clusterfuzzlite: img,
-        syzkaller: img,
+        libfuzzer: engines.libfuzzer,
+        aflplusplus: engines.aflplusplus,
+        honggfuzz: engines.honggfuzz,
+        clusterfuzzlite: engines.clusterfuzzlite,
+        syzkaller: engines.syzkaller,
     }
 }
 
