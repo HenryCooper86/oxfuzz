@@ -24,6 +24,7 @@ import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/F
 import { ProjectProvider, useProject } from "./providers/ProjectContext";
 import { PipelineProvider } from "./providers/PipelineContext";
 import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
+import { I18nProvider, useI18n } from "./i18n";
 import { RunStatusProvider } from "./providers/RunStatusContext";
 import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
@@ -43,6 +44,7 @@ function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
 
 function AppInner() {
   const { theme, setTheme } = usePrefs();
+  const { t } = useI18n();
   const { setActiveProject } = useProject();
   const [activeView, setActiveView] = useState<ViewType>("chat");
   // Bumping this key remounts ChatView, clearing the conversation for a new target.
@@ -103,7 +105,7 @@ function AppInner() {
           {sidebarOpen && <Sidebar activeView={activeView} onNavigate={setActiveView} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
           <div className="app-main flex flex-1 flex-col min-w-0">
             <Header
-              title={viewTitles[activeView]}
+              title={t(`title.${activeView}`)}
               icon={viewIcons[activeView]}
               theme={theme}
               onToggleSidebar={() => setSidebarOpen((o) => !o)}
@@ -111,10 +113,10 @@ function AppInner() {
               onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
               actions={
                 <div className="flex items-center gap-1">
-                  <HeaderToggle active={showProgress} onClick={() => setShowProgress(!showProgress)} icon={<ListChecks size={16} />} label="Progress" />
-                  <HeaderToggle active={showDiag} onClick={() => setShowDiag(!showDiag)} icon={<Activity size={16} />} label="Diagnostics" />
-                  <HeaderToggle active={showObs} onClick={() => setShowObs(!showObs)} icon={<Gauge size={16} />} label="Observability" />
-                  <HeaderToggle active={showInfo} onClick={() => setShowInfo(!showInfo)} icon={<Info size={16} />} label="Info" />
+                  <HeaderToggle active={showProgress} onClick={() => setShowProgress(!showProgress)} icon={<ListChecks size={16} />} label={t("header.progress")} />
+                  <HeaderToggle active={showDiag} onClick={() => setShowDiag(!showDiag)} icon={<Activity size={16} />} label={t("header.diagnostics")} />
+                  <HeaderToggle active={showObs} onClick={() => setShowObs(!showObs)} icon={<Gauge size={16} />} label={t("header.observability")} />
+                  <HeaderToggle active={showInfo} onClick={() => setShowInfo(!showInfo)} icon={<Info size={16} />} label={t("header.info")} />
                 </div>
               }
             />
@@ -204,19 +206,21 @@ function AppInner() {
 
 export default function App() {
   return (
-    <PrefsProvider>
-      <ProjectProvider>
-        <TargetProvider>
-          <PipelineProvider>
-            <RunStatusProvider>
-              <RunOutputProvider>
-                <AppInner />
-              </RunOutputProvider>
-            </RunStatusProvider>
-          </PipelineProvider>
-        </TargetProvider>
-      </ProjectProvider>
-    </PrefsProvider>
+    <I18nProvider>
+      <PrefsProvider>
+        <ProjectProvider>
+          <TargetProvider>
+            <PipelineProvider>
+              <RunStatusProvider>
+                <RunOutputProvider>
+                  <AppInner />
+                </RunOutputProvider>
+              </RunStatusProvider>
+            </PipelineProvider>
+          </TargetProvider>
+        </ProjectProvider>
+      </PrefsProvider>
+    </I18nProvider>
   );
 }
 
@@ -251,22 +255,7 @@ function HeaderToggle({ active, onClick, icon, label }: { active: boolean; onCli
   );
 }
 
-const viewTitles: Record<ViewType, string> = {
-  workflow: "Fuzzing Workflow",
-  chat: "AI Assistant",
-  discover: "Target Discovery",
-  harness: "Harness Generation",
-  run: "Fuzz Run",
-  triage: "Crash Triage",
-  corpus: "Corpus Management",
-  settings: "Settings",
-  projects: "Projects",
-  artifacts: "Artifacts",
-  agents: "Agents",
-  skills: "Skills",
-  knowledge: "Knowledge",
-  automation: "Automation",
-};
+// Screen titles are translated at render via `t(\`title.${view}\`)` (see i18n.tsx).
 
 const viewIcons: Record<ViewType, React.ReactNode> = {
   workflow: <ListChecks size={18} />,

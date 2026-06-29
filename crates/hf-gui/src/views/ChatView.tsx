@@ -3,6 +3,7 @@ import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, 
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
+import { useI18n } from "../i18n";
 import { useRunOutput } from "../providers/RunOutputContext";
 
 interface ChatMessage {
@@ -74,6 +75,7 @@ type AgentEvent =
 export function ChatView() {
   const { activeProject, recentProjects, setActiveProject } = useProject();
   const { sendOnEnter } = usePrefs();
+  const { t } = useI18n();
   // In-flight fuzz runs surface as the composer's task count.
   const { running } = useRunOutput();
   const taskCount = running ? 1 : 0;
@@ -404,12 +406,12 @@ export function ChatView() {
               className="mb-1"
               style={{ fontFamily: "var(--font-display)", fontStyle: "italic", fontSize: "22px", fontWeight: 500 }}
             >
-              Welcome to hobot_fuzz
+              {t("welcome.title")}
             </h2>
             <p className="text-sm text-text-secondary max-w-md" style={{ lineHeight: 1.6 }}>
-              An AI fuzzing agent that discovers targets, writes harnesses, and drives fuzzing engines.
+              {t("welcome.tagline")}
               <br />
-              Pick a project to get started, or ask the assistant below.
+              {t("welcome.pick")}
             </p>
 
             <div className="mt-6">
@@ -422,13 +424,21 @@ export function ChatView() {
             </div>
 
             <div className="flex flex-wrap gap-2 mt-6 justify-center max-w-lg">
-              {["Discover targets", "Generate harness", "Run a fuzzer", "Triage crashes", "Manage corpus"].map((s) => (
+              {[
+                { action: "Discover targets", key: "welcome.chip.discover" },
+                { action: "Generate harness", key: "welcome.chip.harness" },
+                { action: "Run a fuzzer", key: "welcome.chip.run" },
+                { action: "Triage crashes", key: "welcome.chip.triage" },
+                { action: "Manage corpus", key: "welcome.chip.corpus" },
+              ].map((c) => (
                 <button
-                  key={s}
-                  onClick={() => setInput(s)}
+                  key={c.key}
+                  // Send the English action to the agent for deterministic intent;
+                  // display the translated label.
+                  onClick={() => setInput(c.action)}
                   className="text-xs px-3 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
                 >
-                  {s}
+                  {t(c.key)}
                 </button>
               ))}
             </div>
@@ -579,7 +589,7 @@ export function ChatView() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={mode === "plan" ? "Describe the goal — the agent will plan first…" : "Type a message…"}
+            placeholder={mode === "plan" ? t("composer.placeholderPlan") : t("composer.placeholder")}
             rows={1}
             className="w-full text-sm bg-transparent border-none outline-none text-text-primary resize-none"
             style={{
@@ -749,7 +759,8 @@ function WelcomeProjectSelector({
   onBrowse: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const name = activeProject ? activeProject.split("/").pop() || activeProject : "No project";
+  const { t } = useI18n();
+  const name = activeProject ? activeProject.split("/").pop() || activeProject : t("common.noProject");
   return (
     <div className="relative inline-block">
       <button
