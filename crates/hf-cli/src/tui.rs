@@ -4,14 +4,15 @@
 //! Keybindings: q=quit, Tab=next panel, d=discover, r=run selected.
 
 use std::io::{self, Stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use hf_core::target::TargetInventory;
+use hf_core::target::{TargetInventory, TargetLanguage};
+use hf_service::ServiceContainer;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -21,6 +22,12 @@ use ratatui::Terminal;
 
 /// The TUI application state.
 pub struct Tui {
+    /// Service container: discovery and (future) runs go through it so results
+    /// persist and business logic stays out of this presentation layer
+    /// (AGENTS.md 2.9).
+    container: ServiceContainer,
+    project: PathBuf,
+    lang: TargetLanguage,
     inventory: TargetInventory,
     selected: usize,
     active_panel: usize,
@@ -36,10 +43,16 @@ impl Tui {
     /// Returns an error if the terminal cannot be initialized or an event
     /// loop error occurs.
     pub async fn run(project: &Path) -> anyhow::Result<()> {
-        let lang = hf_core::target::TargetLanguage::C;
-        let inventory = hf_discovery::discover(project, lang).await?;
+        let lang = TargetLanguage::C;
+        // Route discovery through the service container so results are persisted
+        // (the DB) and ranked, instead of calling hf-discovery directly.
+        let container = ServiceContainer::bootstrap().await;
+        let inventory = container.discover(project, lang).await?;
 
         let mut app = Self {
+            container,
+            project: project.to_path_buf(),
+            lang,
             inventory,
             selected: 0,
             active_panel: 0,
@@ -64,19 +77,32 @@ impl Tui {
                         }
                         KeyCode::Char('d') => {
                             app.log.push("Discovering...".to_owned());
-                            if let Ok(inv) = hf_discovery::discover(project, lang).await {
-                                app.inventory = inv;
-                                app.log.push("Discovery complete.".to_owned());
+                            match app.container.discover(&app.project, app.lang).await {
+                                Ok(inv) => {
+                                    app.inventory = inv;
+                                    app.log.push("Discovery complete.".to_owned());
+                                }
+                                Err(e) => app.log.push(format!("Discovery failed: {e}")),
                             }
                         }
                         KeyCode::Char('r') => {
+                            // A fuzz run is a long, streaming pipeline
+                            // (harness draft -> compile -> sandboxed run) that
+                            // does not fit this synchronous event loop; launch
+                            // runs from the CLI (`hobot-fuzz run`) or GUI. Report
+                            // the real prerequisite status honestly here.
                             if let Some(c) = app.inventory.ranked().get(app.selected) {
-                                app.log.push(format!("Run: {}", c.symbol));
-                                // In a real implementation this would start
-                                // a fuzz run in the background and stream
-                                // progress. For now, just log it.
-                                app.log
-                                    .push("  (run not started -- needs LLM + Docker)".to_owned());
+                                let symbol = c.symbol.clone();
+                                if app.container.provider_pool().is_none() {
+                                    app.log.push(format!(
+                                        "Cannot run {symbol}: no LLM provider (set HF_PROVIDER_API_KEY)."
+                                    ));
+                                } else {
+                                    app.log.push(format!(
+                                        "Run {symbol} via: hobot-fuzz run {} --target {symbol} --engine libfuzzer",
+                                        app.project.display()
+                                    ));
+                                }
                             }
                         }
                         KeyCode::Down

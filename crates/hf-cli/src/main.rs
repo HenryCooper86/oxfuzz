@@ -169,6 +169,100 @@ enum Commands {
         /// Project root path.
         project: PathBuf,
     },
+    /// Run one autonomous agent turn over a project (the same agent loop the
+    /// GUI and web API use). Requires an LLM provider (`HF_PROVIDER_API_KEY`).
+    Agent {
+        /// The user message / instruction for the agent.
+        message: String,
+        /// Project root the agent operates on.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Agent definition id (default: the orchestrator).
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Knowledge-base operations (see also `ingest`).
+    Knowledge {
+        #[command(subcommand)]
+        op: KnowledgeOp,
+    },
+    /// Campaign scheduling for headless recurring runs.
+    Schedule {
+        #[command(subcommand)]
+        op: ScheduleOp,
+    },
+    /// Chat session management.
+    Session {
+        #[command(subcommand)]
+        op: SessionOp,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnowledgeOp {
+    /// Index a project's source files into its BM25 knowledge base.
+    Index { project: PathBuf },
+    /// Search a project's knowledge base.
+    Search {
+        project: PathBuf,
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleOp {
+    /// List scheduled campaigns.
+    List,
+    /// Show recent campaign execution history.
+    History {
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Create a scheduled campaign.
+    Create {
+        /// Display name.
+        name: String,
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: String,
+        #[arg(long, default_value = "libfuzzer")]
+        engine: String,
+        /// Trigger kind: interval | cron | once.
+        #[arg(long)]
+        trigger_kind: String,
+        /// Trigger value (interval seconds, a cron expr, or an RFC3339 time).
+        #[arg(long)]
+        trigger_value: String,
+        /// Per-run duration (e.g. 30m, 1h).
+        #[arg(long, default_value = "1h")]
+        duration: String,
+    },
+    /// Delete a scheduled campaign by id.
+    Delete { id: String },
+    /// Enable a scheduled campaign by id.
+    Enable { id: String },
+    /// Disable a scheduled campaign by id.
+    Disable { id: String },
+}
+
+#[derive(Subcommand)]
+enum SessionOp {
+    /// Create a new chat session, printing its id.
+    New {
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Print a session's transcript.
+    History { id: String },
+    /// List a session's per-turn checkpoints.
+    Checkpoints { id: String },
+    /// List the branches in a session's tree.
+    Branches { id: String },
+    /// Roll back the last turn of a session.
+    Rollback { id: String },
 }
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
@@ -193,6 +287,216 @@ fn parse_duration(s: &str) -> Result<u64, anyhow::Error> {
     }
     // Fallback: parse as raw seconds.
     Ok(s.parse()?)
+}
+
+/// An [`EventSink`](hf_agent::EventSink) that renders agent progress to stderr,
+/// keeping stdout reserved for the final answer (so it can be piped).
+struct CliEventSink;
+
+#[async_trait::async_trait]
+impl hf_agent::EventSink for CliEventSink {
+    async fn emit(&self, event: hf_agent::AgentEvent) {
+        match event {
+            hf_agent::AgentEvent::Thinking { text } => eprintln!("[thinking] {text}"),
+            hf_agent::AgentEvent::ToolCall { name, args } => {
+                eprintln!("[tool] {name} {args}");
+            }
+            hf_agent::AgentEvent::ToolResult { name, summary } => {
+                eprintln!("[result] {name}: {summary}");
+            }
+            hf_agent::AgentEvent::Error { message } => eprintln!("[error] {message}"),
+            hf_agent::AgentEvent::Started | hf_agent::AgentEvent::Complete { .. } => {}
+        }
+    }
+}
+
+/// Resolve the user agent-definitions directory: `<repo>/agents`, else
+/// `./agents` (mirrors how `hf-agent` resolves skills).
+fn agents_dir() -> PathBuf {
+    hf_service::repo_root().map_or_else(|| PathBuf::from("agents"), |r| r.join("agents"))
+}
+
+async fn cmd_agent(
+    message: &str,
+    project: Option<PathBuf>,
+    agent: Option<&str>,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    if container.provider_pool().is_none() {
+        anyhow::bail!("agent requires an LLM provider; set HF_PROVIDER_API_KEY");
+    }
+    let sink = CliEventSink;
+    let answer = hf_agent::run_chat_turn(
+        container,
+        project,
+        agent,
+        agents_dir(),
+        None,
+        Vec::new(),
+        message,
+        &sink,
+    )
+    .await?;
+    println!("{answer}");
+    Ok(())
+}
+
+fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
+    match op {
+        KnowledgeOp::Index { project } => {
+            let stats = hf_service::knowledge::index_project(&project)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            println!(
+                "Indexed {} file(s), {} chunk(s).",
+                stats.files, stats.chunks
+            );
+        }
+        KnowledgeOp::Search {
+            project,
+            query,
+            limit,
+        } => {
+            // The BM25 index is process-local (in-memory), so a fresh CLI
+            // process must build it before searching -- a `knowledge index` run
+            // in a separate process left no on-disk index to reuse.
+            if !hf_service::knowledge::is_indexed(&project) {
+                hf_service::knowledge::index_project(&project)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            }
+            let hits = hf_service::knowledge::search_project(&project, &query, limit);
+            if hits.is_empty() {
+                println!("No results.");
+            }
+            for h in hits {
+                println!("{:.3}  {}", h.score, h.file);
+                println!("    {}", h.snippet.replace('\n', " "));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Start a campaign scheduler for a one-shot CLI operation. Background ticking
+/// stops when the process exits; persisted schedules live under the user data
+/// dir (shared with the GUI and web server).
+async fn start_scheduler() -> hf_service::scheduler::CampaignScheduler {
+    let container = ServiceContainer::bootstrap().await;
+    let store_path = hf_service::init::user_app_dir().join("schedules.json");
+    hf_service::scheduler::CampaignScheduler::start(container, store_path).await
+}
+
+async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
+    let scheduler = start_scheduler().await;
+    match op {
+        ScheduleOp::List => {
+            let views = scheduler.list_views().await;
+            if views.is_empty() {
+                println!("No scheduled campaigns.");
+            }
+            for v in views {
+                println!(
+                    "{}  {}  [{}]  {}  target={} engine={} {}s  last={}",
+                    v.id,
+                    v.name,
+                    if v.enabled { "enabled" } else { "disabled" },
+                    v.trigger,
+                    v.target,
+                    v.engine,
+                    v.duration_secs,
+                    v.last_fire.unwrap_or_else(|| "never".to_owned()),
+                );
+            }
+        }
+        ScheduleOp::History { limit } => {
+            for e in scheduler.recent_executions(limit).await {
+                println!(
+                    "{}  {}  {}  {}",
+                    e.triggered_at, e.campaign, e.status, e.summary
+                );
+            }
+        }
+        ScheduleOp::Create {
+            name,
+            project,
+            target,
+            engine,
+            trigger_kind,
+            trigger_value,
+            duration,
+        } => {
+            let trigger = hf_service::scheduler::parse_trigger(&trigger_kind, &trigger_value)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let params = hf_service::scheduler::CampaignParams {
+                project: project.display().to_string(),
+                target,
+                engine,
+                duration_secs: parse_duration(&duration)?,
+            };
+            scheduler.create(&name, &params, trigger).await;
+            println!("Created schedule '{name}'.");
+        }
+        ScheduleOp::Delete { id } => {
+            let msg = if scheduler.remove(&id).await {
+                "Deleted."
+            } else {
+                "No such schedule."
+            };
+            println!("{msg}");
+        }
+        ScheduleOp::Enable { id } => {
+            let msg = if scheduler.set_enabled(&id, true).await {
+                "Enabled."
+            } else {
+                "No such schedule."
+            };
+            println!("{msg}");
+        }
+        ScheduleOp::Disable { id } => {
+            let msg = if scheduler.set_enabled(&id, false).await {
+                "Disabled."
+            } else {
+                "No such schedule."
+            };
+            println!("{msg}");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match op {
+        SessionOp::New { title } => match container.create_chat_session(title).await {
+            Some(id) => println!("{id}"),
+            None => {
+                println!("No database configured (set HF_DB_PATH); cannot persist sessions.");
+            }
+        },
+        SessionOp::History { id } => {
+            let sid = hf_core::types::SessionId(id);
+            for m in container.chat_history(&sid).await {
+                println!("[{:?}] {}", m.role, m.content);
+            }
+        }
+        SessionOp::Checkpoints { id } => {
+            let sid = hf_core::types::SessionId(id);
+            for c in container.chat_checkpoints(&sid).await {
+                println!("{c:?}");
+            }
+        }
+        SessionOp::Branches { id } => {
+            let sid = hf_core::types::SessionId(id);
+            for b in container.chat_branches(&sid).await {
+                println!("{b:?}");
+            }
+        }
+        SessionOp::Rollback { id } => {
+            let sid = hf_core::types::SessionId(id);
+            let n = container.chat_rollback_last(&sid).await;
+            println!("Rolled back {n} message(s).");
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Result<()> {
@@ -620,6 +924,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tui { project } => {
             tui::Tui::run(&project).await?;
         }
+        Commands::Agent {
+            message,
+            project,
+            agent,
+        } => cmd_agent(&message, project, agent.as_deref()).await?,
+        Commands::Knowledge { op } => cmd_knowledge(op)?,
+        Commands::Schedule { op } => cmd_schedule(op).await?,
+        Commands::Session { op } => cmd_session(op).await?,
     }
     Ok(())
 }
