@@ -14,6 +14,6 @@ pub mod docker;
 pub use adapter::StubRuntime;
 pub use config::{
     docker_bin, docker_cli_present, docker_daemon_ready, host_platform, norm_platform,
-    platform_short, sandbox_engine_probe, sandbox_image_arch, sandbox_image_present, RuntimeBackend,
-    RuntimeConfig, SandboxEngines, SANDBOX_IMAGE,
+    platform_short, sandbox_engine_probe, sandbox_image_arch, sandbox_image_present,
+    RuntimeBackend, RuntimeConfig, SandboxEngines, SANDBOX_IMAGE,
 };
