@@ -31,6 +31,13 @@ use uuid::Uuid;
 /// do not collide in a single temp dir.
 ///
 /// `hobot_fuzz_workspace/<project_name>/<target>`
+///
+/// `target` is untrusted (it flows in from the CLI/REST/GUI), so it is
+/// sanitised before use: only `Normal` path components are kept, dropping any
+/// root, prefix, or `..` segment. This guarantees the result always stays
+/// within the per-project base directory, satisfying the sandbox boundary in
+/// AGENTS.md 2.12 (untrusted inputs never touch the host FS outside the
+/// workspace).
 #[must_use]
 pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
     let name = project
@@ -40,7 +47,27 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
     std::env::temp_dir()
         .join("hobot_fuzz_workspace")
         .join(name)
-        .join(target)
+        .join(sanitize_target(target))
+}
+
+/// Reduce an untrusted `target` to a path that cannot escape its parent
+/// directory. Keeps only `Normal` components (so `..`, absolute roots, and
+/// Windows prefixes are discarded) and falls back to `default` when nothing
+/// safe remains.
+fn sanitize_target(target: &str) -> PathBuf {
+    use std::path::Component;
+    let safe: PathBuf = Path::new(target)
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect();
+    if safe.as_os_str().is_empty() {
+        PathBuf::from("default")
+    } else {
+        safe
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +688,23 @@ impl ServiceContainer {
             Some(sessions) => sessions.read_transcript(session).await.unwrap_or_default(),
             None => Vec::new(),
         }
+    }
+
+    /// Create a new top-level chat session, returning its id, or `None` when no
+    /// database is configured. Shared by every presentation layer so session
+    /// creation behaves identically (AGENTS.md 2.9).
+    pub async fn create_chat_session(&self, title: Option<String>) -> Option<String> {
+        let manager = self.session_manager.as_ref()?;
+        manager
+            .create_session(hf_core::session::CreateSessionOptions {
+                parent_id: None,
+                session_type: hf_core::session::SessionType::Main,
+                agent_id: None,
+                title: title.or_else(|| Some("Chat".to_owned())),
+            })
+            .await
+            .ok()
+            .map(|node| node.id.0)
     }
 
     /// All sessions in the same conversation tree as `session` (the main session
@@ -2770,5 +2814,73 @@ mod coverage_tests {
         // A new corpus file -> different signature (cache invalidated).
         std::fs::write(ws.join("corpus/b"), "2").unwrap();
         assert_ne!(sig1, coverage_signature(ws));
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::workspace_dir;
+    use std::path::{Component, Path};
+
+    /// The per-project workspace base every resolved path must stay within.
+    fn base(project: &Path) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join("hobot_fuzz_workspace")
+            .join(project.file_name().unwrap())
+    }
+
+    #[test]
+    fn normal_target_is_preserved() {
+        let project = Path::new("/home/user/myproj");
+        let ws = workspace_dir(project, "parse_json");
+        assert_eq!(ws, base(project).join("parse_json"));
+    }
+
+    #[test]
+    fn cpp_style_target_is_preserved() {
+        // C++ symbols contain `::`; that is filesystem-safe and must survive.
+        let project = Path::new("/home/user/myproj");
+        let ws = workspace_dir(project, "ns::Class::method");
+        assert_eq!(ws, base(project).join("ns::Class::method"));
+    }
+
+    #[test]
+    fn dotdot_target_cannot_escape_workspace() {
+        let project = Path::new("/home/user/myproj");
+        let ws = workspace_dir(project, "../../../../etc/evil");
+        // Stays inside the project workspace base...
+        assert!(
+            ws.starts_with(base(project)),
+            "escaped workspace: {}",
+            ws.display()
+        );
+        // ...and contains no parent-dir traversal components.
+        assert!(
+            !ws.components().any(|c| c == Component::ParentDir),
+            "path retained `..`: {}",
+            ws.display()
+        );
+    }
+
+    #[test]
+    fn absolute_target_cannot_escape_workspace() {
+        let project = Path::new("/home/user/myproj");
+        let ws = workspace_dir(project, "/etc/passwd");
+        assert!(
+            ws.starts_with(base(project)),
+            "escaped workspace: {}",
+            ws.display()
+        );
+        assert_ne!(ws, Path::new("/etc/passwd"));
+    }
+
+    #[test]
+    fn empty_or_all_traversal_target_falls_back() {
+        let project = Path::new("/home/user/myproj");
+        assert_eq!(workspace_dir(project, ""), base(project).join("default"));
+        assert_eq!(
+            workspace_dir(project, "../.."),
+            base(project).join("default")
+        );
     }
 }
