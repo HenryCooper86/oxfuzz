@@ -88,7 +88,7 @@ function GhostBtn({ onClick, icon, children, title }: { onClick: () => void; ico
 }
 function IconBtn({ onClick, icon, danger, title }: { onClick: () => void; icon: ReactNode; danger?: boolean; title?: string }) {
   return (
-    <button onClick={onClick} title={title} className={`inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:bg-surface-hover ${danger ? "hover:text-error" : "hover:text-text-primary"}`}>
+    <button onClick={onClick} title={title} className={`hf-action-btn${danger ? " danger" : ""}`}>
       {icon}
     </button>
   );
