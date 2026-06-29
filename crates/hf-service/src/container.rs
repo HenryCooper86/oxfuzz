@@ -354,6 +354,20 @@ fn casrep_input_path(out_dir: &Path, casrep: &Path) -> PathBuf {
         .map_or_else(|| casrep.to_path_buf(), |stem| out_dir.join(stem))
 }
 
+/// A stable crash id derived from its run, stack signature, and input file, so
+/// re-triaging the same run replaces each crash row rather than inserting a new
+/// one (the `crashes` table is keyed on `id`; a fresh random UUID per triage
+/// pass would accumulate identical duplicate rows). The input filename keeps
+/// distinct crashes apart even when they share (or lack) a signature.
+fn deterministic_crash_id(run_id: Uuid, signature: &str, input: &Path) -> Uuid {
+    let file = input
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let name = format!("{run_id}|{signature}|{file}");
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes())
+}
+
 /// Copy C/C++ source and header files from a project into the workspace
 /// so the sandbox can compile the harness + target together.
 pub fn copy_project_sources(project: &Path, workspace: &Path) {
@@ -1509,6 +1523,13 @@ impl ServiceContainer {
             }
         };
 
+        // Give each crash a deterministic id so persisting is idempotent: a
+        // second triage of the same run replaces these rows instead of adding
+        // duplicates (the report lists every persisted crash for the run).
+        for crash in &mut deduped {
+            crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
+        }
+
         // Draft an LLM bug report for each unique crash when a provider is
         // configured, using the captured sanitizer trace (capped, see above).
         if let Some(pool) = self.provider_pool() {
@@ -1758,7 +1779,9 @@ impl ServiceContainer {
             .ok()
             .and_then(|runs| runs.into_iter().next());
         match run {
-            Some(r) => store.list_crashes_by_run(r.id).await.unwrap_or_default(),
+            // Guard against any pre-existing duplicate rows (e.g. crashes
+            // persisted before the deterministic-id fix): collapse by signature.
+            Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await.unwrap_or_default()),
             None => Vec::new(),
         }
     }
@@ -1803,7 +1826,11 @@ impl ServiceContainer {
                 .ok()
                 .and_then(|runs| runs.into_iter().next());
             let crashes = match &run {
-                Some(r) => store.list_crashes_by_run(r.id).await.unwrap_or_default(),
+                // Collapse any pre-existing duplicate rows by signature so the
+                // report never lists the same crash twice.
+                Some(r) => {
+                    hf_crash::dedup(store.list_crashes_by_run(r.id).await.unwrap_or_default())
+                }
                 None => Vec::new(),
             };
             (run, crashes)
@@ -2881,6 +2908,44 @@ mod workspace_tests {
         assert_eq!(
             workspace_dir(project, "../.."),
             base(project).join("default")
+        );
+    }
+}
+
+#[cfg(test)]
+mod crash_id_tests {
+    use super::deterministic_crash_id;
+    use std::path::Path;
+    use uuid::Uuid;
+
+    #[test]
+    fn same_run_signature_and_input_yield_the_same_id() {
+        // Re-triaging the same crash must produce the same id (idempotent
+        // persistence -> INSERT OR REPLACE collapses the duplicate).
+        let run = Uuid::new_v4();
+        let a = deterministic_crash_id(run, "sig", Path::new("/work/out/crash-abc"));
+        let b = deterministic_crash_id(run, "sig", Path::new("/work/out/crash-abc"));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn distinct_inputs_runs_or_signatures_yield_distinct_ids() {
+        let run = Uuid::new_v4();
+        let base = deterministic_crash_id(run, "sig", Path::new("/work/out/crash-abc"));
+        // Different input file -> different id (keeps distinct crashes apart).
+        assert_ne!(
+            base,
+            deterministic_crash_id(run, "sig", Path::new("/work/out/crash-def"))
+        );
+        // Different signature -> different id.
+        assert_ne!(
+            base,
+            deterministic_crash_id(run, "other", Path::new("/work/out/crash-abc"))
+        );
+        // Different run -> different id.
+        assert_ne!(
+            base,
+            deterministic_crash_id(Uuid::new_v4(), "sig", Path::new("/work/out/crash-abc"))
         );
     }
 }
