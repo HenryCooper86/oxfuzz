@@ -108,7 +108,14 @@ pub fn list_configs() -> Vec<ConfigSection> {
         .collect()
 }
 
-/// Read a config section's raw TOML, falling back to the bundled example.
+/// Read a config section's raw TOML.
+///
+/// Resolution order: the live `<section>.toml`, then an on-disk
+/// `<section>.example.toml`, then the example **embedded at compile time**. The
+/// embedded fallback matters for an installed app: its per-user `config_dir()`
+/// is unseeded (no live or example files on disk), so without it every settings
+/// form would render empty. The embedded defaults give the same content a source
+/// checkout sees, and saving writes a live file into the writable config dir.
 ///
 /// # Errors
 /// Returns an error string if `name` is unknown or the file cannot be read.
@@ -122,7 +129,25 @@ pub fn read_config(name: &str) -> Result<String, String> {
     } else if example.is_file() {
         std::fs::read_to_string(&example).map_err(|e| e.to_string())
     } else {
-        Ok(String::new())
+        Ok(bundled_example(section).to_owned())
+    }
+}
+
+/// The example TOML for a section, embedded at compile time so an installed app
+/// (whose per-user config dir is unseeded) still shows sensible defaults rather
+/// than an empty form. Returns `""` for an unrecognized section (already
+/// rejected by [`validated_section`]).
+fn bundled_example(section: &str) -> &'static str {
+    match section {
+        "hobot-fuzz" => include_str!("../../../config/hobot-fuzz.example.toml"),
+        "providers" => include_str!("../../../config/providers.example.toml"),
+        "engines" => include_str!("../../../config/engines.example.toml"),
+        "runtime" => include_str!("../../../config/runtime.example.toml"),
+        "guardrails" => include_str!("../../../config/guardrails.example.toml"),
+        "storage" => include_str!("../../../config/storage.example.toml"),
+        "session" => include_str!("../../../config/session.example.toml"),
+        "tools" => include_str!("../../../config/tools.example.toml"),
+        _ => "",
     }
 }
 
@@ -418,5 +443,29 @@ cpus = 2\n";
             toml_to_json("   ").expect("empty"),
             serde_json::Value::Object(serde_json::Map::new())
         );
+    }
+
+    #[test]
+    fn every_section_has_a_valid_embedded_example() {
+        // The embedded fallback is what an installed app (unseeded config dir)
+        // renders, so each section must yield non-empty, valid TOML.
+        for &section in CONFIG_SECTIONS {
+            let example = bundled_example(section);
+            assert!(
+                !example.trim().is_empty(),
+                "section '{section}' has no embedded example"
+            );
+            toml_to_json(example)
+                .unwrap_or_else(|e| panic!("embedded example for '{section}' is invalid TOML: {e}"));
+        }
+    }
+
+    #[test]
+    fn embedded_engines_example_exposes_the_engines_array() {
+        // The settings form reads `value.engines`; the fallback must populate it
+        // (this is exactly what the empty-form bug needed).
+        let value = toml_to_json(bundled_example("engines")).expect("valid toml");
+        let engines = value["engines"].as_array().expect("engines array");
+        assert!(!engines.is_empty(), "embedded engines example is empty");
     }
 }
