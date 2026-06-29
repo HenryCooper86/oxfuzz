@@ -1,0 +1,61 @@
+# GitLab CI mirror of .github/workflows/ci.yml (the repo lives on GitLab, where
+# GitHub Actions do not run). Keep the two in sync.
+#
+# Pinned toolchain: Rust 1.94.0 (see rust-toolchain.toml). The image tag matches
+# so rustup performs no extra toolchain download.
+
+stages:
+  - quality
+  - supply-chain
+
+default:
+  image: rust:1.94.0-bookworm
+
+variables:
+  # Keep cargo's caches inside the project dir so the cache: block can persist
+  # them between runs.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: "always"
+
+# Run on merge requests targeting main and on pushes to main -- the same
+# triggers as the GitHub workflow (pull_request/push on main).
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+
+# Shared cargo cache keyed on the lockfile so dependency builds are reused.
+.cargo-cache: &cargo-cache
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/git/db/
+      - target/
+
+quality:
+  stage: quality
+  <<: *cargo-cache
+  before_script:
+    # AFL++ and honggfuzz back the engine adapters exercised by some tests.
+    - apt-get update
+    - apt-get install -y --no-install-recommends afl++ honggfuzz
+    # rust-toolchain.toml requires these components; ensure they are present.
+    - rustup component add rustfmt clippy
+  script:
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace -- -D warnings
+    - cargo check --workspace
+    - cargo test --workspace
+
+supply-chain:
+  stage: supply-chain
+  <<: *cargo-cache
+  before_script:
+    # Dependency vulnerability, license, and ban gate (uses deny.toml).
+    - cargo install cargo-deny --locked
+  script:
+    - cargo deny check advisories bans licenses sources
