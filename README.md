@@ -6,8 +6,29 @@
 
 ---
 
+## New to fuzzing? Start here
+
+In plain language: **fuzzing** means automatically throwing millions of weird and
+malformed inputs at a program to find the ones that make it crash -- each crash
+is a potential bug, often a security hole. Doing this by hand takes expert work:
+deciding what to test, writing test code, running it safely, and making sense of
+the crashes.
+
+**hobot_fuzz automates all of that with AI.** You point it at a codebase and it
+finds the riskiest functions, writes the test code for them, runs a real fuzzing
+engine inside a safe sandbox, and explains any bugs it finds -- asking for your
+approval at the steps that matter.
+
+If you are not a fuzzing engineer, read the **[Getting Started
+guide](docs/guides/GETTING_STARTED.md)** first -- it explains everything from
+scratch, walks through your first run in the desktop app, and includes a glossary
+of every term. The rest of this README is the technical reference.
+
+---
+
 ## Table of Contents
 
+- [New to fuzzing? Start here](#new-to-fuzzing-start-here)
 - [Highlights](#highlights)
 - [Quick Start](#quick-start)
 - [Configuration Reference](#configuration-reference)
@@ -213,6 +234,7 @@ cargo clippy --workspace -- -D warnings
 
 ## Documentation
 
+- **`docs/guides/GETTING_STARTED.md` -- plain-language intro for non-experts (start here).**
 - `VISION.md` -- project vision.
 - `AGENTS.md` -- engineering protocol.
 - `docs/design/` -- detailed design documents.
