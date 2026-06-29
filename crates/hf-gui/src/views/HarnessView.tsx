@@ -1,5 +1,8 @@
 import { useState, useEffect } from "react";
 import { getTransport, pickFolder } from "../lib";
+import { useProject } from "../providers/ProjectContext";
+import { usePipeline } from "../providers/PipelineContext";
+import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory } from "../types";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
@@ -25,11 +28,14 @@ interface SeedResult {
 
 type StepStatus = "idle" | "loading" | "done" | "error";
 
-export function HarnessView() {
-  const [project, setProject] = useState("");
+export function HarnessView({ embedded = false }: { embedded?: boolean }) {
+  const { activeProject } = useProject();
+  const { markDone } = usePipeline();
+  const { target: selectedTarget, setTarget: setSelectedTarget, engine, setEngine, lang, setLang, setCompiled } = useTarget();
+  // Embedded in the workflow, the project comes from the workflow's gate.
+  const [localProject, setLocalProject] = useState(activeProject);
+  const project = embedded ? activeProject : localProject;
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
-  const [selectedTarget, setSelectedTarget] = useState<string>("");
-  const [engine, setEngine] = useState("libfuzzer");
   const [harness, setHarness] = useState<HarnessResult | null>(null);
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
   const [seeds, setSeeds] = useState<SeedResult["seeds"] | null>(null);
@@ -40,14 +46,14 @@ export function HarnessView() {
 
   async function browse() {
     const path = await pickFolder();
-    if (path) setProject(path);
+    if (path) setLocalProject(path);
   }
 
   // Auto-run discover when project is set.
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
-    getTransport().invoke<TargetInventory>("discover", { project, lang: "c" })
+    getTransport().invoke<TargetInventory>("discover", { project, lang })
       .then((inv) => {
         if (cancelled) return;
         setInventory(inv);
@@ -57,7 +63,7 @@ export function HarnessView() {
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [project]);
+  }, [project, lang, setSelectedTarget]);
 
   async function generateHarness(target: string) {
     setHarnessStatus("loading");
@@ -66,12 +72,14 @@ export function HarnessView() {
     setHarness(null);
     setCompileResult(null);
     setSeeds(null);
+    setCompiled(false);
     try {
       const result = await getTransport().invoke<HarnessResult>("harness_draft", {
-        project, target, engine,
+        project, target, engine, lang,
       });
       setHarness(result);
       setHarnessStatus("done");
+      markDone("harness");
     } catch {
       setHarnessStatus("error");
     }
@@ -82,10 +90,15 @@ export function HarnessView() {
     setCompileStatus("loading");
     try {
       const result = await getTransport().invoke<CompileResult>("harness_compile", {
-        source: harness.source, project, engine, target: selectedTarget,
+        source: harness.source, project, engine, target: selectedTarget, lang,
       });
       setCompileResult(result);
-      setCompileStatus(result.status === "Compiled" ? "done" : "error");
+      const compiled = result.status === "Compiled";
+      setCompileStatus(compiled ? "done" : "error");
+      if (compiled) {
+        markDone("compile");
+        setCompiled(true);
+      }
     } catch (e) {
       setCompileResult({ status: "Failed", message: String(e) });
       setCompileStatus("error");
@@ -95,9 +108,10 @@ export function HarnessView() {
   async function generateSeeds() {
     setSeedStatus("loading");
     try {
-      const result = await getTransport().invoke<SeedResult>("generate_seeds", { target: selectedTarget });
+      const result = await getTransport().invoke<SeedResult>("generate_seeds", { project, target: selectedTarget });
       setSeeds(result.seeds);
       setSeedStatus("done");
+      markDone("seeds");
     } catch {
       setSeedStatus("error");
     }
@@ -115,25 +129,29 @@ export function HarnessView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <h1 className="text-xl font-semibold">Harness Generation</h1>
-      <p className="text-sm text-text-secondary">
-        Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora.
-      </p>
+      {!embedded && (
+        <>
+          <h1 className="text-xl font-semibold">Harness Generation</h1>
+          <p className="text-sm text-text-secondary">
+            Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora.
+          </p>
 
-      {/* Project selection */}
-      <div className="flex gap-2">
-        <input
-          type="text"
-          placeholder="/path/to/project"
-          value={project}
-          onChange={(e) => setProject(e.target.value)}
-          className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-          style={{ fontFamily: "var(--font-mono)" }}
-        />
-        <button onClick={browse} className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary">
-          <FolderOpen size={14} />
-        </button>
-      </div>
+          {/* Project selection */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="/path/to/project"
+              value={project}
+              onChange={(e) => setLocalProject(e.target.value)}
+              className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
+              style={{ fontFamily: "var(--font-mono)" }}
+            />
+            <button onClick={browse} className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary">
+              <FolderOpen size={14} />
+            </button>
+          </div>
+        </>
+      )}
 
       {/* Target + Engine selection */}
       {inventory && inventory.candidates.length > 0 && (
@@ -163,6 +181,18 @@ export function HarnessView() {
               <option value="libfuzzer">libFuzzer</option>
               <option value="afl++">AFL++</option>
               <option value="honggfuzz">honggfuzz</option>
+              <option value="clusterfuzzlite">ClusterFuzzLite</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1 w-32">
+            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Language</label>
+            <select
+              value={lang}
+              onChange={(e) => setLang(e.target.value)}
+              className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
+            >
+              <option value="c">C</option>
+              <option value="cpp">C++</option>
             </select>
           </div>
           <button

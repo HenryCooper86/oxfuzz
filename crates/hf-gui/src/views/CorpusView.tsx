@@ -1,45 +1,75 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getTransport } from "../lib";
+import { useProject } from "../providers/ProjectContext";
+import { useTarget } from "../providers/TargetContext";
 import type { CorpusEntry } from "../types";
 import { Database, Loader2, Plus, Scissors, Eye } from "lucide-react";
 
-export function CorpusView() {
+export function CorpusView({ embedded = false }: { embedded?: boolean }) {
+  const { activeProject } = useProject();
+  // The corpus belongs to a specific target's workspace -- the one seeded during
+  // Harness and grown during Run -- so it must scan that target, not "".
+  const { target } = useTarget();
   const [entries, setEntries] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState<string | null>(null);
 
-  async function action(op: string) {
-    setLoading(op);
-    try {
-      if (op === "list") {
+  const action = useCallback(
+    async (op: string) => {
+      setLoading(op);
+      try {
+        const project = activeProject || ".";
+        if (op !== "corpus_list") {
+          await getTransport().invoke(op, { project, target });
+        }
         const result = await getTransport().invoke<CorpusEntry[]>("corpus_list", {
-          project: ".",
-          target: "",
+          project,
+          target,
         });
         setEntries(result);
-      } else {
-        await getTransport().invoke(op, { project: ".", target: "" });
-        const result = await getTransport().invoke<CorpusEntry[]>("corpus_list", {
-          project: ".",
-          target: "",
-        });
-        setEntries(result);
+      } catch {
+        setEntries([]);
+      } finally {
+        setLoading(null);
       }
-    } catch {
-      setEntries([]);
-    } finally {
-      setLoading(null);
-    }
-  }
+    },
+    [activeProject, target],
+  );
+
+  // Auto-load the corpus for the current target so it reflects what the flow
+  // actually used (seeds + fuzzer-grown inputs), without a manual List click.
+  // Direct async load (no synchronous setState in the effect body).
+  useEffect(() => {
+    if (!activeProject || !target) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getTransport().invoke<CorpusEntry[]>("corpus_list", {
+          project: activeProject,
+          target,
+        });
+        if (!cancelled) setEntries(result);
+      } catch {
+        if (!cancelled) setEntries([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject, target]);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Corpus Management</h1>
-          <p className="text-sm text-text-secondary mt-0.5">
-            Seed, grow, prune, and inspect the fuzzing corpus.
-          </p>
-        </div>
+        {embedded ? (
+          <span />
+        ) : (
+          <div>
+            <h1 className="text-xl font-semibold">Corpus Management</h1>
+            <p className="text-sm text-text-secondary mt-0.5">
+              Seed, grow, prune, and inspect the fuzzing corpus.
+            </p>
+          </div>
+        )}
         <div className="flex gap-2">
           <ActionButton icon={<Plus size={14} />} label="Seed" loading={loading === "corpus_seed"} onClick={() => action("corpus_seed")} />
           <ActionButton icon={<Eye size={14} />} label="Grow" loading={loading === "corpus_grow"} onClick={() => action("corpus_grow")} />
@@ -54,8 +84,23 @@ export function CorpusView() {
           style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
         >
           <Database size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">Corpus is empty.</p>
-          <p className="text-xs text-text-muted mt-1">Click "Seed" to add default seed inputs.</p>
+          {target ? (
+            <>
+              <p className="text-sm text-text-muted">
+                Corpus for <span style={{ fontFamily: "var(--font-mono)" }}>{target}</span> is empty.
+              </p>
+              <p className="text-xs text-text-muted mt-1">
+                Click "Seed" for default inputs, or run the fuzzer — it grows the corpus as it finds new coverage.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-text-muted">No target selected.</p>
+              <p className="text-xs text-text-muted mt-1">
+                Pick a target in Harness (or run the flow) to view and manage its corpus.
+              </p>
+            </>
+          )}
         </div>
       )}
 

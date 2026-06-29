@@ -76,3 +76,5 @@ data/
 *.db
 *.db-shm
 *.db-wal
+# Local provider config holds API keys -- never commit it.
+config/providers.toml

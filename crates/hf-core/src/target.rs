@@ -16,6 +16,27 @@ pub enum TargetLanguage {
     Python,
 }
 
+impl std::str::FromStr for TargetLanguage {
+    type Err = String;
+
+    /// Parse a language name (case-insensitive, with common aliases). Unknown
+    /// names are rejected so entrypoints fail uniformly rather than silently
+    /// defaulting to C.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "c" => Ok(Self::C),
+            "cpp" | "c++" | "cxx" => Ok(Self::Cpp),
+            "rust" | "rs" => Ok(Self::Rust),
+            "go" | "golang" => Ok(Self::Go),
+            "python" | "py" => Ok(Self::Python),
+            other => Err(format!(
+                "unknown target language '{other}' (expected one of: \
+                 c, cpp, rust, go, python)"
+            )),
+        }
+    }
+}
+
 /// The kind of fuzzing target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetKind {
@@ -67,6 +88,14 @@ pub struct TargetCandidate {
     pub fit_score: f64,
     pub sanitizers: Vec<Sanitizer>,
     pub rationale: String,
+    /// Project functions transitively reachable from this one (direct calls,
+    /// capped). Empty until reachability analysis runs.
+    #[serde(default)]
+    pub reachable_functions: Vec<String>,
+    /// Cyclomatic complexity of this function plus all reachable functions --
+    /// how much code fuzzing this target exercises.
+    #[serde(default)]
+    pub accumulated_complexity: u32,
 }
 
 /// A ranked inventory of fuzzing targets.
@@ -74,6 +103,10 @@ pub struct TargetCandidate {
 pub struct TargetInventory {
     pub project_root: PathBuf,
     pub candidates: Vec<TargetCandidate>,
+    /// Project-only call adjacency (`caller -> direct project callees`), for the
+    /// call-tree view. Empty until reachability/scanning populates it.
+    #[serde(default)]
+    pub call_graph: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl TargetInventory {

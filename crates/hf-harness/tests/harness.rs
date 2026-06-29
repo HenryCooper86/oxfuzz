@@ -2,13 +2,16 @@
 
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
-use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
-use hf_core::provider::{LlmProvider, LlmResponse};
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+use hf_core::provider::{
+    ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, LlmProvider, ProviderError,
+    ProviderMetadata,
+};
 use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
-use hf_core::types::{Message, TokenUsage};
+use hf_core::types::TokenUsage;
 use hf_harness::{compile, draft, smoke_fuzz};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -19,25 +22,49 @@ struct MockLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
-    fn id(&self) -> &str {
-        "mock"
-    }
-    async fn complete(&self, _messages: Vec<Message>) -> Result<LlmResponse, ClassifiedError> {
-        Ok(LlmResponse {
-            content: self.response.clone(),
-            usage: TokenUsage::default(),
+    async fn chat_completion(&self, _request: &ChatRequest) -> Result<ChatResponse, ProviderError> {
+        Ok(ChatResponse {
+            id: "mock".to_owned(),
             model: "mock".to_owned(),
+            content: Some(self.response.clone()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            usage: TokenUsage::default(),
+            finish_reason: FinishReason::Stop,
+            raw_request: None,
+            raw_response: None,
+            provider_id: None,
+            generated_images: Vec::new(),
         })
     }
-    async fn stream(
+    async fn chat_completion_stream(
         &self,
-        _messages: Vec<Message>,
-    ) -> Result<
-        Box<dyn futures::Stream<Item = Result<String, ClassifiedError>> + Send + Unpin>,
-        ClassifiedError,
-    > {
-        Err(ClassifiedError::Provider("no stream".to_owned()))
+        _request: &ChatRequest,
+    ) -> Result<ChatStreamResponse, ProviderError> {
+        Err(ProviderError::Other {
+            message: "no stream".to_owned(),
+        })
     }
+    fn metadata(&self) -> &ProviderMetadata {
+        mock_provider_metadata()
+    }
+}
+
+fn mock_provider_metadata() -> &'static ProviderMetadata {
+    use hf_core::provider::{ProviderCapability, ProviderType, ToolCallingMode};
+    static M: std::sync::OnceLock<ProviderMetadata> = std::sync::OnceLock::new();
+    M.get_or_init(|| ProviderMetadata {
+        id: hf_core::types::ProviderId::from_string("mock"),
+        provider_type: ProviderType::Custom,
+        model: "mock".to_owned(),
+        tags: Vec::new(),
+        capabilities: vec![ProviderCapability::Text],
+        max_concurrency: 1,
+        context_window: 128_000,
+        cost_per_1k_input: 0.0,
+        cost_per_1k_output: 0.0,
+        tool_calling_mode: ToolCallingMode::Native,
+    })
 }
 
 struct MockRuntime {
@@ -86,13 +113,15 @@ fn target() -> TargetCandidate {
         fit_score: 0.9,
         sanitizers: vec![Sanitizer::Address],
         rationale: String::new(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
     }
 }
 
 #[tokio::test]
 async fn draft_extracts_code_block_from_llm_response() {
     let llm = MockLlm {
-        response: r#"Here is the harness:
+        response: r"Here is the harness:
 ```c
 #include <stdint.h>
 #include <stddef.h>
@@ -101,7 +130,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     return 0;
 }
 ```
-That's it."#
+That's it."
             .to_owned(),
     };
     let draft = draft(&target(), EngineKind::LibFuzzer, Box::new(llm))

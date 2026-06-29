@@ -1,0 +1,19 @@
+[skill]
+name = "corpus-curation"
+version = "0.1.0"
+description = "Seed, grow, prune, and keep a fuzzing corpus healthy"
+author = "hobot_fuzz"
+source_format = "markdown"
+
+[skill.classification]
+type = "llm_reasoning"
+domain = ["fuzzing", "corpus", "seed-selection"]
+atomic = true
+
+[skill.constraints]
+max_input_tokens = 8000
+max_output_tokens = 2000
+
+[skill.root]
+path = "root.md"
+token_count = 360

@@ -1,6 +1,20 @@
 // Shared types for hobot_fuzz GUI.
 
-export type ViewType = "discover" | "harness" | "run" | "triage" | "corpus" | "settings" | "chat";
+export type ViewType =
+  | "workflow"
+  | "discover"
+  | "harness"
+  | "run"
+  | "triage"
+  | "corpus"
+  | "settings"
+  | "chat"
+  | "projects"
+  | "artifacts"
+  | "agents"
+  | "skills"
+  | "knowledge"
+  | "automation";
 
 export interface TargetCandidate {
   id: string;
@@ -15,11 +29,15 @@ export interface TargetCandidate {
   fit_score: number;
   sanitizers: string[];
   rationale: string;
+  reachable_functions?: string[];
+  accumulated_complexity?: number;
 }
 
 export interface TargetInventory {
   project_root: string;
   candidates: TargetCandidate[];
+  /** Project-only call adjacency (caller -> direct project callees). */
+  call_graph?: Record<string, string[]>;
 }
 
 export interface CorpusEntry {
@@ -28,6 +46,17 @@ export interface CorpusEntry {
   size: number;
   source: string;
   coverage_hash: string | null;
+}
+
+export type CrashSeverity = "Exploitable" | "ProbablyExploitable" | "NotExploitable" | "Undefined";
+
+/** CASR crash-analysis report attached to a triaged crash. */
+export interface CasrReport {
+  severity: CrashSeverity;
+  severity_short: string;
+  crashline: string;
+  stack: string[];
+  cluster: number | null;
 }
 
 export interface Crash {
@@ -40,6 +69,7 @@ export interface Crash {
   summary: string;
   minimized: boolean;
   bug_report: { title: string; summary: string; repro_steps: string; stack: string; severity_guess: string } | null;
+  casr: CasrReport | null;
 }
 
 export interface FuzzProgress {
@@ -49,7 +79,13 @@ export interface FuzzProgress {
 
 export interface SystemStatus {
   docker: boolean;
-  clang: boolean;
-  afl: boolean;
+  sandbox_image: boolean;
+  libfuzzer: boolean;
+  aflplusplus: boolean;
   honggfuzz: boolean;
+  clusterfuzzlite: boolean;
+  syzkaller: boolean;
 }
+
+/** Engine identifiers used across the Run view and status bar. */
+export type EngineId = "libfuzzer" | "afl++" | "honggfuzz" | "clusterfuzzlite" | "syzkaller";

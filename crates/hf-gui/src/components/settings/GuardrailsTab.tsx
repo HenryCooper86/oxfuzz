@@ -1,6 +1,6 @@
 // Guardrails tab -- HITL approval policy for safety-first fuzzing.
+// Controlled: reads/writes the parsed `guardrails` config object via props.
 
-import { useState } from "react";
 import { Switch } from "../ui/Switch";
 import { Input } from "../ui/Input";
 import { Badge } from "../ui/Badge";
@@ -8,24 +8,32 @@ import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { Shield, ShieldAlert, ShieldCheck } from "lucide-react";
 
 type PermissionMode = "strict" | "auto" | "manual";
+type Cfg = Record<string, unknown>;
 
-export function GuardrailsTab() {
-  const [mode, setMode] = useState<PermissionMode>("strict");
-  const [hitlThreshold, setHitlThreshold] = useState(0.6);
-  const [maxIdenticalCalls, setMaxIdenticalCalls] = useState(3);
-  const [requireHarnessApproval, setRequireHarnessApproval] = useState(true);
-  const [requireRunApproval, setRequireRunApproval] = useState(true);
-  const [requireBugReportApproval, setRequireBugReportApproval] = useState(true);
-  const [loopDetection, setLoopDetection] = useState(true);
+export function GuardrailsTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const mode = ((value.permission_mode as string) ?? "strict") as PermissionMode;
+  const hitlThreshold = (value.hitl_threshold as number) ?? 0.6;
+  const maxIdenticalCalls = (value.max_identical_calls as number) ?? 3;
+  const loopDetection = maxIdenticalCalls > 0;
+
+  // HITL approval gates: persisted under a dedicated [hitl_gates] table so the
+  // toggles round-trip. Unknown to current backend readers (harmless extra keys).
+  const gates = (value.hitl_gates as Cfg) ?? {};
+  const requireHarnessApproval = gates.harness !== false;
+  const requireRunApproval = gates.run !== false;
+  const requireBugReportApproval = gates.bug_report !== false;
+
+  function patch(next: Cfg) {
+    onChange({ ...value, ...next });
+  }
+  function patchGates(next: Cfg) {
+    onChange({ ...value, hitl_gates: { ...gates, ...next } });
+  }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-base font-semibold">Guardrails</h2>
-        <p className="text-xs text-text-secondary mt-0.5">Human-in-the-loop approval policy for safety-first fuzzing. Generated harnesses are untrusted code and require approval before execution.</p>
-      </div>
-
-      <SettingsGroup title="Permission Mode">
+    <div>
+      <SettingsGroup title="Permission Mode" description="Human-in-the-loop approval policy for safety-first fuzzing. Generated harnesses are untrusted code and require approval before execution.">
+        <div style={{ padding: "10px 14px" }}>
         <div className="flex gap-2">
           {([
             { id: "strict", label: "Strict (recommended)", icon: Shield, desc: "HITL on all high-risk actions" },
@@ -34,7 +42,7 @@ export function GuardrailsTab() {
           ] as const).map((m) => (
             <button
               key={m.id}
-              onClick={() => setMode(m.id)}
+              onClick={() => patch({ permission_mode: m.id })}
               className="flex flex-col gap-1 p-3 rounded-md transition-all duration-150 flex-1"
               style={{
                 background: mode === m.id ? "var(--accent-subtle)" : "transparent",
@@ -50,55 +58,46 @@ export function GuardrailsTab() {
             </button>
           ))}
         </div>
+        </div>
       </SettingsGroup>
 
       <SettingsGroup title="HITL Approval Gates">
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Harness compilation</span>
-            <p className="text-xs text-text-muted">Require approval before compiling a generated harness in the sandbox.</p>
-          </div>
-          <Switch checked={requireHarnessApproval} onChange={setRequireHarnessApproval} />
-        </div>
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Fuzzer execution</span>
-            <p className="text-xs text-text-muted">Require approval before starting a fuzz run.</p>
-          </div>
-          <Switch checked={requireRunApproval} onChange={setRequireRunApproval} />
-        </div>
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Bug report publication</span>
-            <p className="text-xs text-text-muted">Require approval before publishing a drafted bug report.</p>
-          </div>
-          <Switch checked={requireBugReportApproval} onChange={setRequireBugReportApproval} />
-        </div>
+        <SettingsItem title="Harness compilation" description="Require approval before compiling a generated harness in the sandbox.">
+          <Switch checked={requireHarnessApproval} onChange={(v) => patchGates({ harness: v })} />
+        </SettingsItem>
+        <SettingsItem title="Fuzzer execution" description="Require approval before starting a fuzz run.">
+          <Switch checked={requireRunApproval} onChange={(v) => patchGates({ run: v })} />
+        </SettingsItem>
+        <SettingsItem title="Bug report publication" description="Require approval before publishing a drafted bug report.">
+          <Switch checked={requireBugReportApproval} onChange={(v) => patchGates({ bug_report: v })} />
+        </SettingsItem>
       </SettingsGroup>
 
       <SettingsGroup title="Risk Scoring">
-        <SettingsItem label="HITL Threshold">
-          <Input type="number" step="0.1" min="0" max="1" value={hitlThreshold} onChange={(e) => setHitlThreshold(parseFloat(e.target.value) || 0.6)} />
+        <SettingsItem title="HITL Threshold">
+          <div style={{ width: 120 }}>
+            <Input type="number" step="0.1" min="0" max="1" value={hitlThreshold} onChange={(e) => patch({ hitl_threshold: parseFloat(e.target.value) || 0.6 })} />
+          </div>
         </SettingsItem>
-        <div className="flex gap-2 mt-2">
-          <Badge variant="success">Low risk</Badge>
-          <Badge variant="warning">Medium risk</Badge>
-          <Badge variant="error">High risk</Badge>
-          <span className="text-xs text-text-muted">Actions scoring above {hitlThreshold} require HITL approval.</span>
+        <div className="settings-item" style={{ padding: "10px 14px" }}>
+          <div className="flex gap-2 items-center flex-wrap">
+            <Badge variant="success">Low risk</Badge>
+            <Badge variant="warning">Medium risk</Badge>
+            <Badge variant="error">High risk</Badge>
+            <span className="text-xs text-text-muted">Actions scoring above {hitlThreshold} require HITL approval.</span>
+          </div>
         </div>
       </SettingsGroup>
 
       <SettingsGroup title="Loop Detection">
-        <div className="flex items-center justify-between py-2">
-          <div>
-            <span className="text-xs text-text-primary">Enable loop detection</span>
-            <p className="text-xs text-text-muted">Detect and block repeated identical tool calls to prevent infinite loops.</p>
-          </div>
-          <Switch checked={loopDetection} onChange={setLoopDetection} />
-        </div>
+        <SettingsItem title="Enable loop detection" description="Detect and block repeated identical tool calls to prevent infinite loops.">
+          <Switch checked={loopDetection} onChange={(v) => patch({ max_identical_calls: v ? 3 : 0 })} />
+        </SettingsItem>
         {loopDetection && (
-          <SettingsItem label="Max identical calls">
-            <Input type="number" value={maxIdenticalCalls} onChange={(e) => setMaxIdenticalCalls(parseInt(e.target.value) || 3)} />
+          <SettingsItem title="Max identical calls">
+            <div style={{ width: 120 }}>
+              <Input type="number" value={maxIdenticalCalls} onChange={(e) => patch({ max_identical_calls: parseInt(e.target.value) || 3 })} />
+            </div>
           </SettingsItem>
         )}
       </SettingsGroup>
