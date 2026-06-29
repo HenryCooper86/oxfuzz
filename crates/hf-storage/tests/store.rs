@@ -105,6 +105,56 @@ async fn concurrent_appends_get_distinct_seqs() {
     );
 }
 
+#[tokio::test]
+async fn dedupe_crashes_collapses_same_run_and_signature() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    let target = Uuid::new_v4();
+    let mk = |sig: &str| Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: target,
+        input_path: PathBuf::from("out/crash"),
+        stack_signature: sig.to_owned(),
+        kind: CrashKind::Asan,
+        summary: "boom".to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    };
+    // Two rows share a signature (legacy duplicate); one distinct signature;
+    // two empty-signature rows that must NOT be collapsed.
+    for c in [mk("S"), mk("S"), mk("T"), mk(""), mk("")] {
+        store.upsert_crash(&c).await.unwrap();
+    }
+    assert_eq!(store.list_crashes_by_run(run.id).await.unwrap().len(), 5);
+
+    store.dedupe_crashes().await.unwrap();
+
+    // "S" collapses to 1, "T" stays, both empty-sig rows stay -> 4.
+    let remaining = store.list_crashes_by_run(run.id).await.unwrap();
+    assert_eq!(remaining.len(), 4, "got {:?}", remaining.len());
+    assert_eq!(
+        remaining
+            .iter()
+            .filter(|c| c.stack_signature == "S")
+            .count(),
+        1
+    );
+    assert_eq!(
+        remaining
+            .iter()
+            .filter(|c| c.stack_signature.is_empty())
+            .count(),
+        2
+    );
+
+    // Idempotent: a second pass removes nothing.
+    store.dedupe_crashes().await.unwrap();
+    assert_eq!(store.list_crashes_by_run(run.id).await.unwrap().len(), 4);
+}
+
 fn sample_harness(target_id: Uuid) -> Harness {
     Harness {
         id: Uuid::new_v4(),
