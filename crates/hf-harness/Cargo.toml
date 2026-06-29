@@ -8,6 +8,7 @@ description = "Harness generation, compile validation, smoke fuzz"
 [dependencies]
 hf-core = { workspace = true }
 hf-prompt = { workspace = true }
+hf-engine = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,6 +22,7 @@ chrono = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 futures = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
