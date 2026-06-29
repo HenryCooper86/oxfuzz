@@ -229,6 +229,19 @@ button:disabled {
   cursor: default;
 }
 
+/* Keyboard focus ring. The app uses `outline-none` widely (50+ call sites), so
+   restoring focus via `outline` would be overridden; a box-shadow ring is not.
+   `:focus-visible` shows it for keyboard navigation only (not mouse clicks),
+   and the inner surface-colored ring leaves a small gap so it reads cleanly on
+   any background. */
+:where(button, a, input, textarea, select, summary, [role="button"], [role="tab"], [role="switch"], [tabindex]):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--surface-primary),
+    0 0 0 4px var(--accent);
+  border-radius: var(--radius-sm);
+}
+
 /* Themed icon/action button (row actions: edit, duplicate, reset, delete).
    Transparent at rest, revealing a subtle surface + border on hover so it reads
    as interactive and matches the app's icon buttons. */
