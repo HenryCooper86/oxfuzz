@@ -14,22 +14,30 @@ hf-crash = { workspace = true }
 hf-corpus = { workspace = true }
 hf-coverage = { workspace = true }
 hf-provider = { workspace = true }
+hf-knowledge = { workspace = true }
+hf-diagnostics = { workspace = true }
+hf-scheduler = { workspace = true }
+hf-journal = { workspace = true }
+ignore = { workspace = true }
 hf-session = { workspace = true }
 hf-storage = { workspace = true }
 hf-runtime = { workspace = true }
-hf-knowledge = { workspace = true }
-hf-skills = { workspace = true }
 hf-guardrails = { workspace = true }
-hf-journal = { workspace = true }
-hf-tools = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

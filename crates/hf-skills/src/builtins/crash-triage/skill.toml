@@ -1,0 +1,19 @@
+[skill]
+name = "crash-triage"
+version = "0.1.0"
+description = "Classify a crash and draft a bug report"
+author = "hobot_fuzz"
+source_format = "markdown"
+
+[skill.classification]
+type = "llm_reasoning"
+domain = ["fuzzing", "crash-triage", "security"]
+atomic = true
+
+[skill.constraints]
+max_input_tokens = 12000
+max_output_tokens = 2000
+
+[skill.root]
+path = "root.md"
+token_count = 420

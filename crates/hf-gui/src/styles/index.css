@@ -161,3 +161,121 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.68; }
 }
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+/* ============================================================
+   Native macOS chrome (Apple-style layered vibrancy)
+   Driven by data-host/data-platform on <html> (set in App.tsx)
+   and the WindowEffect::Sidebar material applied in Rust setup().
+   ============================================================ */
+
+/* Let the native frosted-glass material show through the webview so the
+   rounded window corners and sidebar vibrancy render instead of an opaque
+   square. Only on macOS under Tauri -- web/other platforms stay solid. */
+html[data-host="tauri"][data-platform="macos"] body,
+html[data-host="tauri"][data-platform="macos"] #root,
+html[data-host="tauri"][data-platform="macos"] .app-root {
+  background: transparent;
+}
+
+/* The sidebar reads as the frosted "sidebar" material: a translucent dark
+   veil over the native vibrancy gives subtle depth at the window edge. */
+html[data-host="tauri"][data-platform="macos"] .app-root nav {
+  background: color-mix(in srgb, var(--surface-secondary) 72%, transparent);
+}
+
+/* Main content column stays crisp and opaque so text rendering is sharp. */
+html[data-host="tauri"][data-platform="macos"] .app-main {
+  background: var(--surface-primary);
+}
+
+/* Header is the draggable titlebar when we draw our own chrome; interactive
+   controls inside it opt back out of the drag region. */
+html.custom-decorations header {
+  -webkit-app-region: drag;
+}
+html.custom-decorations header button,
+html.custom-decorations header [role="button"],
+html.custom-decorations header input,
+html.custom-decorations header a {
+  -webkit-app-region: no-drag;
+}
+
+/* The sidebar's top spacer is a drag handle and reserves room for the macOS
+   traffic lights that float over our custom chrome. */
+html.custom-decorations .app-root nav {
+  -webkit-app-region: drag;
+}
+html.custom-decorations .app-root nav button,
+html.custom-decorations .app-root nav [role="button"],
+html.custom-decorations .app-root nav a {
+  -webkit-app-region: no-drag;
+}
+
+/* Base button reset. Without this, a <button> with no explicit background
+   renders the native WebKit/macOS chrome (a glossy light box) that clashes with
+   the dark theme. Components opt into their own background/border on top. */
+button {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+}
+
+/* Themed icon/action button (row actions: edit, duplicate, reset, delete).
+   Transparent at rest, revealing a subtle surface + border on hover so it reads
+   as interactive and matches the app's icon buttons. */
+.hf-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.hf-action-btn:hover {
+  background: var(--surface-active);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+.hf-action-btn.danger:hover {
+  background: var(--error-subtle);
+  color: var(--error);
+  border-color: var(--error);
+}
+
+/* Hairline separators between consecutive settings rows inside a card. */
+.settings-item + .settings-item {
+  border-top: 1px solid var(--border);
+}
+
+/* Rendered Markdown in the report preview. Scoped to .markdown-body so it does
+   not leak into the rest of the app's custom-styled UI. */
+.markdown-body { color: var(--text-primary); font-size: 13px; line-height: 1.65; }
+.markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 0.2em 0 0.6em; }
+.markdown-body h2 { font-size: 1.2rem; font-weight: 600; margin: 1.3em 0 0.5em; padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+.markdown-body h3 { font-size: 1.02rem; font-weight: 600; margin: 1.1em 0 0.4em; }
+.markdown-body p { margin: 0.55em 0; }
+.markdown-body ul, .markdown-body ol { margin: 0.5em 0; padding-left: 1.4em; }
+.markdown-body li { margin: 0.2em 0; }
+.markdown-body a { color: var(--accent); text-decoration: none; }
+.markdown-body strong { color: var(--text-primary); font-weight: 650; }
+.markdown-body blockquote { margin: 0.7em 0; padding: 0.1em 0.9em; border-left: 3px solid var(--border); color: var(--text-secondary); }
+.markdown-body code { font-family: var(--font-mono); font-size: 0.88em; background: var(--surface-active); padding: 0.12em 0.36em; border-radius: 4px; }
+.markdown-body pre { background: var(--surface-active); padding: var(--space-md); border-radius: 6px; overflow-x: auto; }
+.markdown-body pre code { background: none; padding: 0; }
+.markdown-body table { border-collapse: collapse; width: 100%; margin: 0.7em 0; font-size: 0.92em; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 0.4em 0.7em; text-align: left; }
+.markdown-body th { background: var(--surface-active); font-weight: 600; }
+.markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 1.4em 0; }
+.markdown-body svg { max-width: 100%; height: auto; }

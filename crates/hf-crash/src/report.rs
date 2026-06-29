@@ -2,8 +2,8 @@
 
 use hf_core::crash::{BugReport, Crash};
 use hf_core::error::ClassifiedError;
-use hf_core::provider::LlmProvider;
-use hf_core::types::{Message, Role};
+use hf_core::provider::{ChatRequest, LlmProvider};
+use hf_core::types::Message;
 use serde::Deserialize;
 
 /// Draft a bug report for a crash using an LLM.
@@ -31,12 +31,10 @@ pub async fn draft_report(
          {}",
         crash.kind, crash.summary, crash.stack_signature, log,
     );
-    let messages = vec![Message {
-        role: Role::User,
-        content: prompt,
-    }];
-    let resp = llm.complete(messages).await?;
-    let report: BugReportUpdate = match serde_json::from_str(&resp.content) {
+    let messages = vec![Message::user(prompt)];
+    let req = ChatRequest::from_messages(messages);
+    let resp = llm.chat_completion(&req).await?;
+    let report: BugReportUpdate = match serde_json::from_str(resp.text()) {
         Ok(r) => r,
         Err(_) => {
             return Ok(BugReport {

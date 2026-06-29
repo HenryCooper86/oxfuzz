@@ -3,23 +3,13 @@ name = "hf-skills"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Skill registry, versioning, experience capture"
+description = "Fuzzing skill registry: built-in + user skill playbooks"
 
 [dependencies]
-hf-core = { workspace = true }
-async-trait = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
 toml = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

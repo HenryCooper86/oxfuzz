@@ -19,24 +19,29 @@
 //! | [`skill`] | `SkillRegistry` | - |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
-//! | [`engine`] | `FuzzEngine`, `FuzzRunHandle` | ENGINE_ADAPTER_STANDARD.md |
+//! | [`engine`] | `EngineKind`, `FuzzRunConfig`, `FuzzProgress` | ENGINE_ADAPTER_STANDARD.md |
 //! | [`crash`] | `Crash`, `CrashReport` | crash-triage-design.md |
 //! | [`corpus`] | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 //! | [`coverage`] | `CoverageReport` | corpus-coverage-design.md |
 
+pub mod agent;
 pub mod checkpoint;
 pub mod corpus;
 pub mod coverage;
 pub mod crash;
+pub mod embedding;
 pub mod engine;
 pub mod error;
+pub mod exec;
 pub mod harness;
 pub mod hook;
 pub mod memory;
+pub mod permission_types;
 pub mod provider;
 pub mod runtime;
 pub mod session;
 pub mod skill;
 pub mod target;
 pub mod tool;
+pub mod trust;
 pub mod types;

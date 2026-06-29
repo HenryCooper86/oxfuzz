@@ -1,4 +1,4 @@
-//! Tests for the EngineRunner that orchestrates build + run + progress.
+//! Tests for the `EngineRunner` that orchestrates build + run + progress.
 
 use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
@@ -81,6 +81,57 @@ async fn runner_libfuzzer_parses_progress_and_coverage() {
         "should have Done event"
     );
     assert_eq!(coverage.edges, 1024, "should pick max edge count");
+}
+
+#[tokio::test]
+async fn cancelled_run_returns_ok_instead_of_erroring() {
+    use tokio_util::sync::CancellationToken;
+
+    // A non-zero exit with no DONE/SUMMARY normally fails the run.
+    let rt = MockRuntime {
+        exit_code: 1,
+        stdout: String::new(),
+    };
+    let runner = EngineRunner::new();
+
+    // Without cancellation, that exit is treated as a failure.
+    let token = CancellationToken::new();
+    let failed = runner
+        .run_streaming(
+            EngineKind::LibFuzzer,
+            &run_config(EngineKind::LibFuzzer, 60),
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+            &token,
+            &|_| {},
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "a bad exit should error when not cancelled"
+    );
+
+    // When the run was cancelled, the same outcome is accepted: cancellation is
+    // a user action, not an engine failure.
+    let token = CancellationToken::new();
+    token.cancel();
+    let cancelled = runner
+        .run_streaming(
+            EngineKind::LibFuzzer,
+            &run_config(EngineKind::LibFuzzer, 60),
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+            &token,
+            &|_| {},
+        )
+        .await;
+    assert!(cancelled.is_ok(), "a cancelled run should not error");
 }
 
 #[tokio::test]

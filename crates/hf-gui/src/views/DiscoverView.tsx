@@ -1,10 +1,18 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { getTransport, pickFolder } from "../lib";
+import { useProject } from "../providers/ProjectContext";
+import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
-import { Crosshair, Search, Loader2, FolderOpen } from "lucide-react";
+import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
-export function DiscoverView() {
-  const [project, setProject] = useState("");
+export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
+  const { activeProject, setActiveProject } = useProject();
+  const { markDone } = usePipeline();
+  // When embedded in the unified workflow, the project is fixed by the
+  // workflow's project gate; standalone, this view has its own picker.
+  const [localProject, setLocalProject] = useState(activeProject);
+  const project = embedded ? activeProject : localProject;
+  const [lang, setLang] = useState("c");
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -14,7 +22,7 @@ export function DiscoverView() {
     setScanning(true);
     try {
       const path = await pickFolder();
-      if (path) setProject(path);
+      if (path) setLocalProject(path);
     } finally {
       setScanning(false);
     }
@@ -27,9 +35,11 @@ export function DiscoverView() {
     try {
       const inv = await getTransport().invoke<TargetInventory>("discover", {
         project,
-        lang: "c",
+        lang,
       });
       setInventory(inv);
+      setActiveProject(project);
+      markDone("discover");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -39,31 +49,47 @@ export function DiscoverView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <h1 className="text-xl font-semibold" style={{ letterSpacing: "-0.01em" }}>
-        Target Discovery
-      </h1>
-      <p className="text-sm text-text-secondary">
-        Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, and parser heuristics.
-      </p>
+      {!embedded && (
+        <>
+          <h1 className="text-xl font-semibold" style={{ letterSpacing: "-0.01em" }}>
+            Target Discovery
+          </h1>
+          <p className="text-sm text-text-secondary">
+            Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability.
+          </p>
+        </>
+      )}
 
       <div className="flex gap-2">
-        <input
-          type="text"
-          placeholder="/path/to/project"
-          value={project}
-          onChange={(e) => setProject(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && discover()}
-          className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
-          style={{ fontFamily: "var(--font-mono)" }}
-        />
-        <button
-          onClick={browse}
-          disabled={scanning}
-          className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
-          title="Browse for folder"
+        {!embedded && (
+          <input
+            type="text"
+            placeholder="/path/to/project"
+            value={project}
+            onChange={(e) => setLocalProject(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && discover()}
+            className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
+            style={{ fontFamily: "var(--font-mono)" }}
+          />
+        )}
+        <select
+          value={lang}
+          onChange={(e) => setLang(e.target.value)}
+          className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
         >
-          {scanning ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
-        </button>
+          <option value="c">C</option>
+          <option value="cpp">C++</option>
+        </select>
+        {!embedded && (
+          <button
+            onClick={browse}
+            disabled={scanning}
+            className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+            title="Browse for folder"
+          >
+            {scanning ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
+          </button>
+        )}
         <button
           onClick={discover}
           disabled={loading || !project}
@@ -99,7 +125,7 @@ export function DiscoverView() {
             {inventory.candidates
               .sort((a, b) => b.fit_score - a.fit_score)
               .map((c) => (
-                <CandidateCard key={c.id} candidate={c} />
+                <CandidateCard key={c.id} candidate={c} callGraph={inventory.call_graph ?? {}} project={project} />
               ))}
           </div>
         </div>
@@ -108,15 +134,44 @@ export function DiscoverView() {
   );
 }
 
-function CandidateCard({ candidate: c }: { candidate: TargetCandidate }) {
+function CandidateCard({ candidate: c, callGraph, project }: { candidate: TargetCandidate; callGraph: Record<string, string[]>; project: string }) {
   const fitColor = c.fit_score > 0.8 ? "var(--accent)" : c.fit_score > 0.6 ? "var(--warning)" : "var(--text-muted)";
+  const reaches = c.reachable_functions?.length ?? 0;
+  const hasTree = (callGraph[c.symbol]?.length ?? 0) > 0;
+  const [treeOpen, setTreeOpen] = useState(false);
+  // Per-function coverage overlay: null = not loaded, Set = covered functions
+  // (rebuilds a coverage harness + replays the corpus; only if a run happened).
+  const [covered, setCovered] = useState<Set<string> | null>(null);
+  const [covLoading, setCovLoading] = useState(false);
+
+  useEffect(() => {
+    if (!treeOpen || covered !== null || covLoading || !project) return;
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCovLoading(true);
+    getTransport()
+      .invoke<string[]>("coverage_functions", { project, target: c.symbol })
+      .then((fns) => !cancelled && setCovered(new Set(fns)))
+      .catch(() => !cancelled && setCovered(new Set()))
+      .finally(() => !cancelled && setCovLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [treeOpen, covered, covLoading, project, c.symbol]);
   return (
+    <div className="surface-card flex flex-col" style={{ padding: 0 }}>
     <div
-      className="surface-card flex items-center gap-3 transition-all duration-150"
-      style={{ padding: "var(--space-md)", cursor: "pointer" }}
+      className="flex items-center gap-3 transition-all duration-150"
+      style={{ padding: "var(--space-md)", cursor: hasTree ? "pointer" : "default" }}
+      onClick={hasTree ? () => setTreeOpen((o) => !o) : undefined}
       onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--border-focus)")}
       onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
     >
+      {hasTree ? (
+        <span className="shrink-0 text-text-muted">{treeOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+      ) : (
+        <span className="shrink-0" style={{ width: "14px" }} />
+      )}
       <Crosshair size={16} className="shrink-0" style={{ color: "var(--accent)" }} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
@@ -147,7 +202,95 @@ function CandidateCard({ candidate: c }: { candidate: TargetCandidate }) {
           {c.fit_score.toFixed(3)}
         </span>
         <span className="text-xs text-text-muted">complexity: {c.complexity}</span>
+        {reaches > 0 && (
+          <span
+            className="text-xs px-1.5 py-0.5 rounded-sm"
+            style={{ background: "var(--accent-subtle)", color: "var(--accent)", fontSize: "10px", fontWeight: 500 }}
+            title={`Reaches ${reaches} project function${reaches === 1 ? "" : "s"}:\n${(c.reachable_functions ?? []).join(", ")}`}
+          >
+            reaches {reaches} · acc {c.accumulated_complexity ?? c.complexity}
+          </span>
+        )}
       </div>
+    </div>
+    {treeOpen && hasTree && (
+      <div style={{ padding: "0 var(--space-md) var(--space-md) calc(var(--space-md) + 22px)", borderTop: "1px solid var(--border)" }}>
+        <div className="flex items-center gap-2 mt-2 mb-1">
+          <span className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+            Call Tree
+          </span>
+          {covLoading && <Loader2 size={11} className="animate-spin text-text-muted" />}
+          {covered && covered.size > 0 && (
+            <span className="text-xs text-text-muted flex items-center gap-2">
+              <span style={{ color: "var(--success, #16a34a)" }}>● covered</span>
+              <span style={{ color: "var(--text-muted)" }}>○ not covered</span>
+            </span>
+          )}
+          {covered && covered.size === 0 && !covLoading && (
+            <span className="text-xs text-text-muted">no coverage yet — run a campaign for this target</span>
+          )}
+        </div>
+        {(callGraph[c.symbol] ?? []).map((child) => (
+          <CallTreeNode key={child} name={child} graph={callGraph} ancestors={new Set([c.symbol])} depth={1} covered={covered} />
+        ))}
+      </div>
+    )}
+    </div>
+  );
+}
+
+// One node of the call tree: the function name + an expander for its project
+// callees. `ancestors` guards against cycles; deeper levels start collapsed.
+function CallTreeNode({
+  name,
+  graph,
+  ancestors,
+  depth,
+  covered,
+}: {
+  name: string;
+  graph: Record<string, string[]>;
+  ancestors: Set<string>;
+  depth: number;
+  covered: Set<string> | null;
+}) {
+  const isCycle = ancestors.has(name);
+  const children = isCycle ? [] : graph[name] ?? [];
+  const hasChildren = children.length > 0;
+  const [open, setOpen] = useState(depth < 2);
+  // When coverage data is loaded, color by hit/not-hit; otherwise neutral.
+  const hasCoverage = covered !== null && covered.size > 0;
+  const isCovered = covered?.has(name) ?? false;
+  const nameColor = hasCoverage
+    ? isCovered
+      ? "var(--success, #16a34a)"
+      : "var(--text-muted)"
+    : hasChildren
+      ? "var(--text-primary)"
+      : "var(--text-secondary)";
+  return (
+    <div>
+      <div className="flex items-center gap-1 text-xs font-mono" style={{ padding: "1px 0" }}>
+        {hasChildren ? (
+          <button onClick={() => setOpen((o) => !o)} className="text-text-muted hover:text-text-primary outline-none">
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+        ) : (
+          <span style={{ width: "12px" }} />
+        )}
+        {hasCoverage && <span style={{ color: nameColor, fontSize: "9px" }}>{isCovered ? "●" : "○"}</span>}
+        <span style={{ color: nameColor }}>
+          {name}
+          {isCycle ? " ↻" : ""}
+        </span>
+      </div>
+      {open && hasChildren && (
+        <div style={{ marginLeft: "5px", borderLeft: "1px solid var(--border)", paddingLeft: "8px" }}>
+          {children.map((child) => (
+            <CallTreeNode key={child} name={child} graph={graph} ancestors={new Set([...ancestors, name])} depth={depth + 1} covered={covered} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -17,6 +17,12 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+bytes = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+toml = { workspace = true }
+temp-env = "0.3"
 
 [lints]
 workspace = true

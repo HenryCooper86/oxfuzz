@@ -1,9 +1,9 @@
 //! LLM-assisted ranking of discovered targets.
 
 use hf_core::error::ClassifiedError;
-use hf_core::provider::LlmProvider;
-use hf_core::target::{TargetInventory, TargetLanguage};
-use hf_core::types::{Message, Role};
+use hf_core::provider::{ChatRequest, LlmProvider};
+use hf_core::target::TargetInventory;
+use hf_core::types::Message;
 use hf_prompt::render_discovery_prompt;
 use serde::Deserialize;
 
@@ -17,12 +17,10 @@ pub async fn rank(
     llm: Box<dyn LlmProvider>,
 ) -> Result<TargetInventory, ClassifiedError> {
     let prompt = render_discovery_prompt(&inventory.candidates);
-    let messages = vec![Message {
-        role: Role::User,
-        content: prompt,
-    }];
-    let resp = llm.complete(messages).await?;
-    let updates: Vec<RankUpdate> = match serde_json::from_str(&resp.content) {
+    let messages = vec![Message::user(prompt)];
+    let req = ChatRequest::from_messages(messages);
+    let resp = llm.chat_completion(&req).await?;
+    let updates: Vec<RankUpdate> = match serde_json::from_str(resp.text()) {
         Ok(v) => v,
         Err(_) => {
             // LLM returned non-JSON; keep heuristic scores.
@@ -49,11 +47,6 @@ pub async fn rank(
             .partial_cmp(&a.fit_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let _ = inventory
-        .candidates
-        .iter()
-        .map(|c| c.language)
-        .collect::<Vec<TargetLanguage>>();
     Ok(inventory)
 }
 

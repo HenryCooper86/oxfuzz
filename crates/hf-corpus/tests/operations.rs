@@ -1,7 +1,7 @@
 //! Tests for corpus management operations.
 
-use hf_core::corpus::{CorpusEntry, CorpusSource};
-use hf_corpus::{grow, list, merge, prune, seed};
+use hf_core::corpus::CorpusSource;
+use hf_corpus::{absorb, grow, list, merge, minimize, prune, seed};
 use std::fs;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -102,6 +102,70 @@ async fn merge_combines_without_duplicates() {
     let merged = merge(a, b).unwrap();
     // file1 and file1_dup have the same sha256 -> deduped. file2 is unique.
     assert_eq!(merged.entries.len(), 2, "should merge to 2 unique entries");
+}
+
+#[tokio::test]
+async fn minimize_swaps_in_the_minimized_set_and_tags_it() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let minimized = dir.path().join("corpus_min");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&minimized).unwrap();
+    // The live corpus has three inputs.
+    fs::write(corpus_root.join("a"), b"aaa").unwrap();
+    fs::write(corpus_root.join("b"), b"bbb").unwrap();
+    fs::write(corpus_root.join("c"), b"ccc").unwrap();
+    // A coverage-guided merge kept only the two that contribute coverage.
+    fs::write(minimized.join("a"), b"aaa").unwrap();
+    fs::write(minimized.join("c"), b"ccc").unwrap();
+
+    let result = minimize(&corpus_root, &minimized).unwrap();
+
+    assert_eq!(
+        result.entries.len(),
+        2,
+        "should keep only the minimized set"
+    );
+    assert!(corpus_root.join("a").exists());
+    assert!(corpus_root.join("c").exists());
+    assert!(!corpus_root.join("b").exists(), "redundant input removed");
+    assert!(
+        result
+            .entries
+            .iter()
+            .all(|e| matches!(e.source, CorpusSource::Minimized)),
+        "survivors tagged Minimized"
+    );
+}
+
+#[tokio::test]
+async fn absorb_adds_unique_crash_inputs_and_skips_dups() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    // The corpus already contains one input.
+    fs::write(corpus_root.join("existing"), b"already-here").unwrap();
+
+    // Crash reproducers found during triage: one new, one a content-dup of the
+    // existing entry.
+    let crash_dir = dir.path().join("crashes");
+    fs::create_dir_all(&crash_dir).unwrap();
+    let new_crash = crash_dir.join("crash-001");
+    let dup_crash = crash_dir.join("crash-002");
+    fs::write(&new_crash, b"boom").unwrap();
+    fs::write(&dup_crash, b"already-here").unwrap();
+
+    let (corpus, added) = absorb(&corpus_root, &[new_crash, dup_crash]).unwrap();
+
+    assert_eq!(added, 1, "only the genuinely new crash is absorbed");
+    assert_eq!(corpus.entries.len(), 2);
+    // The new crash now lives in the corpus, tagged as fuzzer-derived.
+    let absorbed = corpus
+        .entries
+        .iter()
+        .find(|e| std::fs::read(&e.path).unwrap() == b"boom")
+        .expect("new crash present");
+    assert!(matches!(absorbed.source, CorpusSource::Fuzzer));
 }
 
 #[tokio::test]

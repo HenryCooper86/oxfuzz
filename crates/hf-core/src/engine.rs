@@ -1,18 +1,15 @@
-//! Fuzzing engine traits and types.
+//! Fuzzing engine types.
 //!
+//! The engine adapter contract (`EngineAdapter`) and the runner live in
+//! `hf-engine`; this module holds only the shared, serializable types.
 //! See `docs/standards/ENGINE_ADAPTER_STANDARD.md`.
 
-use async_trait::async_trait;
-use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::error::ClassifiedError;
-use crate::harness::Harness;
-use crate::runtime::RuntimeAdapter;
-use crate::target::{Sanitizer, TargetLanguage};
+use crate::target::Sanitizer;
 
 /// The kind of fuzzing engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -21,14 +18,29 @@ pub enum EngineKind {
     Honggfuzz,
     LibFuzzer,
     ClusterFuzzLite,
+    /// Google's coverage-guided OS kernel fuzzer (syscall sequences).
+    Syzkaller,
 }
 
-/// A compiled harness binary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildArtifact {
-    pub harness_id: Uuid,
-    pub binary: PathBuf,
-    pub log: String,
+impl std::str::FromStr for EngineKind {
+    type Err = String;
+
+    /// Parse an engine name (case-insensitive, with common aliases). Unknown
+    /// names are rejected so every entrypoint (CLI/web/GUI) fails the same way
+    /// instead of silently defaulting to a different engine.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "afl++" | "aflplusplus" | "afl" => Ok(Self::AflPlusPlus),
+            "honggfuzz" | "hfuzz" => Ok(Self::Honggfuzz),
+            "libfuzzer" | "libfuzz" | "lf" => Ok(Self::LibFuzzer),
+            "clusterfuzzlite" | "cfl" | "cflite" => Ok(Self::ClusterFuzzLite),
+            "syzkaller" | "syz" => Ok(Self::Syzkaller),
+            other => Err(format!(
+                "unknown fuzzing engine '{other}' (expected one of: \
+                 afl++, honggfuzz, libfuzzer, clusterfuzzlite, syzkaller)"
+            )),
+        }
+    }
 }
 
 /// Configuration for a fuzz run.
@@ -53,36 +65,4 @@ pub enum FuzzProgress {
     CrashesFound(u32),
     LogLine(String),
     Done,
-}
-
-/// A handle to a running fuzz job.
-pub struct FuzzRunHandle {
-    pub run_id: Uuid,
-    pub progress: Box<dyn Stream<Item = FuzzProgress> + Send + Unpin>,
-}
-
-/// The unified fuzzing engine trait.
-#[async_trait]
-pub trait FuzzEngine: Send + Sync {
-    fn kind(&self) -> EngineKind;
-    fn supports(&self, lang: TargetLanguage, san: Sanitizer) -> bool;
-    async fn build(
-        &self,
-        harness: &Harness,
-        rt: &dyn RuntimeAdapter,
-    ) -> Result<BuildArtifact, ClassifiedError>;
-    async fn run(
-        &self,
-        cfg: &FuzzRunConfig,
-        rt: &dyn RuntimeAdapter,
-    ) -> Result<FuzzRunHandle, ClassifiedError>;
-    async fn minimize(
-        &self,
-        crash: &crate::crash::Crash,
-        rt: &dyn RuntimeAdapter,
-    ) -> Result<crate::crash::Crash, ClassifiedError>;
-    async fn coverage(
-        &self,
-        run: &FuzzRunHandle,
-    ) -> Result<crate::coverage::CoverageReport, ClassifiedError>;
 }

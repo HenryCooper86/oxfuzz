@@ -1,0 +1,25 @@
+# ==============================================================================
+# hobot_fuzz -- Global Settings
+# ==============================================================================
+
+# Logging level: error, warn, info, debug, trace
+log_level = "info"
+
+# Output format: "pretty" (dev) or "json" (production)
+log_format = "pretty"
+
+# Default fuzzing workspace (corpora, crashes, build artifacts).
+# Override with HF_FUZZ_WORKSPACE env var.
+fuzz_workspace = "/tmp/hobot_fuzz_workspace"
+
+# Default engine when none is specified on the CLI.
+default_engine = "afl++"
+
+# Default sanitizer.
+default_sanitizer = "address"
+
+# Maximum LLM rounds for harness iteration before giving up.
+max_harness_iterations = 3
+
+# Smoke fuzz duration in seconds before promoting a harness.
+smoke_fuzz_duration_secs = 60

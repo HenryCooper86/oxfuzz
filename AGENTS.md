@@ -24,7 +24,7 @@ full observability - WAL-based recoverability - self-evolving skills -
 **Fuzzing Domain**: `hf-discovery` - `hf-harness` - `hf-engine` - `hf-crash` - `hf-corpus` - `hf-coverage`
 **Orchestration**: `hf-agent` - `hf-bot`
 **Service**: `hf-service` (all business logic)
-**Presentation**: `hf-cli` (CLI + TUI) - `hf-web` (REST API)
+**Presentation**: `hf-cli` (CLI + TUI) - `hf-web` (REST API) - `hf-gui` (Tauri desktop app, `crates/hf-gui/src-tauri`)
 **Testing**: `hf-test-utils`
 
 ### 1.2 Repository Layout
