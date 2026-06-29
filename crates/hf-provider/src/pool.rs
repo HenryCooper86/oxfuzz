@@ -43,10 +43,10 @@ struct ProviderEntry {
     default_temperature: Option<f64>,
     default_top_p: Option<f64>,
     metrics: SharedMetrics,
-    /// Explicit counter for active in-flight requests (including streaming).
-    /// The semaphore is released when `chat_completion_stream` returns, but
-    /// the stream may still be consumed. This counter is decremented only
-    /// after the request/stream is fully complete.
+    /// Explicit counter for active in-flight requests (including streaming),
+    /// for observability. For streaming, both this counter and the concurrency
+    /// permit are held (via the stream wrapper) until the stream is fully
+    /// consumed or dropped, then released together.
     active_requests: Arc<AtomicUsize>,
 }
 
@@ -478,18 +478,25 @@ impl ProviderPool for ProviderPoolImpl {
         let idx = self.router.select(&routable, route)?;
         let entry = &self.providers[idx];
 
-        // Acquire global semaphore permit if configured.
-        let _global_permit = if let Some(ref sem) = self.global_semaphore {
-            Some(sem.acquire().await.map_err(|_| ProviderError::Other {
-                message: "global semaphore closed".into(),
-            })?)
+        // Acquire OWNED permits: a streaming response outlives this function, so
+        // a borrowed permit would drop here (before the stream is consumed) and
+        // stop enforcing the concurrency limit. Owned permits are moved into the
+        // stream wrapper below and released only when the stream ends or drops.
+        let global_permit = if let Some(ref sem) = self.global_semaphore {
+            Some(
+                Arc::clone(sem)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ProviderError::Other {
+                        message: "global semaphore closed".into(),
+                    })?,
+            )
         } else {
             None
         };
 
-        let _permit = entry
-            .semaphore
-            .acquire()
+        let permit = Arc::clone(&entry.semaphore)
+            .acquire_owned()
             .await
             .map_err(|_| ProviderError::Other {
                 message: "semaphore closed".into(),
@@ -517,14 +524,16 @@ impl ProviderPool for ProviderPoolImpl {
                 stream_response.model.clone_from(&meta.model);
                 stream_response.context_window = meta.context_window;
 
-                // Wrap the inner stream so `guard` is held until the stream
-                // is fully consumed or dropped.
+                // Wrap the inner stream so the active-request guard AND the
+                // concurrency permits are all held until the stream is fully
+                // consumed or dropped (enforcing max_concurrency for streams).
                 let inner = stream_response.stream;
+                let keepalive = (guard, permit, global_permit);
                 stream_response.stream = Box::pin(futures::stream::unfold(
-                    (inner, Some(guard)),
-                    |(mut s, g)| async move {
+                    (inner, Some(keepalive)),
+                    |(mut s, ka)| async move {
                         use futures::StreamExt;
-                        s.next().await.map(|item| (item, (s, g)))
+                        s.next().await.map(|item| (item, (s, ka)))
                     },
                 ));
 
@@ -533,7 +542,7 @@ impl ProviderPool for ProviderPoolImpl {
             Err(e) => {
                 entry.metrics.record_error();
                 self.report_error(&meta.id, &e);
-                // guard drops here, decrementing active_requests
+                // guard + permits drop here, releasing the slot
                 Err(e)
             }
         }
@@ -739,7 +748,21 @@ mod tests {
             &self,
             _request: &ChatRequest,
         ) -> Result<ChatStreamResponse, ProviderError> {
-            panic!("MockProvider does not support streaming -- this code path should not be reached in pool unit tests")
+            if self.should_fail {
+                return Err(ProviderError::ServerError {
+                    provider: self.meta.id.to_string(),
+                    message: "mock failure".into(),
+                });
+            }
+            // An empty stream is enough to verify permit lifetime: the pool's
+            // wrapper holds the permit until the stream is consumed or dropped.
+            Ok(ChatStreamResponse {
+                stream: Box::pin(futures::stream::empty()),
+                raw_request: None,
+                provider_id: None,
+                model: self.meta.model.clone(),
+                context_window: self.meta.context_window,
+            })
         }
 
         fn metadata(&self) -> &ProviderMetadata {
@@ -837,6 +860,39 @@ mod tests {
         assert_eq!(
             before, after,
             "semaphore permits should be released after completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_holds_concurrency_permit_until_stream_dropped() {
+        let pool = ProviderPoolImpl::from_providers(
+            vec![MockProvider::ok("p1", vec!["gen"])],
+            &test_config(),
+        );
+        let route = RouteRequest {
+            required_tags: vec!["gen".into()],
+            ..Default::default()
+        };
+
+        let before = pool.providers[0].semaphore.available_permits();
+        let stream = pool
+            .chat_completion_stream(&test_request(), &route)
+            .await
+            .expect("stream should start");
+
+        // While the (unconsumed) stream is alive, the permit must still be held.
+        assert_eq!(
+            pool.providers[0].semaphore.available_permits(),
+            before - 1,
+            "streaming must hold the concurrency permit for the stream's lifetime"
+        );
+
+        drop(stream);
+        // Dropping the stream releases the permit.
+        assert_eq!(
+            pool.providers[0].semaphore.available_permits(),
+            before,
+            "dropping the stream must release the permit"
         );
     }
 
