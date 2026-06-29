@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { EmptyState } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
@@ -13,23 +14,6 @@ function ViewHeader({ title, description }: { title: string; description: string
     <div>
       <h1 className="text-xl font-semibold">{title}</h1>
       <p className="text-sm text-text-secondary mt-0.5">{description}</p>
-    </div>
-  );
-}
-
-function EmptyState({ icon, hint }: { icon: ReactNode; hint: string }) {
-  return (
-    <div
-      className="surface-card flex flex-col items-center justify-center text-center"
-      style={{ padding: "var(--space-xl) var(--space-md)" }}
-    >
-      <div
-        className="flex items-center justify-center mb-3 rounded-full"
-        style={{ width: "48px", height: "48px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}
-      >
-        <span style={{ color: "var(--accent)" }}>{icon}</span>
-      </div>
-      <p className="text-sm text-text-secondary max-w-sm">{hint}</p>
     </div>
   );
 }
