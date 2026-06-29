@@ -455,8 +455,9 @@ cpus = 2\n";
                 !example.trim().is_empty(),
                 "section '{section}' has no embedded example"
             );
-            toml_to_json(example)
-                .unwrap_or_else(|e| panic!("embedded example for '{section}' is invalid TOML: {e}"));
+            toml_to_json(example).unwrap_or_else(|e| {
+                panic!("embedded example for '{section}' is invalid TOML: {e}")
+            });
         }
     }
 
