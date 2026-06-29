@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hf_agent::{Agent, AgentEvent, CollectingSink};
+use hf_agent::{run_chat_turn, Agent, AgentEvent, CollectingSink};
 use hf_core::provider::{
     ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderPool,
     RouteRequest,
@@ -180,4 +180,35 @@ async fn loop_guard_aborts_redundant_tool_calls() {
             .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("runaway"))),
         "expected an Error event for the detected loop"
     );
+}
+
+#[tokio::test]
+async fn run_chat_turn_drives_default_agent_without_session() {
+    // The shared presentation-layer entry point: with no session it uses the
+    // supplied fallback history and the default (orchestrator) agent.
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"thought":"easy","final":"shared path works"}"#,
+    ]));
+    let container = ServiceContainer::new(runtime, Some(pool));
+    let sink = CollectingSink::new();
+
+    let out = run_chat_turn(
+        container,
+        None,
+        None,                 // default agent
+        std::env::temp_dir(), // no user agent defs -> builtin default
+        None,                 // no persistent session
+        Vec::new(),           // empty fallback history
+        "hello",
+        &sink,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out, "shared path works");
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Complete { content } if content == "shared path works")));
 }
