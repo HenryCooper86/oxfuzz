@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { Copy, Wand2 } from "lucide-react";
 import { getTransport } from "../../lib";
 import { usePrefs } from "../../providers/PrefsContext";
+import { useI18n, LOCALES } from "../../i18n";
 import { useToast } from "../ui/Toast";
 import { Button, Input, Select, Switch } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
@@ -23,6 +24,7 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
     sandboxArch,
     setSandboxArch,
   } = usePrefs();
+  const { locale, setLocale, t } = useI18n();
   const { toast } = useToast();
   const [configPath, setConfigPath] = useState("");
   const [dataPath, setDataPath] = useState("");
@@ -60,6 +62,14 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
       </SettingsGroup>
 
       <SettingsGroup title="Appearance">
+        <SettingsItem title={t("settings.language")}>
+          <Select
+            value={locale}
+            onChange={(v) => setLocale(v === "zh" ? "zh" : "en")}
+            options={LOCALES}
+            className="w-[140px]"
+          />
+        </SettingsItem>
         <SettingsItem title="Theme">
           <Select
             value={theme}

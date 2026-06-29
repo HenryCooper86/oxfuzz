@@ -1,6 +1,7 @@
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
+import { useI18n } from "../i18n";
 import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FolderOpen, MessageSquare, Play, Plus, Puzzle, Settings, Target, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
@@ -61,7 +62,8 @@ function NavButton({
   active: boolean;
   onNavigate: (view: ViewType) => void;
 }) {
-  const { view, label, icon: Icon } = item;
+  const { view, icon: Icon } = item;
+  const { t } = useI18n();
   return (
     <button
       onClick={() => onNavigate(view)}
@@ -75,13 +77,14 @@ function NavButton({
       <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex" }}>
         <Icon size={18} />
       </span>
-      <span>{label}</span>
+      <span>{t(`nav.${view}`)}</span>
     </button>
   );
 }
 
 /** Prominent row that opens a folder picker to begin a new fuzzing target. */
 function NewTargetButton({ onNewTarget }: { onNewTarget: () => void }) {
+  const { t } = useI18n();
   return (
     <button
       onClick={onNewTarget}
@@ -89,7 +92,7 @@ function NewTargetButton({ onNewTarget }: { onNewTarget: () => void }) {
       style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 600, marginBottom: "2px" }}
     >
       <Plus size={18} style={{ color: "var(--accent)" }} />
-      <span>New fuzzing target</span>
+      <span>{t("sidebar.newTarget")}</span>
     </button>
   );
 }
@@ -108,6 +111,7 @@ function TargetRow({
   onSelect: (path: string) => void;
   onRemove: (path: string) => void;
 }) {
+  const { t } = useI18n();
   const name = basename(path);
   const label = active && activeTarget ? `${name} / ${activeTarget}` : name;
   return (
@@ -131,7 +135,7 @@ function TargetRow({
         onClick={() => onRemove(path)}
         className="flex items-center justify-center rounded-md transition-colors duration-150 bg-transparent border-none"
         style={{ width: "26px", height: "26px", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
-        title="Remove from targets"
+        title={t("sidebar.removeTarget")}
         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
@@ -144,6 +148,7 @@ function TargetRow({
 export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }: SidebarProps) {
   const { activeProject, recentProjects, removeRecent } = useProject();
   const { target } = useTarget();
+  const { t } = useI18n();
 
   return (
     <nav
@@ -157,13 +162,13 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
       <div className="flex-1 overflow-y-auto" style={{ padding: "6px 8px 0 8px" }}>
         <NewTargetButton onNewTarget={onNewTarget} />
 
-        <SectionLabel>Targets</SectionLabel>
+        <SectionLabel>{t("sidebar.targets")}</SectionLabel>
         {recentProjects.length === 0 ? (
           <div
             className="text-xs text-text-muted"
             style={{ padding: "2px 10px 6px", lineHeight: 1.5 }}
           >
-            No targets yet. Add a project folder to start fuzzing.
+            {t("sidebar.noTargets")}
           </div>
         ) : (
           recentProjects.map((path) => (
@@ -178,12 +183,12 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           ))
         )}
 
-        <SectionLabel>Pipeline</SectionLabel>
+        <SectionLabel>{t("sidebar.pipeline")}</SectionLabel>
         {PIPELINE_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
 
-        <SectionLabel>Library</SectionLabel>
+        <SectionLabel>{t("sidebar.library")}</SectionLabel>
         {LIBRARY_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}

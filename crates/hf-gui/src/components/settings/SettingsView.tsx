@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Server, HardDrive, Crosshair, Shield, Database, Info, SlidersHorizontal, MessageSquare, Wrench } from "lucide-react";
 import { getTransport } from "../../lib";
+import { useI18n } from "../../i18n";
 import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
 import { GeneralTab } from "./GeneralTab";
@@ -91,6 +92,7 @@ function FormRawToggle({ mode, onChange }: { mode: "form" | "raw"; onChange: (m:
 }
 
 export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onRunWizard?: () => void }) {
+  const { t } = useI18n();
   const [active, setActive] = useState<SectionId>("general");
   const [mode, setMode] = useState<"form" | "raw">("form");
   // The single source of truth for the active config-backed section.
@@ -252,11 +254,11 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
             style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, cursor: "pointer" }}
           >
             <ArrowLeft size={16} />
-            <span>Back</span>
+            <span>{t("settings.back")}</span>
           </button>
         </div>
         <div className="flex-1 overflow-y-auto" style={{ padding: "6px 8px" }}>
-          {SECTIONS.map(({ id, label, icon: Icon }) => {
+          {SECTIONS.map(({ id, icon: Icon }) => {
             const isActive = active === id;
             return (
               <button
@@ -272,7 +274,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
                 <span style={{ color: isActive ? "var(--accent)" : "inherit", display: "flex" }}>
                   <Icon size={16} />
                 </span>
-                <span>{label}</span>
+                <span>{t(`settings.tab.${id}`)}</span>
               </button>
             );
           })}
@@ -295,13 +297,13 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
               opacity: 0.9,
             }}
           >
-            {section.label}
+            {t(`settings.tab.${section.id}`)}
           </span>
           <div className="flex items-center gap-4">
             {hasConfig && <FormRawToggle mode={mode} onChange={changeMode} />}
             {hasConfig && (
               <Button variant="primary" size="sm" onClick={save} disabled={!dirty || saving} loading={saving}>
-                Save Changes
+                {t("settings.save")}
               </Button>
             )}
           </div>
