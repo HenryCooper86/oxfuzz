@@ -1,7 +1,7 @@
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { pickFolder } from "../lib";
-import { EmptyState } from "../components/ui";
+import { Button, EmptyState } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder } from "lucide-react";
 
 export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => void }) {
@@ -27,16 +27,10 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
           <h1 className="text-xl font-semibold">Projects</h1>
           <p className="text-sm text-text-secondary mt-0.5">Recent project folders you've scanned and fuzzed.</p>
         </div>
-        <button
-          onClick={addProject}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none"
-          style={{ background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
-          onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.85")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
-        >
+        <Button variant="primary" onClick={addProject}>
           <FolderPlus size={14} />
           Add project
-        </button>
+        </Button>
       </div>
 
       {recentProjects.length === 0 ? (
@@ -45,16 +39,10 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
           title="No projects yet"
           hint="Add a C/C++ project folder to start discovering targets."
           action={
-            <button
-              onClick={addProject}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none"
-              style={{ background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
-              onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.85")}
-              onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
-            >
+            <Button variant="primary" onClick={addProject}>
               <FolderPlus size={14} />
               Add project
-            </button>
+            </Button>
           }
         />
       ) : (
