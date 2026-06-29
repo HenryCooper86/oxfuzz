@@ -78,3 +78,6 @@ data/
 *.db-wal
 # Local provider config holds API keys -- never commit it.
 config/providers.toml
+
+### TypeScript incremental build cache
+*.tsbuildinfo
