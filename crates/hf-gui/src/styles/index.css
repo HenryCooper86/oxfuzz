@@ -214,6 +214,46 @@ html.custom-decorations .app-root nav a {
   -webkit-app-region: no-drag;
 }
 
+/* Base button reset. Without this, a <button> with no explicit background
+   renders the native WebKit/macOS chrome (a glossy light box) that clashes with
+   the dark theme. Components opt into their own background/border on top. */
+button {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+}
+
+/* Themed icon/action button (row actions: edit, duplicate, reset, delete).
+   Transparent at rest, revealing a subtle surface + border on hover so it reads
+   as interactive and matches the app's icon buttons. */
+.hf-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.hf-action-btn:hover {
+  background: var(--surface-active);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+.hf-action-btn.danger:hover {
+  background: var(--error-subtle);
+  color: var(--error);
+  border-color: var(--error);
+}
+
 /* Hairline separators between consecutive settings rows inside a card. */
 .settings-item + .settings-item {
   border-top: 1px solid var(--border);
