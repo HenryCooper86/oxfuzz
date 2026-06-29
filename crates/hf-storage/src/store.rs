@@ -142,7 +142,39 @@ impl Store {
             .connect_with(opts)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Self { pool })
+        let store = Self { pool };
+        // One-time, self-healing cleanup of legacy duplicate crash rows left by
+        // pre-deterministic-id triages. Idempotent: a no-op on a clean DB.
+        store.dedupe_crashes().await?;
+        Ok(store)
+    }
+
+    /// Remove duplicate crash rows, keeping one representative per
+    /// `(run_id, stack_signature)` -- preferring a row that already carries a
+    /// drafted bug report, else the lexicographically smallest id. Rows with an
+    /// empty signature are never collapsed (distinct un-signatured crashes are
+    /// kept). Heals databases that accumulated duplicates before crash ids were
+    /// made deterministic; idempotent thereafter.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn dedupe_crashes(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "DELETE FROM crashes
+             WHERE stack_signature <> ''
+               AND id NOT IN (
+                 SELECT id FROM (
+                   SELECT id, ROW_NUMBER() OVER (
+                     PARTITION BY run_id, stack_signature
+                     ORDER BY (bug_report_json IS NOT NULL) DESC, id ASC
+                   ) AS rn
+                   FROM crashes WHERE stack_signature <> ''
+                 ) WHERE rn = 1
+               )",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Access the underlying connection pool (for advanced callers/tests).
