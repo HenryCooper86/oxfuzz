@@ -43,6 +43,68 @@ fn sample_target(project: &str) -> TargetCandidate {
     }
 }
 
+#[tokio::test]
+async fn append_message_assigns_monotonic_seq_and_orders_history() {
+    let (store, _dir) = temp_store().await;
+    let session = store.create_session(None, Utc::now()).await.unwrap();
+
+    store
+        .append_message(session, "user", "first", Utc::now())
+        .await
+        .unwrap();
+    store
+        .append_message(session, "assistant", "second", Utc::now())
+        .await
+        .unwrap();
+    store
+        .append_message(session, "user", "third", Utc::now())
+        .await
+        .unwrap();
+
+    let history = store.session_history(session).await.unwrap();
+    assert_eq!(
+        history,
+        vec![
+            ("user".to_owned(), "first".to_owned()),
+            ("assistant".to_owned(), "second".to_owned()),
+            ("user".to_owned(), "third".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_appends_get_distinct_seqs() {
+    // The atomic INSERT...SELECT must not assign duplicate seq under concurrency.
+    let (store, _dir) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let session = store.create_session(None, Utc::now()).await.unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let s = std::sync::Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            s.append_message(session, "user", &format!("m{i}"), Utc::now())
+                .await
+        }));
+    }
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    // Every append got a distinct, gapless seq 0..20 (no collision, none lost).
+    let seqs: Vec<i64> =
+        sqlx::query_scalar("SELECT seq FROM messages WHERE session_id = ?1 ORDER BY seq ASC")
+            .bind(session.to_string())
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        seqs,
+        (0..20).collect::<Vec<i64>>(),
+        "seqs must be distinct 0..20"
+    );
+}
+
 fn sample_harness(target_id: Uuid) -> Harness {
     Harness {
         id: Uuid::new_v4(),

@@ -597,20 +597,20 @@ impl Store {
         content: &str,
         created_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        let next_seq: i64 = sqlx::query(
-            "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM messages WHERE session_id = ?1",
-        )
-        .bind(session.to_string())
-        .fetch_one(&self.pool)
-        .await?
-        .try_get("next")?;
+        // Compute the next seq and insert in a SINGLE statement so the
+        // read-then-write is atomic. A prior SELECT-then-INSERT had a TOCTOU
+        // race: two concurrent appends to one session could read the same MAX
+        // and write a duplicate seq. SQLite serializes writers, so an
+        // `INSERT ... SELECT` evaluates the aggregate under the write lock.
+        // (The `MAX` aggregate always yields exactly one row, even for a session
+        // with no messages yet, so the first insert gets seq 0.)
         sqlx::query(
             "INSERT INTO messages (id, session_id, seq, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             SELECT ?1, ?2, COALESCE(MAX(seq), -1) + 1, ?3, ?4, ?5
+             FROM messages WHERE session_id = ?2",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(session.to_string())
-        .bind(next_seq)
         .bind(role)
         .bind(content)
         .bind(created_at.to_rfc3339())
