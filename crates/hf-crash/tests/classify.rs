@@ -94,3 +94,28 @@ fn ingest_empty_dir_returns_empty() {
     let crashes = ingest(dir.path(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
     assert!(crashes.is_empty());
 }
+
+#[test]
+fn ingest_finds_honggfuzz_crash_artifacts() {
+    let dir = TempDir::new().unwrap();
+    // honggfuzz names crash files SIG<signal>.PC.<...>.<ext> and writes a
+    // HONGGFUZZ.REPORT.TXT alongside them.
+    fs::write(
+        dir.path()
+            .join("SIGSEGV.PC.7ffff7a9c0c0.STACK.18d50d2e.CODE.1.ADDR.0.INSTR.mov.fuzz"),
+        b"crashing input",
+    )
+    .unwrap();
+    fs::write(dir.path().join("HONGGFUZZ.REPORT.TXT"), ASAN_LOG).unwrap();
+    fs::write(dir.path().join("input.fuzz"), b"not a crash").unwrap();
+
+    let crashes = ingest(dir.path(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+    assert_eq!(
+        crashes.len(),
+        1,
+        "should find the honggfuzz SIG-prefixed crash, got {}",
+        crashes.len()
+    );
+    // The uppercase .TXT report should be picked up for classification.
+    assert_eq!(crashes[0].kind, CrashKind::Asan);
+}
