@@ -153,6 +153,105 @@ pub fn sandbox_image_arch() -> Option<String> {
     }
 }
 
+/// Which fuzzing-engine toolchains are actually present in the loaded sandbox
+/// image. Engines run inside the image, so this -- not the host -- determines
+/// what can run.
+// One bool per supported engine: a flat record is the clearest mapping to the
+// engine set and mirrors `SystemStatus`, so the bool count is intrinsic.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SandboxEngines {
+    pub libfuzzer: bool,
+    pub aflplusplus: bool,
+    pub honggfuzz: bool,
+    pub clusterfuzzlite: bool,
+    pub syzkaller: bool,
+}
+
+/// The `docker image inspect --format {{.Id}}` of the loaded sandbox image, used
+/// to invalidate the engine-probe cache when the image is rebuilt.
+fn sandbox_image_id() -> Option<String> {
+    let out = std::process::Command::new(docker_bin())
+        .args(["image", "inspect", "--format", "{{.Id}}", SANDBOX_IMAGE])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Map the probe script's stdout (one present-binary name per line) to the
+/// per-engine availability. Each engine maps to the binary its adapter invokes
+/// inside the sandbox: libFuzzer compiles/runs via `clang`; AFL++ -> `afl-fuzz`;
+/// honggfuzz -> `honggfuzz`; syzkaller -> `syz-manager`; `ClusterFuzzLite` shells
+/// `python3 infra/helper.py`, so it needs `python3` (the helper itself comes
+/// from the project, not the image).
+fn engines_from_probe_output(found: &str) -> SandboxEngines {
+    let has = |bin: &str| found.lines().any(|l| l.trim() == bin);
+    SandboxEngines {
+        libfuzzer: has("clang"),
+        aflplusplus: has("afl-fuzz"),
+        honggfuzz: has("honggfuzz"),
+        clusterfuzzlite: has("python3"),
+        syzkaller: has("syz-manager"),
+    }
+}
+
+/// Run a one-shot container that reports which engine binaries exist in the
+/// image. All-false if the run fails.
+fn probe_sandbox_engines() -> SandboxEngines {
+    let out = std::process::Command::new(docker_bin())
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            SANDBOX_IMAGE,
+            "-c",
+            "for b in clang afl-fuzz honggfuzz syz-manager python3; do \
+             command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
+        ])
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            engines_from_probe_output(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => SandboxEngines::default(),
+    }
+}
+
+/// Engine-probe cache, keyed by sandbox image id so a rebuild re-probes.
+static ENGINE_PROBE_CACHE: std::sync::Mutex<Option<(String, SandboxEngines)>> =
+    std::sync::Mutex::new(None);
+
+/// Probe the loaded sandbox image for each engine's toolchain, reflecting what
+/// can really run rather than assuming the image bundles every engine. Returns
+/// all-false when the image is absent or Docker is unreachable.
+///
+/// The probe runs a container, so the result is cached and only re-run when the
+/// image id changes -- callers may invoke this on a poll without spawning a
+/// container each time.
+#[must_use]
+pub fn sandbox_engine_probe() -> SandboxEngines {
+    let Some(id) = sandbox_image_id() else {
+        return SandboxEngines::default();
+    };
+    if let Ok(cache) = ENGINE_PROBE_CACHE.lock() {
+        if let Some((cached_id, engines)) = cache.as_ref() {
+            if *cached_id == id {
+                return *engines;
+            }
+        }
+    }
+    let engines = probe_sandbox_engines();
+    if let Ok(mut cache) = ENGINE_PROBE_CACHE.lock() {
+        *cache = Some((id, engines));
+    }
+    engines
+}
+
 // ---------------------------------------------------------------------------
 // Platform normalisation helpers (shared by GUI and service layer)
 // ---------------------------------------------------------------------------
@@ -183,4 +282,38 @@ pub fn norm_platform(arch: &str) -> String {
 #[must_use]
 pub fn platform_short(platform: &str) -> &str {
     platform.rsplit('/').next().unwrap_or("arm64")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{engines_from_probe_output, SandboxEngines};
+
+    #[test]
+    fn probe_output_maps_present_binaries_to_engines() {
+        // The image bundles clang/afl-fuzz/honggfuzz/syz-manager but not python3.
+        let out = "clang\nafl-fuzz\nhonggfuzz\nsyz-manager\n";
+        assert_eq!(
+            engines_from_probe_output(out),
+            SandboxEngines {
+                libfuzzer: true,
+                aflplusplus: true,
+                honggfuzz: true,
+                clusterfuzzlite: false,
+                syzkaller: true,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_output_empty_is_all_false() {
+        assert_eq!(engines_from_probe_output(""), SandboxEngines::default());
+    }
+
+    #[test]
+    fn probe_output_clusterfuzzlite_needs_python3() {
+        let out = "clang\npython3\n";
+        let e = engines_from_probe_output(out);
+        assert!(e.libfuzzer && e.clusterfuzzlite);
+        assert!(!e.aflplusplus && !e.honggfuzz && !e.syzkaller);
+    }
 }
