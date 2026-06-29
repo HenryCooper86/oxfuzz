@@ -4,7 +4,7 @@
   --surface-primary: #0f0f0f;
   --surface-secondary: #141414;
   --surface-tertiary: #1c1c1c;
-  --surface-hover: rgba(255, 255, 255, 0.01);
+  --surface-hover: rgba(255, 255, 255, 0.045);
   --surface-code: #1a1a1a;
   --surface-active: rgba(255, 255, 255, 0.06);
 
@@ -59,7 +59,7 @@
   --surface-primary: #ffffff;
   --surface-secondary: #f5f4f1;
   --surface-tertiary: #edecea;
-  --surface-hover: rgba(0, 0, 0, 0.01);
+  --surface-hover: rgba(0, 0, 0, 0.04);
   --surface-code: #f1efed;
   --surface-active: rgba(0, 0, 0, 0.06);
 
@@ -80,8 +80,8 @@
   --info: #2563eb;
   --info-subtle: rgba(37, 99, 235, 0.08);
 
-  --border: rgba(0, 0, 0, 0.07);
-  --border-focus: rgba(0, 0, 0, 0.18);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-focus: rgba(0, 0, 0, 0.22);
 
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.12);
