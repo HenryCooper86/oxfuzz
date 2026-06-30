@@ -313,14 +313,13 @@ async fn harness_draft(
         .harness_draft(&req.project, &req.target, engine, lang)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    let build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{}", req.target));
     Ok(Json(serde_json::json!({
         "source": draft.source,
         "target": req.target,
         "engine": req.engine,
         "build_cmd": {
-            "compiler": build_cmd.compiler,
-            "args": build_cmd.args,
+            "compiler": draft.build_cmd.compiler,
+            "args": draft.build_cmd.args,
         },
         "status": "Draft",
     })))
