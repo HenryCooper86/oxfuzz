@@ -3,7 +3,7 @@
 //! Implements the Anthropic Messages API format with:
 //! - Separated system message (not part of the messages array)
 //! - Content blocks for structured responses
-//! - `Authorization: Bearer` header authentication
+//! - `x-api-key` header authentication (the native Messages API scheme)
 //! - Streaming support via SSE (event-based format)
 
 use async_trait::async_trait;
@@ -115,6 +115,17 @@ impl AnthropicProvider {
     /// Build the full API URL for a given endpoint.
     fn api_url(&self, endpoint: &str) -> String {
         format!("{}/{}", self.base_url.trim_end_matches('/'), endpoint)
+    }
+
+    /// The authentication header for a request, or `None` when no key is set.
+    ///
+    /// Anthropic's native Messages API authenticates standard API keys via the
+    /// `x-api-key` header. `Authorization: Bearer` is reserved for OAuth access
+    /// tokens and returns 401 for `sk-ant-...` keys, so we must not use it here.
+    /// Gateways that expect a different scheme can inject their own header via
+    /// the provider's `custom_headers`.
+    fn auth_header(&self) -> Option<(&'static str, String)> {
+        (!self.api_key.is_empty()).then(|| ("x-api-key", self.api_key.clone()))
     }
 
     /// Extract the system message from the request as an array of content blocks
@@ -388,9 +399,8 @@ impl LlmProvider for AnthropicProvider {
                 .header("anthropic-version", ANTHROPIC_API_VERSION)
                 .header("Content-Type", "application/json");
 
-        if !self.api_key.is_empty() {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {}", self.api_key));
+        if let Some((name, value)) = self.auth_header() {
+            request_builder = request_builder.header(name, value);
         }
 
         let response =
@@ -557,9 +567,8 @@ impl LlmProvider for AnthropicProvider {
                 .header("anthropic-version", ANTHROPIC_API_VERSION)
                 .header("Content-Type", "application/json");
 
-        if !self.api_key.is_empty() {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {}", self.api_key));
+        if let Some((name, value)) = self.auth_header() {
+            request_builder = request_builder.header(name, value);
         }
 
         let response =
@@ -1167,6 +1176,45 @@ mod tests {
         assert_eq!(meta.model, "claude-3-5-sonnet-20241022");
         assert_eq!(meta.provider_type, ProviderType::Anthropic);
         assert_eq!(meta.tags, vec!["reasoning", "code"]);
+    }
+
+    #[test]
+    fn test_anthropic_auth_header_uses_x_api_key() {
+        // Anthropic's native Messages API authenticates standard API keys via
+        // the `x-api-key` header. `Authorization: Bearer` is only accepted for
+        // OAuth access tokens and 401s for `sk-ant-...` keys.
+        let provider = AnthropicProvider::new(
+            "test",
+            "claude-3",
+            "sk-ant-test".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+            3,
+            200_000,
+            ToolCallingMode::default(),
+        );
+        let (name, value) = provider.auth_header().expect("a key is configured");
+        assert_eq!(name, "x-api-key");
+        assert_eq!(value, "sk-ant-test");
+    }
+
+    #[test]
+    fn test_anthropic_no_auth_header_when_key_empty() {
+        let provider = AnthropicProvider::new(
+            "test",
+            "claude-3",
+            String::new(),
+            None,
+            None,
+            vec![],
+            vec![],
+            3,
+            200_000,
+            ToolCallingMode::default(),
+        );
+        assert!(provider.auth_header().is_none());
     }
 
     #[test]
