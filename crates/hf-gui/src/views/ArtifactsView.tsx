@@ -2,7 +2,8 @@ import { useState } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import type { Crash, CorpusEntry } from "../types";
-import { Bug, Database, Loader2, RefreshCw, FileWarning } from "lucide-react";
+import { Button } from "../components/ui";
+import { Bug, Database, RefreshCw, FileWarning } from "lucide-react";
 
 export function ArtifactsView() {
   const { activeProject } = useProject();
@@ -37,17 +38,10 @@ export function ArtifactsView() {
           <h1 className="text-xl font-semibold">Artifacts</h1>
           <p className="text-sm text-text-secondary mt-0.5">Crash reproducers and corpus inputs from your fuzz runs.</p>
         </div>
-        <button
-          onClick={scan}
-          disabled={loading}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55"
-          style={{ background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
-          onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = "0.85")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
-        >
-          {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+        <Button variant="primary" onClick={scan} loading={loading}>
+          {!loading && <RefreshCw size={14} />}
           {loading ? "Scanning..." : "Scan"}
-        </button>
+        </Button>
       </div>
 
       {!scanned && !loading && (
