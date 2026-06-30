@@ -136,6 +136,7 @@ function TargetRow({
         className="flex items-center justify-center rounded-md transition-colors duration-150 bg-transparent border-none"
         style={{ width: "26px", height: "26px", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
         title={t("sidebar.removeTarget")}
+        aria-label={t("sidebar.removeTarget")}
         onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
