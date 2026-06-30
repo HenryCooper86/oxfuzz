@@ -49,6 +49,7 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
               e.currentTarget.style.background = "transparent";
             }}
             title="Toggle sidebar"
+            aria-label="Toggle sidebar"
           >
             <PanelLeft size={18} />
           </button>
@@ -94,6 +95,7 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
             e.currentTarget.style.background = "transparent";
           }}
           title="Toggle theme"
+          aria-label="Toggle theme"
         >
           {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
         </button>

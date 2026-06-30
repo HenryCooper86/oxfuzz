@@ -84,6 +84,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             onClick={browse}
             loading={scanning}
             title="Browse for folder"
+            aria-label="Browse for folder"
           >
             {!scanning && <FolderOpen size={14} />}
           </Button>
@@ -264,7 +265,7 @@ function CallTreeNode({
     <div>
       <div className="flex items-center gap-1 text-xs font-mono" style={{ padding: "1px 0" }}>
         {hasChildren ? (
-          <button onClick={() => setOpen((o) => !o)} className="text-text-muted hover:text-text-primary outline-none">
+          <button onClick={() => setOpen((o) => !o)} aria-label="Toggle call tree node" className="text-text-muted hover:text-text-primary outline-none">
             {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
         ) : (

@@ -101,10 +101,10 @@ export function ProvidersTab({
             <Button variant="ghost" size="sm" onClick={add}>
               <Plus size={13} /> Add
             </Button>
-            <Button variant="icon" size="sm" onClick={duplicate} disabled={providers.length === 0} title="Duplicate">
+            <Button variant="icon" size="sm" onClick={duplicate} disabled={providers.length === 0} title="Duplicate" aria-label="Duplicate">
               <Copy size={14} />
             </Button>
-            <Button variant="icon" size="sm" onClick={moveUp} disabled={active <= 0} title="Move up">
+            <Button variant="icon" size="sm" onClick={moveUp} disabled={active <= 0} title="Move up" aria-label="Move up">
               <ChevronUp size={14} />
             </Button>
             <Button
@@ -113,6 +113,7 @@ export function ProvidersTab({
               onClick={moveDown}
               disabled={active >= providers.length - 1}
               title="Move down"
+              aria-label="Move down"
             >
               <ChevronDown size={14} />
             </Button>
@@ -211,7 +212,7 @@ function HeadersEditor({
         <div key={i} className="flex items-center gap-1.5">
           <Input className="w-[150px]" value={k} onChange={(e) => setKey(k, e.target.value)} placeholder="Header" mono />
           <Input className="w-[180px]" value={v} onChange={(e) => setVal(k, e.target.value)} placeholder="Value" mono />
-          <Button variant="icon" size="sm" onClick={() => removeKey(k)} title="Remove header">
+          <Button variant="icon" size="sm" onClick={() => removeKey(k)} title="Remove header" aria-label="Remove header">
             <Trash2 size={13} />
           </Button>
         </div>
@@ -307,6 +308,7 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
               type="button"
               onClick={() => setShowKey((s) => !s)}
               title={showKey ? "Hide" : "Reveal"}
+              aria-label={showKey ? "Hide" : "Reveal"}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary transition-colors"
               style={{ background: "transparent", border: "none", cursor: "pointer", display: "inline-flex" }}
             >

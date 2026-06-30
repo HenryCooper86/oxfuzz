@@ -580,6 +580,7 @@ export function ChatView() {
                     padding: 0,
                   }}
                   title="Remove attachment"
+                  aria-label="Remove attachment"
                 >
                   <X size={12} />
                 </button>
@@ -729,6 +730,7 @@ export function ChatView() {
                 onClick={send}
                 disabled={busy || !hasText}
                 title="Send"
+                aria-label="Send"
                 className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"
                 style={{
                   width: "30px",
@@ -883,6 +885,7 @@ function ToolbarIconButton({
     <button
       onClick={onClick}
       title={title}
+      aria-label={title}
       className="inline-flex items-center justify-center rounded-md transition-all duration-150"
       style={{
         width: "30px",

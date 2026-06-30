@@ -22,7 +22,7 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
         <SettingsItem title="SQLite Path">
           <div style={{ display: "flex", gap: 4, width: 220 }}>
             <Input value={dbPath} onChange={(e) => patch({ db_path: e.target.value })} mono />
-            <button className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
+            <button aria-label="Browse for database file" className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
               <FolderOpen size={14} />
             </button>
           </div>
@@ -41,7 +41,7 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
         <SettingsItem title="Workspace Path">
           <div style={{ display: "flex", gap: 4, width: 220 }}>
             <Input value={workspace} onChange={(e) => patch({ workspace: e.target.value })} mono />
-            <button className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
+            <button aria-label="Browse for workspace directory" className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
               <FolderOpen size={14} />
             </button>
           </div>
