@@ -5,7 +5,7 @@ import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
 import { Button } from "../components/ui";
-import { Bug, Loader2, ChevronRight, FileDown, FileText } from "lucide-react";
+import { Bug, ChevronRight, FileDown, FileText } from "lucide-react";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
 // when the user opens a report, keeping it out of the initial bundle.
@@ -158,37 +158,26 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           {/* Compose a full report of the campaign (AI-authored when a provider
               is configured) and open it in a preview pane with rendered graphs.
               Enabled once a run has happened (a target is known). */}
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => void previewReport()}
             disabled={reporting || !lastTarget}
-            className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
-            style={{
-              background: "transparent",
-              color: "var(--text-secondary)",
-              borderColor: "var(--border)",
-            }}
-            onMouseEnter={(e) => !reporting && (e.currentTarget.style.opacity = "0.85")}
-            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            loading={reporting}
             title="Compose a detailed report and preview it"
           >
-            {reporting ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
+            {!reporting && <FileText size={14} />}
             {reporting ? "Composing..." : "View Report"}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => void saveReport()}
             disabled={reporting || !lastTarget}
-            className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
-            style={{
-              background: "transparent",
-              color: "var(--text-secondary)",
-              borderColor: "var(--border)",
-            }}
-            onMouseEnter={(e) => !reporting && (e.currentTarget.style.opacity = "0.85")}
-            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
             title="Compose and download the report as Markdown"
           >
             <FileDown size={14} />
-          </button>
+          </Button>
           <Button
             variant="primary"
             onClick={triage}
