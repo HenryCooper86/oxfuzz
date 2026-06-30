@@ -18,13 +18,14 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
       {children}
       {tooltip && (
         <div
-          className="fixed z-9999 px-2 py-1 text-xs rounded-sm pointer-events-none"
+          className="fixed z-9999 px-2 py-1 text-xs rounded-md pointer-events-none"
           style={{
             left: tooltip.x,
             top: tooltip.y,
             background: "var(--surface-tertiary)",
             border: "1px solid var(--border)",
             color: "var(--text-primary)",
+            boxShadow: "var(--shadow-sm)",
             whiteSpace: "nowrap",
             animation: "fadeIn 0.1s ease",
           }}

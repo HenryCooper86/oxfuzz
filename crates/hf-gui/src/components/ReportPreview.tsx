@@ -44,7 +44,7 @@ export function ReportPreview({
   return (
     <div
       className="fixed inset-0 z-9999 flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.55)" }}
+      style={{ background: "rgba(0,0,0,0.55)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)" }}
       onClick={onClose}
     >
       <div
@@ -53,7 +53,8 @@ export function ReportPreview({
           width: "min(900px, 92vw)",
           height: "min(88vh, 900px)",
           padding: 0,
-          animation: "slideInUp 0.15s ease",
+          boxShadow: "var(--shadow-lg)",
+          animation: "dialogContentIn 0.16s ease",
         }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -72,11 +73,7 @@ export function ReportPreview({
               <Download size={14} />
               Download
             </Button>
-            <button
-              onClick={onClose}
-              className="inline-flex items-center justify-center p-1.5 rounded-md text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
-              title="Close"
-            >
+            <button onClick={onClose} className="hf-action-btn" title="Close">
               <X size={16} />
             </button>
           </div>
