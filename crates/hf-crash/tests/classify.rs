@@ -89,6 +89,27 @@ fn ingest_finds_crash_artifacts() {
 }
 
 #[test]
+fn ingest_finds_afl_nested_instance_crashes() {
+    // Single-instance AFL++ (no -M/-S) nests crashes under out/default/crashes,
+    // not out/crashes -- the ingester must walk into the instance directory.
+    let dir = TempDir::new().unwrap();
+    let crashes_dir = dir.path().join("default").join("crashes");
+    fs::create_dir_all(&crashes_dir).unwrap();
+    fs::write(crashes_dir.join("id:000000,sig:06,src:000000"), b"boom").unwrap();
+    fs::write(crashes_dir.join("id:000001,sig:11,src:000001"), b"bang").unwrap();
+    // AFL drops a README.txt in the crashes dir; it must not count as a crash.
+    fs::write(crashes_dir.join("README.txt"), b"these are crashes").unwrap();
+
+    let crashes = ingest(dir.path(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
+    assert_eq!(
+        crashes.len(),
+        2,
+        "expected 2 nested AFL crashes, got {}",
+        crashes.len()
+    );
+}
+
+#[test]
 fn ingest_empty_dir_returns_empty() {
     let dir = TempDir::new().unwrap();
     let crashes = ingest(dir.path(), Uuid::new_v4(), Uuid::new_v4()).unwrap();
