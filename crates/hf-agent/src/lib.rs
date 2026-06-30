@@ -217,12 +217,23 @@ you receive its result and continue until you can give a final answer.",
             // Enforce the agent's tool allowlist: a specialist may only call its
             // own tools. The refusal is fed back so the model can self-correct.
             let result = if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
-                let registry = self
-                    .registry
-                    .get_or_init(agent_tools::build_inspection_registry)
-                    .await;
-                let wd = self.project.as_deref().and_then(|p| p.to_str());
-                agent_tools::dispatch_inspection(registry, &tool, &args, wd).await
+                // Inspection tools read files relative to the project workspace,
+                // which is also the root reads are confined to. With no project
+                // set there is no root, so an absolute path would escape to the
+                // host -- and the agent reads attacker-controlled target source
+                // (a prompt-injection surface). Refuse rather than allow that.
+                match self.project.as_deref().and_then(|p| p.to_str()) {
+                    Some(wd) => {
+                        let registry = self
+                            .registry
+                            .get_or_init(agent_tools::build_inspection_registry)
+                            .await;
+                        agent_tools::dispatch_inspection(registry, &tool, &args, Some(wd)).await
+                    }
+                    None => agent_tools::error_json(
+                        "no project workspace is set; file inspection is unavailable",
+                    ),
+                }
             } else if self.definition.allowed_tools.iter().all(|t| t != &tool) {
                 agent_tools::error_json(format!(
                     "tool '{tool}' is not permitted for the {} agent",

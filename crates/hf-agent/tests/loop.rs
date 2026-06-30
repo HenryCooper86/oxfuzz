@@ -118,6 +118,36 @@ async fn tool_call_then_final() {
 }
 
 #[tokio::test]
+async fn inspection_tool_refused_without_project() {
+    // With no project set, an inspection tool reading an absolute host path must
+    // be refused (no workspace to confine reads to) -- the agent reads
+    // attacker-controlled target source, so this is a prompt-injection surface.
+    let agent = agent_with(
+        vec![
+            r#"{"thought":"peek","tool":"FileRead","args":{"path":"/etc/hosts"}}"#,
+            r#"{"final":"done"}"#,
+        ],
+        None,
+    );
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "read it", &sink).await.unwrap();
+    assert_eq!(out, "done");
+
+    let events = sink.events().await;
+    let summary = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("a tool result was emitted");
+    assert!(
+        summary.contains("no project workspace"),
+        "expected refusal, got: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn non_json_reply_is_treated_as_final() {
     let agent = agent_with(vec!["Just a plain answer with no JSON."], None);
     let sink = CollectingSink::new();

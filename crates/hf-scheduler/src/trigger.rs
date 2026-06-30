@@ -64,8 +64,11 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
             }
         }
         TriggerConfig::OneTime { at } => {
-            let ot = OneTimeSchedule::new(*at);
-            ot.should_fire(now)
+            // Fire exactly once: only when the instant has passed AND we have
+            // never fired. Without the `last_fire` gate (which Cron/Interval
+            // both apply) a one-time schedule whose instant is in the past
+            // re-fires on every evaluation tick forever.
+            schedule.last_fire.is_none() && OneTimeSchedule::new(*at).should_fire(now)
         }
         TriggerConfig::Event { .. } => {
             // Event triggers are handled externally via the EventBridge (Phase S6).
@@ -185,6 +188,24 @@ mod tests {
         let result = evaluate_trigger(&schedule, Utc::now());
         assert!(result.is_some());
         assert_eq!(result.unwrap().trigger_type, TriggerType::OneTime);
+    }
+
+    #[test]
+    fn test_trigger_engine_onetime_fires_only_once() {
+        let mut schedule = Schedule::new(
+            "test-onetime",
+            "Test OneTime",
+            TriggerConfig::OneTime {
+                at: Utc::now() - Duration::seconds(1),
+            },
+            "wf",
+        );
+        // First evaluation fires.
+        assert!(evaluate_trigger(&schedule, Utc::now()).is_some());
+        // After firing once (last_fire recorded), it must never fire again --
+        // previously a past one-time schedule re-fired on every tick.
+        schedule.last_fire = Some(Utc::now());
+        assert!(evaluate_trigger(&schedule, Utc::now()).is_none());
     }
 
     #[test]

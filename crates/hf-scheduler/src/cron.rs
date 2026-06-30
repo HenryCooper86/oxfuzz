@@ -50,16 +50,50 @@ impl CronSchedule {
 
     /// Get the next fire time after `after`.
     ///
-    /// Returns `None` if the expression is invalid or has no future occurrence.
+    /// The cron fields are interpreted in the schedule's `timezone` (e.g.
+    /// `"0 9 * * *"` in `Asia/Shanghai` fires at 09:00 Shanghai time, not UTC).
+    /// An unknown timezone falls back to UTC. The result is always returned in
+    /// UTC. Returns `None` if the expression is invalid or has no future
+    /// occurrence.
     pub fn next_fire(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let cron = self.parsed()?;
-        cron.find_next_occurrence(&after, false).ok()
+        match self.tz() {
+            Some(tz) => cron
+                .find_next_occurrence(&after.with_timezone(&tz), false)
+                .ok()
+                .map(|next| next.with_timezone(&Utc)),
+            None => cron.find_next_occurrence(&after, false).ok(),
+        }
     }
 
-    /// Check whether a given `DateTime` matches the cron expression.
+    /// Check whether a given `DateTime` matches the cron expression, evaluated
+    /// in the schedule's timezone.
     pub fn matches(&self, time: &DateTime<Utc>) -> bool {
-        self.parsed()
-            .is_some_and(|c| c.is_time_matching(time).unwrap_or(false))
+        let Some(cron) = self.parsed() else {
+            return false;
+        };
+        match self.tz() {
+            Some(tz) => cron
+                .is_time_matching(&time.with_timezone(&tz))
+                .unwrap_or(false),
+            None => cron.is_time_matching(time).unwrap_or(false),
+        }
+    }
+
+    /// Parse `timezone` into a `chrono_tz::Tz`. `None` means UTC (either the
+    /// literal `"UTC"`/empty, or an unrecognized name we fall back from).
+    fn tz(&self) -> Option<chrono_tz::Tz> {
+        let name = self.timezone.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("utc") {
+            return None;
+        }
+        name.parse::<chrono_tz::Tz>().map_or_else(
+            |_| {
+                tracing::warn!(timezone = %name, "unknown cron timezone; evaluating in UTC");
+                None
+            },
+            Some,
+        )
     }
 }
 
@@ -134,5 +168,30 @@ mod tests {
         let cron = CronSchedule::new("0 9 * * *").with_timezone("Asia/Shanghai");
         assert_eq!(cron.timezone, "Asia/Shanghai");
         assert!(cron.is_valid());
+    }
+
+    #[test]
+    fn next_fire_honors_timezone() {
+        use chrono::TimeZone;
+        // 09:00 in Asia/Shanghai (UTC+8) is 01:00 UTC. The timezone must shift
+        // the fire time, not be silently ignored (which would give 09:00 UTC).
+        let cron = CronSchedule::new("0 9 * * *").with_timezone("Asia/Shanghai");
+        let after = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let next = cron.next_fire(after).unwrap();
+        assert_eq!(next.format("%H:%M").to_string(), "01:00", "got {next}");
+
+        // The same expression in UTC fires at 09:00 UTC.
+        let utc = CronSchedule::new("0 9 * * *");
+        let next_utc = utc.next_fire(after).unwrap();
+        assert_eq!(next_utc.format("%H:%M").to_string(), "09:00");
+    }
+
+    #[test]
+    fn unknown_timezone_falls_back_to_utc() {
+        use chrono::TimeZone;
+        let cron = CronSchedule::new("0 9 * * *").with_timezone("Mars/Olympus");
+        let after = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let next = cron.next_fire(after).unwrap();
+        assert_eq!(next.format("%H:%M").to_string(), "09:00");
     }
 }

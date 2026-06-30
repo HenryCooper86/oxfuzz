@@ -247,11 +247,13 @@ impl SchedulerManager {
 
         // Run missed-schedule recovery before starting the loop.
         {
-            let store_guard = self.store.lock().await;
-            let (recovery_triggers, result) = recovery::recover_missed(&store_guard, Utc::now());
-            drop(store_guard);
+            let mut store_guard = self.store.lock().await;
+            let recovery_now = Utc::now();
+            let (recovery_triggers, result) = recovery::recover_missed(&store_guard, recovery_now);
 
-            if !recovery_triggers.is_empty() {
+            if recovery_triggers.is_empty() {
+                drop(store_guard);
+            } else {
                 info!(
                     "Recovery: {} caught up, {} skipped, {} backfilled ({} total triggers)",
                     result.caught_up.len(),
@@ -259,6 +261,15 @@ impl SchedulerManager {
                     result.backfilled.len(),
                     recovery_triggers.len(),
                 );
+                // Mark every recovered schedule as fired now, before the eval
+                // loop starts. Its first `interval.tick()` fires immediately, so
+                // without this a never-fired/caught-up schedule (last_fire still
+                // None) would be evaluated again and dispatched a second time
+                // before the executor drains the recovery trigger.
+                for trigger in &recovery_triggers {
+                    store_guard.update_last_fire(&trigger.schedule_id, recovery_now);
+                }
+                drop(store_guard);
                 for trigger in recovery_triggers {
                     let _ = tx.send(trigger).await;
                 }

@@ -57,4 +57,8 @@ pub struct HarnessDraft {
     pub engine: EngineKind,
     pub source: String,
     pub rationale: String,
+    /// The command that will build this draft. Carried on the draft so every
+    /// presentation layer shows the same command instead of re-deriving it (and
+    /// drifting from) the harness naming convention.
+    pub build_cmd: BuildCommand,
 }
