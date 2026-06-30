@@ -219,14 +219,13 @@ pub async fn harness_draft(
         .harness_draft(&project, &target, engine_kind, lang)
         .await
         .map_err(|e| e.to_string())?;
-    let build_cmd = hf_harness::build_command(engine_kind, lang, &format!("fuzz_{target}"));
     Ok(serde_json::json!({
         "source": draft.source,
         "target": target,
         "engine": engine,
         "build_cmd": {
-            "compiler": build_cmd.compiler,
-            "args": build_cmd.args,
+            "compiler": draft.build_cmd.compiler,
+            "args": draft.build_cmd.args,
         },
         "status": "Draft",
     }))
