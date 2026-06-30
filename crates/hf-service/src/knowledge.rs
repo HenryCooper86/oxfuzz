@@ -224,6 +224,26 @@ pub fn is_indexed(project: &Path) -> bool {
     cache().lock().is_ok_and(|m| m.contains_key(&key))
 }
 
+/// Search a project, building the index first if this process has not indexed
+/// it yet.
+///
+/// The BM25 index is an in-memory, process-local cache, so [`search_project`]
+/// (a pure lookup) silently returns nothing in a process that has not indexed
+/// the project -- e.g. a `hf-web`/GUI server restarted between an `index` call
+/// and a later `search`. This guarantees a usable result by indexing on demand.
+/// The index build walks the source tree (blocking), so async callers should
+/// run this on a blocking thread.
+#[must_use]
+pub fn search_project_ensured(project: &Path, query: &str, limit: usize) -> Vec<KnowledgeHit> {
+    if !is_indexed(project) {
+        if let Err(e) = index_project(project) {
+            tracing::warn!(error = %e, "knowledge: on-demand index failed");
+            return Vec::new();
+        }
+    }
+    search_project(project, query, limit)
+}
+
 /// Search a project's knowledge base. Returns an empty list if the project has
 /// not been indexed yet.
 #[must_use]
@@ -287,6 +307,27 @@ mod tests {
     fn search_unindexed_project_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(search_project(dir.path(), "anything", 10).is_empty());
+    }
+
+    #[test]
+    fn ensured_search_indexes_on_demand() {
+        // Fresh project, never indexed (mirrors a server restarted between an
+        // index call and a search). The plain lookup is empty; the ensured
+        // variant indexes on demand and finds the symbol.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("target.c"),
+            "int parse_packet(const char *buf) { return 0; }",
+        )
+        .unwrap();
+        assert!(!is_indexed(dir.path()));
+        assert!(search_project(dir.path(), "parse_packet", 10).is_empty());
+        let hits = search_project_ensured(dir.path(), "parse_packet", 10);
+        assert!(is_indexed(dir.path()));
+        assert!(
+            !hits.is_empty(),
+            "on-demand index should surface the symbol"
+        );
     }
 
     #[test]
