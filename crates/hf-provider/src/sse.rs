@@ -79,9 +79,10 @@ impl SseStreamState {
     }
 
     /// Decode raw bytes into the text buffer, handling incomplete UTF-8
-    /// sequences at chunk boundaries.
+    /// sequences at chunk boundaries and recovering from genuinely invalid
+    /// bytes (so a corrupt byte cannot stall the stream).
     fn decode_bytes(&mut self, bytes: &[u8]) {
-        let combined = if self.bytes_remainder.is_empty() {
+        let mut combined = if self.bytes_remainder.is_empty() {
             bytes.to_vec()
         } else {
             let mut combined = std::mem::take(&mut self.bytes_remainder);
@@ -89,19 +90,42 @@ impl SseStreamState {
             combined
         };
 
-        match std::str::from_utf8(&combined) {
-            Ok(text) => self.buffer.push_str(text),
-            Err(e) => {
-                let valid_up_to = e.valid_up_to();
-                if valid_up_to > 0 {
-                    // valid_up_to is guaranteed to be a valid UTF-8 boundary,
-                    // so this unwrap is infallible.
-                    let valid_text = std::str::from_utf8(&combined[..valid_up_to])
-                        .expect("valid_up_to guarantees valid UTF-8");
-                    self.buffer.push_str(valid_text);
+        loop {
+            match std::str::from_utf8(&combined) {
+                Ok(text) => {
+                    self.buffer.push_str(text);
+                    return;
                 }
-                // Keep the remaining bytes for the next chunk.
-                self.bytes_remainder = combined[valid_up_to..].to_vec();
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    if valid_up_to > 0 {
+                        // valid_up_to is guaranteed to be a valid UTF-8 boundary,
+                        // so this unwrap is infallible.
+                        let valid_text = std::str::from_utf8(&combined[..valid_up_to])
+                            .expect("valid_up_to guarantees valid UTF-8");
+                        self.buffer.push_str(valid_text);
+                    }
+                    match e.error_len() {
+                        // No `error_len` means the tail is a valid but
+                        // *incomplete* multi-byte sequence split across this
+                        // chunk boundary; keep it to prepend to the next chunk.
+                        None => {
+                            self.bytes_remainder = combined[valid_up_to..].to_vec();
+                            return;
+                        }
+                        // `Some(n)` means `n` genuinely invalid bytes that can
+                        // never complete. Emit a replacement char, drop them, and
+                        // re-decode the rest so trailing valid text is flushed
+                        // now. Previously the invalid byte was stored as the
+                        // remainder, where it re-failed on every subsequent chunk
+                        // -- the stream silently stopped decoding and the buffer
+                        // of bad bytes grew without bound.
+                        Some(invalid_len) => {
+                            self.buffer.push('\u{FFFD}');
+                            combined.drain(..valid_up_to + invalid_len);
+                        }
+                    }
+                }
             }
         }
     }
@@ -272,5 +296,25 @@ mod tests {
         state.decode_bytes(&[0xA9, b'!']);
         assert_eq!(state.buffer, "hi\u{00e9}!");
         assert!(state.bytes_remainder.is_empty());
+    }
+
+    #[test]
+    fn decode_bytes_recovers_from_invalid_byte_without_stalling() {
+        let mut state = SseStreamState::new(Box::pin(futures::stream::empty()));
+
+        // 0xFF is never valid UTF-8. The decoder must emit the surrounding text
+        // plus a replacement char and keep going -- the old code stashed the bad
+        // byte in `bytes_remainder`, where it re-failed forever and the stream
+        // silently stopped decoding.
+        state.decode_bytes(&[b'a', 0xFF, b'b']);
+        assert_eq!(state.buffer, "a\u{FFFD}b");
+        assert!(
+            state.bytes_remainder.is_empty(),
+            "invalid byte left in remainder would stall the stream"
+        );
+
+        // A subsequent valid chunk still decodes -- no permanent stall.
+        state.decode_bytes(b"c");
+        assert_eq!(state.buffer, "a\u{FFFD}bc");
     }
 }

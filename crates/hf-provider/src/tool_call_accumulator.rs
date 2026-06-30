@@ -12,6 +12,13 @@ struct Entry {
     arguments: String,
 }
 
+/// Upper bound on tool calls accumulated from one streamed response. The
+/// `index` is provider-supplied (and reachable from user-pointed
+/// `openai-compat`/proxy endpoints); without a cap, a delta with a huge index
+/// makes the gap-fill loop allocate billions of `Entry` structs -> OOM. No real
+/// response returns anywhere near this many parallel tool calls.
+const MAX_TOOL_CALLS: usize = 1024;
+
 #[derive(Debug, Default)]
 pub(crate) struct ToolCallAccumulatorSet {
     entries: Vec<Entry>,
@@ -34,6 +41,12 @@ impl ToolCallAccumulatorSet {
         args: Option<&str>,
     ) {
         let index = index.unwrap_or(self.entries.len());
+        // Drop deltas whose index would grow the set past the sane cap: a
+        // malicious/buggy provider could otherwise force an unbounded allocation.
+        if index >= MAX_TOOL_CALLS {
+            tracing::warn!(index, "dropping tool-call delta with out-of-range index");
+            return;
+        }
         while self.entries.len() <= index {
             self.entries.push(Entry::default());
         }
@@ -176,6 +189,20 @@ mod tests {
         let calls = acc.drain_completed();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_3");
+    }
+
+    /// Regression: a hostile/buggy provider sending an enormous `index` must
+    /// not trigger an unbounded allocation. The delta is dropped, not grown to.
+    #[test]
+    fn out_of_range_index_is_dropped_without_allocating() {
+        let mut acc = ToolCallAccumulatorSet::default();
+        acc.process_delta(Some(4_000_000_000), Some("evil"), Some("boom"), Some("{}"));
+        assert!(acc.entries.is_empty());
+        // A normal delta still works afterwards.
+        acc.process_delta(Some(0), Some("call_1"), Some("ok"), Some("{}"));
+        let calls = acc.drain_completed();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
     }
 
     /// Regression: when a provider omits `index` (e.g. Gemini's OpenAI-compat
