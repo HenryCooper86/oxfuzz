@@ -2,7 +2,7 @@ import { useState } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import type { Crash, CorpusEntry } from "../types";
-import { Button } from "../components/ui";
+import { Button, ViewHeader } from "../components/ui";
 import { Bug, Database, RefreshCw, FileWarning } from "lucide-react";
 
 export function ArtifactsView() {
@@ -34,10 +34,7 @@ export function ArtifactsView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Artifacts</h1>
-          <p className="text-sm text-text-secondary mt-0.5">Crash reproducers and corpus inputs from your fuzz runs.</p>
-        </div>
+        <ViewHeader title="Artifacts" description="Crash reproducers and corpus inputs from your fuzz runs." />
         <Button variant="primary" onClick={scan} loading={loading}>
           {!loading && <RefreshCw size={14} />}
           {loading ? "Scanning..." : "Scan"}

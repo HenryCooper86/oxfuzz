@@ -3,7 +3,7 @@ import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type { CorpusEntry } from "../types";
-import { Button } from "../components/ui";
+import { Button, ViewHeader } from "../components/ui";
 import { Database, Plus, Scissors, Eye } from "lucide-react";
 
 export function CorpusView({ embedded = false }: { embedded?: boolean }) {
@@ -64,12 +64,10 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
         {embedded ? (
           <span />
         ) : (
-          <div>
-            <h1 className="text-xl font-semibold">Corpus Management</h1>
-            <p className="text-sm text-text-secondary mt-0.5">
-              Seed, grow, prune, and inspect the fuzzing corpus.
-            </p>
-          </div>
+          <ViewHeader
+            title="Corpus Management"
+            description="Seed, grow, prune, and inspect the fuzzing corpus."
+          />
         )}
         <div className="flex gap-2">
           <ActionButton icon={<Plus size={14} />} label="Seed" loading={loading === "corpus_seed"} onClick={() => action("corpus_seed")} />

@@ -1,22 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Button, EmptyState, Input, LoadingState, Select, Textarea } from "../components/ui";
+import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
-
-// ---------------------------------------------------------------------------
-// Shared scaffolding
-// ---------------------------------------------------------------------------
-
-function ViewHeader({ title, description }: { title: string; description: string }) {
-  return (
-    <div>
-      <h1 className="text-xl font-semibold">{title}</h1>
-      <p className="text-sm text-text-secondary mt-0.5">{description}</p>
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Agents

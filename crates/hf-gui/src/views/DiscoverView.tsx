@@ -3,7 +3,7 @@ import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
-import { Button, Input, Select } from "../components/ui";
+import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
@@ -51,14 +51,10 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
-        <>
-          <h1 className="text-xl font-semibold" style={{ letterSpacing: "-0.01em" }}>
-            Target Discovery
-          </h1>
-          <p className="text-sm text-text-secondary">
-            Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability.
-          </p>
-        </>
+        <ViewHeader
+          title="Target Discovery"
+          description="Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability."
+        />
       )}
 
       <div className="flex gap-2">

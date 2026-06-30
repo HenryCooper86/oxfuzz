@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
-import { Button } from "../components/ui";
+import { Button, ViewHeader } from "../components/ui";
 import { Bug, ChevronRight, FileDown, FileText } from "lucide-react";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
@@ -147,12 +147,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         {embedded ? (
           <span />
         ) : (
-          <div>
-            <h1 className="text-xl font-semibold">Crash Triage</h1>
-            <p className="text-sm text-text-secondary mt-0.5">
-              Ingest, classify, and deduplicate crash artifacts from fuzz runs.
-            </p>
-          </div>
+          <ViewHeader
+            title="Crash Triage"
+            description="Ingest, classify, and deduplicate crash artifacts from fuzz runs."
+          />
         )}
         <div className="flex items-center gap-2">
           {/* Compose a full report of the campaign (AI-authored when a provider
