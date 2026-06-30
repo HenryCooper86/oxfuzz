@@ -96,13 +96,17 @@ impl FreezeManager {
         state.frozen_at = Some(Instant::now());
         state.consecutive_freezes += 1;
 
-        if let Some(d) = duration {
-            state.thaw_at = Some(Instant::now() + d);
-        } else {
-            let adaptive = self.adaptive_duration(state.consecutive_freezes);
-            state.thaw_at = Some(Instant::now() + adaptive);
-        }
-
+        // An explicit zero duration (e.g. a `retry-after: 0` header) would set
+        // thaw_at to now and thaw on the very next check -- effectively no freeze,
+        // letting us hammer the provider. Treat it like "no duration" and use the
+        // adaptive backoff. Every duration is capped at the configured maximum so
+        // an explicit value cannot exceed it (the type's documented contract).
+        let max = Duration::from_secs(self.max_duration_secs);
+        let target = duration
+            .filter(|d| !d.is_zero())
+            .unwrap_or_else(|| self.adaptive_duration(state.consecutive_freezes))
+            .min(max);
+        state.thaw_at = Some(Instant::now() + target);
         state.permanent = false;
     }
 
@@ -135,8 +139,14 @@ impl FreezeManager {
     /// Get freeze status information.
     pub fn status(&self) -> FreezeStatus {
         let state = self.read_state();
+        // Report the *effective* frozen state: a non-permanent freeze whose
+        // thaw time has passed is no longer frozen, even if `try_auto_thaw` has
+        // not run yet. Returning the raw `state.frozen` showed an expired freeze
+        // as still active (with a thaw_at in the past) to the GUI/TUI.
+        let is_frozen =
+            state.frozen && (state.permanent || state.thaw_at.is_none_or(|t| Instant::now() < t));
         FreezeStatus {
-            is_frozen: state.frozen,
+            is_frozen,
             reason: state.reason.clone(),
             frozen_since: state.frozen_at,
             thaw_at: state.thaw_at,
@@ -206,6 +216,40 @@ mod tests {
     }
 
     #[test]
+    fn zero_retry_after_still_freezes() {
+        // A `retry-after: 0` must not produce a no-op freeze (thaw_at == now);
+        // it falls back to the adaptive backoff so we do not hammer the provider.
+        let fm = FreezeManager::new(30, 3600);
+        fm.freeze_with_retry_after("rate limited".into(), Duration::ZERO);
+        assert!(fm.is_frozen(), "zero retry-after should still freeze");
+        let status = fm.status();
+        let held = status
+            .thaw_at
+            .unwrap()
+            .duration_since(status.frozen_since.unwrap());
+        assert!(
+            held >= Duration::from_secs(1),
+            "freeze window collapsed to zero"
+        );
+    }
+
+    #[test]
+    fn explicit_duration_is_capped_at_max() {
+        // An explicit duration longer than the configured max is clamped.
+        let fm = FreezeManager::new(30, 2);
+        fm.freeze("rate limited".into(), Some(Duration::from_secs(3600)));
+        let status = fm.status();
+        let held = status
+            .thaw_at
+            .unwrap()
+            .duration_since(status.frozen_since.unwrap());
+        assert!(
+            held <= Duration::from_secs(3),
+            "explicit duration not capped to max: {held:?}"
+        );
+    }
+
+    #[test]
     fn test_freeze_on_auth_failure() {
         let fm = FreezeManager::new(30, 3600);
         fm.freeze_permanent("auth failed".into());
@@ -249,12 +293,16 @@ mod tests {
     #[test]
     fn test_thaw_after_duration() {
         let fm = FreezeManager::new(30, 3600);
-        // Freeze for 0 seconds (should auto-thaw immediately).
-        fm.freeze("test".into(), Some(Duration::from_secs(0)));
+        // Freeze for a real but tiny duration; it should auto-thaw once it
+        // elapses. (A *zero* duration is treated as no-duration -> adaptive
+        // backoff; see `zero_retry_after_still_freezes`.)
+        fm.freeze("test".into(), Some(Duration::from_millis(5)));
 
-        // Give a tiny bit of time for the instant to pass.
-        std::thread::sleep(Duration::from_millis(1));
-        assert!(!fm.is_frozen(), "should auto-thaw after duration");
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            !fm.is_frozen(),
+            "should auto-thaw after the duration elapses"
+        );
     }
 
     #[test]
