@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory } from "../types";
-import { Button } from "../components/ui";
+import { Button, Input, Select, ViewHeader } from "../components/ui";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles,
@@ -132,20 +132,20 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
         <>
-          <h1 className="text-xl font-semibold">Harness Generation</h1>
-          <p className="text-sm text-text-secondary">
-            Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora.
-          </p>
+          <ViewHeader
+            title="Harness Generation"
+            description="Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora."
+          />
 
           {/* Project selection */}
           <div className="flex gap-2">
-            <input
+            <Input
+              mono
               type="text"
               placeholder="/path/to/project"
               value={project}
               onChange={(e) => setLocalProject(e.target.value)}
-              className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-              style={{ fontFamily: "var(--font-mono)" }}
+              className="flex-1"
             />
             <Button variant="outline" size="sm" onClick={browse}>
               <FolderOpen size={14} />
@@ -159,42 +159,38 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
         <div className="flex gap-3 items-end">
           <div className="flex flex-col gap-1 flex-1">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Target</label>
-            <select
+            <Select
+              mono
               value={selectedTarget}
-              onChange={(e) => { setSelectedTarget(e.target.value); setHarness(null); setCompileResult(null); setSeeds(null); }}
-              className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-              style={{ fontFamily: "var(--font-mono)" }}
-            >
-              {inventory.candidates.sort((a, b) => b.fit_score - a.fit_score).map((c) => (
-                <option key={c.id} value={c.symbol}>
-                  {c.symbol} (fit: {c.fit_score.toFixed(2)})
-                </option>
-              ))}
-            </select>
+              onChange={(v) => { setSelectedTarget(v); setHarness(null); setCompileResult(null); setSeeds(null); }}
+              options={inventory.candidates
+                .sort((a, b) => b.fit_score - a.fit_score)
+                .map((c) => ({ value: c.symbol, label: `${c.symbol} (fit: ${c.fit_score.toFixed(2)})` }))}
+            />
           </div>
           <div className="flex flex-col gap-1 w-40">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Engine</label>
-            <select
+            <Select
               value={engine}
-              onChange={(e) => setEngine(e.target.value)}
-              className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-            >
-              <option value="libfuzzer">libFuzzer</option>
-              <option value="afl++">AFL++</option>
-              <option value="honggfuzz">honggfuzz</option>
-              <option value="clusterfuzzlite">ClusterFuzzLite</option>
-            </select>
+              onChange={(v) => setEngine(v)}
+              options={[
+                { value: "libfuzzer", label: "libFuzzer" },
+                { value: "afl++", label: "AFL++" },
+                { value: "honggfuzz", label: "honggfuzz" },
+                { value: "clusterfuzzlite", label: "ClusterFuzzLite" },
+              ]}
+            />
           </div>
           <div className="flex flex-col gap-1 w-32">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Language</label>
-            <select
+            <Select
               value={lang}
-              onChange={(e) => setLang(e.target.value)}
-              className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-            >
-              <option value="c">C</option>
-              <option value="cpp">C++</option>
-            </select>
+              onChange={(v) => setLang(v)}
+              options={[
+                { value: "c", label: "C" },
+                { value: "cpp", label: "C++" },
+              ]}
+            />
           </div>
           <Button
             variant="primary"

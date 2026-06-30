@@ -1,7 +1,7 @@
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { pickFolder } from "../lib";
-import { Button, EmptyState } from "../components/ui";
+import { Button, EmptyState, ViewHeader } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder } from "lucide-react";
 
 export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => void }) {
@@ -23,10 +23,7 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">Projects</h1>
-          <p className="text-sm text-text-secondary mt-0.5">Recent project folders you've scanned and fuzzed.</p>
-        </div>
+        <ViewHeader title="Projects" description="Recent project folders you've scanned and fuzzed." />
         <Button variant="primary" onClick={addProject}>
           <FolderPlus size={14} />
           Add project

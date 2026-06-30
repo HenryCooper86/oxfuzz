@@ -8,6 +8,7 @@ import { HarnessView } from "./HarnessView";
 import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
 import { CorpusView } from "./CorpusView";
+import { ViewHeader } from "../components/ui";
 
 // A unified, connected fuzzing flow: choose a project, then Discover -> Harness
 // -> Run -> Triage as one stacked accordion (no jumping between sidebar pages).
@@ -97,12 +98,10 @@ export function WorkflowView() {
 
   return (
     <div className="flex flex-col gap-3" style={{ animation: "fadeIn 0.2s ease" }}>
-      <div>
-        <h1 className="text-xl font-semibold">Fuzzing Workflow</h1>
-        <p className="text-sm text-text-secondary mt-0.5">
-          One connected flow: choose a project, discover a target, generate a harness, run the fuzzer, then triage crashes.
-        </p>
-      </div>
+      <ViewHeader
+        title="Fuzzing Workflow"
+        description="One connected flow: choose a project, discover a target, generate a harness, run the fuzzer, then triage crashes."
+      />
 
       {/* Project gate -- everything below runs in the chosen project's workspace. */}
       <section className="surface-card" style={{ padding: "12px 14px", borderLeft: `3px solid ${activeProject ? "var(--success)" : "var(--accent)"}` }}>
