@@ -6,7 +6,7 @@ import { usePrefs } from "../providers/PrefsContext";
 import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
-import { Button } from "../components/ui";
+import { Button, Input, Select } from "../components/ui";
 import { Play, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
 
 export function RunView({ embedded = false }: { embedded?: boolean }) {
@@ -101,13 +101,13 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
           <div className="flex flex-col gap-1">
             <Label>Project</Label>
             <div className="flex gap-1">
-              <input
+              <Input
+                mono
                 type="text"
                 placeholder="/path/to/project"
                 value={project}
                 onChange={(e) => setLocalProject(e.target.value)}
-                className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-                style={{ fontFamily: "var(--font-mono)" }}
+                className="flex-1"
               />
               <Button
                 variant="outline"
@@ -123,37 +123,35 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
         {!isSyz && (
           <div className="flex flex-col gap-1">
             <Label>Target Symbol{compiled && <span style={{ color: "var(--success)", marginLeft: "8px" }}> (compiled)</span>}</Label>
-            <input
+            <Input
+              mono
               type="text"
               placeholder="parse_value"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
-              className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-              style={{ fontFamily: "var(--font-mono)" }}
             />
           </div>
         )}
         <div className="flex flex-col gap-1">
           <Label>Engine</Label>
-          <select
+          <Select
             value={engine}
-            onChange={(e) => setEngine(e.target.value)}
-            className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-          >
-            <option value="libfuzzer">libFuzzer</option>
-            <option value="afl++">AFL++</option>
-            <option value="honggfuzz">honggfuzz</option>
-            <option value="clusterfuzzlite">ClusterFuzzLite</option>
-            <option value="syzkaller">syzkaller (kernel)</option>
-          </select>
+            onChange={(v) => setEngine(v)}
+            options={[
+              { value: "libfuzzer", label: "libFuzzer" },
+              { value: "afl++", label: "AFL++" },
+              { value: "honggfuzz", label: "honggfuzz" },
+              { value: "clusterfuzzlite", label: "ClusterFuzzLite" },
+              { value: "syzkaller", label: "syzkaller (kernel)" },
+            ]}
+          />
         </div>
         <div className="flex flex-col gap-1">
           <Label>Duration (seconds)</Label>
-          <input
+          <Input
             type="number"
             value={duration}
             onChange={(e) => setDuration(e.target.value)}
-            className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
           />
         </div>
       </div>
@@ -180,12 +178,11 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
             onChange={setManagerCfg} onPick={() => pickFile("Select manager.cfg").then((p) => p && setManagerCfg(p))} />
           <div className="flex flex-col gap-1" style={{ maxWidth: "160px" }}>
             <Label>VM count</Label>
-            <input
+            <Input
               type="number"
               min={1}
               value={vmCount}
               onChange={(e) => setVmCount(e.target.value)}
-              className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
             />
           </div>
         </div>
@@ -279,13 +276,13 @@ function FileField({
     <div className="flex flex-col gap-1">
       <Label>{label}</Label>
       <div className="flex gap-1">
-        <input
+        <Input
+          mono
           type="text"
           placeholder={placeholder}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-          style={{ fontFamily: "var(--font-mono)" }}
+          className="flex-1"
         />
         <Button
           variant="outline"

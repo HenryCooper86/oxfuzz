@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Button, EmptyState } from "../components/ui";
+import { Button, EmptyState, Input, Select, Textarea } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
@@ -38,9 +38,6 @@ const TOOL_ICONS: Record<string, ReactNode> = {
 };
 
 // -- shared form primitives -------------------------------------------------
-
-const INPUT_CLS =
-  "w-full px-2.5 py-1.5 text-sm rounded-md border border-border bg-surface-primary text-text-primary outline-none font-mono";
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -431,8 +428,8 @@ function AgentEditor({
       {error && <ErrorBanner message={error} />}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Name">
-          <input
-            className={INPUT_CLS}
+          <Input
+            mono
             value={draft.name}
             placeholder="Discovery Scout"
             onChange={(e) => {
@@ -442,8 +439,8 @@ function AgentEditor({
           />
         </Field>
         <Field label="Id" hint={draft.isNew ? "auto from name; editable" : "locked"}>
-          <input
-            className={INPUT_CLS}
+          <Input
+            mono
             value={derivedId}
             disabled={!draft.isNew}
             placeholder="discovery-scout"
@@ -453,29 +450,33 @@ function AgentEditor({
       </div>
 
       <Field label="Description">
-        <input className={INPUT_CLS} value={draft.description} placeholder="What this agent does" onChange={(e) => onField("description", e.target.value)} />
+        <Input mono value={draft.description} placeholder="What this agent does" onChange={(e) => onField("description", e.target.value)} />
       </Field>
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Role">
-          <select className={INPUT_CLS} value={draft.role} onChange={(e) => onField("role", e.target.value as AgentRole)}>
-            {ROLES.map((r) => (
-              <option key={r} value={r}>{r}</option>
-            ))}
-          </select>
+          <Select
+            mono
+            className="w-full"
+            value={draft.role}
+            onChange={(v) => onField("role", v as AgentRole)}
+            options={ROLES.map((r) => ({ value: r, label: r }))}
+          />
         </Field>
         <Field label="Autonomy">
-          <select className={INPUT_CLS} value={draft.autonomy} onChange={(e) => onField("autonomy", e.target.value as Autonomy)}>
-            {AUTONOMY_LEVELS.map((a) => (
-              <option key={a} value={a}>{a}</option>
-            ))}
-          </select>
+          <Select
+            mono
+            className="w-full"
+            value={draft.autonomy}
+            onChange={(v) => onField("autonomy", v as Autonomy)}
+            options={AUTONOMY_LEVELS.map((a) => ({ value: a, label: a }))}
+          />
         </Field>
       </div>
 
       <Field label="System prompt" hint="the agent's instructions">
-        <textarea
-          className={`${INPUT_CLS} resize-y`}
+        <Textarea
+          mono
           rows={14}
           value={draft.system_prompt}
           placeholder="You are a fuzzing agent. Your job is to…"
@@ -543,13 +544,13 @@ function AgentEditor({
 
       <div className="grid grid-cols-3 gap-3">
         <Field label="Model tags" hint="comma-separated">
-          <input className={INPUT_CLS} value={draft.model_tags} placeholder="reasoning, code" onChange={(e) => onField("model_tags", e.target.value)} />
+          <Input mono value={draft.model_tags} placeholder="reasoning, code" onChange={(e) => onField("model_tags", e.target.value)} />
         </Field>
         <Field label="Temperature" hint="optional">
-          <input className={INPUT_CLS} value={draft.temperature} placeholder="(default)" onChange={(e) => onField("temperature", e.target.value)} />
+          <Input mono value={draft.temperature} placeholder="(default)" onChange={(e) => onField("temperature", e.target.value)} />
         </Field>
         <Field label="Max iterations" hint="1-50">
-          <input type="number" min={1} max={50} className={INPUT_CLS} value={draft.max_iterations} onChange={(e) => onField("max_iterations", Number(e.target.value) || 1)} />
+          <Input mono type="number" min={1} max={50} value={draft.max_iterations} onChange={(e) => onField("max_iterations", Number(e.target.value) || 1)} />
         </Field>
       </div>
 
@@ -714,20 +715,20 @@ export function SkillsView() {
           {error && <ErrorBanner message={error} />}
           <div className="grid grid-cols-2 gap-3">
             <Field label="Name" hint={draft.isNew ? "letters, digits, -, _" : "locked"}>
-              <input className={INPUT_CLS} value={draft.name} disabled={!draft.isNew} placeholder="my-skill" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+              <Input mono value={draft.name} disabled={!draft.isNew} placeholder="my-skill" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             </Field>
             <Field label="Version">
-              <input className={INPUT_CLS} value={draft.version} placeholder="0.1.0" onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
+              <Input mono value={draft.version} placeholder="0.1.0" onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
             </Field>
           </div>
           <Field label="Description">
-            <input className={INPUT_CLS} value={draft.description} placeholder="What this skill does" onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+            <Input mono value={draft.description} placeholder="What this skill does" onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
           </Field>
           <Field label="Domain" hint="comma-separated tags">
-            <input className={INPUT_CLS} value={draft.domain} placeholder="fuzzing, harness-generation" onChange={(e) => setDraft({ ...draft, domain: e.target.value })} />
+            <Input mono value={draft.domain} placeholder="fuzzing, harness-generation" onChange={(e) => setDraft({ ...draft, domain: e.target.value })} />
           </Field>
           <Field label="Body (root.md)" hint="the playbook injected into the agent's context">
-            <textarea className={`${INPUT_CLS} resize-y`} rows={16} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
+            <Textarea mono rows={16} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
           </Field>
           <div className="flex gap-2 justify-end">
             <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>Cancel</GhostBtn>
@@ -918,13 +919,13 @@ function KnowledgeBaseSearch() {
         BM25 search over this project's source and ingested documents (specs, RFCs). Index or add a document, then search.
       </p>
       <div className="flex items-center gap-2">
-        <input
+        <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void search()}
           placeholder={stats ? "Search the codebase…" : "Index the project to enable search"}
           disabled={!stats}
-          className="flex-1 rounded-md border border-border bg-surface-primary px-3 py-1.5 text-xs outline-none disabled:opacity-55"
+          className="flex-1 disabled:opacity-55"
         />
         <button
           onClick={search}
@@ -1221,18 +1222,21 @@ export function AutomationView() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select value={triggerKind} onChange={(e) => setTriggerKind(e.target.value as typeof triggerKind)}
-            className="rounded-md border border-border bg-surface-primary px-2 py-1.5 text-xs outline-none">
-            <option value="interval">Interval</option>
-            <option value="cron">Cron</option>
-            <option value="once">Once</option>
-          </select>
-          <input value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
-            className="flex-1 min-w-[180px] rounded-md border border-border bg-surface-primary px-2 py-1.5 text-xs font-mono outline-none" />
+          <Select
+            value={triggerKind}
+            onChange={(v) => setTriggerKind(v as typeof triggerKind)}
+            options={[
+              { value: "interval", label: "Interval" },
+              { value: "cron", label: "Cron" },
+              { value: "once", label: "Once" },
+            ]}
+          />
+          <Input mono value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
+            className="flex-1 min-w-[180px]" />
           <label className="text-xs text-text-muted flex items-center gap-1">
             run
-            <input type="number" min={10} value={duration} onChange={(e) => setDuration(Math.max(10, Number(e.target.value) || 60))}
-              className="w-16 rounded-md border border-border bg-surface-primary px-2 py-1.5 text-xs font-mono outline-none" />
+            <Input mono type="number" min={10} value={duration} onChange={(e) => setDuration(Math.max(10, Number(e.target.value) || 60))}
+              className="w-16" />
             s
           </label>
           <button onClick={save} disabled={!canSave || busy || !triggerValue.trim()}
