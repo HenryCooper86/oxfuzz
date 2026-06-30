@@ -80,12 +80,30 @@ pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
     events
 }
 
+/// Whether a raw engine-stdout line reports an individual crash/finding event.
+///
+/// This is distinct from a periodic *status counter*: AFL++ (`uniq crashes :
+/// N`, `last uniq crash : ...`) and honggfuzz (`Crashes : N`) print a crash
+/// label on every status tick, whose total comes from ingesting the crash
+/// directory -- counting each tick as a finding inflates the run's crash count
+/// by hundreds. See `docs/standards/ENGINE_ADAPTER_STANDARD.md` section 4.
+#[must_use]
+pub fn line_reports_finding(line: &str) -> bool {
+    is_finding_signal(&line.to_ascii_lowercase())
+}
+
 /// Whether a (lowercased) line signals a fuzzer finding -- a crash, OOM, leak,
 /// or timeout. Covers libFuzzer's "Test unit written to <artifact>" save line
-/// (one per saved finding of any type) plus the common sanitizer/summary
-/// phrasings, while excluding the benign "crashes 0" status token.
+/// (one per saved finding of any type), the `crash-<hash>` artifact-filename
+/// prefix, and the common sanitizer/signal phrasings.
+///
+/// It deliberately does NOT trigger on the bare substring "crash": that matches
+/// AFL++/honggfuzz periodic status counters (`uniq crashes : N`, `Crashes : N`)
+/// and header text (`last uniq crash : none seen yet`), producing phantom
+/// crashes on every clean run. The `crash-` prefix is safe because a counter
+/// never contains it (`crashes` is followed by a space/colon, not `-`).
 fn is_finding_signal(lower: &str) -> bool {
-    let positive = lower.contains("crash")
+    lower.contains("crash-")
         || lower.contains("addresssanitizer")
         || lower.contains("asan")
         || lower.contains("ubsan")
@@ -96,8 +114,7 @@ fn is_finding_signal(lower: &str) -> bool {
         || lower.contains("leaksanitizer")
         || lower.contains("detected memory leak")
         || lower.contains("deadly signal")
-        || lower.contains("test unit written");
-    positive && !lower.contains("crashes 0") && !lower.contains("crashes: 0")
+        || lower.contains("test unit written")
 }
 
 /// Parse a full stdout buffer into a list of progress events.
@@ -241,6 +258,37 @@ mod tests {
         assert!(!finding("VMs 4, executed 100, crashes 0"));
         // A normal libFuzzer pulse line is not a finding.
         assert!(!finding("#131072 pulse cov: 58 exec/s: 43690 rss: 546Mb"));
+    }
+
+    #[test]
+    fn afl_and_honggfuzz_status_counters_are_not_per_line_crashes() {
+        let finding = |line: &str| {
+            parse_progress_events(line)
+                .iter()
+                .any(|e| matches!(e, FuzzProgress::CrashesFound(_)))
+        };
+        // AFL++ prints these crash *labels* on every status tick. They are
+        // absolute counters (or header text), not per-line crash events -- the
+        // real count comes from ingesting the crash directory. Counting each
+        // tick inflates the total by hundreds, which is the bug being fixed.
+        assert!(!finding(" last uniq crash : none seen yet"));
+        assert!(!finding("  uniq crashes : 0"));
+        assert!(!finding("  uniq crashes : 5"));
+        assert!(!finding("  saved crashes : 12"));
+        // honggfuzz status line, zero and non-zero.
+        assert!(!finding(
+            "Crashes : 0 (unique: 0, blacklist: 0, verified: 0)"
+        ));
+        assert!(!finding(
+            "Crashes : 7 (unique: 3, blacklist: 0, verified: 0)"
+        ));
+        // A genuine crash artifact / sanitizer line is still a finding.
+        assert!(finding(
+            "artifact_prefix='/work/out/'; Test unit written to /work/out/crash-abc"
+        ));
+        assert!(finding(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow"
+        ));
     }
 
     #[test]
