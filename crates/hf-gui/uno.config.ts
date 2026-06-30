@@ -49,7 +49,10 @@ export default defineConfig({
     },
   },
   shortcuts: {
+    // Content cards are flat-with-a-hairline-border for a calm, dense layout; a
+    // heavy drop shadow on every card (incl. list rows) was visually noisy.
+    // Floating surfaces (modal, toast, tooltip, menus) set their own elevation.
     "surface-card":
-      "bg-surface-primary border border-solid border-border rounded-lg shadow-lg",
+      "bg-surface-primary border border-solid border-border rounded-lg shadow-sm",
   },
 });
