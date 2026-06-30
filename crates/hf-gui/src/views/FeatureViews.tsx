@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { Button, EmptyState } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
@@ -13,23 +14,6 @@ function ViewHeader({ title, description }: { title: string; description: string
     <div>
       <h1 className="text-xl font-semibold">{title}</h1>
       <p className="text-sm text-text-secondary mt-0.5">{description}</p>
-    </div>
-  );
-}
-
-function EmptyState({ icon, hint }: { icon: ReactNode; hint: string }) {
-  return (
-    <div
-      className="surface-card flex flex-col items-center justify-center text-center"
-      style={{ padding: "var(--space-xl) var(--space-md)" }}
-    >
-      <div
-        className="flex items-center justify-center mb-3 rounded-full"
-        style={{ width: "48px", height: "48px", background: "var(--accent-subtle)", border: "1px solid var(--border)" }}
-      >
-        <span style={{ color: "var(--accent)" }}>{icon}</span>
-      </div>
-      <p className="text-sm text-text-secondary max-w-sm">{hint}</p>
     </div>
   );
 }
@@ -70,20 +54,22 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+// Thin wrappers over the shared ui/Button so the library views' actions share
+// one consistent button look, spacing, and hover/disabled/focus behavior.
 function PrimaryBtn({ onClick, disabled, icon, children }: { onClick: () => void; disabled?: boolean; icon: ReactNode; children: ReactNode }) {
   return (
-    <button onClick={onClick} disabled={disabled} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50" style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }}>
+    <Button variant="primary" size="sm" onClick={onClick} disabled={disabled}>
       {icon}
       {children}
-    </button>
+    </Button>
   );
 }
 function GhostBtn({ onClick, icon, children, title }: { onClick: () => void; icon: ReactNode; children?: ReactNode; title?: string }) {
   return (
-    <button onClick={onClick} title={title} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary">
+    <Button variant="outline" size="sm" onClick={onClick} title={title}>
       {icon}
       {children}
-    </button>
+    </Button>
   );
 }
 function IconBtn({ onClick, icon, danger, title }: { onClick: () => void; icon: ReactNode; danger?: boolean; title?: string }) {
