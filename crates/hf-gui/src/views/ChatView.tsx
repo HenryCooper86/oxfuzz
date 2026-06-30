@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
+import { Button } from "../components/ui";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useI18n } from "../i18n";
@@ -431,15 +432,16 @@ export function ChatView() {
                 { action: "Triage crashes", key: "welcome.chip.triage" },
                 { action: "Manage corpus", key: "welcome.chip.corpus" },
               ].map((c) => (
-                <button
+                <Button
                   key={c.key}
+                  variant="outline"
+                  size="sm"
                   // Send the English action to the agent for deterministic intent;
                   // display the translated label.
                   onClick={() => setInput(c.action)}
-                  className="text-xs px-3 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
                 >
                   {t(c.key)}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
