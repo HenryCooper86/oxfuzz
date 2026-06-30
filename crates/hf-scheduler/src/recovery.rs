@@ -201,6 +201,35 @@ mod tests {
     }
 
     #[test]
+    fn recovered_schedule_does_not_double_fire_on_first_eval() {
+        // A never-fired schedule: recovery fires it once. The manager then marks
+        // last_fire before the eval loop's immediate first tick; that tick must
+        // NOT fire it a second time.
+        let mut store = ScheduleStore::new();
+        store.register(interval_schedule("s1", 60, MissedPolicy::CatchUp));
+        let now = Utc::now();
+
+        let (triggers, _) = recover_missed(&store, now);
+        assert_eq!(
+            triggers.len(),
+            1,
+            "recovery should fire the never-fired schedule once"
+        );
+
+        // Mirror the manager: record last_fire for each recovered schedule.
+        for t in &triggers {
+            store.update_last_fire(&t.schedule_id, now);
+        }
+
+        let enabled: Vec<_> = store.list_enabled().into_iter().cloned().collect();
+        let fired = crate::trigger::evaluate_all(&enabled, now);
+        assert!(
+            fired.is_empty(),
+            "schedule double-fired right after recovery"
+        );
+    }
+
+    #[test]
     fn test_recovery_disabled_schedule_skipped() {
         let mut store = ScheduleStore::new();
         let mut s = interval_schedule("s1", 60, MissedPolicy::CatchUp);
