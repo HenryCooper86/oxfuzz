@@ -73,7 +73,7 @@ export function ReportPreview({
               <Download size={14} />
               Download
             </Button>
-            <button onClick={onClose} className="hf-action-btn" title="Close">
+            <button onClick={onClose} className="hf-action-btn" title="Close" aria-label="Close">
               <X size={16} />
             </button>
           </div>

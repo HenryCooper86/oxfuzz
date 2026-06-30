@@ -173,6 +173,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             onClick={() => void saveReport()}
             disabled={reporting || !lastTarget}
             title="Compose and download the report as Markdown"
+            aria-label="Compose and download the report as Markdown"
           >
             <FileDown size={14} />
           </Button>
