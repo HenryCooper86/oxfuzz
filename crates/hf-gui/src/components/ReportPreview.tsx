@@ -72,11 +72,7 @@ export function ReportPreview({
               <Download size={14} />
               Download
             </Button>
-            <button
-              onClick={onClose}
-              className="inline-flex items-center justify-center p-1.5 rounded-md text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
-              title="Close"
-            >
+            <button onClick={onClose} className="hf-action-btn" title="Close">
               <X size={16} />
             </button>
           </div>
