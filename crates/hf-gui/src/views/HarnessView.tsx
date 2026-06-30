@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory } from "../types";
-import { Button, Input, Select } from "../components/ui";
+import { Button, Input, Select, ViewHeader } from "../components/ui";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles,
@@ -132,10 +132,10 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
         <>
-          <h1 className="text-xl font-semibold">Harness Generation</h1>
-          <p className="text-sm text-text-secondary">
-            Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora.
-          </p>
+          <ViewHeader
+            title="Harness Generation"
+            description="Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora."
+          />
 
           {/* Project selection */}
           <div className="flex gap-2">

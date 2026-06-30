@@ -6,7 +6,7 @@ import { usePrefs } from "../providers/PrefsContext";
 import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
-import { Button, Input, Select } from "../components/ui";
+import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { Play, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
 
 export function RunView({ embedded = false }: { embedded?: boolean }) {
@@ -86,14 +86,14 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
-        <>
-          <h1 className="text-xl font-semibold">Fuzz Run</h1>
-          <p className="text-sm text-text-secondary">
-            {isSyz
+        <ViewHeader
+          title="Fuzz Run"
+          description={
+            isSyz
               ? "Drive a syzkaller kernel-fuzzing campaign in the sandbox via syz-manager against a KCOV kernel + rootfs."
-              : "Compile a harness in the sandbox and drive a fuzzing engine against the target."}
-          </p>
-        </>
+              : "Compile a harness in the sandbox and drive a fuzzing engine against the target."
+          }
+        />
       )}
 
       <div className="grid grid-cols-2 gap-3">
