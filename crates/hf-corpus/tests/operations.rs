@@ -66,6 +66,49 @@ async fn grow_copies_new_inputs_from_engine_output() {
 }
 
 #[tokio::test]
+async fn grow_pulls_afl_queue_and_skips_artifacts() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let out = dir.path().join("out");
+    fs::create_dir_all(&corpus_root).unwrap();
+
+    // Single-instance AFL++ layout: coverage inputs in out/default/queue/, with
+    // crashes and bookkeeping that must NOT be pulled into the corpus.
+    let queue = out.join("default").join("queue");
+    fs::create_dir_all(&queue).unwrap();
+    fs::write(queue.join("id:000000,orig:seed"), b"cov-input-a").unwrap();
+    fs::write(queue.join("id:000001,src:000000"), b"cov-input-b").unwrap();
+    fs::create_dir_all(out.join("default").join("crashes")).unwrap();
+    fs::write(out.join("default").join("fuzzer_stats"), b"stats...").unwrap();
+    // A libFuzzer-style crash artifact at the top level must be skipped.
+    fs::write(out.join("crash-deadbeef"), b"crashing-input").unwrap();
+
+    let grown = grow(&corpus_root, &out).unwrap();
+    let contents: Vec<String> = grown
+        .entries
+        .iter()
+        .map(|e| fs::read_to_string(&e.path).unwrap_or_default())
+        .collect();
+
+    assert!(
+        contents.iter().any(|c| c == "cov-input-a"),
+        "queue input a missing"
+    );
+    assert!(
+        contents.iter().any(|c| c == "cov-input-b"),
+        "queue input b missing"
+    );
+    assert!(
+        !contents.iter().any(|c| c == "crashing-input"),
+        "crash artifact was pulled into the corpus"
+    );
+    assert!(
+        !contents.iter().any(|c| c == "stats..."),
+        "bookkeeping was pulled into the corpus"
+    );
+}
+
+#[tokio::test]
 async fn prune_removes_duplicate_coverage_entries() {
     let dir = TempDir::new().unwrap();
     let corpus_root = dir.path().join("corpus");
