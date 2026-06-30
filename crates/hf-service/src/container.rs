@@ -1474,6 +1474,232 @@ impl ServiceContainer {
         })
     }
 
+    /// Run a syzkaller kernel-fuzzing campaign through the sandbox.
+    ///
+    /// syzkaller fuzzes an OS kernel by mutating syscall sequences inside a
+    /// managed VM whose kernel is built with KCOV coverage. This mounts the
+    /// user-supplied kernel image + rootfs (or an existing `manager.cfg`) into
+    /// the sandbox, synthesizes a qemu `manager.cfg` when needed, and streams
+    /// `syz-manager` progress to `on_progress`.
+    ///
+    /// Unlike a harness/fuzz run, qemu needs container networking and a relaxed
+    /// capability profile, so this uses
+    /// [`SandboxOptions`](hf_core::runtime::SandboxOptions) rather than the
+    /// hardened default -- but it still goes through the `hf-runtime` sandbox
+    /// abstraction (no presentation layer shells out to `docker`).
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if Docker is unavailable, an artifact path is
+    /// invalid, or the sandbox run fails.
+    pub async fn run_syzkaller(
+        &self,
+        opts: &SyzkallerRunOpts,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<SyzkallerSummary, ClassifiedError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        self.guardrails
+            .authorize(Action::RunFuzzer {
+                engine: "Syzkaller".to_owned(),
+                duration_secs: opts.duration_secs,
+            })
+            .await?;
+
+        let platform = opts
+            .arch
+            .as_deref()
+            .map_or_else(hf_runtime::host_platform, hf_runtime::norm_platform);
+        let target_triple = format!("linux/{}", hf_runtime::platform_short(&platform));
+
+        let log = |s: &str| on_progress(FuzzProgress::LogLine(s.to_owned()));
+        let nonempty = |o: &Option<String>| {
+            o.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let manager_cfg = nonempty(&opts.manager_cfg);
+        let kernel_image = nonempty(&opts.kernel_image);
+        let disk_image = nonempty(&opts.disk_image);
+        let ssh_key = nonempty(&opts.ssh_key);
+
+        let have_artifacts = kernel_image.is_some() && disk_image.is_some();
+
+        // No artifacts at all: surface what a campaign needs and stop (no error).
+        if manager_cfg.is_none() && !have_artifacts {
+            for line in [
+                format!("syzkaller (kernel fuzzing) -- project: {}", opts.project),
+                "No campaign artifacts provided. syzkaller drives a VM against a".to_owned(),
+                "KCOV-instrumented kernel; it needs one of:".to_owned(),
+                "  (a) a kernel image (bzImage) + a rootfs disk image, or".to_owned(),
+                "  (b) an existing syz-manager config (manager.cfg).".to_owned(),
+                "Build a KCOV kernel + rootfs per the setup guide, then select them above:"
+                    .to_owned(),
+                "https://github.com/google/syzkaller/blob/master/docs/linux/setup.md".to_owned(),
+            ] {
+                log(&line);
+            }
+            on_progress(FuzzProgress::Done);
+            return Ok(SyzkallerSummary::default());
+        }
+
+        if !hf_runtime::docker_daemon_ready() {
+            return Err(ClassifiedError::Sandbox(
+                "Docker daemon not running -- cannot launch syz-manager.".to_owned(),
+            ));
+        }
+
+        let file_ok = |p: &str| Path::new(p).is_file();
+
+        // Assemble bind mounts and resolve the in-container config path.
+        let mut mounts: Vec<String> = Vec::new();
+        let workspace = std::env::temp_dir().join("hobot_fuzz_syzkaller");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workspace: {e}")))?;
+        let cfg_in_container: String;
+
+        if let Some(cfg) = manager_cfg.as_deref() {
+            if !file_ok(cfg) {
+                return Err(ClassifiedError::Validation(format!(
+                    "manager.cfg not found: {cfg}"
+                )));
+            }
+            let dir = Path::new(cfg).parent().ok_or_else(|| {
+                ClassifiedError::Validation("manager.cfg has no parent directory".to_owned())
+            })?;
+            mounts.push(format!("{0}:{0}", dir.display()));
+            cfg_in_container = cfg.to_owned();
+            log(&format!("Using provided manager.cfg: {cfg}"));
+        } else {
+            let kernel = kernel_image.ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "kernel_image is required when no manager.cfg is provided".to_owned(),
+                )
+            })?;
+            let disk = disk_image.ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "disk_image is required when no manager.cfg is provided".to_owned(),
+                )
+            })?;
+            if !file_ok(&kernel) {
+                return Err(ClassifiedError::Validation(format!(
+                    "kernel image not found: {kernel}"
+                )));
+            }
+            if !file_ok(&disk) {
+                return Err(ClassifiedError::Validation(format!(
+                    "disk image not found: {disk}"
+                )));
+            }
+            mounts.push(format!("{kernel}:/syzbench/kernel:ro"));
+            mounts.push(format!("{disk}:/syzbench/rootfs.img"));
+
+            let sshkey_field = if let Some(key) = ssh_key.as_deref() {
+                if !file_ok(key) {
+                    return Err(ClassifiedError::Validation(format!(
+                        "ssh key not found: {key}"
+                    )));
+                }
+                mounts.push(format!("{key}:/syzbench/id_rsa:ro"));
+                "\n  \"sshkey\": \"/syzbench/id_rsa\",".to_owned()
+            } else {
+                String::new()
+            };
+
+            let count = opts.vm_count.unwrap_or(2).max(1);
+            let procs = count.min(4);
+            let qemu_args = if hf_runtime::platform_short(&platform) == "arm64" {
+                "-machine virt,accel=tcg -cpu max"
+            } else {
+                "-machine pc,accel=tcg -cpu max"
+            };
+            let cfg_json = format!(
+                "{{\n  \"target\": \"{target_triple}\",\n  \"http\": \"0.0.0.0:56741\",\n  \"workdir\": \"/syzbench/workdir\",\n  \"image\": \"/syzbench/rootfs.img\",{sshkey_field}\n  \"syzkaller\": \"/opt/syzkaller\",\n  \"procs\": {procs},\n  \"type\": \"qemu\",\n  \"vm\": {{\n    \"count\": {count},\n    \"kernel\": \"/syzbench/kernel\",\n    \"cpu\": 2,\n    \"mem\": 2048,\n    \"qemu_args\": \"{qemu_args}\"\n  }}\n}}\n"
+            );
+            let cfg_host = workspace.join("manager.cfg");
+            std::fs::write(&cfg_host, &cfg_json)
+                .map_err(|e| ClassifiedError::Internal(format!("write manager.cfg: {e}")))?;
+            let workdir_host = workspace.join("workdir");
+            std::fs::create_dir_all(&workdir_host)
+                .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workdir: {e}")))?;
+            mounts.push(format!("{}:/syzbench/manager.cfg:ro", cfg_host.display()));
+            mounts.push(format!("{}:/syzbench/workdir", workdir_host.display()));
+            cfg_in_container = "/syzbench/manager.cfg".to_owned();
+            log(&format!(
+                "Synthesized qemu manager.cfg ({target_triple}, {count} VM(s))."
+            ));
+        }
+
+        log(&format!(
+            "Launching syz-manager in the sandbox for {}s...",
+            opts.duration_secs
+        ));
+        log("Note: qemu runs under TCG emulation inside Docker (no /dev/kvm on macOS) -- expect low exec rates.");
+
+        let inner = format!(
+            "command -v syz-manager >/dev/null 2>&1 || {{ echo 'ERROR: syz-manager not found in the sandbox image. Rebuild the image with the syzkaller toolchain: open Settings > General and switch the sandbox Architecture (forces a rebuild), or remove the image with: docker image rm {sandbox_img}'; exit 3; }}; timeout {duration} syz-manager -config={cfg_in_container} 2>&1 || true",
+            sandbox_img = SANDBOX_IMAGE,
+            duration = opts.duration_secs,
+        );
+
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 4096,
+            max_cpus: 4,
+            // The inner `timeout` governs the campaign; give the sandbox deadline
+            // a grace margin so it is only a backstop.
+            max_duration_secs: opts.duration_secs.saturating_add(30),
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        let sandbox_opts = hf_core::runtime::SandboxOptions {
+            extra_mounts: mounts,
+            platform: Some(platform),
+            network_enabled: true,
+            workdir: Some("/syzbench".to_owned()),
+            relax_hardening: true,
+        };
+
+        // Cross-line state for the streaming callback.
+        let peak_edges = AtomicU64::new(0);
+        let last_execs = AtomicU64::new(0);
+        let peak_crashes = AtomicU64::new(0);
+        let on_line = |line: &str| {
+            if let Some((cover, executed, crash_ct)) =
+                hf_engine::progress::parse_syzkaller_status(line)
+            {
+                peak_edges.fetch_max(cover, Ordering::Relaxed);
+                last_execs.store(executed, Ordering::Relaxed);
+                let prev = peak_crashes.load(Ordering::Relaxed);
+                if crash_ct > prev {
+                    on_progress(FuzzProgress::CrashesFound(
+                        u32::try_from(crash_ct - prev).unwrap_or(u32::MAX),
+                    ));
+                    peak_crashes.store(crash_ct, Ordering::Relaxed);
+                }
+                on_progress(FuzzProgress::EdgesCovered(cover));
+                on_progress(FuzzProgress::ExecsPerSec(executed as f64));
+                on_progress(FuzzProgress::LogLine(line.to_owned()));
+            } else if !line.trim().is_empty() {
+                on_progress(FuzzProgress::LogLine(line.to_owned()));
+            }
+        };
+
+        let cancel = CancellationToken::new();
+        let cmd = ["bash".to_owned(), "-c".to_owned(), inner];
+        let result = self
+            .runtime
+            .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox_opts, &cancel, &on_line)
+            .await?;
+
+        on_progress(FuzzProgress::Done);
+        Ok(SyzkallerSummary {
+            edges: peak_edges.load(Ordering::Relaxed),
+            execs: last_execs.load(Ordering::Relaxed) as f64,
+            crashes: peak_crashes.load(Ordering::Relaxed),
+            exit_code: Some(result.exit_code),
+        })
+    }
+
     // -- Triage -----------------------------------------------------------
 
     /// Ingest and deduplicate crash artifacts from the output directory.
@@ -2578,6 +2804,36 @@ pub struct RunSummary {
     pub edges: u64,
     pub execs: f64,
     pub crashes: u64,
+}
+
+/// Inputs for a syzkaller kernel-fuzzing campaign.
+#[derive(Debug, Clone, Default)]
+pub struct SyzkallerRunOpts {
+    /// Project label (for logging only).
+    pub project: String,
+    /// Target architecture (e.g. `"amd64"`); defaults to the host platform.
+    pub arch: Option<String>,
+    /// Campaign duration in seconds.
+    pub duration_secs: u64,
+    /// Path to a KCOV kernel image (bzImage). Required without `manager_cfg`.
+    pub kernel_image: Option<String>,
+    /// Path to a rootfs disk image. Required without `manager_cfg`.
+    pub disk_image: Option<String>,
+    /// Optional SSH private key for the VM.
+    pub ssh_key: Option<String>,
+    /// Path to an existing `syz-manager` config; bypasses synthesis.
+    pub manager_cfg: Option<String>,
+    /// Number of fuzzing VMs (default 2).
+    pub vm_count: Option<u32>,
+}
+
+/// Result of a syzkaller campaign.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SyzkallerSummary {
+    pub edges: u64,
+    pub execs: f64,
+    pub crashes: u64,
+    pub exit_code: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
