@@ -249,6 +249,7 @@ function HeaderToggle({ active, onClick, icon, label }: { active: boolean; onCli
         cursor: "pointer",
       }}
       title={label}
+      aria-label={label}
     >
       {icon}
     </button>
