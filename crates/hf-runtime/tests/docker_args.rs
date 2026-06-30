@@ -154,6 +154,55 @@ fn build_exec_args_adds_ptrace_caps_when_requested() {
 }
 
 #[test]
+fn build_exec_args_with_syzkaller_profile() {
+    use hf_core::runtime::SandboxOptions;
+    let cfg = cfg_with(limits(4096, 4));
+    let opts = SandboxOptions {
+        extra_mounts: vec![
+            "/host/kernel:/syzbench/kernel:ro".to_owned(),
+            "/host/rootfs.img:/syzbench/rootfs.img".to_owned(),
+        ],
+        platform: Some("linux/amd64".to_owned()),
+        network_enabled: true,
+        workdir: Some("/syzbench".to_owned()),
+        relax_hardening: true,
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(4096, 4),
+        &["bash".to_owned(), "-c".to_owned(), "syz-manager".to_owned()],
+        &opts,
+    );
+    let joined = args.join(" ");
+    // Platform, custom mounts, and a custom workdir are present.
+    assert!(joined.contains("--platform linux/amd64"), "{joined}");
+    assert!(
+        joined.contains("-v /host/kernel:/syzbench/kernel:ro"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("-v /host/rootfs.img:/syzbench/rootfs.img"),
+        "{joined}"
+    );
+    assert!(joined.contains("-w /syzbench"), "{joined}");
+    // Network is enabled and the qemu-incompatible hardening is relaxed.
+    assert!(
+        !joined.contains("--network=none"),
+        "network should be enabled: {joined}"
+    );
+    assert!(
+        !joined.contains("--cap-drop=ALL"),
+        "hardening should be relaxed: {joined}"
+    );
+    assert!(
+        !joined.contains("no-new-privileges"),
+        "hardening should be relaxed: {joined}"
+    );
+    // pids-limit is still applied even when hardening is relaxed.
+    assert!(joined.contains("--pids-limit=512"), "{joined}");
+}
+
+#[test]
 fn build_exec_args_applies_hardening_baseline() {
     let cfg = RuntimeConfig::default();
     let args = hf_runtime::docker::build_exec_args(&cfg, &limits(2048, 1), &["x".to_owned()]);

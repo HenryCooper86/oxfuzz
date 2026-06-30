@@ -24,5 +24,6 @@ pub use container::{
     provider_pool_from_env, repo_root, runtime_from_env, workspace_dir, AgentInstanceSnapshot,
     AgentPoolSnapshot, ArtifactSummary, CompileOutcome, MemorySnapshot, MinimizeOutcome,
     ProviderSnapshot, RegressionResult, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot,
+    SyzkallerRunOpts, SyzkallerSummary,
 };
 pub use init::{init_at, init_workspace, InitReport};

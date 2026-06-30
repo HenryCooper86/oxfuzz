@@ -25,12 +25,41 @@ pub fn build_exec_args(
     limits: &hf_core::runtime::ResourceLimits,
     command: &[String],
 ) -> Vec<String> {
+    build_exec_args_with(
+        cfg,
+        limits,
+        command,
+        &hf_core::runtime::SandboxOptions::default(),
+    )
+}
+
+/// Build the `docker run` argument list, applying
+/// [`SandboxOptions`](hf_core::runtime::SandboxOptions).
+///
+/// With its default this is identical to the hardened
+/// harness/fuzz profile. Options relax or extend it for specialized runs
+/// (syzkaller): extra bind mounts, a target platform, container networking, a
+/// custom working directory, and a relaxed capability profile for qemu.
+#[must_use]
+pub fn build_exec_args_with(
+    cfg: &RuntimeConfig,
+    limits: &hf_core::runtime::ResourceLimits,
+    command: &[String],
+    opts: &hf_core::runtime::SandboxOptions,
+) -> Vec<String> {
     let mut args = vec![
         "run".to_owned(),
         "--rm".to_owned(),
         format!("--memory={}m", limits.max_mem_mb),
         format!("--cpus={}", limits.max_cpus),
     ];
+
+    // Target platform for the image (e.g. an arm64 host running a linux/amd64
+    // syzkaller image under emulation).
+    if let Some(platform) = &opts.platform {
+        args.push("--platform".to_owned());
+        args.push(platform.clone());
+    }
 
     // Timeout: pass as a label for tooling. The actual kill is done by
     // tokio::time::timeout / the streaming deadline in `DockerRuntime`.
@@ -61,20 +90,36 @@ pub fn build_exec_args(
     args.push("-v".to_owned());
     args.push(format!("{host_workspace}:{}", cfg.container_workspace));
 
+    // Additional bind mounts (e.g. syzkaller's kernel image / rootfs / config).
+    for mount in &opts.extra_mounts {
+        args.push("-v".to_owned());
+        args.push(mount.clone());
+    }
+
     // Working directory inside the container.
     args.push("-w".to_owned());
-    args.push(cfg.container_workspace.clone());
+    args.push(
+        opts.workdir
+            .clone()
+            .unwrap_or_else(|| cfg.container_workspace.clone()),
+    );
 
-    // Network disabled for fuzz runs by default.
-    args.push("--network=none".to_owned());
+    // Network: disabled for fuzz runs by default; enabled only when a run needs
+    // it (syzkaller's managed VM).
+    if !opts.network_enabled {
+        args.push("--network=none".to_owned());
+    }
 
     // Hardening: drop all Linux capabilities by default (re-added per-run only
     // when needed), forbid privilege escalation, and cap process count to blunt
     // fork bombs from a malicious harness. The container is also network-
-    // isolated, resource-limited, and ephemeral.
-    args.push("--cap-drop=ALL".to_owned());
-    args.push("--security-opt".to_owned());
-    args.push("no-new-privileges".to_owned());
+    // isolated, resource-limited, and ephemeral. qemu-based runs cannot operate
+    // under this profile, so it can be relaxed per-run.
+    if !opts.relax_hardening {
+        args.push("--cap-drop=ALL".to_owned());
+        args.push("--security-opt".to_owned());
+        args.push("no-new-privileges".to_owned());
+    }
     args.push(format!("--pids-limit={}", cfg.max_pids));
 
     // CASR's crash analysis uses ptrace, which needs SYS_PTRACE and an
@@ -115,6 +160,134 @@ impl DockerRuntime {
             cfg,
             host_workspace: host_workspace.to_path_buf(),
         }
+    }
+
+    /// Build the final `docker run` args for a streaming run: substitute the
+    /// real `cwd` into the workspace mount and give the container a unique name
+    /// (so a deadline/cancel can `docker kill` it). Returns the args and name.
+    fn prepare_stream_args(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+    ) -> (Vec<String>, String) {
+        let mut args = build_exec_args_with(&self.cfg, limits, cmd, opts);
+        let placeholder = "/tmp/hobot_fuzz_workspace";
+        for a in &mut args {
+            if a == &format!("{placeholder}:{}", self.cfg.container_workspace) {
+                *a = format!("{}:{}", cwd.display(), self.cfg.container_workspace);
+            }
+        }
+        // `args[0]` is "run"; the name must precede the image/command.
+        let container_name = format!("hf-run-{}", uuid::Uuid::new_v4());
+        args.insert(1, format!("--name={container_name}"));
+        (args, container_name)
+    }
+
+    /// Spawn `docker run` with `args` and stream stdout/stderr line-by-line to
+    /// `on_line`, honoring the wall-clock `timeout` and `cancel`. On either a
+    /// deadline or a cancel, `docker kill`s the named container (killing the
+    /// client process alone leaves the container running). Shared by the plain
+    /// and options-bearing streaming entry points.
+    async fn stream_docker_run(
+        &self,
+        args: &[String],
+        container_name: &str,
+        timeout: Duration,
+        cwd: &Path,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command;
+
+        enum Stop {
+            Completed,
+            Killed,
+        }
+
+        let mut docker = Command::new(crate::docker_bin());
+        docker
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = docker
+            .spawn()
+            .map_err(|e| ClassifiedError::Sandbox(format!("docker spawn: {e}")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ClassifiedError::Sandbox("no stdout pipe".to_owned()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ClassifiedError::Sandbox("no stderr pipe".to_owned()))?;
+
+        let mut out_lines = BufReader::new(stdout).lines();
+        let mut err_lines = BufReader::new(stderr).lines();
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
+        let mut out_done = false;
+        let mut err_done = false;
+
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+
+        // Read both pipes line-by-line as the command runs. libFuzzer writes its
+        // progress to stderr (unbuffered in C), so this surfaces live activity.
+        let stop = loop {
+            if out_done && err_done {
+                break Stop::Completed;
+            }
+            tokio::select! {
+                () = &mut deadline => break Stop::Killed,
+                () = cancel.cancelled() => break Stop::Killed,
+                line = out_lines.next_line(), if !out_done => match line {
+                    Ok(Some(l)) => {
+                        on_line(l.as_str());
+                        stdout_buf.push_str(&l);
+                        stdout_buf.push('\n');
+                    }
+                    _ => out_done = true,
+                },
+                line = err_lines.next_line(), if !err_done => match line {
+                    Ok(Some(l)) => {
+                        on_line(l.as_str());
+                        stderr_buf.push_str(&l);
+                        stderr_buf.push('\n');
+                    }
+                    _ => err_done = true,
+                },
+            }
+        };
+
+        let exit_code = match stop {
+            Stop::Completed => child.wait().await.map_or(-1, |s| s.code().unwrap_or(0)),
+            Stop::Killed => {
+                let kill = Command::new(crate::docker_bin())
+                    .arg("kill")
+                    .arg(container_name)
+                    .output()
+                    .await;
+                if let Err(e) = kill {
+                    tracing::warn!(container = %container_name, error = %e, "failed to kill stopped container");
+                }
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                0
+            }
+        };
+
+        Ok(CommandResult {
+            exit_code,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+            workspace: cwd.to_path_buf(),
+        })
     }
 }
 
@@ -186,18 +359,26 @@ impl RuntimeAdapter for DockerRuntime {
         cancel: &tokio_util::sync::CancellationToken,
         on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
-        use std::process::Stdio;
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        use tokio::process::Command;
+        self.run_command_streaming_opts(
+            cmd,
+            cwd,
+            limits,
+            &hf_core::runtime::SandboxOptions::default(),
+            cancel,
+            on_line,
+        )
+        .await
+    }
 
-        // Outcome of the read loop: ran to completion, hit the deadline, or was
-        // cancelled by the caller.
-        enum Stop {
-            Completed,
-            TimedOut,
-            Cancelled,
-        }
-
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<CommandResult, ClassifiedError> {
         // A run cancelled before it starts launches no container.
         if cancel.is_cancelled() {
             return Ok(CommandResult {
@@ -209,105 +390,9 @@ impl RuntimeAdapter for DockerRuntime {
         }
 
         let timeout = Duration::from_secs(limits.max_duration_secs);
-        let mut args = build_exec_args(&self.cfg, limits, cmd);
-        let placeholder = "/tmp/hobot_fuzz_workspace";
-        for a in &mut args {
-            if a == &format!("{placeholder}:{}", self.cfg.container_workspace) {
-                *a = format!("{}:{}", cwd.display(), self.cfg.container_workspace);
-            }
-        }
-        // Name the container so a cancel can `docker kill` it explicitly:
-        // dropping the client process alone leaves the container running.
-        // `args[0]` is "run"; the name must precede the image/command.
-        let container_name = format!("hf-run-{}", uuid::Uuid::new_v4());
-        args.insert(1, format!("--name={container_name}"));
-
-        let mut docker = Command::new(crate::docker_bin());
-        docker
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = docker
-            .spawn()
-            .map_err(|e| ClassifiedError::Sandbox(format!("docker spawn: {e}")))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ClassifiedError::Sandbox("no stdout pipe".to_owned()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ClassifiedError::Sandbox("no stderr pipe".to_owned()))?;
-
-        let mut out_lines = BufReader::new(stdout).lines();
-        let mut err_lines = BufReader::new(stderr).lines();
-        let mut stdout_buf = String::new();
-        let mut stderr_buf = String::new();
-        let mut out_done = false;
-        let mut err_done = false;
-
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
-
-        // Read both pipes line-by-line as the fuzzer runs. libFuzzer writes its
-        // progress to stderr (unbuffered in C), so this surfaces live activity.
-        let stop = loop {
-            if out_done && err_done {
-                break Stop::Completed;
-            }
-            tokio::select! {
-                () = &mut deadline => break Stop::TimedOut,
-                () = cancel.cancelled() => break Stop::Cancelled,
-                line = out_lines.next_line(), if !out_done => match line {
-                    Ok(Some(l)) => {
-                        on_line(l.as_str());
-                        stdout_buf.push_str(&l);
-                        stdout_buf.push('\n');
-                    }
-                    _ => out_done = true,
-                },
-                line = err_lines.next_line(), if !err_done => match line {
-                    Ok(Some(l)) => {
-                        on_line(l.as_str());
-                        stderr_buf.push_str(&l);
-                        stderr_buf.push('\n');
-                    }
-                    _ => err_done = true,
-                },
-            }
-        };
-
-        // A fuzzer reaching its time limit self-exits; a hard deadline kill and
-        // a user cancel are also normal outcomes (we keep what we streamed).
-        // Both the deadline and the cancel must `docker kill` the named
-        // container: killing the `docker run` client (start_kill / kill_on_drop)
-        // leaves the container running, so an untrusted harness that ignores its
-        // internal time limit would keep executing past the supervised deadline.
-        let exit_code = match stop {
-            Stop::Completed => child.wait().await.map_or(-1, |s| s.code().unwrap_or(0)),
-            Stop::TimedOut | Stop::Cancelled => {
-                let kill = Command::new(crate::docker_bin())
-                    .arg("kill")
-                    .arg(&container_name)
-                    .output()
-                    .await;
-                if let Err(e) = kill {
-                    tracing::warn!(container = %container_name, error = %e, "failed to kill stopped container");
-                }
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                0
-            }
-        };
-
-        Ok(CommandResult {
-            exit_code,
-            stdout: stdout_buf,
-            stderr: stderr_buf,
-            workspace: cwd.to_path_buf(),
-        })
+        let (args, container_name) = self.prepare_stream_args(cmd, cwd, limits, opts);
+        self.stream_docker_run(&args, &container_name, timeout, cwd, cancel, on_line)
+            .await
     }
 
     async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
