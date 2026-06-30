@@ -54,42 +54,70 @@ pub fn ingest(
         }
     }
 
-    // AFL++-style: crashes/ subdirectory.
-    let afl_crashes = run_dir.join("crashes");
-    if afl_crashes.is_dir() {
-        let entries = std::fs::read_dir(&afl_crashes)
-            .map_err(|e| ClassifiedError::Internal(format!("read crashes dir: {e}")))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+    // AFL++-style: a crashes/ subdirectory. A single-instance run (no -M/-S)
+    // nests it under an instance directory, e.g. out/default/crashes, so scan
+    // both the direct crashes/ dir and one level of instance subdirectories.
+    let mut afl_dirs = vec![run_dir.join("crashes")];
+    if let Ok(entries) = std::fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            let nested = entry.path().join("crashes");
+            if nested.is_dir() {
+                afl_dirs.push(nested);
             }
-            // AFL++ does not embed a sanitizer trace in the crash file itself,
-            // but a sibling report may exist (e.g. when the harness was built
-            // with ASan). Classify from it when present; otherwise leave the
-            // crash unclassified for the service-layer replay pass.
-            let log = find_sanitizer_log(&path, &afl_crashes, &name);
-            let (kind, sig, summary) = log
-                .as_deref()
-                .map_or((CrashKind::Other, String::new(), String::new()), classify);
-            crashes.push(Crash {
-                id: Uuid::new_v4(),
-                run_id,
-                target_id,
-                input_path: path,
-                stack_signature: sig,
-                kind,
-                summary,
-                minimized: false,
-                bug_report: None,
-                casr: None,
-            });
         }
+    }
+    for afl_crashes in afl_dirs {
+        ingest_afl_crash_dir(&afl_crashes, run_id, target_id, &mut crashes)?;
     }
 
     Ok(crashes)
+}
+
+/// Ingest every crash file in one AFL++ `crashes/` directory into `crashes`.
+fn ingest_afl_crash_dir(
+    dir: &Path,
+    run_id: Uuid,
+    target_id: Uuid,
+    crashes: &mut Vec<Crash>,
+) -> Result<(), ClassifiedError> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| ClassifiedError::Internal(format!("read crashes dir: {e}")))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // AFL++ drops a `README.txt` in the crashes dir; it is not a crash.
+        if name == "README.txt" {
+            continue;
+        }
+        // AFL++ does not embed a sanitizer trace in the crash file itself, but a
+        // sibling report may exist (e.g. when the harness was built with ASan).
+        // Classify from it when present; otherwise leave the crash unclassified
+        // for the service-layer replay pass.
+        let log = find_sanitizer_log(&path, dir, &name);
+        let (kind, sig, summary) = log
+            .as_deref()
+            .map_or((CrashKind::Other, String::new(), String::new()), classify);
+        crashes.push(Crash {
+            id: Uuid::new_v4(),
+            run_id,
+            target_id,
+            input_path: path,
+            stack_signature: sig,
+            kind,
+            summary,
+            minimized: false,
+            bug_report: None,
+            casr: None,
+        });
+    }
+    Ok(())
 }
 
 fn is_crash_artifact(name: &str) -> bool {
