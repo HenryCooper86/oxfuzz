@@ -156,6 +156,13 @@ impl TranscriptStore for JsonlTranscriptStore {
         session_id: &SessionId,
         keep_count: usize,
     ) -> Result<usize, SessionError> {
+        // Hold the write lock across the whole read-modify-rename. Without it a
+        // concurrent `append` could write to the old file after our `read_all`
+        // but before the `rename`, and the rename would then silently clobber
+        // that appended message. `read_all` does not take the lock, so there is
+        // no re-entrancy.
+        let _guard = self.write_lock.lock().await;
+
         let all = self.read_all(session_id).await?;
         if keep_count >= all.len() {
             return Ok(0);
@@ -216,11 +223,17 @@ pub(crate) async fn read_messages_from_file(path: &Path) -> Result<Vec<Message>,
         if trimmed.is_empty() {
             continue;
         }
-        let msg: Message =
-            serde_json::from_str(trimmed).map_err(|e| SessionError::TranscriptError {
-                message: format!("parse message: {e}"),
-            })?;
-        messages.push(msg);
+        // Skip (don't fail on) an unparseable line. A crash mid-append can leave
+        // a torn final line; erroring would make the whole session permanently
+        // unloadable instead of dropping just the corrupt record.
+        match serde_json::from_str::<Message>(trimmed) {
+            Ok(msg) => messages.push(msg),
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "skipping unparseable transcript line"
+            ),
+        }
     }
 
     Ok(messages)
@@ -261,13 +274,22 @@ async fn read_last_messages_from_file(
         ring.push_back(line);
     }
 
-    ring.into_iter()
-        .map(|line| {
-            serde_json::from_str(line.trim()).map_err(|e| SessionError::TranscriptError {
-                message: format!("parse message: {e}"),
-            })
+    // Skip unparseable lines rather than failing the whole read (see
+    // `read_messages_from_file`).
+    Ok(ring
+        .into_iter()
+        .filter_map(|line| match serde_json::from_str::<Message>(line.trim()) {
+            Ok(msg) => Some(msg),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping unparseable transcript line"
+                );
+                None
+            }
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -381,6 +403,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn read_all_skips_a_torn_line_instead_of_failing() {
+        let (dir, store) = temp_store();
+        let session_id = SessionId::new();
+        store
+            .append(&session_id, &test_message("first"))
+            .await
+            .unwrap();
+
+        // Simulate a crash mid-append: a valid line, a torn JSON line, then a
+        // recovered valid line.
+        let path = dir.path().join(format!("{}.jsonl", session_id.as_str()));
+        let good = serde_json::to_string(&test_message("third")).unwrap();
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        f.write_all(b"{\"role\":\"user\",\"content\":\n")
+            .await
+            .unwrap();
+        f.write_all(format!("{good}\n").as_bytes()).await.unwrap();
+        f.flush().await.unwrap();
+
+        // The whole transcript must remain loadable; only the torn line is lost.
+        let messages = store.read_all(&session_id).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "first");
+        assert_eq!(messages[1].content, "third");
+
+        // read_last is just as resilient.
+        let last = store.read_last(&session_id, 5).await.unwrap();
+        assert_eq!(last.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn truncate_keeps_the_requested_prefix() {
+        let (_dir, store) = temp_store();
+        let session_id = SessionId::new();
+        for i in 0..5 {
+            store
+                .append(&session_id, &test_message(&format!("m{i}")))
+                .await
+                .unwrap();
+        }
+        let removed = store.truncate(&session_id, 2).await.unwrap();
+        assert_eq!(removed, 3);
+        let kept = store.read_all(&session_id).await.unwrap();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].content, "m0");
+        assert_eq!(kept[1].content, "m1");
     }
 
     #[tokio::test]
