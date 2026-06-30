@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Button, EmptyState, Input, Select, Textarea } from "../components/ui";
+import { Button, EmptyState, Input, LoadingState, Select, Textarea } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile } from "../lib";
 import { useProject } from "../providers/ProjectContext";
@@ -737,6 +737,7 @@ export function SkillsView() {
         </div>
       ) : (
         <div className="flex flex-col gap-2">
+          {!loaded && <LoadingState label="Loading skills…" />}
           {loaded && skills.length === 0 && (
             <EmptyState icon={<Puzzle size={20} />} hint="No skills yet. Click 'New skill' to author a reusable playbook." />
           )}
