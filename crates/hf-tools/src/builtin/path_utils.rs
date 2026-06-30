@@ -107,9 +107,61 @@ fn resolve_path_with_read_dirs(
                 ),
             });
         }
+
+        // Defense in depth: the lexical check above can be fooled by a symlink
+        // that lives inside an allowed root but points outside it (e.g. an
+        // untrusted fuzz target plants `<workspace>/link -> /etc`). Resolve
+        // symlinks in the existing portion of the path and confirm the real
+        // target is still within a canonicalized allowed root. Roots are
+        // canonicalized too so equivalent paths (e.g. macOS `/tmp` ->
+        // `/private/tmp`) compare correctly. When nothing on the path exists
+        // yet, both sides fall back to lexical form, preserving prior behavior.
+        let real_target = canonicalize_existing_ancestor(&resolved);
+        let within_real_root = allowed_roots.iter().any(|root| {
+            let real_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            path_is_within_root(&real_target, &real_root)
+        });
+        if !within_real_root {
+            return Err(ToolError::PermissionDenied {
+                name: tool_name.to_string(),
+                reason: format!(
+                    "path '{}' resolves through a symlink to outside the allowed roots",
+                    resolved.display()
+                ),
+            });
+        }
     }
 
     Ok(resolved)
+}
+
+/// Canonicalize `path`, tolerating a leaf (or tail) that does not exist yet.
+///
+/// Resolves the longest existing ancestor with `std::fs::canonicalize` (which
+/// follows symlinks -- where any escape must live, since the symlink has to
+/// exist to be followed) and re-appends the remaining components. Falls back to
+/// lexical normalization when no ancestor exists.
+fn canonicalize_existing_ancestor(path: &Path) -> PathBuf {
+    let mut ancestor = path;
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(real) = ancestor.canonicalize() {
+            let mut result = real;
+            for part in tail.iter().rev() {
+                result.push(part);
+            }
+            return result;
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                ancestor = parent;
+            }
+            // Reached a root/prefix with nothing existing: no symlink can be
+            // involved, so the lexical form is authoritative.
+            _ => return normalize_lexically(path),
+        }
+    }
 }
 
 fn system_temporary_roots() -> Vec<PathBuf> {
@@ -142,6 +194,40 @@ fn path_is_within_root(path: &Path, root: &Path) -> bool {
     match std::fs::metadata(root) {
         Ok(metadata) if metadata.is_file() => false,
         _ => path.starts_with(root),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symlink_escaping_workspace_is_denied() {
+        let ws = tempfile::tempdir().unwrap();
+
+        // A symlink inside the workspace that points at a sensitive host dir
+        // outside any allowed root (/etc, not the shared temp scratch).
+        let link = ws.path().join("escape");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+
+        let ws_str = ws.path().to_str().unwrap();
+        // Reading through the symlink must be denied even though "escape/hosts"
+        // is lexically inside the workspace.
+        let result = resolve_read_path("FileRead", Some("escape/hosts"), Some(ws_str), &[]);
+        assert!(result.is_err(), "symlink escape was allowed: {result:?}");
+    }
+
+    #[test]
+    fn ordinary_workspace_paths_still_resolve() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir(ws.path().join("src")).unwrap();
+        std::fs::write(ws.path().join("src/a.c"), "int main(){}").unwrap();
+        let ws_str = ws.path().to_str().unwrap();
+
+        // An existing in-workspace file resolves.
+        assert!(resolve_read_path("FileRead", Some("src/a.c"), Some(ws_str), &[]).is_ok());
+        // A not-yet-created file under an existing dir resolves (for writes).
+        assert!(resolve_workspace_path("FileWrite", Some("src/new.txt"), Some(ws_str)).is_ok());
     }
 }
 
