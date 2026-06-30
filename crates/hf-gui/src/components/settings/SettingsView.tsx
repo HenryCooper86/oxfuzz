@@ -13,6 +13,7 @@ import { getTransport } from "../../lib";
 import { useI18n } from "../../i18n";
 import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
+import { LoadingState } from "../ui";
 import { GeneralTab } from "./GeneralTab";
 import { ProvidersTab } from "./ProvidersTab";
 import { normalizeProvider, type Provider } from "./providerTypes";
@@ -313,9 +314,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
           {!hasConfig ? (
             renderForm()
           ) : loading ? (
-            <div className="text-text-muted text-sm" style={{ padding: "var(--space-md)" }}>
-              Loading…
-            </div>
+            <LoadingState />
           ) : showRaw ? (
             <div className="flex flex-col h-full">
               <textarea
