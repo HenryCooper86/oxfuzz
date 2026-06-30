@@ -4,6 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
+import { Button } from "../components/ui";
 import { Bug, Loader2, ChevronRight, FileDown, FileText } from "lucide-react";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
@@ -188,21 +189,15 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           >
             <FileDown size={14} />
           </button>
-          <button
+          <Button
+            variant="primary"
             onClick={triage}
             disabled={loading}
-            className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55"
-            style={{
-              background: "var(--accent)",
-              color: "var(--accent-contrast)",
-              borderColor: "transparent",
-            }}
-            onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = "0.85")}
-            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            loading={loading}
           >
-            {loading ? <Loader2 size={14} className="animate-spin" /> : <Bug size={14} />}
+            {!loading && <Bug size={14} />}
             {loading ? "Scanning..." : "Scan for Crashes"}
-          </button>
+          </Button>
         </div>
       </div>
 

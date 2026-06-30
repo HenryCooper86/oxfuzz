@@ -3,7 +3,8 @@ import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type { CorpusEntry } from "../types";
-import { Database, Loader2, Plus, Scissors, Eye } from "lucide-react";
+import { Button } from "../components/ui";
+import { Database, Plus, Scissors, Eye } from "lucide-react";
 
 export function CorpusView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject } = useProject();
@@ -142,13 +143,9 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
 
 function ActionButton({ icon, label, loading, onClick }: { icon: React.ReactNode; label: string; loading: boolean; onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      disabled={loading}
-      className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
-    >
-      {loading ? <Loader2 size={14} className="animate-spin" /> : icon}
+    <Button variant="outline" size="sm" onClick={onClick} loading={loading}>
+      {!loading && icon}
       {label}
-    </button>
+    </Button>
   );
 }

@@ -4,6 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory } from "../types";
+import { Button } from "../components/ui";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles,
@@ -146,9 +147,9 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
               className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
               style={{ fontFamily: "var(--font-mono)" }}
             />
-            <button onClick={browse} className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary">
+            <Button variant="outline" size="sm" onClick={browse}>
               <FolderOpen size={14} />
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -195,15 +196,14 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
               <option value="cpp">C++</option>
             </select>
           </div>
-          <button
+          <Button
+            variant="primary"
             onClick={runAll}
             disabled={!selectedTarget || harnessStatus === "loading"}
-            className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55"
-            style={{ background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
           >
             <Sparkles size={14} />
             Generate All
-          </button>
+          </Button>
         </div>
       )}
 
@@ -355,14 +355,15 @@ function Step({
           {icon}
           {title}
         </span>
-        <button
+        <Button
+          variant="outline"
+          size="sm"
           onClick={actionClick}
-          disabled={disabled || status === "loading"}
-          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+          disabled={disabled}
+          loading={status === "loading"}
         >
-          {status === "loading" ? <Loader2 size={12} className="animate-spin" /> : null}
           {actionLabel}
-        </button>
+        </Button>
       </div>
       {children}
     </div>

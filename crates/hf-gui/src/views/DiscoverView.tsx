@@ -3,6 +3,7 @@ import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
+import { Button } from "../components/ui";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
@@ -81,30 +82,25 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           <option value="cpp">C++</option>
         </select>
         {!embedded && (
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             onClick={browse}
-            disabled={scanning}
-            className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
+            loading={scanning}
             title="Browse for folder"
           >
-            {scanning ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
-          </button>
+            {!scanning && <FolderOpen size={14} />}
+          </Button>
         )}
-        <button
+        <Button
+          variant="primary"
           onClick={discover}
           disabled={loading || !project}
-          className="inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
-          style={{
-            background: "var(--accent)",
-            color: "var(--accent-contrast)",
-            borderColor: "transparent",
-          }}
-          onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = "0.85")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+          loading={loading}
         >
-          {loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+          {!loading && <Search size={14} />}
           {loading ? "Scanning..." : "Discover"}
-        </button>
+        </Button>
       </div>
 
       {error && (

@@ -6,6 +6,7 @@ import { usePrefs } from "../providers/PrefsContext";
 import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
+import { Button } from "../components/ui";
 import { Play, Loader2, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
 
 export function RunView({ embedded = false }: { embedded?: boolean }) {
@@ -108,13 +109,14 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
                 className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
                 style={{ fontFamily: "var(--font-mono)" }}
               />
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={browse}
-                className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary"
                 title="Browse for folder"
               >
                 <FolderOpen size={14} />
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -190,21 +192,16 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
       )}
 
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="primary"
+          className="self-start"
           onClick={run}
           disabled={running || !project || (!isSyz && !target)}
-          className="self-start inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
-          style={{
-            background: "var(--accent)",
-            color: "var(--accent-contrast)",
-            borderColor: "transparent",
-          }}
-          onMouseEnter={(e) => !running && (e.currentTarget.style.opacity = "0.85")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+          loading={running}
         >
-          {running ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+          {!running && <Play size={14} />}
           {running ? "Running..." : isSyz ? "Launch Campaign" : "Run Fuzzer"}
-        </button>
+        </Button>
 
         {/* Stop is offered while a harness fuzz run is in flight. Kernel
             (syzkaller) campaigns run through a separate path not covered by the
@@ -296,13 +293,14 @@ function FileField({
           className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
           style={{ fontFamily: "var(--font-mono)" }}
         />
-        <button
+        <Button
+          variant="outline"
+          size="sm"
           onClick={onPick}
-          className="inline-flex items-center justify-center px-3 py-2 text-xs font-medium rounded-md border border-solid border-border bg-surface-primary text-text-secondary transition-all duration-150 outline-none hover:bg-surface-hover hover:text-text-primary"
           title="Browse for file"
         >
           <FolderOpen size={14} />
-        </button>
+        </Button>
       </div>
     </div>
   );
