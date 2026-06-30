@@ -3,7 +3,7 @@ import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import type { TargetInventory, TargetCandidate } from "../types";
-import { Button } from "../components/ui";
+import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
@@ -51,36 +51,32 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
-        <>
-          <h1 className="text-xl font-semibold" style={{ letterSpacing: "-0.01em" }}>
-            Target Discovery
-          </h1>
-          <p className="text-sm text-text-secondary">
-            Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability.
-          </p>
-        </>
+        <ViewHeader
+          title="Target Discovery"
+          description="Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability."
+        />
       )}
 
       <div className="flex gap-2">
         {!embedded && (
-          <input
+          <Input
+            mono
             type="text"
             placeholder="/path/to/project"
             value={project}
             onChange={(e) => setLocalProject(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && discover()}
-            className="flex-1 px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)]"
-            style={{ fontFamily: "var(--font-mono)" }}
+            className="flex-1"
           />
         )}
-        <select
+        <Select
           value={lang}
-          onChange={(e) => setLang(e.target.value)}
-          className="px-3 py-2 text-xs border border-solid border-border rounded-md bg-surface-primary text-text-primary outline-none focus:border-[var(--border-focus)] transition-colors duration-150"
-        >
-          <option value="c">C</option>
-          <option value="cpp">C++</option>
-        </select>
+          onChange={(v) => setLang(v)}
+          options={[
+            { value: "c", label: "C" },
+            { value: "cpp", label: "C++" },
+          ]}
+        />
         {!embedded && (
           <Button
             variant="outline"
