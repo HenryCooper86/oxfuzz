@@ -60,8 +60,10 @@ impl std::fmt::Debug for ProviderPoolImpl {
 
 /// RAII guard that decrements a provider's active-request counter on drop.
 ///
-/// Used to track streaming requests: the guard is moved into the wrapped
-/// stream and lives until the stream is fully consumed or dropped.
+/// Used by both request paths so the counter is correct even under
+/// cancellation: the non-streaming path holds it across the `await`, and the
+/// streaming path moves it into the wrapped stream so it lives until the stream
+/// is fully consumed or dropped.
 struct ActiveRequestGuard(Arc<AtomicUsize>);
 
 impl Drop for ActiveRequestGuard {
@@ -439,14 +441,16 @@ impl ProviderPool for ProviderPoolImpl {
                 message: "semaphore closed".into(),
             })?;
 
-        // Track active request for observability.
+        // Track active request for observability. Use the RAII guard (not a
+        // manual fetch_sub) so the counter is decremented even if this future is
+        // cancelled/dropped mid-await (e.g. wrapped in a timeout) -- a manual
+        // decrement after the await would be skipped on cancellation, leaking
+        // the count upward forever.
         entry.active_requests.fetch_add(1, Ordering::Relaxed);
+        let _active = ActiveRequestGuard(Arc::clone(&entry.active_requests));
         let effective_request = Self::apply_request_defaults(request, entry);
 
         let result = entry.provider.chat_completion(&effective_request).await;
-
-        // Decrement active counter after request completes.
-        entry.active_requests.fetch_sub(1, Ordering::Relaxed);
 
         match result {
             Ok(mut response) => {
@@ -1046,6 +1050,63 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert!(!statuses[0].is_frozen);
         assert_eq!(statuses[0].total_requests, 0);
+    }
+
+    /// A provider whose `chat_completion` never returns, to exercise the
+    /// cancellation path.
+    struct SlowProvider {
+        meta: ProviderMetadata,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SlowProvider {
+        async fn chat_completion(
+            &self,
+            _request: &ChatRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            // Far longer than any test timeout; the future is dropped instead.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("cancelled before completing")
+        }
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "no stream".into(),
+            })
+        }
+        fn metadata(&self) -> &ProviderMetadata {
+            &self.meta
+        }
+    }
+
+    #[tokio::test]
+    async fn active_requests_counter_released_on_cancellation() {
+        let (ok, _) = MockProvider::new_provider("template", vec!["gen"], false);
+        let meta = ok.metadata().clone();
+        let provider: Arc<dyn LlmProvider> = Arc::new(SlowProvider { meta });
+        let pool = ProviderPoolImpl::from_providers(vec![provider], &test_config());
+        let route = RouteRequest {
+            required_tags: vec!["gen".into()],
+            ..Default::default()
+        };
+
+        // Cancel the in-flight request by letting a short timeout fire; the
+        // inner future is dropped, which must run the guard's Drop and release
+        // the active-request counter.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pool.chat_completion(&test_request(), &route),
+        )
+        .await;
+        assert!(result.is_err(), "request should have timed out");
+
+        let statuses = pool.provider_statuses().await;
+        assert_eq!(
+            statuses[0].active_requests, 0,
+            "active-request counter leaked after cancellation"
+        );
     }
 
     // -----------------------------------------------------------------------

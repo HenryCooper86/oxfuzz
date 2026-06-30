@@ -33,6 +33,7 @@ pub async fn draft(
         engine,
         source,
         rationale: String::new(),
+        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
     })
 }
 

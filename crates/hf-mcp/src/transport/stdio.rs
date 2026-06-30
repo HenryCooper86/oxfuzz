@@ -34,7 +34,13 @@ pub struct StdioTransport {
     stderr_handle: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Option<Child>>,
     closed: Arc<AtomicBool>,
+    /// How long `send` waits for a response before timing out. Defaults to
+    /// [`DEFAULT_REQUEST_TIMEOUT`]; set from the manager's `tool_timeout_secs`.
+    request_timeout: std::time::Duration,
 }
+
+/// Default per-request response timeout when none is configured.
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl std::fmt::Debug for StdioTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -227,7 +233,17 @@ impl StdioTransport {
             stderr_handle: Mutex::new(Some(stderr_handle)),
             child: Mutex::new(Some(child)),
             closed: closed_flag,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         })
+    }
+
+    /// Set the per-request response timeout (from the manager's configured
+    /// `tool_timeout_secs`). The stdio transport previously hardcoded 30s,
+    /// ignoring the configuration the HTTP transport already honored.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Write a serialized message (+ newline) to stdin.
@@ -278,8 +294,8 @@ impl McpTransport for StdioTransport {
             return Err(e);
         }
 
-        // Wait for the response with a timeout.
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        // Wait for the response with the configured timeout.
+        match tokio::time::timeout(self.request_timeout, rx).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(McpError::TransportError {
                 message: "server process exited before responding".into(),
@@ -289,7 +305,10 @@ impl McpTransport for StdioTransport {
                 let mut map = self.pending.lock().await;
                 map.remove(&id);
                 Err(McpError::Timeout {
-                    message: format!("request {id} timed out after 30s"),
+                    message: format!(
+                        "request {id} timed out after {}s",
+                        self.request_timeout.as_secs()
+                    ),
                 })
             }
         }
@@ -410,6 +429,27 @@ mod tests {
             matches!(result, Err(McpError::TransportError { .. })),
             "expected TransportError after close, got: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn send_honors_configured_request_timeout() {
+        // `sleep` never responds, so send must time out after the configured
+        // (short) timeout instead of the old hardcoded 30s.
+        let transport = StdioTransport::spawn("sleep", &["60".to_owned()], &HashMap::new(), None)
+            .expect("failed to spawn sleep")
+            .with_request_timeout(std::time::Duration::from_millis(100));
+
+        let start = std::time::Instant::now();
+        let result = transport.send(JsonRpcRequest::new(1, "test", None)).await;
+        assert!(
+            matches!(result, Err(McpError::Timeout { .. })),
+            "expected Timeout, got: {result:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "send did not honor the short configured timeout"
+        );
+        transport.close().await.unwrap();
     }
 
     #[tokio::test]
