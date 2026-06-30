@@ -152,7 +152,7 @@ function PathField({ value, onCopy }: { value: string; onCopy: () => void }) {
   return (
     <div className="relative flex items-center w-full">
       <Input mono readOnly value={value} title={value} className="pr-9 text-text-secondary select-all" />
-      <Button variant="icon" size="sm" className="absolute right-1" onClick={onCopy} title="Copy path">
+      <Button variant="icon" size="sm" className="absolute right-1" onClick={onCopy} title="Copy path" aria-label="Copy path">
         <Copy size={13} />
       </Button>
     </div>

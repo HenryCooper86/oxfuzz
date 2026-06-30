@@ -7,8 +7,10 @@
 // Unknown / non-editable shapes (e.g. arrays of tables) are preserved untouched
 // because every patch spreads the existing object and only replaces one key.
 
+import { SlidersHorizontal } from "lucide-react";
 import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
+import { EmptyState } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
 type Cfg = Record<string, unknown>;
@@ -57,6 +59,15 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
       </SettingsItem>
     );
   }
+  // A nested object/array-of-tables has no simple control; surface it read-only
+  // (with a hint to edit in RAW) instead of rendering a useless "[object Object]".
+  if (typeof value === "object" && value !== null) {
+    return (
+      <SettingsItem title={label} description="Nested config — edit in RAW.">
+        <span className="text-xs text-text-muted font-mono">{Array.isArray(value) ? "[…]" : "{…}"}</span>
+      </SettingsItem>
+    );
+  }
   // string (and any other scalar fallback rendered as text)
   return (
     <SettingsItem title={label}>
@@ -74,9 +85,11 @@ export function ObjectForm({ value, onChange }: { value: Cfg; onChange: (next: C
 
   if (entries.length === 0) {
     return (
-      <div className="text-text-muted text-sm" style={{ padding: "var(--space-md)" }}>
-        Empty configuration. Switch to RAW to add fields.
-      </div>
+      <EmptyState
+        icon={<SlidersHorizontal size={20} />}
+        title="Empty configuration"
+        hint="This section has no fields yet. Switch to RAW to add them."
+      />
     );
   }
 

@@ -58,7 +58,7 @@ function GhostBtn({ onClick, icon, children, title }: { onClick: () => void; ico
 }
 function IconBtn({ onClick, icon, danger, title }: { onClick: () => void; icon: ReactNode; danger?: boolean; title?: string }) {
   return (
-    <button onClick={onClick} title={title} className={`hf-action-btn${danger ? " danger" : ""}`}>
+    <button onClick={onClick} title={title} aria-label={title} className={`hf-action-btn${danger ? " danger" : ""}`}>
       {icon}
     </button>
   );
@@ -1258,7 +1258,7 @@ export function AutomationView() {
               {c.enabled ? <Square size={13} /> : <Play size={13} />}
               {c.enabled ? "Pause" : "Resume"}
             </button>
-            <button onClick={() => remove(c.id)} className="inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:text-error hover:bg-surface-hover" title="Delete campaign">
+            <button onClick={() => remove(c.id)} className="inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:text-error hover:bg-surface-hover" title="Delete campaign" aria-label="Delete campaign">
               <Trash2 size={14} />
             </button>
           </div>
