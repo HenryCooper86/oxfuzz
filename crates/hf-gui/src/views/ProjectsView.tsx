@@ -84,6 +84,7 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
                   className="inline-flex items-center justify-center rounded-md transition-colors duration-150"
                   style={{ width: "28px", height: "28px", color: "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
                   title="Remove from recents"
+                  aria-label="Remove from recents"
                   onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                 >

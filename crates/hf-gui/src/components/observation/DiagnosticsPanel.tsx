@@ -67,7 +67,7 @@ export function DiagnosticsPanel() {
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="default">{data?.calls ?? 0}</Badge>
-          <button onClick={load} className="text-text-muted hover:text-text-primary" title="Refresh">
+          <button onClick={load} className="text-text-muted hover:text-text-primary" title="Refresh" aria-label="Refresh">
             {loading ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
           </button>
         </div>
