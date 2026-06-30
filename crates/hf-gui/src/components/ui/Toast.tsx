@@ -33,6 +33,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               minWidth: 240,
               maxWidth: 360,
               animation: "slideInUp 0.2s ease",
+              boxShadow: "var(--shadow-md)",
               borderColor: t.variant === "success" ? "var(--success)" : t.variant === "error" ? "var(--error)" : "var(--border)",
             }}
           >
