@@ -224,15 +224,15 @@ you receive its result and continue until you can give a final answer.",
                 let wd = self.project.as_deref().and_then(|p| p.to_str());
                 agent_tools::dispatch_inspection(registry, &tool, &args, wd).await
             } else if self.definition.allowed_tools.iter().all(|t| t != &tool) {
-                format!(
-                    "{{\"error\":\"tool '{tool}' is not permitted for the {} agent\"}}",
+                agent_tools::error_json(format!(
+                    "tool '{tool}' is not permitted for the {} agent",
                     self.definition.name
-                )
+                ))
             } else {
                 match tools::dispatch(&self.container, self.project.as_deref(), &tool, &args).await
                 {
                     Ok(r) => r,
-                    Err(e) => format!("{{\"error\":\"{e}\"}}"),
+                    Err(e) => agent_tools::error_json(e),
                 }
             };
             sink.emit(AgentEvent::ToolResult {

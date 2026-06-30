@@ -151,6 +151,10 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
         session_id: &SessionId,
         keep_count: usize,
     ) -> Result<usize, SessionError> {
+        // Serialise with appends so a concurrent write cannot be clobbered by
+        // the rename below (see `JsonlTranscriptStore::truncate`).
+        let _guard = self.write_lock.lock().await;
+
         let all = self.read_all(session_id).await?;
         if keep_count >= all.len() {
             return Ok(0);

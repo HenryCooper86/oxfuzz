@@ -251,26 +251,35 @@ impl LoopGuard {
         }
     }
 
-    /// No new distinct action over the last `drift_window` steps.
+    /// A small set of steps cycling over the last `drift_window` steps -- e.g.
+    /// the multi-action cycle `A, B, C, A, B, C` that none of the other
+    /// detectors catch (it is neither consecutive repetition nor strict A/B
+    /// oscillation).
     fn check_drift(&self) -> Option<LoopDetection> {
         let window = self.config.drift_window;
-        if window == 0 || self.history.len() < window {
+        // A window of <4 is too short to distinguish a cycle from normal work.
+        if window < 4 || self.history.len() < window {
             return None;
         }
-        let recent = self.history.iter().rev().take(window);
-        let distinct = recent
-            .map(|s| s.action.as_str())
+        // Key on the full (action, args) signature so genuinely varying
+        // arguments -- i.e. real progress through a small toolset -- are not
+        // mistaken for a stuck cycle. A repeating cycle reuses the same steps.
+        let distinct = self
+            .history
+            .iter()
+            .rev()
+            .take(window)
+            .map(|s| (s.action.as_str(), s.args_signature.as_deref()))
             .collect::<std::collections::HashSet<_>>()
             .len();
-        // "No new distinct action" -> the window churns through a tiny set of
-        // actions (1 here would already be Repetition; 2..=window/2 still smells
-        // like a stuck cycle). Fire when the window is dominated by very few
-        // distinct actions.
-        if distinct <= 1 {
+        // `distinct * 2 <= window` means each distinct step recurs at least
+        // twice on average -- a cycle, not forward progress. (`distinct == 1`
+        // would already be Repetition; this also catches 2..=window/2.)
+        if distinct >= 1 && distinct.saturating_mul(2) <= window {
             Some(LoopDetection {
                 pattern: LoopPattern::Drift,
                 reason: format!(
-                    "no new distinct action over the last {window} steps (only {distinct} distinct)"
+                    "stuck cycling over {distinct} distinct step(s) across the last {window} steps"
                 ),
             })
         } else {
@@ -362,6 +371,32 @@ mod tests {
         let steps: Vec<_> = (0..6).map(|_| StepRecord::action("spin")).collect();
         let d = feed(&mut guard, &steps).expect("drift should fire");
         assert_eq!(d.pattern, LoopPattern::Drift);
+    }
+
+    #[test]
+    fn detects_multi_action_cycle() {
+        // A, B, C repeating is neither consecutive repetition nor strict A/B
+        // oscillation, so only drift can catch it. Default drift_window is 8.
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let cycle = ["a", "b", "c"];
+        let steps: Vec<_> = (0..9).map(|i| StepRecord::action(cycle[i % 3])).collect();
+        let d = feed(&mut guard, &steps).expect("multi-action cycle should fire");
+        assert_eq!(d.pattern, LoopPattern::Drift);
+    }
+
+    #[test]
+    fn small_toolset_with_varying_args_does_not_drift() {
+        // A small 3-tool set (so not strict A/B oscillation) but each call
+        // carries fresh arguments -- real progress, not a cycle. Drift keys on
+        // the full (action, args) signature, so this must not fire.
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let steps: Vec<_> = (0..16)
+            .map(|i| StepRecord::tool(format!("tool_{}", i % 3), format!("arg_{i}")))
+            .collect();
+        assert!(
+            feed(&mut guard, &steps).is_none(),
+            "varying args over a small toolset must not be drift"
+        );
     }
 
     #[test]
