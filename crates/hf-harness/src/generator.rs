@@ -356,15 +356,17 @@ fn first_number(s: &str) -> Option<f64> {
 }
 
 /// Parse the number of crashes from fuzzer stdout.
+///
+/// Reuses the engine's finding detector so smoke validation agrees with the
+/// production run parser. Critically, this does NOT count AFL++/honggfuzz
+/// periodic status counters (`uniq crashes : N`, `Crashes : N`) as crashes --
+/// doing so marked every clean non-libFuzzer smoke run as `Failed`.
 fn parse_crashes(stdout: &str) -> u32 {
-    let mut count = 0u32;
-    for line in stdout.lines() {
-        let lower = line.to_ascii_lowercase();
-        if lower.contains("crash") || lower.contains("sum") && lower.contains("bug") {
-            count += 1;
-        }
-    }
-    count
+    let count = stdout
+        .lines()
+        .filter(|line| hf_engine::progress::line_reports_finding(line))
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// The source filename to write the harness to, by language. The extension
@@ -450,6 +452,27 @@ mod tests {
         let log =
             "Test unit written to ./crash-abc\nSUMMARY: AddressSanitizer: heap-buffer-overflow";
         assert!(parse_crashes(log) >= 1);
+    }
+
+    #[test]
+    fn clean_afl_and_honggfuzz_smoke_reports_zero_crashes() {
+        // A clean AFL++/honggfuzz run prints crash *labels* on every status
+        // tick. None of these are real crashes; a clean smoke run must report 0
+        // so the harness is promoted (it was previously marked Failed).
+        let afl = "\
+american fuzzy lop ++4.0
+ last uniq crash : none seen yet
+   uniq crashes : 0
+    saved crashes : 0
+   exec speed : 1234/sec";
+        assert_eq!(parse_crashes(afl), 0);
+
+        let honggfuzz = "\
+Iterations : 12345
+     Crashes : 0 (unique: 0, blacklist: 0, verified: 0)
+    Timeouts : 0
+ Corpus Size : 42";
+        assert_eq!(parse_crashes(honggfuzz), 0);
     }
 
     #[test]

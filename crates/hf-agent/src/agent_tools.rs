@@ -22,6 +22,18 @@ use hf_tools::registry::ToolRegistryImpl;
 pub const INSPECTION_TOOLS: &[&str] =
     &["FileRead", "Glob", "Grep", "ToolSearch", "KnowledgeSearch"];
 
+/// Build a well-formed `{"error": "..."}` tool result.
+///
+/// Tool errors routinely contain quotes, backslashes, and newlines (compiler
+/// diagnostics, Windows paths, validation messages quoting the bad token).
+/// Interpolating them into a hand-built JSON string produces invalid JSON,
+/// which the model then cannot parse -- crippling `ReAct` self-correction on
+/// exactly the errors it most needs to read. Serialize instead of formatting.
+#[must_use]
+pub(crate) fn error_json(message: impl std::fmt::Display) -> String {
+    serde_json::json!({ "error": message.to_string() }).to_string()
+}
+
 /// A one-line catalog entry per inspection tool, appended to the system prompt.
 pub const INSPECTION_CATALOG: &str = "\
 - FileRead: read a source file. args: {\"path\":\"...\"}\n\
@@ -172,13 +184,24 @@ pub async fn dispatch_inspection(
     let mut executor = ToolExecutor::new();
     match executor.execute(registry, &tool_name, input).await {
         Ok(out) => out.content.to_string(),
-        Err(e) => format!("{{\"error\":\"{e}\"}}"),
+        Err(e) => error_json(e),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_json_escapes_special_characters() {
+        // A realistic compiler diagnostic: quotes, a backslash path, a newline.
+        let msg = "expected ';', found \"}\"\n  at C:\\src\\a.c";
+        let out = error_json(msg);
+        // Must be valid JSON that round-trips to the original message.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("error_json must be valid JSON");
+        assert_eq!(parsed["error"], serde_json::Value::String(msg.to_owned()));
+    }
 
     #[tokio::test]
     async fn registry_executes_file_read() {

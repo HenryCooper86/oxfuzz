@@ -1335,221 +1335,68 @@ pub struct SyzkallerOpts {
     vm_count: Option<u32>,
 }
 
-/// Run a real syzkaller campaign by invoking `syz-manager` inside the sandbox.
+/// Run a real syzkaller campaign through the service layer.
 ///
-/// syzkaller fuzzes an OS kernel by mutating syscall sequences inside a managed
-/// VM whose kernel is built with KCOV coverage. This command mounts the
-/// user-supplied kernel image + rootfs (or an existing `manager.cfg`) into the
-/// sandbox, synthesizes a qemu `manager.cfg` when needed, and streams
-/// `syz-manager` output back to the GUI as `run:progress` events.
+/// Thin presentation wrapper: all orchestration (mount assembly, `manager.cfg`
+/// synthesis, sandboxed `syz-manager` invocation) lives in
+/// [`hf_service::ServiceContainer::run_syzkaller`], which routes through the
+/// `hf-runtime` sandbox. This command only maps options in and streams
+/// [`FuzzProgress`] back to the GUI as `run:progress` events.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub async fn run_syzkaller(
+    state: tauri::State<'_, crate::state::AppState>,
     app: tauri::AppHandle,
     opts: SyzkallerOpts,
 ) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
-    use tokio::io::AsyncBufReadExt;
 
-    let SyzkallerOpts {
-        project,
-        arch,
-        duration,
-        kernel_image,
-        disk_image,
-        ssh_key,
-        manager_cfg,
-        vm_count,
-    } = opts;
-
-    let platform = arch
-        .as_deref()
-        .map_or_else(hf_runtime::host_platform, hf_runtime::norm_platform);
-    let target_triple = format!("linux/{}", hf_runtime::platform_short(&platform));
-
-    let emit = |ty: &str, data: serde_json::Value| {
-        let _ = app.emit(
+    let app_handle = app.clone();
+    let on_progress = move |p: FuzzProgress| {
+        let (ty, data) = match p {
+            FuzzProgress::EdgesCovered(v) => ("EdgesCovered", serde_json::json!(v)),
+            FuzzProgress::ExecsPerSec(v) => ("ExecsPerSec", serde_json::json!(v)),
+            FuzzProgress::CrashesFound(n) => ("CrashesFound", serde_json::json!(n)),
+            FuzzProgress::LogLine(s) => ("LogLine", serde_json::json!(s)),
+            FuzzProgress::Done => ("Done", serde_json::Value::Null),
+        };
+        let _ = app_handle.emit(
             "run:progress",
             serde_json::json!({ "type": ty, "data": data }),
         );
     };
-    let logln = |s: &str| emit("LogLine", serde_json::json!(s));
 
-    let nonempty = |o: &Option<String>| {
-        o.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
+    let svc_opts = hf_service::SyzkallerRunOpts {
+        project: opts.project,
+        arch: opts.arch,
+        duration_secs: opts.duration,
+        kernel_image: opts.kernel_image,
+        disk_image: opts.disk_image,
+        ssh_key: opts.ssh_key,
+        manager_cfg: opts.manager_cfg,
+        vm_count: opts.vm_count,
     };
-    let manager_cfg = nonempty(&manager_cfg);
-    let kernel_image = nonempty(&kernel_image);
-    let disk_image = nonempty(&disk_image);
-    let ssh_key = nonempty(&ssh_key);
 
-    let have_artifacts = kernel_image.is_some() && disk_image.is_some();
-
-    // No artifacts at all: surface what a campaign needs and stop (no error).
-    if manager_cfg.is_none() && !have_artifacts {
-        for line in [
-            format!("syzkaller (kernel fuzzing) -- project: {project}"),
-            "No campaign artifacts provided. syzkaller drives a VM against a".to_string(),
-            "KCOV-instrumented kernel; it needs one of:".to_string(),
-            "  (a) a kernel image (bzImage) + a rootfs disk image, or".to_string(),
-            "  (b) an existing syz-manager config (manager.cfg).".to_string(),
-            "Build a KCOV kernel + rootfs per the setup guide, then select them above:".to_string(),
-            "https://github.com/google/syzkaller/blob/master/docs/linux/setup.md".to_string(),
-        ] {
-            logln(&line);
-        }
-        emit("Done", serde_json::Value::Null);
-        return Ok(serde_json::json!({ "edges": 0, "crashes": 0, "execs": 0.0, "exit_code": 0 }));
-    }
-
-    if !hf_runtime::docker_daemon_ready() {
-        logln("Docker daemon not running -- cannot launch syz-manager.");
-        return Err("Docker daemon not running -- cannot launch syz-manager.".to_string());
-    }
-
-    let file_ok = |p: &str| std::path::Path::new(p).is_file();
-
-    // Assemble bind mounts and resolve the in-container config path.
-    let mut mounts: Vec<String> = Vec::new();
-    let workspace = std::env::temp_dir().join("hobot_fuzz_syzkaller");
-    std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-    let workdir = "/syzbench";
-    let cfg_in_container: String;
-
-    if let Some(cfg) = manager_cfg.as_deref() {
-        if !file_ok(cfg) {
-            return Err(format!("manager.cfg not found: {cfg}"));
-        }
-        let cfg_path = std::path::Path::new(cfg);
-        let dir = cfg_path
-            .parent()
-            .ok_or_else(|| "manager.cfg has no parent directory".to_string())?;
-        mounts.push(format!("{0}:{0}", dir.display()));
-        cfg_in_container = cfg.to_string();
-        logln(&format!("Using provided manager.cfg: {cfg}"));
-    } else {
-        let kernel = kernel_image.ok_or_else(|| {
-            "kernel_image is required when no manager.cfg is provided".to_string()
-        })?;
-        let disk = disk_image
-            .ok_or_else(|| "disk_image is required when no manager.cfg is provided".to_string())?;
-        if !file_ok(&kernel) {
-            return Err(format!("kernel image not found: {kernel}"));
-        }
-        if !file_ok(&disk) {
-            return Err(format!("disk image not found: {disk}"));
-        }
-        mounts.push(format!("{kernel}:/syzbench/kernel:ro"));
-        mounts.push(format!("{disk}:/syzbench/rootfs.img"));
-
-        let sshkey_field = if let Some(key) = ssh_key.as_deref() {
-            if !file_ok(key) {
-                return Err(format!("ssh key not found: {key}"));
-            }
-            mounts.push(format!("{key}:/syzbench/id_rsa:ro"));
-            "\n  \"sshkey\": \"/syzbench/id_rsa\",".to_string()
-        } else {
-            String::new()
-        };
-
-        let count = vm_count.unwrap_or(2).max(1);
-        let procs = count.min(4);
-        let qemu_args = if hf_runtime::platform_short(&platform) == "arm64" {
-            "-machine virt,accel=tcg -cpu max"
-        } else {
-            "-machine pc,accel=tcg -cpu max"
-        };
-        let cfg_json = format!(
-            "{{\n  \"target\": \"{target_triple}\",\n  \"http\": \"0.0.0.0:56741\",\n  \"workdir\": \"/syzbench/workdir\",\n  \"image\": \"/syzbench/rootfs.img\",{sshkey_field}\n  \"syzkaller\": \"/opt/syzkaller\",\n  \"procs\": {procs},\n  \"type\": \"qemu\",\n  \"vm\": {{\n    \"count\": {count},\n    \"kernel\": \"/syzbench/kernel\",\n    \"cpu\": 2,\n    \"mem\": 2048,\n    \"qemu_args\": \"{qemu_args}\"\n  }}\n}}\n"
-        );
-        let cfg_host = workspace.join("manager.cfg");
-        std::fs::write(&cfg_host, &cfg_json).map_err(|e| e.to_string())?;
-        let workdir_host = workspace.join("workdir");
-        std::fs::create_dir_all(&workdir_host).map_err(|e| e.to_string())?;
-        mounts.push(format!("{}:/syzbench/manager.cfg:ro", cfg_host.display()));
-        mounts.push(format!("{}:/syzbench/workdir", workdir_host.display()));
-        cfg_in_container = "/syzbench/manager.cfg".to_string();
-        logln(&format!(
-            "Synthesized qemu manager.cfg ({target_triple}, {count} VM(s))."
+    // The explicit launch is the human approval for this sandboxed run; auto-
+    // approve so the agent-oriented HITL gate does not block it (mirrors
+    // `run_fuzzer`).
+    let container = state
+        .container
+        .clone()
+        .with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::default(),
+            std::sync::Arc::new(AutoApproveGate),
         ));
+
+    match container.run_syzkaller(&svc_opts, &on_progress).await {
+        Ok(summary) => Ok(serde_json::json!({
+            "edges": summary.edges,
+            "crashes": summary.crashes,
+            "execs": summary.execs,
+            "exit_code": summary.exit_code,
+        })),
+        Err(e) => Err(e.to_string()),
     }
-
-    logln(&format!(
-        "Launching syz-manager in the sandbox for {duration}s..."
-    ));
-    logln("Note: qemu runs under TCG emulation inside Docker (no /dev/kvm on macOS) -- expect low exec rates.");
-
-    let inner = format!(
-        "command -v syz-manager >/dev/null 2>&1 || {{ echo 'ERROR: syz-manager not found in the sandbox image. Rebuild the image with the syzkaller toolchain: open Settings > General and switch the sandbox Architecture (forces a rebuild), or remove the image with: docker image rm {sandbox_img}'; exit 3; }}; timeout {duration} syz-manager -config={cfg_in_container} 2>&1 || true",
-        sandbox_img = hf_runtime::SANDBOX_IMAGE,
-    );
-
-    let mut args: Vec<String> = vec![
-        "run".into(),
-        "--rm".into(),
-        "--platform".into(),
-        platform.clone(),
-        "--memory=4096m".into(),
-        "--cpus=4".into(),
-    ];
-    for m in &mounts {
-        args.push("-v".into());
-        args.push(m.clone());
-    }
-    args.push("-w".into());
-    args.push(workdir.into());
-    args.push(hf_runtime::SANDBOX_IMAGE.into());
-    args.push("bash".into());
-    args.push("-c".into());
-    args.push(inner);
-
-    let mut child = tokio::process::Command::new(hf_runtime::docker_bin())
-        .args(&args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("docker run (syz-manager): {e}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "failed to capture stdout".to_string())?;
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-
-    let mut edges: u64 = 0;
-    let mut execs: f64 = 0.0;
-    let mut crashes: u64 = 0;
-
-    while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-        if let Some((cover, executed, crash_ct)) =
-            hf_engine::progress::parse_syzkaller_status(&line)
-        {
-            edges = edges.max(cover);
-            execs = executed as f64;
-            if crash_ct > crashes {
-                emit("CrashesFound", serde_json::json!(crash_ct - crashes));
-                crashes = crash_ct;
-            }
-            emit("EdgesCovered", serde_json::json!(cover));
-            emit("ExecsPerSec", serde_json::json!(executed));
-            logln(&line);
-        } else if !line.trim().is_empty() {
-            logln(&line);
-        }
-    }
-
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    emit("Done", serde_json::Value::Null);
-
-    Ok(serde_json::json!({
-        "edges": edges,
-        "crashes": crashes,
-        "execs": execs,
-        "exit_code": status.code(),
-    }))
 }
 
 // ---------------------------------------------------------------------------
