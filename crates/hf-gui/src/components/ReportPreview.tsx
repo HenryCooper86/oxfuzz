@@ -2,6 +2,7 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { X, Download, Copy, Check } from "lucide-react";
+import { Button } from "./ui";
 import { Mermaid } from "./Mermaid";
 
 /**
@@ -63,14 +64,14 @@ export function ReportPreview({
         >
           <span className="text-sm font-semibold">Fuzzing Report</span>
           <div className="flex items-center gap-2">
-            <HeaderButton onClick={copy} title="Copy Markdown">
+            <Button variant="outline" size="sm" onClick={copy} title="Copy Markdown">
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {copied ? "Copied" : "Copy"}
-            </HeaderButton>
-            <HeaderButton onClick={onDownload} title="Download .md">
+            </Button>
+            <Button variant="outline" size="sm" onClick={onDownload} title="Download .md">
               <Download size={14} />
               Download
-            </HeaderButton>
+            </Button>
             <button
               onClick={onClose}
               className="inline-flex items-center justify-center p-1.5 rounded-md text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors"
@@ -102,25 +103,5 @@ export function ReportPreview({
         </div>
       </div>
     </div>
-  );
-}
-
-function HeaderButton({
-  children,
-  onClick,
-  title,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  title: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md border border-solid border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors outline-none"
-    >
-      {children}
-    </button>
   );
 }
