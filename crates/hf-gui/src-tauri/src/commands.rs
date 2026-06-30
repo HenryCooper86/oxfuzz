@@ -732,7 +732,9 @@ pub async fn knowledge_ingest(
         .map_err(|e| e.to_string())
 }
 
-/// Search a project's knowledge base (returns empty until indexed).
+/// Search a project's knowledge base, indexing it on demand if this process has
+/// not yet (the index is an in-memory cache, so a restart would otherwise return
+/// nothing). Runs on Tauri's blocking command pool, so the tree walk is fine.
 #[tauri::command]
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
@@ -741,7 +743,7 @@ pub fn knowledge_search(
     query: String,
     limit: Option<usize>,
 ) -> Vec<hf_service::knowledge::KnowledgeHit> {
-    hf_service::knowledge::search_project(
+    hf_service::knowledge::search_project_ensured(
         std::path::Path::new(&project),
         &query,
         limit.unwrap_or(10),
