@@ -68,30 +68,16 @@ pub fn catalog_for(allowed: &[String]) -> String {
     format!("Available tools (call one per step):\n{}", lines.join("\n"))
 }
 
+// Parse via the canonical `FromStr` impls in `hf-core` so the agent accepts the
+// exact same engine/language aliases as the CLI, web, and GUI layers -- a local
+// copy here had drifted to a narrower alias set (rejecting e.g. `afl`, `golang`,
+// `lf`), making the shared agent path less capable than the layers it unifies.
 fn parse_lang(s: &str) -> Result<TargetLanguage, ClassifiedError> {
-    match s.to_ascii_lowercase().as_str() {
-        "c" => Ok(TargetLanguage::C),
-        "cpp" | "c++" => Ok(TargetLanguage::Cpp),
-        "rust" | "rs" => Ok(TargetLanguage::Rust),
-        "go" => Ok(TargetLanguage::Go),
-        "python" | "py" => Ok(TargetLanguage::Python),
-        other => Err(ClassifiedError::Validation(format!(
-            "unsupported language: {other}"
-        ))),
-    }
+    s.parse().map_err(ClassifiedError::Validation)
 }
 
 fn parse_engine(s: &str) -> Result<EngineKind, ClassifiedError> {
-    match s.to_ascii_lowercase().as_str() {
-        "afl++" | "aflplusplus" => Ok(EngineKind::AflPlusPlus),
-        "honggfuzz" | "hfuzz" => Ok(EngineKind::Honggfuzz),
-        "libfuzzer" | "libfuzz" => Ok(EngineKind::LibFuzzer),
-        "clusterfuzzlite" | "cfl" => Ok(EngineKind::ClusterFuzzLite),
-        "syzkaller" | "syz" => Ok(EngineKind::Syzkaller),
-        other => Err(ClassifiedError::Validation(format!(
-            "unsupported engine: {other}"
-        ))),
-    }
+    s.parse().map_err(ClassifiedError::Validation)
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ClassifiedError> {
@@ -215,5 +201,29 @@ pub async fn dispatch(
         other => Err(ClassifiedError::Validation(format!(
             "unknown tool: {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_engine, parse_lang};
+    use hf_core::engine::EngineKind;
+    use hf_core::target::TargetLanguage;
+
+    #[test]
+    fn parsers_accept_canonical_aliases() {
+        // These aliases were rejected by the old hand-rolled matchers but are
+        // accepted by every other layer's canonical FromStr.
+        assert_eq!(parse_engine("afl").unwrap(), EngineKind::AflPlusPlus);
+        assert_eq!(parse_engine("lf").unwrap(), EngineKind::LibFuzzer);
+        assert_eq!(parse_engine("cflite").unwrap(), EngineKind::ClusterFuzzLite);
+        assert_eq!(parse_lang("golang").unwrap(), TargetLanguage::Go);
+        assert_eq!(parse_lang("cxx").unwrap(), TargetLanguage::Cpp);
+    }
+
+    #[test]
+    fn parsers_reject_unknown() {
+        assert!(parse_engine("nope").is_err());
+        assert!(parse_lang("cobol").is_err());
     }
 }
