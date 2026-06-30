@@ -313,14 +313,13 @@ async fn harness_draft(
         .harness_draft(&req.project, &req.target, engine, lang)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    let build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{}", req.target));
     Ok(Json(serde_json::json!({
         "source": draft.source,
         "target": req.target,
         "engine": req.engine,
         "build_cmd": {
-            "compiler": build_cmd.compiler,
-            "args": build_cmd.args,
+            "compiler": draft.build_cmd.compiler,
+            "args": draft.build_cmd.args,
         },
         "status": "Draft",
     })))
@@ -734,11 +733,19 @@ async fn knowledge_search(
     State(_): State<AppState>,
     Json(req): Json<KnowledgeSearchRequest>,
 ) -> Json<Vec<hf_service::knowledge::KnowledgeHit>> {
-    Json(hf_service::knowledge::search_project(
-        std::path::Path::new(&req.project),
-        &req.query,
-        req.limit.unwrap_or(10),
-    ))
+    // Index-on-demand so a server restarted since the last `index` call does not
+    // silently return nothing. The tree walk is blocking, so run it off the
+    // async runtime.
+    let hits = tokio::task::spawn_blocking(move || {
+        hf_service::knowledge::search_project_ensured(
+            std::path::Path::new(&req.project),
+            &req.query,
+            req.limit.unwrap_or(10),
+        )
+    })
+    .await
+    .unwrap_or_default();
+    Json(hits)
 }
 
 // -- Campaign scheduling ---------------------------------------------------

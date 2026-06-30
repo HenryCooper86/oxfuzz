@@ -2951,6 +2951,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
         engine,
         source,
         rationale: String::new(),
+        build_cmd: hf_harness::build_command(
+            engine,
+            candidate.language,
+            &format!("fuzz_{}", candidate.symbol),
+        ),
     }
 }
 

@@ -640,7 +640,8 @@ async fn connect_single_server(
                 message: "stdio transport requires a 'command' field".into(),
             })?;
             let stdio =
-                StdioTransport::spawn(command, &config.args, &config.env, config.cwd.as_deref())?;
+                StdioTransport::spawn(command, &config.args, &config.env, config.cwd.as_deref())?
+                    .with_request_timeout(Duration::from_secs(config.tool_timeout_secs));
             // Wire up disconnect signal channel for supervisor.
             let (tx, rx) = mpsc::unbounded_channel();
             stdio.set_disconnect_signal(tx);

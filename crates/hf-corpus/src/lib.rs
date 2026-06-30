@@ -41,32 +41,34 @@ pub async fn seed(
 /// Grow the corpus by pulling new coverage-inducing inputs from the engine
 /// output directory.
 ///
-/// Files already present (by sha256) are skipped.
+/// New inputs live in different places per engine: AFL++ writes them to a
+/// `queue/` directory (nested under an instance dir for single-instance runs,
+/// e.g. `out/default/queue/`), while libFuzzer writes them in place into the
+/// corpus directory itself -- so its `out/` holds only crash artifacts. This
+/// pulls from the queue directories and any plausible top-level inputs, while
+/// excluding crash artifacts (`crash-*`, `SIG*.PC.*`, ...) and engine
+/// bookkeeping (`fuzzer_stats`, `plot_data`, ...) that must not enter the
+/// corpus. Files already present (by sha256) are skipped.
 ///
 /// # Errors
-/// Returns `ClassifiedError` if the directories cannot be read.
+/// Returns `ClassifiedError` if a pulled input cannot be copied.
 pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedError> {
     let existing = list(corpus_root)?;
-    let existing_hashes: HashSet<String> =
-        existing.entries.iter().map(|e| e.sha256.clone()).collect();
-
+    let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
     let mut entries = existing.entries;
-    let engine_dir = engine_out
-        .read_dir()
-        .map_err(|e| ClassifiedError::Internal(format!("read engine_out: {e}")))?;
-    for entry in engine_dir {
-        let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
-        let path = entry.path();
-        if !path.is_file() {
+
+    for path in collect_candidate_inputs(engine_out) {
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        if data.is_empty() {
             continue;
         }
-        let data = std::fs::read(&path)
-            .map_err(|e| ClassifiedError::Internal(format!("read input: {e}")))?;
         let hash = sha256_hex(&data);
-        if existing_hashes.contains(&hash) {
+        if !seen.insert(hash.clone()) {
             continue;
         }
-        let dest = corpus_root.join(entry.file_name());
+        let dest = grow_dest_path(corpus_root, &path, &hash);
         std::fs::copy(&path, &dest).map_err(|e| ClassifiedError::Internal(format!("copy: {e}")))?;
         entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
     }
@@ -76,6 +78,80 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
         root: corpus_root.to_path_buf(),
         entries,
     })
+}
+
+/// Collect candidate coverage-input files from an engine output directory:
+/// every file directly under a `queue/` dir (AFL++, including the nested
+/// `out/<instance>/queue/` layout) plus top-level files that look like inputs
+/// rather than crash artifacts or bookkeeping.
+fn collect_candidate_inputs(engine_out: &Path) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    let mut queue_dirs = vec![engine_out.join("queue")];
+    if let Ok(entries) = std::fs::read_dir(engine_out) {
+        for entry in entries.flatten() {
+            let queue = entry.path().join("queue");
+            if queue.is_dir() {
+                queue_dirs.push(queue);
+            }
+        }
+    }
+    for dir in queue_dirs {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(engine_out) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && is_coverage_input_name(&entry.file_name().to_string_lossy()) {
+                candidates.push(path);
+            }
+        }
+    }
+
+    candidates
+}
+
+/// Whether a top-level engine-output filename is a coverage input rather than a
+/// crash artifact or engine bookkeeping file.
+fn is_coverage_input_name(name: &str) -> bool {
+    const ARTIFACT_PREFIXES: &[&str] = &["crash-", "leak-", "timeout-", "oom-"];
+    const BOOKKEEPING: &[&str] = &[
+        "fuzzer_stats",
+        "fuzzer_setup",
+        "cmdline",
+        "plot_data",
+        "fastresume.bin",
+        ".cur_input",
+        "README.txt",
+        "HONGGFUZZ.REPORT.TXT",
+    ];
+    if ARTIFACT_PREFIXES.iter().any(|p| name.starts_with(p)) || BOOKKEEPING.contains(&name) {
+        return false;
+    }
+    // honggfuzz crash files: SIG<signal>.PC.<...>.
+    !(name.starts_with("SIG") && name.contains(".PC."))
+}
+
+/// Destination path for a pulled input: keep the source filename, falling back
+/// to a content-hash suffix if a different file already occupies that name.
+fn grow_dest_path(corpus_root: &Path, src: &Path, hash: &str) -> std::path::PathBuf {
+    let name = src
+        .file_name()
+        .map_or_else(|| hash.to_owned(), |n| n.to_string_lossy().into_owned());
+    let dest = corpus_root.join(&name);
+    if dest.exists() {
+        corpus_root.join(format!("{name}-{}", &hash[..8.min(hash.len())]))
+    } else {
+        dest
+    }
 }
 
 /// Prune redundant corpus entries, deleting their files.
