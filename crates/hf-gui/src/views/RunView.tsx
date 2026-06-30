@@ -7,7 +7,7 @@ import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Button } from "../components/ui";
-import { Play, Loader2, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
+import { Play, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
 
 export function RunView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject, setActiveProject } = useProject();
@@ -207,22 +207,16 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
             (syzkaller) campaigns run through a separate path not covered by the
             cancellation registry, so the button is scoped to non-syzkaller runs. */}
         {running && !isSyz && (
-          <button
+          <Button
+            variant="danger"
+            className="self-start"
             onClick={() => void cancelRun()}
-            disabled={cancelling}
-            className="self-start inline-flex items-center justify-center gap-1 px-4 py-2 text-xs font-medium rounded-md border border-solid transition-all duration-150 outline-none disabled:opacity-55 disabled:cursor-not-allowed"
-            style={{
-              background: "transparent",
-              color: "var(--error)",
-              borderColor: "var(--error)",
-            }}
-            onMouseEnter={(e) => !cancelling && (e.currentTarget.style.opacity = "0.85")}
-            onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+            loading={cancelling}
             title="Cancel the running fuzz campaign"
           >
-            {cancelling ? <Loader2 size={14} className="animate-spin" /> : <Square size={14} />}
+            {!cancelling && <Square size={14} />}
             {cancelling ? "Stopping..." : "Stop"}
-          </button>
+          </Button>
         )}
       </div>
 
