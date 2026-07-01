@@ -13,18 +13,29 @@ pub fn build_minimize_args(
     output: &str,
 ) -> Option<Vec<String>> {
     match engine {
+        // `binary -minimize_crash=1 -exact_artifact_path=<output> <crash>`:
+        // libFuzzer takes the crash file as a positional argument and writes the
+        // minimized result to `-exact_artifact_path`. `-runs` bounds the search
+        // so a stubborn crash cannot minimize forever.
         EngineKind::LibFuzzer => Some(vec![
             binary.to_owned(),
             "-minimize_crash=1".to_owned(),
-            format!("-exact_artifact_path={crash_input}"),
-            format!("-artifact_prefix={output}"),
+            "-runs=10000".to_owned(),
+            format!("-exact_artifact_path={output}"),
+            crash_input.to_owned(),
         ]),
+        // `afl-tmin -i <crash> -o <output> -- <binary> @@`: the instrumented
+        // target and its `@@` file-argument placeholder must follow `--`, or
+        // afl-tmin has no program to run.
         EngineKind::AflPlusPlus => Some(vec![
             "afl-tmin".to_owned(),
             "-i".to_owned(),
             crash_input.to_owned(),
             "-o".to_owned(),
             output.to_owned(),
+            "--".to_owned(),
+            binary.to_owned(),
+            "@@".to_owned(),
         ]),
         // No built-in raw-binary minimizer for these engines:
         // - ClusterFuzzLite is driven through `infra/helper.py` (see
