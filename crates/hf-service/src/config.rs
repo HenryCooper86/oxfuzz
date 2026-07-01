@@ -40,6 +40,8 @@ pub struct AppPaths {
     pub config_dir: String,
     /// The runtime data directory.
     pub data_dir: String,
+    /// The fuzz workspace root (compiled harnesses, corpora, crash reproducers).
+    pub workspace_dir: String,
 }
 
 /// A model offered by a configured provider.
@@ -92,6 +94,7 @@ pub fn app_paths() -> AppPaths {
     AppPaths {
         config_dir: config_dir().display().to_string(),
         data_dir: data_dir().display().to_string(),
+        workspace_dir: crate::workspace_root().display().to_string(),
     }
 }
 
