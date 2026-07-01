@@ -166,6 +166,7 @@ fn build_exec_args_with_syzkaller_profile() {
         network_enabled: true,
         workdir: Some("/syzbench".to_owned()),
         relax_hardening: true,
+        devices: vec!["/dev/kvm".to_owned()],
     };
     let args = hf_runtime::docker::build_exec_args_with(
         &cfg,
@@ -174,8 +175,9 @@ fn build_exec_args_with_syzkaller_profile() {
         &opts,
     );
     let joined = args.join(" ");
-    // Platform, custom mounts, and a custom workdir are present.
+    // Platform, custom mounts, a custom workdir, and device passthrough present.
     assert!(joined.contains("--platform linux/amd64"), "{joined}");
+    assert!(joined.contains("--device=/dev/kvm"), "{joined}");
     assert!(
         joined.contains("-v /host/kernel:/syzbench/kernel:ro"),
         "{joined}"

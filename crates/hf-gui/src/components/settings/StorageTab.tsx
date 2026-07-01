@@ -1,19 +1,55 @@
 // Storage tab -- SQLite database and transcript configuration.
 // Controlled: reads/writes the parsed `storage` config object via props.
 
-import { Input } from "../ui/Input";
-import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
+import { useEffect, useState } from "react";
 import { Database, FolderOpen } from "lucide-react";
+import { getTransport } from "../../lib";
+import { useToast } from "../ui/Toast";
+import { Button, Input } from "../ui";
+import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
 type Cfg = Record<string, unknown>;
 
 export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { toast } = useToast();
   const dbPath = (value.db_path as string) ?? "";
   const transcriptDir = (value.transcript_dir as string) ?? "";
-  const workspace = (value.workspace as string) ?? "";
+
+  // The fuzz workspace location is resolved by the service (persistent, under
+  // the per-user data dir, overridable via HF_WORKSPACE_DIR), not a config
+  // field -- so show the real resolved path rather than a dead editable input.
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    getTransport()
+      .invoke<{ config_dir: string; data_dir: string; workspace_dir: string }>("app_paths")
+      .then((p) => setWorkspacePath(p.workspace_dir))
+      .catch(() => {
+        /* leave blank if the backend can't resolve it */
+      });
+  }, []);
 
   function patch(next: Cfg) {
     onChange({ ...value, ...next });
+  }
+
+  async function clearWorkspace() {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      return;
+    }
+    setClearing(true);
+    try {
+      await getTransport().invoke("clear_workspace");
+      toast({ title: "Workspace cleared", description: "On-disk fuzz artifacts were removed.", variant: "success" });
+    } catch (e) {
+      toast({ title: "Clear failed", description: String(e), variant: "error" });
+    } finally {
+      setClearing(false);
+      setConfirmClear(false);
+    }
   }
 
   return (
@@ -38,18 +74,24 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
       </SettingsGroup>
 
       <SettingsGroup title="Fuzz Workspace">
-        <SettingsItem title="Workspace Path">
-          <div style={{ display: "flex", gap: 4, width: 220 }}>
-            <Input value={workspace} onChange={(e) => patch({ workspace: e.target.value })} mono />
-            <button aria-label="Browse for workspace directory" className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
-              <FolderOpen size={14} />
-            </button>
+        <SettingsItem title="Location">
+          <div style={{ width: 320 }}>
+            <Input value={workspacePath} readOnly mono />
           </div>
+        </SettingsItem>
+        <SettingsItem title="Reset">
+          <Button variant={confirmClear ? "danger" : "outline"} onClick={clearWorkspace} disabled={clearing}>
+            {clearing ? "Clearing..." : confirmClear ? "Click again to confirm" : "Clear Workspace"}
+          </Button>
         </SettingsItem>
         <div className="settings-item" style={{ padding: "10px 14px" }}>
           <div className="flex items-center gap-2 text-xs text-text-muted">
             <Database size={12} />
-            <span>Corpora, crashes, and compiled harnesses are stored in the workspace.</span>
+            <span>
+              Corpora, crashes, and compiled harnesses persist here across sessions. Override the
+              location with the <code>HF_WORKSPACE_DIR</code> environment variable. Clearing reclaims
+              disk space; discovered targets, runs, and crashes in the database are kept.
+            </span>
           </div>
         </div>
       </SettingsGroup>
