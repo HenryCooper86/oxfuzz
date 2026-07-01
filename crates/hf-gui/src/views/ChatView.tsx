@@ -100,6 +100,7 @@ export function ChatView() {
   const [mode, setMode] = useState<ChatMode>(() => (localStorage.getItem(CHAT_MODE_KEY) as ChatMode) || "auto");
   const [expanded, setExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     localStorage.setItem(CHAT_MODE_KEY, mode);
@@ -211,6 +212,20 @@ export function ChatView() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  // Auto-grow the composer textarea to fit its content (up to a cap), then
+  // scroll internally -- so long/multi-line input is never clipped by a fixed
+  // one-line box.
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    const minPx = expanded ? 200 : 24;
+    const maxPx = expanded ? window.innerHeight * 0.5 : 160;
+    ta.style.height = "auto";
+    const next = Math.min(Math.max(ta.scrollHeight, minPx), maxPx);
+    ta.style.height = `${next}px`;
+    ta.style.overflowY = ta.scrollHeight > maxPx ? "auto" : "hidden";
+  }, [input, expanded]);
 
   async function attachProjectFolder() {
     const path = await pickFolder();
@@ -463,7 +478,12 @@ export function ChatView() {
                     padding: "var(--space-sm) var(--space-md)",
                   }}
                 >
-                  <p className="text-sm text-text-primary whitespace-pre-wrap">{m.content}</p>
+                  <p
+                    className="text-sm text-text-primary whitespace-pre-wrap"
+                    style={{ overflowWrap: "anywhere" }}
+                  >
+                    {m.content}
+                  </p>
                   <span className="text-xs text-text-muted mt-1 block" style={{ fontSize: "10px" }}>
                     {m.timestamp}
                   </span>
@@ -482,7 +502,7 @@ export function ChatView() {
                 >
                   <Crosshair size={14} style={{ color: "var(--accent)" }} />
                 </div>
-                <div className="flex flex-col gap-1 max-w-[80%]">
+                <div className="flex flex-col gap-1 max-w-[80%] min-w-0">
                   <div
                     className="rounded-lg"
                     style={{
@@ -491,7 +511,10 @@ export function ChatView() {
                       padding: "var(--space-sm) var(--space-md)",
                     }}
                   >
-                    <p className="text-sm text-text-primary whitespace-pre-wrap" style={{ lineHeight: 1.5 }}>
+                    <p
+                      className="text-sm text-text-primary whitespace-pre-wrap"
+                      style={{ lineHeight: 1.5, overflowWrap: "anywhere" }}
+                    >
                       {m.content}
                     </p>
                   </div>
@@ -589,6 +612,7 @@ export function ChatView() {
           )}
 
           <textarea
+            ref={taRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
@@ -598,8 +622,9 @@ export function ChatView() {
             style={{
               fontFamily: "var(--font-sans)",
               lineHeight: 1.5,
-              minHeight: expanded ? "200px" : "24px",
-              maxHeight: expanded ? "50vh" : "160px",
+              // Height is driven by the auto-grow effect (min/max enforced there);
+              // wrap long words so a single long token can't force overflow.
+              overflowWrap: "anywhere",
               padding: "4px 2px",
             }}
           />
