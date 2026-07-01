@@ -895,6 +895,31 @@ impl ServiceContainer {
         }
     }
 
+    /// Every crash persisted to the store, across all targets and runs.
+    ///
+    /// This is the correct source for a browse-all artifacts view: it returns
+    /// crashes already ingested by triage regardless of which target's workspace
+    /// they came from, rather than re-scanning a single (possibly wrong) target
+    /// workspace. Returns an empty list when no database is configured.
+    pub async fn all_crashes(&self) -> Vec<hf_core::crash::Crash> {
+        match self.store.as_ref() {
+            Some(store) => store.list_all_crashes().await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Every corpus entry persisted to the store, across all targets.
+    ///
+    /// The browse-all counterpart to [`Self::corpus_list`] (which is scoped to a
+    /// single target's on-disk corpus). Returns an empty list when no database
+    /// is configured.
+    pub async fn all_corpus_entries(&self) -> Vec<hf_core::corpus::CorpusEntry> {
+        match self.store.as_ref() {
+            Some(store) => store.list_all_corpus_entries().await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
     /// Ingest a document into a project's knowledge base.
     ///
     /// Converts the file (PDF, Office, HTML, CSV, ...) to Markdown with
