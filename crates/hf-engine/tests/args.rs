@@ -81,6 +81,24 @@ fn honggfuzz_args_have_run_time() {
         joined.contains("--input") && joined.contains("/work/corpus"),
         "honggfuzz must set --input corpus: {joined}"
     );
+    // Crashes and the report must be directed into the run's `out` dir, or
+    // triage (which only scans `out`) never finds honggfuzz crashes.
+    let crashdir = args
+        .iter()
+        .position(|a| a == "--crashdir")
+        .expect("--crashdir");
+    assert_eq!(
+        args.get(crashdir + 1).map(String::as_str),
+        Some("/work/out")
+    );
+    let workspace = args
+        .iter()
+        .position(|a| a == "--workspace")
+        .expect("--workspace");
+    assert_eq!(
+        args.get(workspace + 1).map(String::as_str),
+        Some("/work/out")
+    );
 }
 
 #[test]

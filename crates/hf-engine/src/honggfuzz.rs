@@ -16,6 +16,16 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     args.push(corpus.to_owned());
     args.push("--output".to_owned());
     args.push(out.to_owned());
+    // honggfuzz writes crash artifacts (`SIG*.PC.*`) and `HONGGFUZZ.REPORT.TXT`
+    // to its workspace/crashdir, which defaults to the container CWD (`/work`),
+    // NOT to `--output` (that is the new-coverage corpus dir). Triage only scans
+    // the run's `out` dir, so without these flags every honggfuzz crash lands at
+    // the workspace root and is never ingested. Point both at `out` so crashes
+    // and the report land where `hf_crash::ingest` looks for them.
+    args.push("--workspace".to_owned());
+    args.push(out.to_owned());
+    args.push("--crashdir".to_owned());
+    args.push(out.to_owned());
     if !cfg.env.is_empty() {
         let mut env_prefix = vec!["env".to_owned()];
         for (k, v) in &cfg.env {
