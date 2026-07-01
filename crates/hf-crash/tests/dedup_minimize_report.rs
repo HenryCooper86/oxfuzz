@@ -62,10 +62,19 @@ fn minimize_args_libfuzzer() {
         "/work/out",
     )
     .expect("libFuzzer should have a minimizer");
-    let joined = args.join(" ");
-    assert!(joined.contains("-minimize_crash=1"));
-    assert!(joined.contains("/work/crash-1"));
-    assert!(joined.contains("/work/fuzz_bin"));
+    // The binary must be argv[0], the crash file must be the positional input
+    // (last arg, not a flag value), and the minimized result goes to
+    // -exact_artifact_path (the output, never the crash itself).
+    assert_eq!(args.first().map(String::as_str), Some("/work/fuzz_bin"));
+    assert_eq!(args.last().map(String::as_str), Some("/work/crash-1"));
+    assert!(args.iter().any(|a| a == "-minimize_crash=1"));
+    assert!(args.iter().any(|a| a == "-exact_artifact_path=/work/out"));
+    assert!(
+        !args
+            .iter()
+            .any(|a| a.contains("-exact_artifact_path=/work/crash-1")),
+        "crash input must not be used as the output path"
+    );
 }
 
 #[test]
@@ -77,10 +86,23 @@ fn minimize_args_afl() {
         "/work/minimized",
     )
     .expect("AFL++ should have a minimizer");
-    let joined = args.join(" ");
-    assert!(joined.contains("afl-tmin"));
-    assert!(joined.contains("-i") && joined.contains("/work/crash-1"));
-    assert!(joined.contains("-o") && joined.contains("/work/minimized"));
+    assert_eq!(args.first().map(String::as_str), Some("afl-tmin"));
+    // afl-tmin needs the target after `--` with a `@@` file placeholder, or it
+    // has no program to run.
+    let sep = args
+        .iter()
+        .position(|a| a == "--")
+        .expect("must have -- separator");
+    assert_eq!(
+        args.get(sep + 1).map(String::as_str),
+        Some("/work/fuzz_bin")
+    );
+    assert_eq!(args.get(sep + 2).map(String::as_str), Some("@@"));
+    // Input/output flags precede the separator.
+    let i = args.iter().position(|a| a == "-i").expect("-i");
+    assert_eq!(args.get(i + 1).map(String::as_str), Some("/work/crash-1"));
+    let o = args.iter().position(|a| a == "-o").expect("-o");
+    assert_eq!(args.get(o + 1).map(String::as_str), Some("/work/minimized"));
 }
 
 #[test]
