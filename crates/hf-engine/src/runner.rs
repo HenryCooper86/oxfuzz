@@ -27,6 +27,11 @@ fn final_progress(engine: EngineKind, combined: &str) -> Vec<FuzzProgress> {
 /// `-max_total_time`, covering corpus loading and sanitizer shutdown.
 const SANDBOX_TIMEOUT_HEADROOM_SECS: u64 = 60;
 
+/// Default run duration (seconds) applied when a `FuzzRunConfig` carries no
+/// explicit duration, so the fuzzer always gets a self-limit and exits cleanly
+/// within the sandbox window rather than being killed at the wall-clock cap.
+const DEFAULT_RUN_SECS: u64 = 3600;
+
 /// The result of a fuzz run.
 pub struct RunResult {
     pub progress: Vec<FuzzProgress>,
@@ -103,12 +108,27 @@ impl EngineRunner {
         cancel: &tokio_util::sync::CancellationToken,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunResult, ClassifiedError> {
+        // A run with no explicit duration would otherwise get no self-limit
+        // flag (`-max_total_time`/`-V`/`--run_time`) from the adapter and run
+        // forever, only to be killed at the sandbox wall-clock cap -- and a
+        // killed run is classified as an engine error, discarding its coverage.
+        // Fill in a concrete default so the adapter bounds the fuzzer and both
+        // layers agree: the fuzzer exits cleanly within the sandbox window.
+        let effective_cfg = if cfg.duration.is_some() {
+            std::borrow::Cow::Borrowed(cfg)
+        } else {
+            let mut c = cfg.clone();
+            c.duration = Some(std::time::Duration::from_secs(DEFAULT_RUN_SECS));
+            std::borrow::Cow::Owned(c)
+        };
+        let cfg = effective_cfg.as_ref();
+
         let args = crate::registry::adapter_for(engine).build_run_args(cfg, binary, corpus, out);
         // The sandbox wall-clock timeout must exceed the fuzzer's own run time:
         // a libFuzzer `-max_total_time=N` campaign also spends time loading the
         // corpus and running ASan leak detection at exit, so without headroom
         // the container is killed as "command timed out" right at the finish.
-        let max_duration_secs = cfg.duration.map_or(3600, |d| {
+        let max_duration_secs = cfg.duration.map_or(DEFAULT_RUN_SECS, |d| {
             d.as_secs().saturating_add(SANDBOX_TIMEOUT_HEADROOM_SECS)
         });
         let limits = hf_core::runtime::ResourceLimits {
@@ -174,9 +194,12 @@ impl EngineRunner {
         }
 
         // libFuzzer exit codes: 0 = clean exit, 77 = crash/leak found,
-        // 76 = OOM, 1 = error. 0 and 77 are valid fuzzing outcomes.
+        // 76 = OOM, 1 = error. 0, 77 and 76 are all valid fuzzing outcomes -- an
+        // OOM is a finding to triage, not an engine failure, so it must not be
+        // turned into an error (which would discard the run's coverage).
         let is_valid_outcome = result.exit_code == 0
             || result.exit_code == 77
+            || result.exit_code == 76
             || combined.contains("DONE")
             || combined.contains("SUMMARY");
         if !is_valid_outcome {
