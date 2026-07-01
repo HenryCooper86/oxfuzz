@@ -295,6 +295,27 @@ pub async fn corpus_list(
     serde_json::to_value(&corpus.entries).map_err(|e| e.to_string())
 }
 
+/// Every crash persisted to the store, across all targets and runs.
+///
+/// The browse-all Artifacts view uses this instead of `triage` with an empty
+/// target (which would scan the wrong per-target workspace and find nothing).
+#[tauri::command]
+pub async fn all_crashes(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<serde_json::Value, String> {
+    let crashes = state.container.all_crashes().await;
+    serde_json::to_value(&crashes).map_err(|e| e.to_string())
+}
+
+/// Every corpus entry persisted to the store, across all targets.
+#[tauri::command]
+pub async fn all_corpus(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<serde_json::Value, String> {
+    let entries = state.container.all_corpus_entries().await;
+    serde_json::to_value(&entries).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn corpus_seed(
     state: tauri::State<'_, crate::state::AppState>,

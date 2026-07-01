@@ -593,6 +593,17 @@ impl Store {
             .collect()
     }
 
+    /// List every persisted corpus entry across all targets.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn list_all_corpus_entries(&self) -> Result<Vec<CorpusEntry>, StorageError> {
+        let rows = sqlx::query("SELECT data_json FROM corpus_entries")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| json_col(r, "data_json")).collect()
+    }
+
     // -- sessions -----------------------------------------------------------
 
     /// Create a conversation session (optionally a child of `parent`) and
