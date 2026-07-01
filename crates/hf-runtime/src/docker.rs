@@ -96,6 +96,11 @@ pub fn build_exec_args_with(
         args.push(mount.clone());
     }
 
+    // Host device passthrough (e.g. `/dev/kvm` for hardware-accelerated qemu).
+    for device in &opts.devices {
+        args.push(format!("--device={device}"));
+    }
+
     // Working directory inside the container.
     args.push("-w".to_owned());
     args.push(

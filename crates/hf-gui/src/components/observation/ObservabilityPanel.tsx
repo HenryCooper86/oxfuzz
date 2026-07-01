@@ -135,6 +135,7 @@ function Section({
 
 export function ObservabilityPanel() {
   const [snap, setSnap] = useState<SystemSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [providersOpen, setProvidersOpen] = useState(true);
   const [agentsOpen, setAgentsOpen] = useState(true);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -144,8 +145,15 @@ export function ObservabilityPanel() {
     const tick = () => {
       getTransport()
         .invoke<SystemSnapshot>("system_snapshot")
-        .then((d) => !cancelled && d && setSnap(d))
-        .catch(() => !cancelled && setSnap(null));
+        .then((d) => {
+          if (!cancelled && d) {
+            setSnap(d);
+            setError(null);
+          }
+        })
+        // Keep the last good snapshot on a transient poll failure; only surface
+        // an error (instead of an eternal "Loading...") when we have nothing.
+        .catch((e) => !cancelled && setError(String(e)));
     };
     tick();
     const id = setInterval(tick, 5000);
@@ -181,7 +189,9 @@ export function ObservabilityPanel() {
         {!snap ? (
           <div className="obs-empty">
             <Server size={24} className="obs-empty-icon" />
-            <p className="obs-empty-text">Loading system state...</p>
+            <p className="obs-empty-text">
+              {error ? `Failed to load system state: ${error}` : "Loading system state..."}
+            </p>
           </div>
         ) : (
           <>
