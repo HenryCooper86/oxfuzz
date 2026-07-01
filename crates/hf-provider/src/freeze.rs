@@ -91,6 +91,14 @@ impl FreezeManager {
     /// on consecutive freezes.
     pub fn freeze(&self, reason: String, duration: Option<Duration>) {
         let mut state = self.write_state();
+        // A temporary freeze must never downgrade an existing permanent freeze
+        // (invalid key / exhausted quota / insufficient balance): those require
+        // manual intervention, and a later transient error must not resurrect
+        // the provider by giving it an auto-thaw time.
+        if state.permanent {
+            state.consecutive_freezes += 1;
+            return;
+        }
         state.frozen = true;
         state.reason = Some(reason);
         state.frozen_at = Some(Instant::now());
@@ -237,7 +245,7 @@ mod tests {
     fn explicit_duration_is_capped_at_max() {
         // An explicit duration longer than the configured max is clamped.
         let fm = FreezeManager::new(30, 2);
-        fm.freeze("rate limited".into(), Some(Duration::from_secs(3600)));
+        fm.freeze("rate limited".into(), Some(Duration::from_hours(1)));
         let status = fm.status();
         let held = status
             .thaw_at
@@ -258,6 +266,23 @@ mod tests {
         let status = fm.status();
         assert!(status.permanent);
         assert!(status.thaw_at.is_none());
+    }
+
+    #[test]
+    fn temporary_freeze_does_not_downgrade_a_permanent_freeze() {
+        let fm = FreezeManager::new(30, 3600);
+        // Provider permanently frozen (e.g. invalid key).
+        fm.freeze_permanent("invalid key".into());
+        // A later transient error tries to freeze it for 5 minutes.
+        fm.freeze("transient 500".into(), Some(Duration::from_mins(5)));
+
+        let status = fm.status();
+        assert!(status.permanent, "must stay permanently frozen");
+        assert!(
+            status.thaw_at.is_none(),
+            "permanent freeze must not gain an auto-thaw time"
+        );
+        assert!(fm.is_frozen());
     }
 
     #[test]
