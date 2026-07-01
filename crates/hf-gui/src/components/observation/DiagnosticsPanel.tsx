@@ -29,12 +29,16 @@ const fmtCost = (n: number) => (n > 0 ? `$${n.toFixed(n < 0.01 ? 4 : 2)}` : "$0"
 export function DiagnosticsPanel() {
   const [data, setData] = useState<CostSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     getTransport()
       .invoke<CostSummary>("diagnostics_cost_summary")
-      .then(setData)
-      .catch(() => setData(null))
+      .then((d) => {
+        setData(d);
+        setError(null);
+      })
+      .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -44,8 +48,15 @@ export function DiagnosticsPanel() {
     const tick = () => {
       getTransport()
         .invoke<CostSummary>("diagnostics_cost_summary")
-        .then((d) => !cancelled && setData(d))
-        .catch(() => !cancelled && setData(null))
+        .then((d) => {
+          if (!cancelled) {
+            setData(d);
+            setError(null);
+          }
+        })
+        // Keep the last good data on a transient failure; surface the error
+        // rather than showing "no calls yet" for a broken query.
+        .catch((e) => !cancelled && setError(String(e)))
         .finally(() => !cancelled && setLoading(false));
     };
     tick();
@@ -76,9 +87,18 @@ export function DiagnosticsPanel() {
       {empty ? (
         <div className="flex-1 overflow-y-auto p-2 flex items-center justify-center">
           <div className="flex flex-col items-center text-center gap-1" style={{ opacity: 0.7 }}>
-            <Activity size={20} className="text-text-muted" style={{ opacity: 0.5 }} />
-            <span className="text-xs text-text-muted">No LLM calls yet</span>
-            <span className="text-xs text-text-muted" style={{ opacity: 0.7 }}>Rank, harness, triage, and chat are tracked here.</span>
+            <Activity size={20} className="text-text-muted" style={{ opacity: 0.5, color: error && !data ? "var(--error)" : undefined }} />
+            {error && !data ? (
+              <>
+                <span className="text-xs" style={{ color: "var(--error)" }}>Diagnostics unavailable</span>
+                <span className="text-xs text-text-muted font-mono" style={{ opacity: 0.7 }}>{error}</span>
+              </>
+            ) : (
+              <>
+                <span className="text-xs text-text-muted">No LLM calls yet</span>
+                <span className="text-xs text-text-muted" style={{ opacity: 0.7 }}>Rank, harness, triage, and chat are tracked here.</span>
+              </>
+            )}
           </div>
         </div>
       ) : (

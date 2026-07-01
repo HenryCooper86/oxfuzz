@@ -284,6 +284,40 @@ pub fn platform_short(platform: &str) -> &str {
     platform.rsplit('/').next().unwrap_or("arm64")
 }
 
+/// Whether the host can build and run containers for `platform` (a
+/// `linux/<arch>` value).
+///
+/// Always true for the host's native platform. A non-native platform requires
+/// Docker to emulate the foreign arch via `qemu-user` + `binfmt_misc`:
+/// macOS/Windows (`OrbStack` / Docker Desktop) register this automatically
+/// inside their managed VM, but a bare Linux `docker` install does not. So on
+/// Linux we
+/// probe `/proc/sys/fs/binfmt_misc` for the matching qemu handler. When this
+/// returns false a cross-arch build fails with an opaque "exec format error";
+/// callers should surface a clear "register qemu-user/binfmt" hint instead.
+#[must_use]
+pub fn can_run_platform(platform: &str) -> bool {
+    if norm_platform(platform) == host_platform() {
+        return true;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // The managed container VM (OrbStack / Docker Desktop) emulates it.
+        true
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let handler = if platform_short(platform) == "amd64" {
+            "qemu-x86_64"
+        } else {
+            "qemu-aarch64"
+        };
+        std::path::Path::new("/proc/sys/fs/binfmt_misc")
+            .join(handler)
+            .exists()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{engines_from_probe_output, SandboxEngines};

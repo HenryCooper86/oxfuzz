@@ -9,28 +9,33 @@ export function ArtifactsView() {
   const [corpus, setCorpus] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanned, setScanned] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function scan() {
     setLoading(true);
+    setError(null);
     const t = getTransport();
     try {
       // Browse-all view: read persisted artifacts from the store across every
-      // target/run. Re-triaging with an empty target scans the wrong per-target
-      // workspace dir and always comes back empty, so crashes never showed up
-      // here even after a run produced them.
+      // target/run. Surface a real failure rather than swallowing it into an
+      // empty state -- "the query broke" must look different from "no artifacts".
       const [c, k] = await Promise.all([
-        t.invoke<Crash[]>("all_crashes").catch(() => [] as Crash[]),
-        t.invoke<CorpusEntry[]>("all_corpus").catch(() => [] as CorpusEntry[]),
+        t.invoke<Crash[]>("all_crashes"),
+        t.invoke<CorpusEntry[]>("all_corpus"),
       ]);
       setCrashes(c);
       setCorpus(k);
+    } catch (e) {
+      setError(String(e));
+      setCrashes([]);
+      setCorpus([]);
     } finally {
       setScanned(true);
       setLoading(false);
     }
   }
 
-  const empty = scanned && crashes.length === 0 && corpus.length === 0;
+  const empty = scanned && !error && crashes.length === 0 && corpus.length === 0;
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -49,6 +54,19 @@ export function ArtifactsView() {
         >
           <FileWarning size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
           <p className="text-sm text-text-muted">Scan to collect crash and corpus artifacts.</p>
+        </div>
+      )}
+
+      {error && (
+        <div
+          className="surface-card flex items-start gap-2"
+          style={{ padding: "var(--space-md)", borderColor: "var(--error)" }}
+        >
+          <FileWarning size={16} style={{ color: "var(--error)", flexShrink: 0, marginTop: 2 }} />
+          <div>
+            <p className="text-sm font-medium" style={{ color: "var(--error)" }}>Failed to load artifacts</p>
+            <p className="text-xs text-text-muted mt-1 font-mono">{error}</p>
+          </div>
         </div>
       )}
 
