@@ -27,10 +27,39 @@ use uuid::Uuid;
 // Workspace resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a per-project/per-target workspace directory so multiple projects
-/// do not collide in a single temp dir.
+/// The base directory that holds every per-project fuzz workspace.
 ///
-/// `hobot_fuzz_workspace/<project_name>/<target>`
+/// Persistent by default so compiled harnesses, corpora, and crash reproducers
+/// survive across sessions. It previously lived under `std::env::temp_dir()`,
+/// which macOS (`/var/folders/.../T`) and Linux (`/tmp`) purge after a few days
+/// -- silently deleting a campaign's artifacts and producing the confusing
+/// "compiled harness not found" state after a successful compile. It now lives
+/// under the same stable per-user directory as the database and run journal
+/// ([`crate::init::user_app_dir`]).
+///
+/// Override with the `HF_WORKSPACE_DIR` environment variable to place
+/// workspaces on a specific volume (e.g. a large scratch disk).
+#[must_use]
+pub fn workspace_root() -> PathBuf {
+    workspace_root_from(std::env::var_os("HF_WORKSPACE_DIR"))
+}
+
+/// Pure resolver for [`workspace_root`], taking the `HF_WORKSPACE_DIR` value
+/// explicitly so it can be tested without mutating global process env (which
+/// races under the parallel test runner).
+fn workspace_root_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = override_dir {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    crate::init::user_app_dir().join("workspaces")
+}
+
+/// Resolve a per-project/per-target workspace directory so multiple projects
+/// do not collide.
+///
+/// `<workspace_root>/<project_name>/<target>`
 ///
 /// `target` is untrusted (it flows in from the CLI/REST/GUI), so it is
 /// sanitised before use: only `Normal` path components are kept, dropping any
@@ -44,10 +73,25 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("default");
-    std::env::temp_dir()
-        .join("hobot_fuzz_workspace")
-        .join(name)
-        .join(sanitize_target(target))
+    workspace_root().join(name).join(sanitize_target(target))
+}
+
+/// Whether the in-container qemu for a syzkaller run can use KVM hardware
+/// acceleration. Requires a Linux host with `/dev/kvm`, and that the sandbox
+/// arch matches the host arch (KVM cannot accelerate a foreign architecture).
+/// On macOS/Windows the Docker VM does not expose nested KVM, so this is always
+/// false and qemu falls back to slow TCG emulation.
+fn syz_kvm_usable(platform: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        hf_runtime::norm_platform(platform) == hf_runtime::host_platform()
+            && Path::new("/dev/kvm").exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = platform;
+        false
+    }
 }
 
 /// Reduce an untrusted `target` to a path that cannot escape its parent
@@ -443,6 +487,25 @@ pub fn repo_root() -> Option<PathBuf> {
     None
 }
 
+/// RAII guard that keeps an agent turn registered in the container's
+/// `active_agents` list for its lifetime, removing it on drop (even if the turn
+/// panics or is cancelled). Returned by [`ServiceContainer::track_agent`].
+#[must_use = "the agent turn is only tracked while this guard is alive"]
+pub struct AgentTurnGuard {
+    active_agents: Arc<std::sync::Mutex<Vec<String>>>,
+    label: String,
+}
+
+impl Drop for AgentTurnGuard {
+    fn drop(&mut self) {
+        if let Ok(mut agents) = self.active_agents.lock() {
+            if let Some(pos) = agents.iter().position(|a| a == &self.label) {
+                agents.remove(pos);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ServiceContainer
 // ---------------------------------------------------------------------------
@@ -470,6 +533,11 @@ pub struct ServiceContainer {
     /// registers its token on start and removes it on completion;
     /// [`Self::cancel_run`] fires the token to stop the run cooperatively.
     active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
+    /// Labels of agent turns currently executing, so the Observability panel can
+    /// show live agent activity instead of always "No active agent instances".
+    /// A turn registers via [`Self::track_agent`] and is removed when the
+    /// returned guard drops. Shared across clones of this container.
+    active_agents: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// RAII guard that removes a run's cancellation token from the active-runs map
@@ -560,6 +628,7 @@ impl ServiceContainer {
             )),
             run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -873,7 +942,7 @@ impl ServiceContainer {
 
         SystemSnapshot {
             providers,
-            agents: AgentPoolSnapshot::default(),
+            agents: self.active_agent_pool(),
             memory,
         }
     }
@@ -1063,6 +1132,7 @@ impl ServiceContainer {
             diagnostics,
             run_journal,
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -1094,6 +1164,67 @@ impl ServiceContainer {
                 .map_err(|e| ClassifiedError::Internal(format!("clear knowledge: {e}")))?;
         }
         Ok(())
+    }
+
+    /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
+    /// reproducers, coverage builds), reclaiming disk space. Since the
+    /// workspace is now persistent, it grows over time; this is the affordance
+    /// to reset it. Persistent DB records (targets, runs, crashes) are left
+    /// intact -- re-running a campaign rebuilds the workspace on disk.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the workspace directory cannot be removed.
+    /// Register an executing agent turn labelled `label` (e.g. the agent id) so
+    /// the Observability panel reflects live activity. The turn stays tracked
+    /// until the returned [`AgentTurnGuard`] is dropped.
+    pub fn track_agent(&self, label: &str) -> AgentTurnGuard {
+        if let Ok(mut agents) = self.active_agents.lock() {
+            agents.push(label.to_owned());
+        }
+        AgentTurnGuard {
+            active_agents: Arc::clone(&self.active_agents),
+            label: label.to_owned(),
+        }
+    }
+
+    /// A snapshot of the agent turns currently executing.
+    fn active_agent_pool(&self) -> AgentPoolSnapshot {
+        let labels = self
+            .active_agents
+            .lock()
+            .map(|a| a.clone())
+            .unwrap_or_default();
+        let instances: Vec<AgentInstanceSnapshot> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| AgentInstanceSnapshot {
+                instance_id: format!("turn-{i}"),
+                agent_name: label.clone(),
+                state: "running".to_owned(),
+                elapsed_ms: 0,
+                iterations: 0,
+                tokens_used: 0,
+            })
+            .collect();
+        AgentPoolSnapshot {
+            active_instances: instances.len(),
+            available_slots: 0,
+            total_instances: instances.len(),
+            instances,
+        }
+    }
+
+    pub fn clear_workspace(&self) -> Result<(), ClassifiedError> {
+        let root = workspace_root();
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => Ok(()),
+            // Already absent is success -- nothing to reclaim.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(ClassifiedError::Internal(format!(
+                "clear workspace {}: {e}",
+                root.display()
+            ))),
+        }
     }
 
     // -- Discovery --------------------------------------------------------
@@ -1600,10 +1731,15 @@ impl ServiceContainer {
 
         // Assemble bind mounts and resolve the in-container config path.
         let mut mounts: Vec<String> = Vec::new();
-        let workspace = std::env::temp_dir().join("hobot_fuzz_syzkaller");
+        let workspace = workspace_root().join("syzkaller");
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workspace: {e}")))?;
         let cfg_in_container: String;
+
+        // Use KVM when the host can (native-arch Linux with /dev/kvm); this is
+        // orders of magnitude faster than TCG emulation. It drives both the
+        // synthesized qemu args and the `--device /dev/kvm` passthrough below.
+        let use_kvm = syz_kvm_usable(&platform);
 
         if let Some(cfg) = manager_cfg.as_deref() {
             if !file_ok(cfg) {
@@ -1655,11 +1791,15 @@ impl ServiceContainer {
 
             let count = opts.vm_count.unwrap_or(2).max(1);
             let procs = count.min(4);
-            let qemu_args = if hf_runtime::platform_short(&platform) == "arm64" {
-                "-machine virt,accel=tcg -cpu max"
+            let machine = if hf_runtime::platform_short(&platform) == "arm64" {
+                "virt"
             } else {
-                "-machine pc,accel=tcg -cpu max"
+                "pc"
             };
+            let accel = if use_kvm { "kvm" } else { "tcg" };
+            // KVM pairs with `-cpu host`; TCG emulation uses `-cpu max`.
+            let cpu = if use_kvm { "host" } else { "max" };
+            let qemu_args = format!("-machine {machine},accel={accel} -cpu {cpu}");
             let cfg_json = format!(
                 "{{\n  \"target\": \"{target_triple}\",\n  \"http\": \"0.0.0.0:56741\",\n  \"workdir\": \"/syzbench/workdir\",\n  \"image\": \"/syzbench/rootfs.img\",{sshkey_field}\n  \"syzkaller\": \"/opt/syzkaller\",\n  \"procs\": {procs},\n  \"type\": \"qemu\",\n  \"vm\": {{\n    \"count\": {count},\n    \"kernel\": \"/syzbench/kernel\",\n    \"cpu\": 2,\n    \"mem\": 2048,\n    \"qemu_args\": \"{qemu_args}\"\n  }}\n}}\n"
             );
@@ -1681,7 +1821,11 @@ impl ServiceContainer {
             "Launching syz-manager in the sandbox for {}s...",
             opts.duration_secs
         ));
-        log("Note: qemu runs under TCG emulation inside Docker (no /dev/kvm on macOS) -- expect low exec rates.");
+        if use_kvm {
+            log("Note: qemu uses KVM acceleration (/dev/kvm passed through) -- expect good exec rates.");
+        } else {
+            log("Note: qemu runs under TCG emulation inside Docker (no KVM on this host) -- expect low exec rates.");
+        }
 
         let inner = format!(
             "command -v syz-manager >/dev/null 2>&1 || {{ echo 'ERROR: syz-manager not found in the sandbox image. Rebuild the image with the syzkaller toolchain: open Settings > General and switch the sandbox Architecture (forces a rebuild), or remove the image with: docker image rm {sandbox_img}'; exit 3; }}; timeout {duration} syz-manager -config={cfg_in_container} 2>&1 || true",
@@ -1704,6 +1848,11 @@ impl ServiceContainer {
             network_enabled: true,
             workdir: Some("/syzbench".to_owned()),
             relax_hardening: true,
+            devices: if use_kvm {
+                vec!["/dev/kvm".to_owned()]
+            } else {
+                Vec::new()
+            },
         };
 
         // Cross-line state for the streaming callback.
@@ -3159,9 +3308,29 @@ mod workspace_tests {
 
     /// The per-project workspace base every resolved path must stay within.
     fn base(project: &Path) -> std::path::PathBuf {
-        std::env::temp_dir()
-            .join("hobot_fuzz_workspace")
-            .join(project.file_name().unwrap())
+        super::workspace_root().join(project.file_name().unwrap())
+    }
+
+    #[test]
+    fn workspace_root_is_persistent_not_temp() {
+        // With no override the workspace root must NOT live under the OS temp
+        // dir, or artifacts get purged between sessions.
+        let root = super::workspace_root_from(None);
+        assert!(
+            !root.starts_with(std::env::temp_dir()),
+            "workspace root must be persistent, got {}",
+            root.display()
+        );
+        assert!(root.ends_with("workspaces"));
+    }
+
+    #[test]
+    fn workspace_root_honors_env_override() {
+        let root = super::workspace_root_from(Some("/mnt/scratch/hf".into()));
+        assert_eq!(root, std::path::PathBuf::from("/mnt/scratch/hf"));
+        // An empty override falls back to the persistent default.
+        let empty = super::workspace_root_from(Some(String::new().into()));
+        assert!(empty.ends_with("workspaces"));
     }
 
     #[test]

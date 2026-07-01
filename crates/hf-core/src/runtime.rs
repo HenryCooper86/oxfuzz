@@ -54,6 +54,9 @@ pub struct SandboxOptions {
     /// Skip the `cap-drop=ALL` / `no-new-privileges` baseline. Required for
     /// qemu-based syzkaller runs; leave `false` for everything else.
     pub relax_hardening: bool,
+    /// Host device nodes to pass through with `--device`, e.g. `"/dev/kvm"` so
+    /// an in-container qemu can use hardware virtualization. Empty by default.
+    pub devices: Vec<String>,
 }
 
 /// A sandboxed runtime for building harnesses and running fuzzers.

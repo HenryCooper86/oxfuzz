@@ -15,17 +15,39 @@ use tauri::Manager;
 // Docker daemon management (GUI-specific I/O -- not domain logic)
 // ---------------------------------------------------------------------------
 
-/// Best-effort start of the local Docker daemon on macOS. Prefers `OrbStack`,
-/// falls back to Docker Desktop. Returns immediately; the caller polls
-/// `docker_daemon_ready` for completion.
+/// Best-effort start of the local Docker daemon. Returns immediately; the
+/// caller polls `docker_daemon_ready` for completion.
+///
+/// - macOS: launches `OrbStack`, falling back to Docker Desktop, via `open`.
+/// - Linux: the daemon is a system/user service, so try `systemctl start
+///   docker`; if the user lacks privileges this no-ops and the caller surfaces
+///   guidance to start it manually.
 fn start_docker_daemon() {
-    for app_name in ["OrbStack", "Docker"] {
-        let started = std::process::Command::new("open")
-            .args(["-ga", app_name])
-            .status()
-            .is_ok_and(|s| s.success());
-        if started {
-            return;
+    #[cfg(target_os = "macos")]
+    {
+        for app_name in ["OrbStack", "Docker"] {
+            let started = std::process::Command::new("open")
+                .args(["-ga", app_name])
+                .status()
+                .is_ok_and(|s| s.success());
+            if started {
+                return;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for args in [
+            ["--user", "start", "docker"].as_slice(),
+            ["start", "docker"].as_slice(),
+        ] {
+            let started = std::process::Command::new("systemctl")
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success());
+            if started {
+                return;
+            }
         }
     }
 }
@@ -48,6 +70,9 @@ pub(crate) async fn ensure_docker_ready(
     let want_short = hf_runtime::platform_short(&platform).to_string();
 
     if !hf_runtime::docker_cli_present() {
+        #[cfg(target_os = "linux")]
+        emit("Docker CLI not found -- install Docker (e.g. your distro's docker.io / docker-ce).");
+        #[cfg(not(target_os = "linux"))]
         emit("Docker CLI not found -- install OrbStack or Docker Desktop.");
         return system_status();
     }
@@ -65,6 +90,11 @@ pub(crate) async fn ensure_docker_ready(
     }
 
     if !hf_runtime::docker_daemon_ready() {
+        #[cfg(target_os = "linux")]
+        emit(
+            "Docker daemon did not start -- start it manually (e.g. sudo systemctl start docker).",
+        );
+        #[cfg(not(target_os = "linux"))]
         emit("Docker daemon did not start -- start OrbStack/Docker manually.");
         return system_status();
     }
@@ -73,6 +103,14 @@ pub(crate) async fn ensure_docker_ready(
     let arch_ok = hf_runtime::sandbox_image_arch().is_some_and(|a| a == want_short);
     if hf_runtime::sandbox_image_present() && arch_ok {
         emit(&format!("Sandbox image ready ({platform})."));
+    } else if !hf_runtime::can_run_platform(&platform) {
+        // A non-native sandbox arch on a host without qemu-user/binfmt would
+        // fail the build with an opaque "exec format error" -- say so plainly.
+        emit(&format!(
+            "Cannot build the {platform} sandbox: this host cannot run that architecture. \
+             Register emulation with `docker run --privileged --rm tonistiigi/binfmt --install all` \
+             (or install qemu-user-static), or pick the native arch in Settings."
+        ));
     } else if let Some(root) = hf_service::repo_root() {
         if hf_runtime::sandbox_image_present() {
             emit(&format!("Rebuilding sandbox image for {platform}..."));
@@ -638,6 +676,14 @@ pub async fn clear_knowledge(
         .map_err(|e| e.to_string())
 }
 
+/// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
+/// reproducers), reclaiming disk space. Persistent DB records are untouched.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn clear_workspace(state: tauri::State<'_, crate::state::AppState>) -> Result<(), String> {
+    state.container.clear_workspace().map_err(|e| e.to_string())
+}
+
 /// Aggregated LLM cost/usage recorded this session (diagnostics).
 #[tauri::command]
 pub async fn diagnostics_cost_summary(
@@ -1093,6 +1139,14 @@ pub async fn chat_agent(
         hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
     let container = state.container.clone().with_guardrails(guardrails);
     let sink = TauriEventSink { app };
+
+    // Register the turn so the Observability panel shows live agent activity;
+    // the guard removes it when the turn returns (or errors). The shared
+    // `active_agents` list is behind an Arc, so tracking via `state.container`
+    // is visible to `system_snapshot`.
+    let _agent_guard = state
+        .container
+        .track_agent(agent_id.as_deref().unwrap_or("agent"));
 
     // Drive the turn through the shared service-layer orchestration so the GUI,
     // web, and CLI all run the agent identically (AGENTS.md 2.9).
