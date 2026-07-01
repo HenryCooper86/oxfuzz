@@ -219,7 +219,15 @@ fn compact_wal<'a>(path: &Path, events: impl Iterator<Item = &'a RunEvent>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, body);
+    // Atomic replace: write a sibling temp file, then rename it over the WAL.
+    // A plain truncating write can crash between truncate and write, leaving an
+    // empty/partial WAL and losing the interrupted-run records being rewritten.
+    // rename(2) is atomic on the same filesystem, so a crash leaves either the
+    // old WAL or the fully-written new one intact.
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 #[cfg(test)]

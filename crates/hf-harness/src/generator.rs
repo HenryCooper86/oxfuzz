@@ -197,11 +197,14 @@ pub async fn smoke_fuzz(
         passed,
     };
     harness.smoke_run = Some(summary);
-    harness.status = if passed {
-        HarnessStatus::SmokePassed
-    } else {
-        HarnessStatus::Failed
-    };
+    // `SmokePassed` means the harness is viable -- it built and the fuzzer
+    // actually exercised the target. A crash found during smoke does NOT make
+    // the harness `Failed`: a harness that drives the target well enough to find
+    // a bug is a working harness (and the crash is worth triaging). The crash
+    // signal lives in `smoke_run.passed`/`crashes`, not in the status. Only a
+    // harness the fuzzer could not run at all is `Failed`, and that path already
+    // returned `Err` above.
+    harness.status = HarnessStatus::SmokePassed;
     Ok(harness)
 }
 
@@ -358,16 +361,36 @@ fn first_number(s: &str) -> Option<f64> {
 
 /// Parse the number of crashes from fuzzer stdout.
 ///
-/// Reuses the engine's finding detector so smoke validation agrees with the
-/// production run parser. Critically, this does NOT count AFL++/honggfuzz
-/// periodic status counters (`uniq crashes : N`, `Crashes : N`) as crashes --
-/// doing so marked every clean non-libFuzzer smoke run as `Failed`.
+/// A single crash emits several finding-signal lines -- the sanitizer report,
+/// the `SUMMARY:` line, and the artifact-save line -- so counting every line
+/// that [`line_reports_finding`](hf_engine::progress::line_reports_finding)
+/// matches would report one crash as two or more. Instead count distinct saved
+/// artifacts: libFuzzer prints exactly one `Test unit written to <path>` per
+/// saved finding, and the `crash-<hash>` filename token appears once per
+/// artifact. When a finding is signalled but no per-artifact line is present
+/// (e.g. honggfuzz naming a `SIG...` file), fall back to "at least one".
+///
+/// Like the production run parser, this does NOT count AFL++/honggfuzz periodic
+/// status counters (`uniq crashes : N`, `Crashes : N`) as crashes -- doing so
+/// marked every clean non-libFuzzer smoke run as `Failed`.
 fn parse_crashes(stdout: &str) -> u32 {
-    let count = stdout
+    let artifacts = stdout
         .lines()
-        .filter(|line| hf_engine::progress::line_reports_finding(line))
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("test unit written") || lower.contains("crash-")
+        })
         .count();
-    u32::try_from(count).unwrap_or(u32::MAX)
+    if artifacts > 0 {
+        return u32::try_from(artifacts).unwrap_or(u32::MAX);
+    }
+    // A finding was reported (sanitizer/signal phrasing) but no per-artifact
+    // line was emitted: report a single crash rather than zero.
+    u32::from(
+        stdout
+            .lines()
+            .any(hf_engine::progress::line_reports_finding),
+    )
 }
 
 /// The source filename to write the harness to, by language. The extension
@@ -450,9 +473,23 @@ mod tests {
 
     #[test]
     fn counts_libfuzzer_crash_artifacts() {
+        // One crash: an artifact-save line plus a SUMMARY line. Must count as
+        // exactly 1, not 2 -- the SUMMARY line is part of the same crash.
         let log =
             "Test unit written to ./crash-abc\nSUMMARY: AddressSanitizer: heap-buffer-overflow";
-        assert!(parse_crashes(log) >= 1);
+        assert_eq!(parse_crashes(log), 1);
+
+        // Two distinct saved artifacts => 2, even amid extra signal lines.
+        let two = "==ERROR: AddressSanitizer: heap-buffer-overflow\n\
+                   Test unit written to ./crash-abc\n\
+                   SUMMARY: AddressSanitizer: heap-buffer-overflow\n\
+                   Test unit written to ./crash-def\n\
+                   SUMMARY: AddressSanitizer: heap-buffer-overflow";
+        assert_eq!(parse_crashes(two), 2);
+
+        // A finding with no per-artifact line still reports at least one.
+        let no_artifact = "==1== ERROR: AddressSanitizer: SEGV on unknown address";
+        assert_eq!(parse_crashes(no_artifact), 1);
     }
 
     #[test]

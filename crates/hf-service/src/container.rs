@@ -472,6 +472,23 @@ pub struct ServiceContainer {
     active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
 }
 
+/// RAII guard that removes a run's cancellation token from the active-runs map
+/// on drop, so the entry cannot leak if the `run_fuzzer` future is
+/// dropped/aborted rather than returning normally (which would otherwise leave
+/// a phantom run that `active_run_ids` reports and `cancel_run` can never clear).
+struct ActiveRunGuard {
+    active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
+    run_id: Uuid,
+}
+
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        if let Ok(mut runs) = self.active_runs.lock() {
+            runs.remove(&self.run_id);
+        }
+    }
+}
+
 /// Build the per-model cost table (`model -> (per-1k-in, per-1k-out)`) from the
 /// configured providers, for LLM cost diagnostics.
 fn build_cost_map() -> std::collections::HashMap<String, (f64, f64)> {
@@ -1412,11 +1429,19 @@ impl ServiceContainer {
         self.run_journal.open_run(run_id, project, target, engine);
 
         // Register a cancellation token so `cancel_run(run_id)` can stop this
-        // run cooperatively; it is removed again as soon as the run returns.
+        // run cooperatively. `ActiveRunGuard` removes it again when this scope
+        // ends -- crucially, even if the `run_fuzzer` future is dropped/aborted
+        // (e.g. wrapped in a `timeout`) rather than returning normally. A plain
+        // post-await removal would leak the entry on abort, leaving a phantom
+        // run that `active_run_ids` reports and `cancel_run` can never clear.
         let cancel = CancellationToken::new();
         if let Ok(mut runs) = self.active_runs.lock() {
             runs.insert(run_id, cancel.clone());
         }
+        let _active_run_guard = ActiveRunGuard {
+            active_runs: Arc::clone(&self.active_runs),
+            run_id,
+        };
 
         let runner = hf_engine::runner::EngineRunner::new();
         // Stream progress live: `on_progress` fires for each output line and
@@ -1434,9 +1459,6 @@ impl ServiceContainer {
                 on_progress,
             )
             .await;
-        if let Ok(mut runs) = self.active_runs.lock() {
-            runs.remove(&run_id);
-        }
         let was_cancelled = cancel.is_cancelled();
         if let (Some(store), Some(rec)) = (&self.store, &run_record) {
             let status = if was_cancelled {
