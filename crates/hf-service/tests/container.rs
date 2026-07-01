@@ -4,6 +4,21 @@ use std::sync::Arc;
 
 use hf_service::ServiceContainer;
 
+/// Redirect the fuzz workspace to a temp dir for the duration of the test
+/// process, so tests that compile harnesses / seed corpora don't pollute (or
+/// collide with) the real per-user data dir now that the workspace is
+/// persistent. `HF_WORKSPACE_DIR` takes precedence in `workspace_root`; the
+/// `Once` sets it before any workspace-touching test proceeds.
+fn isolate_workspace() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var(
+            "HF_WORKSPACE_DIR",
+            std::env::temp_dir().join("hobot_fuzz_it_workspace"),
+        );
+    });
+}
+
 /// A runtime whose streamed command blocks until the run is cancelled, so a
 /// test can observe and drive the cancellation path deterministically.
 struct BlockingRuntime;
@@ -61,6 +76,7 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
 #[tokio::test]
 async fn cancel_run_stops_an_in_flight_fuzz_run() {
     use std::fs;
+    isolate_workspace();
 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("cancel_proj");
@@ -207,6 +223,7 @@ async fn provider_pool_swap_is_visible_across_container_clones() {
 #[tokio::test]
 async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
     use std::fs;
+    isolate_workspace();
 
     // A unique project name keeps this test's workspace isolated.
     let dir = tempfile::tempdir().unwrap();
@@ -261,6 +278,7 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
 #[tokio::test]
 async fn verify_regressions_replays_stored_crash_inputs() {
     use std::fs;
+    isolate_workspace();
 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("regress_proj");
@@ -296,6 +314,7 @@ async fn verify_regressions_replays_stored_crash_inputs() {
 #[tokio::test]
 async fn artifact_summary_reports_on_disk_state() {
     use std::fs;
+    isolate_workspace();
 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("artifact_proj");
@@ -330,6 +349,7 @@ async fn artifact_summary_reports_on_disk_state() {
 #[tokio::test]
 async fn corpus_absorb_crashes_feeds_reproducers_back_in() {
     use std::fs;
+    isolate_workspace();
 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("absorb_proj");
@@ -369,6 +389,7 @@ async fn corpus_absorb_crashes_feeds_reproducers_back_in() {
 
 #[tokio::test]
 async fn generate_report_produces_a_titled_markdown_doc() {
+    isolate_workspace();
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("report_proj");
     std::fs::create_dir_all(&project).unwrap();

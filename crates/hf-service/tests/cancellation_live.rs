@@ -18,9 +18,22 @@ use hf_service::ServiceContainer;
 
 const IMAGE: &str = "hobot/fuzz-sandbox:latest";
 
+/// Keep the (now persistent) fuzz workspace out of the real per-user data dir
+/// by redirecting it to a temp dir for this test.
+fn isolate_workspace() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var(
+            "HF_WORKSPACE_DIR",
+            std::env::temp_dir().join("hobot_fuzz_it_workspace"),
+        );
+    });
+}
+
 #[tokio::test]
 #[ignore = "requires Docker + hobot/fuzz-sandbox image"]
 async fn stop_button_cancels_a_real_fuzz_run() {
+    isolate_workspace();
     let project = std::env::temp_dir().join("hf_cancel_live_proj");
     std::fs::create_dir_all(&project).unwrap();
     let target = "demo";
