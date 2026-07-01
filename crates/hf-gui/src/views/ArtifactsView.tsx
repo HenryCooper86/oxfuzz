@@ -1,12 +1,10 @@
 import { useState } from "react";
 import { getTransport } from "../lib";
-import { useProject } from "../providers/ProjectContext";
 import type { Crash, CorpusEntry } from "../types";
 import { Button, ViewHeader } from "../components/ui";
 import { Bug, Database, RefreshCw, FileWarning } from "lucide-react";
 
 export function ArtifactsView() {
-  const { activeProject } = useProject();
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [corpus, setCorpus] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -15,11 +13,14 @@ export function ArtifactsView() {
   async function scan() {
     setLoading(true);
     const t = getTransport();
-    const project = activeProject || ".";
     try {
+      // Browse-all view: read persisted artifacts from the store across every
+      // target/run. Re-triaging with an empty target scans the wrong per-target
+      // workspace dir and always comes back empty, so crashes never showed up
+      // here even after a run produced them.
       const [c, k] = await Promise.all([
-        t.invoke<Crash[]>("triage", { project, target: "" }).catch(() => [] as Crash[]),
-        t.invoke<CorpusEntry[]>("corpus_list", { project, target: "" }).catch(() => [] as CorpusEntry[]),
+        t.invoke<Crash[]>("all_crashes").catch(() => [] as Crash[]),
+        t.invoke<CorpusEntry[]>("all_corpus").catch(() => [] as CorpusEntry[]),
       ]);
       setCrashes(c);
       setCorpus(k);

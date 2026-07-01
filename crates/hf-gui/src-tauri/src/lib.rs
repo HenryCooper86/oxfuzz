@@ -11,8 +11,8 @@ use state::AppState;
 use tauri::Manager;
 
 use commands::{
-    agent_info, agent_tools, app_paths, artifact_summary, cancel_run, chat_agent,
-    chat_answer_permission, chat_branch, chat_branches, chat_checkpoints, chat_history,
+    agent_info, agent_tools, all_corpus, all_crashes, app_paths, artifact_summary, cancel_run,
+    chat_agent, chat_answer_permission, chat_branch, chat_branches, chat_checkpoints, chat_history,
     chat_rollback, chat_rollback_to, chat_send, clear_knowledge, config_toml_to_value,
     config_value_to_toml, corpus_grow, corpus_list, corpus_prune, corpus_seed, coverage_functions,
     create_session, delete_agent, delete_skill, diagnostics_cost_summary, discover,
@@ -46,6 +46,8 @@ pub fn run() {
             corpus_seed,
             corpus_grow,
             corpus_prune,
+            all_crashes,
+            all_corpus,
             triage,
             system_status_cmd,
             ensure_docker,
