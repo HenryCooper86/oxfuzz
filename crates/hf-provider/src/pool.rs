@@ -325,6 +325,59 @@ impl ProviderPoolImpl {
             .find(|e| e.provider.metadata().id == *provider_id)
     }
 
+    /// Classify a provider error and freeze the provider accordingly.
+    ///
+    /// Takes the provider's `FreezeManager` directly (rather than looking it up
+    /// via `&self`) so it can be called from a detached streaming task that
+    /// outlives the pool borrow (see the mid-stream error path in
+    /// `chat_completion_stream`).
+    fn classify_and_freeze(
+        freeze_manager: &FreezeManager,
+        provider_id: &ProviderId,
+        error: &ProviderError,
+    ) {
+        // Use the error classifier (P1-5) for freeze decisions.
+        let std_error = error_classifier::classify_provider_error(error);
+
+        if !std_error.should_freeze() {
+            tracing::debug!(
+                provider_id = %provider_id,
+                error = %error,
+                classification = ?std_error,
+                "error does not warrant provider freeze"
+            );
+            return;
+        }
+
+        if std_error.is_permanent() {
+            freeze_manager.freeze_permanent(format!("{error}"));
+            tracing::warn!(
+                provider_id = %provider_id,
+                error = %error,
+                classification = ?std_error,
+                "provider permanently frozen"
+            );
+        } else if let Some(duration) = std_error.freeze_duration() {
+            freeze_manager.freeze(format!("{error}"), Some(duration));
+            tracing::info!(
+                provider_id = %provider_id,
+                error = %error,
+                classification = ?std_error,
+                freeze_secs = duration.as_secs(),
+                "provider frozen with error-type-specific duration"
+            );
+        } else {
+            // Fallback: adaptive freeze.
+            freeze_manager.freeze(format!("{error}"), None);
+            tracing::info!(
+                provider_id = %provider_id,
+                error = %error,
+                classification = ?std_error,
+                "provider frozen (adaptive duration)"
+            );
+        }
+    }
+
     /// Apply provider-level sampling defaults without overriding explicit request values.
     fn apply_request_defaults(request: &ChatRequest, entry: &ProviderEntry) -> ChatRequest {
         let mut effective_request = request.clone();
@@ -531,13 +584,38 @@ impl ProviderPool for ProviderPoolImpl {
                 // Wrap the inner stream so the active-request guard AND the
                 // concurrency permits are all held until the stream is fully
                 // consumed or dropped (enforcing max_concurrency for streams).
+                //
+                // A stream that establishes successfully but then yields an
+                // error mid-flight (e.g. a connection reset after the first
+                // byte) must still count against the provider and trigger a
+                // freeze; otherwise a provider that always fails after the
+                // handshake is never frozen and failover never engages. We
+                // report the first such error once, then keep forwarding items.
                 let inner = stream_response.stream;
                 let keepalive = (guard, permit, global_permit);
+                let freeze_manager = Arc::clone(&entry.freeze_manager);
+                let stream_metrics = Arc::clone(&entry.metrics);
+                let stream_pid = meta.id.clone();
                 stream_response.stream = Box::pin(futures::stream::unfold(
-                    (inner, Some(keepalive)),
-                    |(mut s, ka)| async move {
+                    (
+                        inner,
+                        Some(keepalive),
+                        freeze_manager,
+                        stream_metrics,
+                        stream_pid,
+                        false,
+                    ),
+                    |(mut s, ka, fm, metrics, pid, mut reported)| async move {
                         use futures::StreamExt;
-                        s.next().await.map(|item| (item, (s, ka)))
+                        let item = s.next().await?;
+                        if let Err(err) = &item {
+                            if !reported {
+                                reported = true;
+                                metrics.record_error();
+                                Self::classify_and_freeze(&fm, &pid, err);
+                            }
+                        }
+                        Some((item, (s, ka, fm, metrics, pid, reported)))
                     },
                 ));
 
@@ -554,48 +632,7 @@ impl ProviderPool for ProviderPoolImpl {
 
     fn report_error(&self, provider_id: &ProviderId, error: &ProviderError) {
         if let Some(entry) = self.find_entry(provider_id) {
-            // Use the error classifier (P1-5) for freeze decisions.
-            let std_error = error_classifier::classify_provider_error(error);
-
-            if !std_error.should_freeze() {
-                tracing::debug!(
-                    provider_id = %provider_id,
-                    error = %error,
-                    classification = ?std_error,
-                    "error does not warrant provider freeze"
-                );
-                return;
-            }
-
-            if std_error.is_permanent() {
-                entry.freeze_manager.freeze_permanent(format!("{error}"));
-                tracing::warn!(
-                    provider_id = %provider_id,
-                    error = %error,
-                    classification = ?std_error,
-                    "provider permanently frozen"
-                );
-            } else if let Some(duration) = std_error.freeze_duration() {
-                entry
-                    .freeze_manager
-                    .freeze(format!("{error}"), Some(duration));
-                tracing::info!(
-                    provider_id = %provider_id,
-                    error = %error,
-                    classification = ?std_error,
-                    freeze_secs = duration.as_secs(),
-                    "provider frozen with error-type-specific duration"
-                );
-            } else {
-                // Fallback: adaptive freeze.
-                entry.freeze_manager.freeze(format!("{error}"), None);
-                tracing::info!(
-                    provider_id = %provider_id,
-                    error = %error,
-                    classification = ?std_error,
-                    "provider frozen (adaptive duration)"
-                );
-            }
+            Self::classify_and_freeze(&entry.freeze_manager, provider_id, error);
         }
     }
 
@@ -1065,7 +1102,7 @@ mod tests {
             _request: &ChatRequest,
         ) -> Result<ChatResponse, ProviderError> {
             // Far longer than any test timeout; the future is dropped instead.
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            tokio::time::sleep(std::time::Duration::from_hours(1)).await;
             unreachable!("cancelled before completing")
         }
         async fn chat_completion_stream(

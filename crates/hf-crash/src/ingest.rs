@@ -1,6 +1,6 @@
 //! Crash ingestion: scan a run output directory for crash artifacts.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use hf_core::crash::{Crash, CrashKind};
 use hf_core::error::ClassifiedError;
@@ -162,8 +162,15 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
         }
     }
 
-    // 2. Any sibling .txt/.log carrying a sanitizer trace. Look both next to the
+    // 2. A sibling .txt/.log carrying a sanitizer trace. Look both next to the
     // artifact and in the run directory (AFL++ keeps crashes in a subdir).
+    //
+    // A shared report must not be attached to the wrong crash: if several crash
+    // artifacts sit beside a single generic report, mapping all of them to that
+    // report gives them identical stack signatures and `dedup` collapses
+    // genuinely distinct crashes into one. So we only accept a report that is
+    // unambiguously this crash's: either its filename references the crash stem,
+    // or it is the sole crash artifact in the directory.
     let mut dirs = vec![run_dir.to_path_buf()];
     if let Some(parent) = crash_path.parent() {
         if parent != run_dir {
@@ -174,30 +181,65 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
+        let mut reports: Vec<PathBuf> = Vec::new();
+        let mut crash_artifacts = 0usize;
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() || path == *crash_path {
+            if !path.is_file() {
                 continue;
             }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if is_crash_artifact(&name) {
+                crash_artifacts += 1;
+            }
+            if path == *crash_path {
+                continue;
+            }
+            // honggfuzz writes an uppercase `HONGGFUZZ.REPORT.TXT`, so match the
+            // extension case-insensitively.
             let is_text = path
                 .extension()
                 .and_then(|e| e.to_str())
-                // honggfuzz writes an uppercase `HONGGFUZZ.REPORT.TXT`, so match
-                // the extension case-insensitively.
                 .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"));
-            if !is_text {
-                continue;
+            if is_text {
+                reports.push(path);
             }
-            match std::fs::read_to_string(&path) {
-                Ok(s) if looks_like_sanitizer_report(&s) => return Some(s),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to read crash log");
+        }
+
+        // First, a report whose name references this crash's stem -- a strong,
+        // per-crash association that holds even when many crashes share a dir.
+        for path in &reports {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if name.is_some_and(|n| n.contains(stem)) {
+                if let Some(s) = read_if_sanitizer_report(path) {
+                    return Some(s);
+                }
+            }
+        }
+        // Otherwise, a generic report only if it cannot belong to another crash.
+        if crash_artifacts <= 1 {
+            for path in &reports {
+                if let Some(s) = read_if_sanitizer_report(path) {
+                    return Some(s);
                 }
             }
         }
     }
     None
+}
+
+/// Read `path` and return its contents only if they resemble a sanitizer
+/// report. Read failures are logged rather than silently swallowed.
+fn read_if_sanitizer_report(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) if looks_like_sanitizer_report(&s) => Some(s),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to read crash log");
+            None
+        }
+    }
 }
 
 /// Whether a file's contents resemble a sanitizer/engine crash report worth
@@ -215,4 +257,68 @@ fn looks_like_sanitizer_report(s: &str) -> bool {
         // honggfuzz HONGGFUZZ.REPORT.TXT field markers.
         || lower.contains("stack hash")
         || lower.contains("fault address")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ASAN: &str = "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n";
+
+    fn tmp() -> PathBuf {
+        // Unique-ish directory without Math.random/time: use a static counter.
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let mut base = std::env::temp_dir();
+        base.push(format!(
+            "hf-ingest-test-{}",
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn generic_report_ignored_when_multiple_crashes_share_a_dir() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-aaa"), b"x").unwrap();
+        std::fs::write(dir.join("crash-bbb"), b"y").unwrap();
+        // One generic sanitizer report that names neither crash.
+        std::fs::write(dir.join("report.txt"), ASAN).unwrap();
+
+        // Ambiguous: the shared report must not be attributed to either crash,
+        // otherwise both get the same signature and dedup collapses them.
+        let got = find_sanitizer_log(&dir.join("crash-aaa"), &dir, "crash-aaa");
+        assert!(got.is_none(), "shared report must not be misattributed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn generic_report_used_when_it_is_the_sole_crash() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-aaa"), b"x").unwrap();
+        std::fs::write(dir.join("report.txt"), ASAN).unwrap();
+
+        let got = find_sanitizer_log(&dir.join("crash-aaa"), &dir, "crash-aaa");
+        assert!(got.is_some(), "sole crash may claim the generic report");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stem_named_report_wins_even_with_multiple_crashes() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-aaa"), b"x").unwrap();
+        std::fs::write(dir.join("crash-bbb"), b"y").unwrap();
+        // A report whose name references crash-aaa's stem ("aaa"), but not via
+        // the step-1 `log-<stem>.txt` convention -- this exercises step 2.
+        std::fs::write(dir.join("sanitizer-aaa.log"), ASAN).unwrap();
+
+        let got = find_sanitizer_log(&dir.join("crash-aaa"), &dir, "crash-aaa");
+        assert!(got.is_some(), "stem-named report is an unambiguous match");
+        // The other crash has no stem-named report and cannot claim the shared
+        // one, so it stays unclassified from a sibling log.
+        let other = find_sanitizer_log(&dir.join("crash-bbb"), &dir, "crash-bbb");
+        assert!(other.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
