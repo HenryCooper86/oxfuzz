@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { pickFolder, pickFile } from "../lib";
+import { pickFolder, pickFile, getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -45,6 +45,29 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [log]);
+
+  // Whether the target's harness binary actually exists on disk. The shared
+  // `compiled` flag is only a localStorage hint and can go stale (e.g. after
+  // the workspace is cleared), so the badge is driven from `artifact_summary`,
+  // a real on-disk check -- otherwise Run shows "(compiled)" and then dead-ends
+  // with "compiled harness not found".
+  const [harnessBuilt, setHarnessBuilt] = useState(compiled);
+  useEffect(() => {
+    // syzkaller has no harness binary; the badge is hidden for it anyway.
+    if (isSyz) return;
+    let cancelled = false;
+    getTransport()
+      .invoke<{ harness_built: boolean }>("artifact_summary", { project: project ?? "", target: target ?? "" })
+      .then((s) => {
+        if (!cancelled) setHarnessBuilt(Boolean(s.harness_built));
+      })
+      .catch(() => {
+        if (!cancelled) setHarnessBuilt(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, target, isSyz, summary]);
 
   async function browse() {
     const path = await pickFolder();
@@ -122,7 +145,14 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
         )}
         {!isSyz && (
           <div className="flex flex-col gap-1">
-            <Label>Target Symbol{compiled && <span style={{ color: "var(--success)", marginLeft: "8px" }}> (compiled)</span>}</Label>
+            <Label>
+              Target Symbol
+              {harnessBuilt ? (
+                <span style={{ color: "var(--success)", marginLeft: "8px" }}> (compiled)</span>
+              ) : (
+                target && <span style={{ color: "var(--text-muted)", marginLeft: "8px" }}> (not built)</span>
+              )}
+            </Label>
             <Input
               mono
               type="text"
