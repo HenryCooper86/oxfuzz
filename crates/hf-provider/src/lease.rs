@@ -190,12 +190,30 @@ impl LeaseGuard {
 
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
-        let lease_id = self.lease_id.clone();
-        let manager = self.manager.clone();
-        // Spawn a background task to release the lease since Drop is synchronous.
-        tokio::spawn(async move {
-            manager.release(&lease_id).await;
-        });
+        // Fast path: if the lock is uncontended, release synchronously. This
+        // works even outside a Tokio runtime, unlike `tokio::spawn`, which
+        // panics when there is no runtime and silently discards the release
+        // future during runtime shutdown (leaking the lease in both cases).
+        if let Ok(mut inner) = self.manager.inner.try_lock() {
+            inner.active_leases.remove(&self.lease_id);
+            return;
+        }
+        // Contended: fall back to a background release, but only if a runtime is
+        // actually available. If not, the stale lease is reclaimed by the expiry
+        // reaper (`find_expired`/`cleanup_expired`) after `max_lease_duration`.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let lease_id = self.lease_id.clone();
+            let manager = self.manager.clone();
+            handle.spawn(async move {
+                manager.release(&lease_id).await;
+            });
+        } else {
+            tracing::warn!(
+                lease_id = %self.lease_id,
+                "lease guard dropped with lock contended and no runtime; \
+                 relying on the expiry reaper to reclaim it"
+            );
+        }
     }
 }
 

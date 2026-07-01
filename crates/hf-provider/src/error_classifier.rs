@@ -46,6 +46,14 @@ impl StandardError {
     ///
     /// Returns `None` for errors that should cause permanent freeze
     /// (requiring manual intervention).
+    ///
+    /// These are *upper bounds*: the pool clamps every returned duration to the
+    /// configured `max_freeze_duration_secs` (default 1h), so with the default
+    /// cap the longer values below (auth failure, model-not-found) freeze for at
+    /// most 1h before the provider is retried. `AuthenticationFailed` is
+    /// deliberately transient (a 401 that is not an outright invalid key, e.g. a
+    /// clock-skew or token-service blip): it backs off long, then retries,
+    /// rather than freezing permanently like [`KeyInvalid`](Self::KeyInvalid).
     pub fn freeze_duration(&self) -> Option<Duration> {
         match self {
             Self::RateLimited { retry_after } => {
@@ -54,7 +62,8 @@ impl StandardError {
             Self::ServerError => Some(Duration::from_mins(5)),
             Self::NetworkError => Some(Duration::from_secs(30)),
             Self::ModelNotFound => Some(Duration::from_hours(1)),
-            Self::AuthenticationFailed => Some(Duration::from_hours(24)), // 24h
+            // Long backoff, clamped to max_freeze_duration_secs by the pool.
+            Self::AuthenticationFailed => Some(Duration::from_hours(24)),
             Self::Unknown => Some(Duration::from_mins(1)),
             // Not a provider issue (context window, content filter) — don't freeze.
             // Permanent errors (key invalid, quota, balance) — freeze duration
