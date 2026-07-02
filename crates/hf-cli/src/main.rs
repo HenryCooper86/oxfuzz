@@ -611,6 +611,9 @@ async fn cmd_run(
     println!("  execs/sec: {:.0}", summary.execs);
     println!("  crashes detected: {}", summary.crashes);
     println!("  edges covered: {}", summary.edges);
+    if let Some(proposal) = &summary.stagnation {
+        println!("  coverage stalled: {proposal:?} -- consider regenerating the harness or adding seeds/a dictionary");
+    }
     Ok(())
 }
 

@@ -166,10 +166,20 @@ you receive its result and continue until you can give a final answer.",
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
             let trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
-            let req = ChatRequest::from_messages(trimmed);
+            let mut req = ChatRequest::from_messages(trimmed);
+            // Apply the agent's configured sampling temperature (previously set
+            // in the definition but never plumbed into the request).
+            req.temperature = self.definition.temperature;
             let resp = pool
                 .chat_completion(&req, &RouteRequest::with_tags(&route))
                 .await?;
+            // Record the turn's token usage/cost as a diagnostic so interactive
+            // agent spend shows up in the cost summary, like rank/harness/triage
+            // (which route through LlmProviderBridge::with_diagnostics).
+            self.container
+                .diagnostics()
+                .record("agent_chat", &resp.model, &resp.usage)
+                .await;
             let content = resp.text().trim().to_owned();
 
             let Some(step) = parse_step(&content) else {
@@ -214,9 +224,22 @@ you receive its result and continue until you can give a final answer.",
             })
             .await;
 
-            // Enforce the agent's tool allowlist: a specialist may only call its
-            // own tools. The refusal is fed back so the model can self-correct.
-            let result = if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
+            // A manual-autonomy agent gates every tool (including reads) on
+            // operator approval. Tighten-only: Assist/Auto are unchanged, and a
+            // decline is fed back so the model can adapt rather than silently
+            // bypassing the human gate.
+            let result = if self.definition.autonomy == Autonomy::Manual
+                && !self
+                    .container
+                    .approve_agent_tool(&tool, &self.definition.name)
+                    .await
+            {
+                agent_tools::error_json(format!(
+                    "approval declined: the {} agent runs with manual autonomy, so '{tool}' \
+                     requires operator approval",
+                    self.definition.name
+                ))
+            } else if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
                 // Inspection tools read files relative to the project workspace,
                 // which is also the root reads are confined to. With no project
                 // set there is no root, so an absolute path would escape to the
@@ -320,6 +343,18 @@ pub async fn run_chat_turn(
 ) -> Result<String, ClassifiedError> {
     // Resolve the conversation history: prefer the persisted transcript.
     let has_session = session.is_some() && container.session_manager().is_some();
+
+    // Serialize turns on the same session for the whole read-modify-write below:
+    // reading the history, running the turn, then appending user+assistant and
+    // checkpointing. Two concurrent turns on one session would otherwise read the
+    // same pre-turn length, mint duplicate checkpoint turn numbers, and interleave
+    // their four appends. The guard is held until this function returns; distinct
+    // sessions take distinct locks and still run concurrently.
+    let _turn_guard = match &session {
+        Some(id) if has_session => Some(container.session_turn_lock(id).lock_owned().await),
+        _ => None,
+    };
+
     let history = if let (Some(id), Some(manager)) = (&session, container.session_manager()) {
         manager
             .read_transcript(id)

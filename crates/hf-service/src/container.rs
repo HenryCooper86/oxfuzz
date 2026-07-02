@@ -69,11 +69,28 @@ fn workspace_root_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
 /// workspace).
 #[must_use]
 pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
+    workspace_root()
+        .join(project_slug(project))
+        .join(sanitize_target(target))
+}
+
+/// A per-project workspace directory name: the human-readable basename plus a
+/// short deterministic hash of the full path. The hash disambiguates projects
+/// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
+/// workspaces -- and thus compiled binaries, corpora, and crash reproducers --
+/// never collide, while the basename keeps the directory recognizable. Stable
+/// across processes (SHA-256, unlike `DefaultHasher`), so the same project maps
+/// to the same workspace on every invocation.
+fn project_slug(project: &Path) -> String {
+    use sha2::{Digest, Sha256};
     let name = project
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("default");
-    workspace_root().join(name).join(sanitize_target(target))
+    let mut hasher = Sha256::new();
+    hasher.update(project.to_string_lossy().as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{name}-{}", &digest[..8])
 }
 
 /// Whether the in-container qemu for a syzkaller run can use KVM hardware
@@ -386,16 +403,21 @@ fn collect_casreps_into(dir: &Path, out: &mut Vec<(PathBuf, hf_core::crash::Casr
     }
 }
 
-/// Map a `.casrep` path back to the crash input it analyzed: CASR names each
-/// report after its input (`crash-abc.casrep` -> `crash-abc`), so the report's
-/// file stem under `out` gives a clean input name for display. (The libFuzzer
-/// path's input sits directly in `out`; the AFL path's lives deeper, but the
-/// stem still carries the crash id.)
-fn casrep_input_path(out_dir: &Path, casrep: &Path) -> PathBuf {
-    casrep
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map_or_else(|| casrep.to_path_buf(), |stem| out_dir.join(stem))
+/// Map a `.casrep` path back to the crash input it analyzed. CASR names each
+/// report after its input file (`id:000….casrep` -> `id:000…`); match that
+/// filename against the actual crash inputs so an AFL++ input nested under
+/// `out/<instance>/crashes/` resolves to its real location rather than a
+/// nonexistent `out/<name>` (which broke `verify_regressions`/reproduce). Falls
+/// back to the flat `out_dir/<name>` layout (libFuzzer) when not found.
+fn casrep_input_path(out_dir: &Path, casrep: &Path, crash_inputs: &[PathBuf]) -> PathBuf {
+    let Some(stem) = casrep.file_stem().and_then(|s| s.to_str()) else {
+        return casrep.to_path_buf();
+    };
+    crash_inputs
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(stem))
+        .cloned()
+        .unwrap_or_else(|| out_dir.join(stem))
 }
 
 /// A stable crash id derived from its run, stack signature, and input file, so
@@ -538,6 +560,16 @@ pub struct ServiceContainer {
     /// A turn registers via [`Self::track_agent`] and is removed when the
     /// returned guard drops. Shared across clones of this container.
     active_agents: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Per-session locks serializing chat turns on the same session. A turn is a
+    /// read-modify-write over the transcript (read history, run the turn, append
+    /// user+assistant + checkpoint); two concurrent turns on one session would
+    /// otherwise interleave appends and mint duplicate checkpoint turn numbers.
+    /// Different sessions still run concurrently. Shared across clones.
+    session_turn_locks: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
+        >,
+    >,
 }
 
 /// RAII guard that removes a run's cancellation token from the active-runs map
@@ -591,8 +623,11 @@ fn build_session_managers(
     let display: Arc<dyn DisplayTranscriptStore> = Arc::new(
         hf_storage::JsonlDisplayTranscriptStore::new(base.join("display")),
     );
-    let checkpoint_store: Arc<dyn ChatCheckpointStore> =
-        Arc::new(crate::checkpoints::InMemoryChatCheckpointStore::default());
+    // Persist checkpoints in the DB so turn-level rollback survives a restart
+    // (the in-memory store lost them on exit, silently no-op'ing rollback).
+    let checkpoint_store: Arc<dyn ChatCheckpointStore> = Arc::new(
+        hf_storage::SqliteChatCheckpointStore::new(store.pool().clone()),
+    );
 
     let manager = Arc::new(hf_session::SessionManager::new(
         Arc::clone(&session_store),
@@ -629,6 +664,7 @@ impl ServiceContainer {
             run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -731,8 +767,12 @@ impl ServiceContainer {
             .await
             .unwrap_or_default();
         let transcript = sessions.read_transcript(session).await.unwrap_or_default();
-        list.into_iter()
-            .filter(|c| !c.invalidated)
+        let mut valid: Vec<_> = list.into_iter().filter(|c| !c.invalidated).collect();
+        // Present turns oldest-first for the picker, regardless of the store's
+        // list ordering (the trait returns them newest-first).
+        valid.sort_by_key(|c| c.turn_number);
+        valid
+            .into_iter()
             .map(|c| {
                 let preview = transcript
                     .get(c.message_count_before as usize)
@@ -862,6 +902,21 @@ impl ServiceContainer {
     #[must_use]
     pub fn session_manager(&self) -> Option<&Arc<hf_session::SessionManager>> {
         self.session_manager.as_ref()
+    }
+
+    /// The lock serializing chat turns on `session`, creating it on first use.
+    /// Held for the whole turn so concurrent turns on one session run one at a
+    /// time; distinct sessions take distinct locks and are unaffected.
+    #[must_use]
+    pub fn session_turn_lock(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .session_turn_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(session.clone()).or_default())
     }
 
     /// Replace the guardrail engine (e.g. install an interactive HITL gate),
@@ -1114,6 +1169,21 @@ impl ServiceContainer {
         &self.guardrails
     }
 
+    /// Ask the operator to approve an agent's tool call, for an agent running
+    /// with manual autonomy that gates every action. Returns whether it was
+    /// approved. Tighten-only: it only ever adds a prompt via the guardrail
+    /// gate; it never bypasses the policy or auto-allows.
+    pub async fn approve_agent_tool(&self, tool: &str, agent: &str) -> bool {
+        self.guardrails
+            .require_approval(
+                &Action::AgentTool {
+                    name: tool.to_owned(),
+                },
+                &format!("agent '{agent}' runs with manual autonomy and requests tool '{tool}'"),
+            )
+            .await
+    }
+
     /// Construct the canonical container used by every presentation layer
     /// (CLI, web, GUI): a Docker (or stub) runtime, an LLM provider pool from
     /// the environment, and the persistence store from `HF_DB_PATH`.
@@ -1172,6 +1242,7 @@ impl ServiceContainer {
             run_journal,
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1372,6 +1443,28 @@ impl ServiceContainer {
                     .map(|c| c.id)
             })
             .unwrap_or_default()
+    }
+
+    /// Resolve the persisted harness id that a run should be linked to, so the
+    /// target-scoped workbench dashboard can attribute the run to its target
+    /// (runs carry only `config.harness_id`, and the dashboard maps that id back
+    /// through the stored harness to the target). Prefers the harness compiled
+    /// for the same engine, then any harness for the target; falls back to a
+    /// fresh id only when nothing is persisted yet.
+    async fn resolve_run_harness_id(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+    ) -> Uuid {
+        let Some(store) = &self.store else {
+            return Uuid::new_v4();
+        };
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        let harnesses = store.list_harnesses(target_id).await.unwrap_or_default();
+        select_run_harness(&harnesses, engine).unwrap_or_else(Uuid::new_v4)
     }
 
     /// Persist corpus entries for a target so the Corpus view and later runs
@@ -1592,7 +1685,10 @@ impl ServiceContainer {
         let binary_str = format!("/work/{bin}");
 
         let run_cfg = FuzzRunConfig {
-            harness_id: Uuid::new_v4(),
+            // Link the run to the target's compiled harness so the target-scoped
+            // workbench dashboard can attribute it. A throwaway id here would
+            // leave every run unattributable (dashboard shows zero runs).
+            harness_id: self.resolve_run_harness_id(project, target, engine).await,
             engine,
             duration: Some(std::time::Duration::from_secs(duration_secs)),
             max_mem_mb: 2048,
@@ -1639,6 +1735,17 @@ impl ServiceContainer {
         };
 
         let runner = hf_engine::runner::EngineRunner::new();
+        // Coverage-guided feedback: watch edge readings for stagnation and, once
+        // coverage plateaus past the threshold, surface a proposal to iterate.
+        // Wrap `on_progress` so every event still flows to the caller unchanged.
+        let feedback =
+            CoverageFeedback::new(crate::config::coverage_stagnation_secs(), on_progress);
+        let watched = |p: FuzzProgress| {
+            if let FuzzProgress::EdgesCovered(v) = &p {
+                feedback.on_edges(*v);
+            }
+            on_progress(p);
+        };
         // Stream progress live: `on_progress` fires for each output line and
         // stat as the fuzzer runs, not post-hoc.
         let run_result = runner
@@ -1651,7 +1758,7 @@ impl ServiceContainer {
                 self.runtime.as_ref(),
                 &workspace,
                 &cancel,
-                on_progress,
+                &watched,
             )
             .await;
         let was_cancelled = cancel.is_cancelled();
@@ -1688,6 +1795,7 @@ impl ServiceContainer {
             edges,
             execs,
             crashes: u64::from(crashes),
+            stagnation: feedback.proposal(),
         })
     }
 
@@ -1919,7 +2027,18 @@ impl ServiceContainer {
             }
         };
 
+        // Register the cancellation token so the UI Stop button (which fires
+        // `cancel_all_runs`) and `cancel_run` can tear down a long KVM campaign.
+        // `ActiveRunGuard` removes it again even if this future is aborted.
         let cancel = CancellationToken::new();
+        let run_id = Uuid::new_v4();
+        if let Ok(mut runs) = self.active_runs.lock() {
+            runs.insert(run_id, cancel.clone());
+        }
+        let _active_run_guard = ActiveRunGuard {
+            active_runs: Arc::clone(&self.active_runs),
+            run_id,
+        };
         let cmd = ["bash".to_owned(), "-c".to_owned(), inner];
         let result = self
             .runtime
@@ -2526,10 +2645,13 @@ impl ServiceContainer {
             tracing::info!("casr produced no reports; falling back to built-in triage");
             return None;
         }
+        // The actual crash inputs, including AFL++'s nested
+        // out/<instance>/crashes/ layout, so each casrep resolves to a real file.
+        let crash_inputs = collect_crash_inputs(&out_dir);
         let mut crashes = reports
             .into_iter()
             .map(|(path, casr)| {
-                let input_path = casrep_input_path(&out_dir, &path);
+                let input_path = casrep_input_path(&out_dir, &path, &crash_inputs);
                 let signature = if casr.crashline.is_empty() {
                     casr.stack.first().cloned().unwrap_or_default()
                 } else {
@@ -3039,6 +3161,11 @@ pub struct RunSummary {
     pub edges: u64,
     pub execs: f64,
     pub crashes: u64,
+    /// A coverage-stagnation proposal surfaced during the run (e.g. regenerate
+    /// the harness), or `None` if coverage kept progressing. Lets a presentation
+    /// layer offer an iterate-next affordance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stagnation: Option<hf_coverage::StagnationProposal>,
 }
 
 /// Inputs for a syzkaller kernel-fuzzing campaign.
@@ -3299,6 +3426,222 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     body
 }
 
+/// Coverage-guided feedback for a live fuzz run.
+///
+/// Feeds each streamed edge reading into a [`hf_coverage::CoverageTracker`] and,
+/// the first time coverage has been flat for longer than `threshold_secs`,
+/// surfaces a [`StagnationProposal`](hf_coverage::StagnationProposal) to the user
+/// (a live log line now, and on the final [`RunSummary`]). This realizes the
+/// coverage feedback loop from `docs/design/corpus-coverage-design.md` §4: we
+/// detect stagnation and *propose* iterating (a new harness / dictionary / seed)
+/// rather than regenerating a harness autonomously, which would bypass the
+/// human-in-the-loop review that harness execution requires (AGENTS.md §2.12).
+struct CoverageFeedback<'a> {
+    tracker: std::sync::Mutex<hf_coverage::CoverageTracker>,
+    /// Latched proposal: `Some` once surfaced, so it is proposed at most once.
+    proposal: std::sync::Mutex<Option<hf_coverage::StagnationProposal>>,
+    threshold_secs: u64,
+    emit: &'a (dyn Fn(FuzzProgress) + Send + Sync),
+}
+
+impl<'a> CoverageFeedback<'a> {
+    fn new(threshold_secs: u64, emit: &'a (dyn Fn(FuzzProgress) + Send + Sync)) -> Self {
+        Self {
+            tracker: std::sync::Mutex::new(hf_coverage::CoverageTracker::new()),
+            proposal: std::sync::Mutex::new(None),
+            threshold_secs,
+            emit,
+        }
+    }
+
+    /// Record a cumulative edge count from a stat pulse and, on the first
+    /// stagnation, emit and latch a proposal.
+    fn on_edges(&self, edges: u64) {
+        let Ok(mut tracker) = self.tracker.lock() else {
+            return;
+        };
+        tracker.update(&hf_core::coverage::CoverageReport {
+            run_id: Uuid::nil(),
+            edges,
+            blocks: 0,
+            delta_edges: 0,
+            stagnation_secs: 0,
+            new_edges_files: Vec::new(),
+        });
+        // Only the first stagnation is surfaced.
+        if self.proposal.lock().is_ok_and(|p| p.is_some()) {
+            return;
+        }
+        if let Some(proposal) = hf_coverage::propose_action(&tracker, self.threshold_secs) {
+            (self.emit)(FuzzProgress::LogLine(format!(
+                "[coverage] no new edges for {}s -- {}",
+                tracker.stagnation_secs(),
+                describe_proposal(&proposal),
+            )));
+            if let Ok(mut slot) = self.proposal.lock() {
+                *slot = Some(proposal);
+            }
+        }
+    }
+
+    /// The proposal surfaced during the run, if any.
+    fn proposal(&self) -> Option<hf_coverage::StagnationProposal> {
+        self.proposal.lock().ok().and_then(|p| p.clone())
+    }
+}
+
+/// A short, user-facing description of a stagnation proposal for the run log.
+fn describe_proposal(proposal: &hf_coverage::StagnationProposal) -> &'static str {
+    match proposal {
+        hf_coverage::StagnationProposal::NewHarness => {
+            "consider regenerating the harness to reach new code paths"
+        }
+        hf_coverage::StagnationProposal::CustomMutator => {
+            "consider adding a dictionary or custom mutator"
+        }
+        hf_coverage::StagnationProposal::Stop => "consider stopping this target",
+    }
+}
+
+/// Pick the harness id a run should be linked to from the harnesses persisted
+/// for its target. Prefers a harness built for the same engine, then any
+/// harness; returns `None` when the target has no persisted harness yet.
+fn select_run_harness(harnesses: &[Harness], engine: EngineKind) -> Option<Uuid> {
+    harnesses
+        .iter()
+        .find(|h| h.engine == engine)
+        .or_else(|| harnesses.first())
+        .map(|h| h.id)
+}
+
+#[cfg(test)]
+mod harness_link_tests {
+    use super::{select_run_harness, EngineKind, Harness};
+    use hf_core::harness::{BuildCommand, HarnessStatus};
+    use hf_core::target::{Sanitizer, TargetLanguage};
+    use uuid::Uuid;
+
+    fn harness(engine: EngineKind) -> Harness {
+        Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine,
+            source: String::new(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: String::new(),
+                args: Vec::new(),
+                output: std::path::PathBuf::new(),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Compiled,
+            smoke_run: None,
+        }
+    }
+
+    #[test]
+    fn prefers_the_harness_for_the_running_engine() {
+        let afl = harness(EngineKind::AflPlusPlus);
+        let libfuzzer = harness(EngineKind::LibFuzzer);
+        let harnesses = vec![afl.clone(), libfuzzer.clone()];
+        assert_eq!(
+            select_run_harness(&harnesses, EngineKind::LibFuzzer),
+            Some(libfuzzer.id)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_any_harness_when_engine_absent() {
+        let afl = harness(EngineKind::AflPlusPlus);
+        let harnesses = vec![afl.clone()];
+        assert_eq!(
+            select_run_harness(&harnesses, EngineKind::LibFuzzer),
+            Some(afl.id)
+        );
+    }
+
+    #[test]
+    fn returns_none_without_any_harness() {
+        assert_eq!(select_run_harness(&[], EngineKind::LibFuzzer), None);
+    }
+}
+
+#[cfg(test)]
+mod casrep_path_tests {
+    use super::casrep_input_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn resolves_afl_nested_crash_input() {
+        // AFL++ nests the input under out/<instance>/crashes/; the casrep sits in
+        // casr_out. The resolved path must point at the real nested file.
+        let out = Path::new("/work/out");
+        let nested = PathBuf::from("/work/out/default/crashes/id:000001,sig:06");
+        let inputs = vec![nested.clone()];
+        let casrep = Path::new("/work/casr_out/id:000001,sig:06.casrep");
+        assert_eq!(casrep_input_path(out, casrep, &inputs), nested);
+    }
+
+    #[test]
+    fn falls_back_to_flat_layout_for_libfuzzer() {
+        // libFuzzer crashes sit directly in out/; when the input list does not
+        // contain a match, fall back to out/<name>.
+        let out = Path::new("/work/out");
+        let casrep = Path::new("/work/casr_out/crash-abc.casrep");
+        assert_eq!(
+            casrep_input_path(out, casrep, &[]),
+            PathBuf::from("/work/out/crash-abc")
+        );
+    }
+}
+
+#[cfg(test)]
+mod coverage_feedback_tests {
+    use super::{CoverageFeedback, FuzzProgress};
+    use hf_coverage::StagnationProposal;
+    use std::sync::Mutex;
+
+    #[test]
+    fn proposes_once_when_edges_plateau() {
+        let emitted: Mutex<Vec<FuzzProgress>> = Mutex::new(Vec::new());
+        let emit = |p: FuzzProgress| emitted.lock().unwrap().push(p);
+        // threshold 0: the first flat pulse after the initial reading is stagnant.
+        let fb = CoverageFeedback::new(0, &emit);
+        fb.on_edges(100); // first reading -- never stagnant (needs >1 update)
+        assert_eq!(fb.proposal(), None);
+        fb.on_edges(100); // flat -> stagnant -> propose
+        fb.on_edges(100); // still flat -> must NOT propose again (latched)
+
+        assert_eq!(fb.proposal(), Some(StagnationProposal::NewHarness));
+        let log_lines = emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| matches!(p, FuzzProgress::LogLine(_)))
+            .count();
+        assert_eq!(log_lines, 1, "the proposal must be surfaced exactly once");
+    }
+
+    #[test]
+    fn no_proposal_on_a_single_reading() {
+        let emit = |_p: FuzzProgress| {};
+        let fb = CoverageFeedback::new(0, &emit);
+        fb.on_edges(100);
+        assert_eq!(fb.proposal(), None);
+    }
+
+    #[test]
+    fn threshold_gates_the_proposal() {
+        let emit = |_p: FuzzProgress| {};
+        // A high threshold is not reached in the test's wall-clock window, so a
+        // flat plateau does not (yet) propose.
+        let fb = CoverageFeedback::new(3600, &emit);
+        fb.on_edges(100);
+        fb.on_edges(100);
+        assert_eq!(fb.proposal(), None);
+    }
+}
+
 #[cfg(test)]
 mod coverage_tests {
     use super::parse_covered_functions;
@@ -3347,7 +3690,7 @@ mod workspace_tests {
 
     /// The per-project workspace base every resolved path must stay within.
     fn base(project: &Path) -> std::path::PathBuf {
-        super::workspace_root().join(project.file_name().unwrap())
+        super::workspace_root().join(super::project_slug(project))
     }
 
     #[test]
@@ -3376,6 +3719,27 @@ mod workspace_tests {
         let project = Path::new("/home/user/myproj");
         let ws = workspace_dir(project, "parse_json");
         assert_eq!(ws, base(project).join("parse_json"));
+    }
+
+    #[test]
+    fn projects_sharing_a_basename_get_distinct_workspaces() {
+        // Two different projects with the same directory name must not share a
+        // workspace, or one's compiled binary/corpus/crashes would be used for
+        // the other's runs/triage.
+        let a = workspace_dir(Path::new("/a/libfoo"), "parse");
+        let b = workspace_dir(Path::new("/b/libfoo"), "parse");
+        assert_ne!(a, b, "same-basename projects collided");
+    }
+
+    #[test]
+    fn same_project_maps_to_a_stable_workspace() {
+        // The slug must be deterministic so compile -> run -> triage across
+        // separate invocations all resolve to the same on-disk workspace.
+        let project = Path::new("/home/user/myproj");
+        assert_eq!(
+            workspace_dir(project, "parse_json"),
+            workspace_dir(project, "parse_json")
+        );
     }
 
     #[test]

@@ -503,6 +503,9 @@ struct GuiApprovalGate {
 impl hf_guardrails::ApprovalGate for GuiApprovalGate {
     async fn request_approval(&self, action: &hf_guardrails::Action, reason: &str) -> bool {
         use tauri::Emitter;
+        /// Deny an approval the user never answers so the agent turn cannot hang
+        /// indefinitely (the only prompt listener lives in the Chat view).
+        const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
         let id = uuid::Uuid::new_v4();
         let rx = self.pending.register(id).await;
         let _ = self.app.emit(
@@ -513,7 +516,7 @@ impl hf_guardrails::ApprovalGate for GuiApprovalGate {
                 "reason": reason,
             }),
         );
-        rx.await.unwrap_or(false)
+        self.pending.await_decision(id, rx, APPROVAL_TIMEOUT).await
     }
 }
 
@@ -1362,6 +1365,10 @@ pub async fn run_fuzzer(
             "edges": summary.edges,
             "crashes": summary.crashes,
             "execs": summary.execs,
+            // A coverage-stagnation proposal (e.g. "new_harness") when the run
+            // plateaued, so the UI can offer an iterate-next affordance; null
+            // when coverage kept progressing.
+            "stagnation": summary.stagnation,
             "exit_code": 0,
         })),
         Err(e) => Err(e.to_string()),

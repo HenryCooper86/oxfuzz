@@ -10,7 +10,8 @@ mod summary;
 pub use summary::{parse_llvm_cov_summary, CoverageSummary};
 
 /// A proposal when coverage stagnates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StagnationProposal {
     /// Generate a new harness variant for the target.
     NewHarness,

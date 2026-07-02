@@ -15,12 +15,15 @@ use tokio::sync::Mutex;
 /// A provider pool that returns pre-scripted replies in order.
 struct ScriptedPool {
     replies: Mutex<VecDeque<String>>,
+    /// The `temperature` on the most recent request (to assert it was applied).
+    last_temperature: Mutex<Option<f64>>,
 }
 
 impl ScriptedPool {
     fn new(replies: Vec<&str>) -> Self {
         Self {
             replies: Mutex::new(replies.into_iter().map(str::to_owned).collect()),
+            last_temperature: Mutex::new(None),
         }
     }
 }
@@ -29,9 +32,10 @@ impl ScriptedPool {
 impl ProviderPool for ScriptedPool {
     async fn chat_completion(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
         _route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        *self.last_temperature.lock().await = request.temperature;
         let content = self
             .replies
             .lock()
@@ -44,7 +48,12 @@ impl ProviderPool for ScriptedPool {
             content: Some(content),
             reasoning_content: None,
             tool_calls: Vec::new(),
-            usage: hf_core::types::TokenUsage::default(),
+            // Non-zero usage so a recorded diagnostic carries real token counts.
+            usage: hf_core::types::TokenUsage {
+                input_tokens: 12,
+                output_tokens: 8,
+                ..Default::default()
+            },
             finish_reason: FinishReason::Stop,
             raw_request: None,
             raw_response: None,
@@ -76,6 +85,133 @@ fn agent_with(replies: Vec<&str>, project: Option<std::path::PathBuf>) -> Agent 
     let pool = Arc::new(ScriptedPool::new(replies));
     let container = ServiceContainer::new(runtime, Some(pool));
     Agent::new(container, project)
+}
+
+#[tokio::test]
+async fn agent_turn_records_diagnostics_cost() {
+    // An interactive agent turn must show up in the cost summary, like
+    // rank/harness/triage -- otherwise interactive-agent spend is invisible.
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"thought":"easy","final":"done"}"#,
+    ]));
+    let container = ServiceContainer::new(runtime, Some(pool));
+    let agent = Agent::new(container.clone(), None);
+    let sink = CollectingSink::new();
+
+    let before = container.cost_summary().await.calls;
+    agent.run_turn(vec![], "hi", &sink).await.unwrap();
+    let after = container.cost_summary().await;
+
+    assert_eq!(
+        after.calls,
+        before + 1,
+        "the turn's LLM call must be recorded"
+    );
+    assert_eq!(after.input_tokens, 12);
+    assert_eq!(after.output_tokens, 8);
+}
+
+#[tokio::test]
+async fn agent_applies_configured_temperature() {
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(vec![r#"{"final":"ok"}"#]));
+    let captured = Arc::clone(&pool);
+    let container = ServiceContainer::new(runtime, Some(pool));
+
+    let def = hf_agent::AgentDefinition::from_toml(
+        "id = \"tempy\"\n\
+         name = \"Tempy\"\n\
+         description = \"d\"\n\
+         role = \"orchestrator\"\n\
+         system_prompt = \"you are a test\"\n\
+         temperature = 0.25\n",
+    )
+    .expect("valid definition toml");
+    let agent = Agent::with_definition(container, None, def);
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "hi", &sink).await.unwrap();
+
+    assert_eq!(
+        *captured.last_temperature.lock().await,
+        Some(0.25),
+        "the agent's configured temperature must reach the provider request"
+    );
+}
+
+/// Build an agent from an inline definition TOML, with a container whose
+/// guardrail gate denies every approval request.
+fn agent_with_deny_gate(autonomy: &str, replies: Vec<&str>) -> Agent {
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(replies));
+    let container =
+        ServiceContainer::new(runtime, Some(pool)).with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::permissive(),
+            Arc::new(hf_guardrails::DenyAll),
+        ));
+    let def = hf_agent::AgentDefinition::from_toml(&format!(
+        "id = \"m\"\n\
+         name = \"Tester\"\n\
+         description = \"d\"\n\
+         role = \"orchestrator\"\n\
+         system_prompt = \"s\"\n\
+         autonomy = \"{autonomy}\"\n\
+         allowed_tools = [\"FileRead\"]\n"
+    ))
+    .expect("valid definition toml");
+    Agent::with_definition(container, Some(std::env::temp_dir()), def)
+}
+
+fn last_tool_summary(events: &[AgentEvent]) -> String {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("a tool result was emitted")
+}
+
+#[tokio::test]
+async fn manual_autonomy_gates_tools_on_approval() {
+    // A manual-autonomy agent must get operator approval before ANY tool runs.
+    // With a denying gate the tool is refused (not executed), and the refusal is
+    // fed back so the turn still completes.
+    let agent = agent_with_deny_gate(
+        "manual",
+        vec![
+            r#"{"thought":"peek","tool":"FileRead","args":{"path":"x"}}"#,
+            r#"{"final":"done"}"#,
+        ],
+    );
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "read", &sink).await.unwrap();
+    assert_eq!(out, "done");
+    assert!(
+        last_tool_summary(&sink.events().await).contains("approval declined"),
+        "manual autonomy must gate the tool on the (denied) approval"
+    );
+}
+
+#[tokio::test]
+async fn assist_autonomy_is_not_gated_by_the_manual_path() {
+    // Tighten-only: the same denying gate must NOT block an Assist agent's read
+    // (the manual-approval path is skipped), so the refusal is a normal tool
+    // outcome, not an "approval declined".
+    let agent = agent_with_deny_gate(
+        "assist",
+        vec![
+            r#"{"thought":"peek","tool":"FileRead","args":{"path":"nonexistent"}}"#,
+            r#"{"final":"done"}"#,
+        ],
+    );
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "read", &sink).await.unwrap();
+    assert!(
+        !last_tool_summary(&sink.events().await).contains("approval declined"),
+        "assist autonomy must not go through the manual-approval gate"
+    );
 }
 
 #[tokio::test]

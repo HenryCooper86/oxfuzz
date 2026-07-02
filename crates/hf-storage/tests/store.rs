@@ -365,3 +365,57 @@ async fn schedule_executions_round_trip_and_latest_fire() {
         .unwrap();
     assert_eq!(store.list_schedule_executions(10).await.unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn chat_checkpoints_survive_a_reconnect() {
+    use hf_core::session::{ChatCheckpoint, ChatCheckpointStore};
+    use hf_core::types::SessionId;
+    use hf_storage::SqliteChatCheckpointStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cp.db");
+    let session = SessionId("s-1".to_owned());
+
+    let cp = |id: &str, turn: u32| ChatCheckpoint {
+        checkpoint_id: id.to_owned(),
+        session_id: session.clone(),
+        turn_number: turn,
+        message_count_before: turn * 2,
+        journal_scope_id: format!("scope-{turn}"),
+        invalidated: false,
+        created_at: Utc::now(),
+    };
+
+    // Persist two checkpoints, then drop the store (simulating app exit).
+    {
+        let store = Store::connect(&path).await.expect("connect");
+        let cps = SqliteChatCheckpointStore::new(store.pool().clone());
+        cps.save(&cp("cp-1", 1)).await.unwrap();
+        cps.save(&cp("cp-2", 2)).await.unwrap();
+    }
+
+    // Reconnect (simulating a restart) -- the checkpoints must still be there,
+    // which is exactly what the in-memory store lost (making rollback a no-op).
+    let store = Store::connect(&path).await.expect("reconnect");
+    let cps = SqliteChatCheckpointStore::new(store.pool().clone());
+
+    let all = cps.list_by_session(&session).await.unwrap();
+    assert_eq!(all.len(), 2, "checkpoints must persist across a restart");
+    // list_by_session is turn_number DESC.
+    assert_eq!(all[0].turn_number, 2);
+
+    let latest = cps.latest(&session).await.unwrap().expect("a latest");
+    assert_eq!(latest.checkpoint_id, "cp-2");
+
+    let loaded = cps.load("cp-1").await.unwrap();
+    assert_eq!(loaded.message_count_before, 2);
+
+    // Rolling back past turn 1 invalidates every later checkpoint.
+    let invalidated = cps.invalidate_after(&session, 1).await.unwrap();
+    assert_eq!(invalidated, 1);
+    assert_eq!(
+        cps.latest(&session).await.unwrap().map(|c| c.checkpoint_id),
+        Some("cp-1".to_owned()),
+        "the latest non-invalidated checkpoint is now cp-1"
+    );
+}

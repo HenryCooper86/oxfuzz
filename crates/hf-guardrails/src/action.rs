@@ -38,6 +38,13 @@ pub enum Action {
         /// The destination path.
         path: String,
     },
+    /// An agent tool invocation gated for approval because the driving agent
+    /// runs with manual autonomy (every action needs operator consent). This is
+    /// a tighten-only signal -- it only ever asks; it never auto-allows.
+    AgentTool {
+        /// The tool the agent wants to run.
+        name: String,
+    },
 }
 
 impl Action {
@@ -58,6 +65,7 @@ impl Action {
             Action::Chat => "chat turn".to_owned(),
             Action::ShellExec { command } => format!("shell: {command}"),
             Action::WriteHostFile { path } => format!("write host file: {path}"),
+            Action::AgentTool { name } => format!("agent tool: {name}"),
         }
     }
 
@@ -68,7 +76,7 @@ impl Action {
             Action::Discover | Action::DraftHarness | Action::CorpusOp | Action::Chat => {
                 RiskTier::Low
             }
-            Action::CompileHarness | Action::Triage => RiskTier::Medium,
+            Action::CompileHarness | Action::Triage | Action::AgentTool { .. } => RiskTier::Medium,
             Action::RunHarness | Action::RunFuzzer { .. } | Action::WriteHostFile { .. } => {
                 RiskTier::High
             }
