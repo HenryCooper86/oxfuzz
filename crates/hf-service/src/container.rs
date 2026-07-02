@@ -998,6 +998,36 @@ impl ServiceContainer {
         }
     }
 
+    /// Internal-team dashboard summary for the active project/target.
+    pub async fn workbench_dashboard(
+        &self,
+        project: Option<&Path>,
+        target: Option<&str>,
+    ) -> crate::workbench::WorkbenchDashboard {
+        crate::workbench::dashboard(self.store.as_deref(), project, target).await
+    }
+
+    /// Generated harnesses that need human review or promotion.
+    pub async fn harness_review_queue(
+        &self,
+        project: Option<&Path>,
+        target: Option<&str>,
+    ) -> Vec<crate::workbench::HarnessReviewItem> {
+        crate::workbench::harness_review_queue(self.store.as_deref(), project, target).await
+    }
+
+    /// Build a human-reviewable GitLab issue draft for a crash.
+    ///
+    /// This is intentionally non-publishing: it returns a title, Markdown body,
+    /// labels, and a prefilled issue URL when a GitLab remote/config is known.
+    pub async fn gitlab_issue_export(
+        &self,
+        project: &Path,
+        crash_id: &str,
+    ) -> Result<crate::workbench::GitLabIssueExport, ClassifiedError> {
+        crate::workbench::gitlab_issue_export(self.store.as_deref(), project, crash_id).await
+    }
+
     /// Ingest a document into a project's knowledge base.
     ///
     /// Converts the file (PDF, Office, HTML, CSV, ...) to Markdown with
