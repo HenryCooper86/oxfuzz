@@ -72,6 +72,23 @@ impl Drop for ActiveRequestGuard {
     }
 }
 
+/// State threaded through the metrics-recording `unfold` that wraps a provider's
+/// chunk stream, so a completed stream records its usage/cost exactly once (the
+/// original stream reported nothing on success, leaving streamed spend invisible
+/// while mid-stream errors were still counted -- skewing the error rate).
+struct StreamMetricsState {
+    stream: hf_core::provider::ChatStream,
+    freeze_manager: Arc<FreezeManager>,
+    metrics: crate::metrics::SharedMetrics,
+    pid: ProviderId,
+    cost_in: f64,
+    cost_out: f64,
+    /// Token counts from the most recent chunk that carried usage.
+    usage: Option<(u32, u32)>,
+    /// Set once the terminal outcome (success or error) has been recorded.
+    recorded: bool,
+}
+
 impl ProviderPoolImpl {
     /// Create a new pool from a list of pre-constructed providers.
     ///
@@ -591,31 +608,73 @@ impl ProviderPool for ProviderPoolImpl {
                 // freeze; otherwise a provider that always fails after the
                 // handshake is never frozen and failover never engages. We
                 // report the first such error once, then keep forwarding items.
-                let inner = stream_response.stream;
                 let keepalive = (guard, permit, global_permit);
-                let freeze_manager = Arc::clone(&entry.freeze_manager);
-                let stream_metrics = Arc::clone(&entry.metrics);
-                let stream_pid = meta.id.clone();
                 stream_response.stream = Box::pin(futures::stream::unfold(
-                    (
-                        inner,
-                        Some(keepalive),
-                        freeze_manager,
-                        stream_metrics,
-                        stream_pid,
-                        false,
-                    ),
-                    |(mut s, ka, fm, metrics, pid, mut reported)| async move {
-                        use futures::StreamExt;
-                        let item = s.next().await?;
-                        if let Err(err) = &item {
-                            if !reported {
-                                reported = true;
-                                metrics.record_error();
-                                Self::classify_and_freeze(&fm, &pid, err);
+                    StreamMetricsState {
+                        stream: stream_response.stream,
+                        freeze_manager: Arc::clone(&entry.freeze_manager),
+                        metrics: Arc::clone(&entry.metrics),
+                        pid: meta.id.clone(),
+                        cost_in: meta.cost_per_1k_input,
+                        cost_out: meta.cost_per_1k_output,
+                        // Last usage seen (the final chunk carries it); recorded
+                        // on clean completion.
+                        usage: None,
+                        // Whether the request's terminal outcome (success or
+                        // error) has been recorded, so it counts exactly once.
+                        recorded: false,
+                    },
+                    move |mut st: StreamMetricsState| {
+                        // Hold the concurrency permits + active-request guard for
+                        // the whole stream: captured by this `move` closure, they
+                        // drop (releasing the slot) when the stream ends or is
+                        // dropped.
+                        let _keepalive = &keepalive;
+                        async move {
+                            use futures::StreamExt;
+                            match st.stream.next().await {
+                                // Clean end of stream: record the completed request
+                                // once (tokens + cost), unless an error already
+                                // terminated it. A stream dropped before this point
+                                // is left uncounted (in-flight, not done).
+                                None => {
+                                    if !st.recorded {
+                                        st.recorded = true;
+                                        let (input, output) = st.usage.unwrap_or((0, 0));
+                                        st.metrics.record_success_with_cost(
+                                            input,
+                                            output,
+                                            st.cost_in,
+                                            st.cost_out,
+                                        );
+                                    }
+                                    None
+                                }
+                                Some(item) => {
+                                    match &item {
+                                        Ok(chunk) => {
+                                            if let Some(u) = &chunk.usage {
+                                                st.usage = Some((u.input_tokens, u.output_tokens));
+                                            }
+                                        }
+                                        // A mid-stream error counts against the
+                                        // provider and triggers a freeze, once.
+                                        Err(err) => {
+                                            if !st.recorded {
+                                                st.recorded = true;
+                                                st.metrics.record_error();
+                                                Self::classify_and_freeze(
+                                                    &st.freeze_manager,
+                                                    &st.pid,
+                                                    err,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Some((item, st))
+                                }
                             }
                         }
-                        Some((item, (s, ka, fm, metrics, pid, reported)))
                     },
                 ));
 
@@ -795,10 +854,25 @@ mod tests {
                     message: "mock failure".into(),
                 });
             }
-            // An empty stream is enough to verify permit lifetime: the pool's
-            // wrapper holds the permit until the stream is consumed or dropped.
+            // Emit one final chunk carrying usage, so consuming the stream to its
+            // end exercises the pool's completion metrics; permit-lifetime tests
+            // that never consume it are unaffected.
+            let chunk = ChatStreamChunk {
+                delta_content: Some("hi".into()),
+                delta_reasoning_content: None,
+                delta_tool_calls: vec![],
+                usage: Some(TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    ..Default::default()
+                }),
+                finish_reason: Some(FinishReason::Stop),
+                delta_images: vec![],
+            };
             Ok(ChatStreamResponse {
-                stream: Box::pin(futures::stream::empty()),
+                stream: Box::pin(futures::stream::iter(vec![Ok(chunk)])),
                 raw_request: None,
                 provider_id: None,
                 model: self.meta.model.clone(),
@@ -935,6 +1009,36 @@ mod tests {
             before,
             "dropping the stream must release the permit"
         );
+    }
+
+    #[tokio::test]
+    async fn completed_stream_records_usage_and_cost() {
+        use futures::StreamExt;
+        let pool = ProviderPoolImpl::from_providers(
+            vec![MockProvider::ok("p1", vec!["gen"])],
+            &test_config(),
+        );
+        let route = RouteRequest {
+            required_tags: vec!["gen".into()],
+            ..Default::default()
+        };
+
+        // Nothing recorded until the stream is actually consumed to completion.
+        assert_eq!(pool.providers[0].metrics.snapshot().total_requests, 0);
+
+        let mut resp = pool
+            .chat_completion_stream(&test_request(), &route)
+            .await
+            .expect("stream should start");
+        while resp.stream.next().await.is_some() {}
+
+        let snap = pool.providers[0].metrics.snapshot();
+        assert_eq!(snap.total_requests, 1, "a completed stream counts once");
+        assert_eq!(snap.total_errors, 0);
+        assert_eq!(snap.total_input_tokens, 10);
+        assert_eq!(snap.total_output_tokens, 5);
+        // 10/1000*0.01 + 5/1000*0.03 = 0.00025 USD = 250 micro-dollars.
+        assert_eq!(snap.estimated_cost_micros, 250);
     }
 
     #[tokio::test]

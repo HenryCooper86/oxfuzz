@@ -12,6 +12,36 @@ use std::time::Duration;
 
 use crate::config::RuntimeConfig;
 
+/// Outcome of reading one line from a streamed pipe.
+enum LineRead {
+    /// A decoded line to forward.
+    Line(String),
+    /// An unreadable line (non-UTF-8 or a transient interruption): drop it but
+    /// keep reading the pipe.
+    Skip,
+    /// End of the stream (clean EOF or a hard read error).
+    Eof,
+}
+
+/// Classify one `next_line()` result. A fuzzed target can emit raw bytes on
+/// stdout/stderr; `tokio`'s line reader surfaces those as `InvalidData`. Folding
+/// that into EOF (as a bare `_ => done`) would stop reading the pipe for the
+/// rest of the campaign and silently drop later crash/coverage lines, so a
+/// non-UTF-8 or interrupted read is skipped rather than treated as the end.
+fn classify_line_read(line: std::io::Result<Option<String>>) -> LineRead {
+    match line {
+        Ok(Some(l)) => LineRead::Line(l),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::InvalidData
+                || e.kind() == std::io::ErrorKind::Interrupted =>
+        {
+            LineRead::Skip
+        }
+        // A clean EOF or a hard read error (e.g. a broken pipe) both end it.
+        Ok(None) | Err(_) => LineRead::Eof,
+    }
+}
+
 /// Build the `docker run` argument list for a command.
 ///
 /// This is a pure function with no side effects, making it testable without
@@ -251,21 +281,23 @@ impl DockerRuntime {
             tokio::select! {
                 () = &mut deadline => break Stop::Killed,
                 () = cancel.cancelled() => break Stop::Killed,
-                line = out_lines.next_line(), if !out_done => match line {
-                    Ok(Some(l)) => {
+                line = out_lines.next_line(), if !out_done => match classify_line_read(line) {
+                    LineRead::Line(l) => {
                         on_line(l.as_str());
                         stdout_buf.push_str(&l);
                         stdout_buf.push('\n');
                     }
-                    _ => out_done = true,
+                    LineRead::Skip => {}
+                    LineRead::Eof => out_done = true,
                 },
-                line = err_lines.next_line(), if !err_done => match line {
-                    Ok(Some(l)) => {
+                line = err_lines.next_line(), if !err_done => match classify_line_read(line) {
+                    LineRead::Line(l) => {
                         on_line(l.as_str());
                         stderr_buf.push_str(&l);
                         stderr_buf.push('\n');
                     }
-                    _ => err_done = true,
+                    LineRead::Skip => {}
+                    LineRead::Eof => err_done = true,
                 },
             }
         };
@@ -417,5 +449,41 @@ impl RuntimeAdapter for DockerRuntime {
         tokio::fs::read_to_string(path)
             .await
             .map_err(|e| ClassifiedError::Sandbox(format!("read: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod line_read_tests {
+    use super::{classify_line_read, LineRead};
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn decoded_line_is_forwarded() {
+        assert!(matches!(
+            classify_line_read(Ok(Some("crash-0".to_owned()))),
+            LineRead::Line(l) if l == "crash-0"
+        ));
+    }
+
+    #[test]
+    fn clean_eof_ends_the_stream() {
+        assert!(matches!(classify_line_read(Ok(None)), LineRead::Eof));
+    }
+
+    #[test]
+    fn non_utf8_line_is_skipped_not_ended() {
+        // A raw byte on the fuzzer's output must not stop capture, or later
+        // crash/coverage lines would be lost.
+        let err = Err(Error::new(
+            ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        ));
+        assert!(matches!(classify_line_read(err), LineRead::Skip));
+    }
+
+    #[test]
+    fn hard_read_error_ends_the_stream() {
+        let err = Err(Error::new(ErrorKind::BrokenPipe, "pipe closed"));
+        assert!(matches!(classify_line_read(err), LineRead::Eof));
     }
 }
