@@ -625,6 +625,7 @@ impl LlmProvider for AnthropicProvider {
                     current_thinking: String::new(),
                     accumulated_usage: None,
                     image_index: 0,
+                    provider_id: self.metadata.id.to_string(),
                 },
                 VecDeque::<InterStreamEvent>::new(),
             ),
@@ -767,9 +768,20 @@ impl LlmProvider for AnthropicProvider {
                                 state.sse.done = true;
                                 return None;
                             }
-                            AnthropicSseEvent::Ping
-                            | AnthropicSseEvent::Error { .. }
-                            | AnthropicSseEvent::Unknown => {
+                            AnthropicSseEvent::Error { message } => {
+                                // A mid-stream error (e.g. overloaded_error) must
+                                // fail the stream so the pool can freeze/fail over,
+                                // not be swallowed into a silently truncated reply.
+                                state.sse.done = true;
+                                return Some((
+                                    Err(ProviderError::ServerError {
+                                        provider: state.provider_id.clone(),
+                                        message,
+                                    }),
+                                    composite,
+                                ));
+                            }
+                            AnthropicSseEvent::Ping | AnthropicSseEvent::Unknown => {
                                 continue;
                             }
                         }
@@ -818,6 +830,8 @@ struct AnthropicSseState {
     accumulated_usage: Option<TokenUsage>,
     /// Running index for generated images.
     image_index: usize,
+    /// Provider id, for attributing a mid-stream `error` event.
+    provider_id: String,
 }
 
 /// Parsed Anthropic SSE event types.
@@ -1637,6 +1651,18 @@ mod tests {
         let mut buf = "event: ping\ndata: {}\n\n".to_string();
         let event = extract_anthropic_sse_event(&mut buf);
         assert!(matches!(event, Some(AnthropicSseEvent::Ping)));
+    }
+
+    #[test]
+    fn test_extract_anthropic_sse_error_carries_message() {
+        // A mid-stream error event must parse to Error with the API message so
+        // the stream can fail (freeze/fail over) rather than truncate silently.
+        let mut buf = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".to_string();
+        let event = extract_anthropic_sse_event(&mut buf);
+        match event {
+            Some(AnthropicSseEvent::Error { message }) => assert_eq!(message, "Overloaded"),
+            _ => panic!("expected an Error event"),
+        }
     }
 
     #[test]
