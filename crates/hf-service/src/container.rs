@@ -1374,6 +1374,28 @@ impl ServiceContainer {
             .unwrap_or_default()
     }
 
+    /// Resolve the persisted harness id that a run should be linked to, so the
+    /// target-scoped workbench dashboard can attribute the run to its target
+    /// (runs carry only `config.harness_id`, and the dashboard maps that id back
+    /// through the stored harness to the target). Prefers the harness compiled
+    /// for the same engine, then any harness for the target; falls back to a
+    /// fresh id only when nothing is persisted yet.
+    async fn resolve_run_harness_id(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+    ) -> Uuid {
+        let Some(store) = &self.store else {
+            return Uuid::new_v4();
+        };
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        let harnesses = store.list_harnesses(target_id).await.unwrap_or_default();
+        select_run_harness(&harnesses, engine).unwrap_or_else(Uuid::new_v4)
+    }
+
     /// Persist corpus entries for a target so the Corpus view and later runs
     /// survive restarts (best-effort; a store failure only logs).
     async fn persist_corpus(&self, target_id: Uuid, corpus: &hf_core::corpus::Corpus) {
@@ -1592,7 +1614,10 @@ impl ServiceContainer {
         let binary_str = format!("/work/{bin}");
 
         let run_cfg = FuzzRunConfig {
-            harness_id: Uuid::new_v4(),
+            // Link the run to the target's compiled harness so the target-scoped
+            // workbench dashboard can attribute it. A throwaway id here would
+            // leave every run unattributable (dashboard shows zero runs).
+            harness_id: self.resolve_run_harness_id(project, target, engine).await,
             engine,
             duration: Some(std::time::Duration::from_secs(duration_secs)),
             max_mem_mb: 2048,
@@ -1919,7 +1944,18 @@ impl ServiceContainer {
             }
         };
 
+        // Register the cancellation token so the UI Stop button (which fires
+        // `cancel_all_runs`) and `cancel_run` can tear down a long KVM campaign.
+        // `ActiveRunGuard` removes it again even if this future is aborted.
         let cancel = CancellationToken::new();
+        let run_id = Uuid::new_v4();
+        if let Ok(mut runs) = self.active_runs.lock() {
+            runs.insert(run_id, cancel.clone());
+        }
+        let _active_run_guard = ActiveRunGuard {
+            active_runs: Arc::clone(&self.active_runs),
+            run_id,
+        };
         let cmd = ["bash".to_owned(), "-c".to_owned(), inner];
         let result = self
             .runtime
@@ -3297,6 +3333,69 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     }
     let _ = write!(body, "    {symbol}({});", args.join(", "));
     body
+}
+
+/// Pick the harness id a run should be linked to from the harnesses persisted
+/// for its target. Prefers a harness built for the same engine, then any
+/// harness; returns `None` when the target has no persisted harness yet.
+fn select_run_harness(harnesses: &[Harness], engine: EngineKind) -> Option<Uuid> {
+    harnesses
+        .iter()
+        .find(|h| h.engine == engine)
+        .or_else(|| harnesses.first())
+        .map(|h| h.id)
+}
+
+#[cfg(test)]
+mod harness_link_tests {
+    use super::{select_run_harness, EngineKind, Harness};
+    use hf_core::harness::{BuildCommand, HarnessStatus};
+    use hf_core::target::{Sanitizer, TargetLanguage};
+    use uuid::Uuid;
+
+    fn harness(engine: EngineKind) -> Harness {
+        Harness {
+            id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            engine,
+            source: String::new(),
+            language: TargetLanguage::C,
+            build_cmd: BuildCommand {
+                compiler: String::new(),
+                args: Vec::new(),
+                output: std::path::PathBuf::new(),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Compiled,
+            smoke_run: None,
+        }
+    }
+
+    #[test]
+    fn prefers_the_harness_for_the_running_engine() {
+        let afl = harness(EngineKind::AflPlusPlus);
+        let libfuzzer = harness(EngineKind::LibFuzzer);
+        let harnesses = vec![afl.clone(), libfuzzer.clone()];
+        assert_eq!(
+            select_run_harness(&harnesses, EngineKind::LibFuzzer),
+            Some(libfuzzer.id)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_any_harness_when_engine_absent() {
+        let afl = harness(EngineKind::AflPlusPlus);
+        let harnesses = vec![afl.clone()];
+        assert_eq!(
+            select_run_harness(&harnesses, EngineKind::LibFuzzer),
+            Some(afl.id)
+        );
+    }
+
+    #[test]
+    fn returns_none_without_any_harness() {
+        assert_eq!(select_run_harness(&[], EngineKind::LibFuzzer), None);
+    }
 }
 
 #[cfg(test)]

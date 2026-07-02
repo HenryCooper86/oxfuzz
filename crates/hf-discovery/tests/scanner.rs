@@ -63,6 +63,42 @@ async fn discover_assigns_parser_kind_to_parse_value() {
 }
 
 #[tokio::test]
+async fn candidate_ids_are_stable_across_discovery_passes() {
+    // Persistence (harnesses, corpus, crashes, run linkage) is keyed on the
+    // target id. If a symbol got a fresh random id on every discovery pass, all
+    // of that stored state would be orphaned the next time discovery ran. The id
+    // must therefore be deterministic per (project_root, symbol).
+    let root = fixture_root();
+    let first = hf_discovery::discover(&root, TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    let second = hf_discovery::discover(&root, TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+
+    for c in &first.candidates {
+        let again = second
+            .candidates
+            .iter()
+            .find(|o| o.symbol == c.symbol)
+            .unwrap_or_else(|| panic!("{} should be found on the second pass", c.symbol));
+        assert_eq!(
+            c.id, again.id,
+            "candidate id for {} must be stable across passes",
+            c.symbol
+        );
+    }
+
+    // Distinct symbols must still get distinct ids.
+    let ids: std::collections::HashSet<_> = first.candidates.iter().map(|c| c.id).collect();
+    assert_eq!(
+        ids.len(),
+        first.candidates.len(),
+        "each distinct symbol must get its own id"
+    );
+}
+
+#[tokio::test]
 async fn discover_skips_no_arg_functions() {
     let inv = hf_discovery::discover(&fixture_root(), TargetLanguage::C)
         .await
