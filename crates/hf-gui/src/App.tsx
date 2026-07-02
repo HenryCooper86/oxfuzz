@@ -147,7 +147,7 @@ function AppInner() {
                 )}
                 {activeView === "run" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
-                    <RunView />
+                    <RunView onNavigate={setActiveView} />
                   </div>
                 )}
                 {activeView === "triage" && (
