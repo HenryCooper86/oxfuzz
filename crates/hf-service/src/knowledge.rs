@@ -12,7 +12,8 @@
 //! snippet shown to the user.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hf_core::error::ClassifiedError;
@@ -163,13 +164,32 @@ pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> 
 /// by markitdown). Kept under the app data dir, not in the user's repo, so
 /// ingested specs/RFCs persist and are picked up by [`index_project`].
 #[must_use]
-pub fn docs_dir(project: &Path) -> std::path::PathBuf {
+pub fn docs_dir(project: &Path) -> PathBuf {
+    docs_dir_from(project, std::env::var_os("HF_WORKSPACE_DIR"))
+}
+
+fn docs_dir_from(project: &Path, workspace_override: Option<OsString>) -> PathBuf {
     let key: String = project
         .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    crate::init::user_app_dir().join("knowledge").join(key)
+    docs_root_from(workspace_override).join(key)
+}
+
+fn docs_root_from(workspace_override: Option<OsString>) -> PathBuf {
+    if let Some(dir) = workspace_override {
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("knowledge");
+        }
+    }
+
+    let root = crate::init::user_app_dir().join("knowledge");
+    if crate::init::writable_dir(&root) {
+        root
+    } else {
+        std::env::temp_dir().join("hobot_fuzz").join("knowledge")
+    }
 }
 
 /// Index Markdown/text files from a directory into the retriever, labelled
@@ -307,6 +327,19 @@ mod tests {
     fn search_unindexed_project_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(search_project(dir.path(), "anything", 10).is_empty());
+    }
+
+    #[test]
+    fn docs_dir_honors_workspace_override() {
+        let project = Path::new("/tmp/example-project");
+        let root = std::ffi::OsString::from("/tmp/hf-test-workspace");
+
+        assert_eq!(
+            docs_dir_from(project, Some(root)),
+            Path::new("/tmp/hf-test-workspace")
+                .join("knowledge")
+                .join("_tmp_example_project")
+        );
     }
 
     #[test]
