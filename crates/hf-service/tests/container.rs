@@ -204,6 +204,61 @@ impl hf_core::provider::ProviderPool for MockPool {
 }
 
 #[tokio::test]
+async fn session_turn_lock_is_shared_per_session_across_clones() {
+    use hf_core::types::SessionId;
+
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let clone = container.clone();
+    let a = SessionId("session-a".to_owned());
+    let b = SessionId("session-b".to_owned());
+
+    // The same session resolves to the same underlying lock, even from a
+    // different clone of the container -- so two turns on one session serialize.
+    assert!(std::sync::Arc::ptr_eq(
+        &container.session_turn_lock(&a),
+        &clone.session_turn_lock(&a)
+    ));
+    // Distinct sessions get distinct locks -- so they still run concurrently.
+    assert!(!std::sync::Arc::ptr_eq(
+        &container.session_turn_lock(&a),
+        &container.session_turn_lock(&b)
+    ));
+}
+
+#[tokio::test]
+async fn session_turn_lock_serializes_concurrent_holders() {
+    use hf_core::types::SessionId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let id = SessionId("busy".to_owned());
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let lock = container.session_turn_lock(&id);
+        let in_flight = Arc::clone(&in_flight);
+        let max_seen = Arc::clone(&max_seen);
+        handles.push(tokio::spawn(async move {
+            let _guard = lock.lock_owned().await;
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            max_seen.fetch_max(now, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    assert_eq!(
+        max_seen.load(Ordering::SeqCst),
+        1,
+        "at most one turn per session may hold the lock at a time"
+    );
+}
+
+#[tokio::test]
 async fn provider_pool_swap_is_visible_across_container_clones() {
     // Live reload swaps the pool in a shared cell, so a change applied to one
     // handle must be observed by every clone (every consumer) -- the property
