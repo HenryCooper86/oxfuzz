@@ -43,6 +43,10 @@ const TOOL_USAGE: &[(&str, &str)] = &[
         "corpus",
         r#"- corpus {"target": "<symbol>", "op": "seed|grow|prune|list"} -> manage the corpus"#,
     ),
+    (
+        "delegate",
+        r#"- delegate {"agent": "target-scout|harness-author|run-operator|crash-triager|coverage-analyst|corpus-curator", "task": "<instruction>"} -> hand a scoped subtask to a specialist sub-agent and get its result"#,
+    ),
 ];
 
 /// The full tool catalog (all tools), for the default/orchestrator agent.
