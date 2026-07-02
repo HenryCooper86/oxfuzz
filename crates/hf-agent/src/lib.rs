@@ -166,10 +166,20 @@ you receive its result and continue until you can give a final answer.",
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
             let trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
-            let req = ChatRequest::from_messages(trimmed);
+            let mut req = ChatRequest::from_messages(trimmed);
+            // Apply the agent's configured sampling temperature (previously set
+            // in the definition but never plumbed into the request).
+            req.temperature = self.definition.temperature;
             let resp = pool
                 .chat_completion(&req, &RouteRequest::with_tags(&route))
                 .await?;
+            // Record the turn's token usage/cost as a diagnostic so interactive
+            // agent spend shows up in the cost summary, like rank/harness/triage
+            // (which route through LlmProviderBridge::with_diagnostics).
+            self.container
+                .diagnostics()
+                .record("agent_chat", &resp.model, &resp.usage)
+                .await;
             let content = resp.text().trim().to_owned();
 
             let Some(step) = parse_step(&content) else {
