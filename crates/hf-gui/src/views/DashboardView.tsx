@@ -1,10 +1,68 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, AlertTriangle, Bug, CheckCircle2, Clipboard, ExternalLink, FileCode, GitPullRequest, Play, RefreshCw, Target } from "lucide-react";
-import { Button, EmptyState, LoadingState, Textarea, ViewHeader } from "../components/ui";
+import {
+  Activity,
+  AlertTriangle,
+  BookOpen,
+  Bug,
+  CheckCircle2,
+  Clipboard,
+  Copy,
+  ExternalLink,
+  FileCode,
+  FileText,
+  GitPullRequest,
+  Play,
+  RefreshCw,
+  Save,
+  Search,
+  Server,
+  ShieldCheck,
+  Target,
+  Trash2,
+  Users,
+  Wrench,
+} from "lucide-react";
+import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
-import type { CrashReviewItem, GitLabIssueExport, HarnessReviewItem, WorkbenchDashboard, WorkbenchRun, WorkbenchTarget } from "../types";
+import type {
+  CrashReviewItem,
+  GitLabIssueExport,
+  HarnessReviewItem,
+  ReportDraft,
+  SystemStatus,
+  WorkbenchDashboard,
+  WorkbenchRun,
+  WorkbenchTarget,
+} from "../types";
+
+type WorkbenchTab =
+  | "overview"
+  | "reports"
+  | "crashes"
+  | "harnesses"
+  | "targets"
+  | "repro"
+  | "team"
+  | "gitlab"
+  | "knowledge"
+  | "health";
+
+interface KnowledgeHit {
+  file: string;
+  score: number;
+  snippet: string;
+}
+
+interface ReportEditorState {
+  id: string | null;
+  title: string;
+  project: string;
+  target: string;
+  status: string;
+  content: string;
+}
 
 const EMPTY_TOTALS = {
   projects: 0,
@@ -16,6 +74,15 @@ const EMPTY_TOTALS = {
   crashes: 0,
   corpus_entries: 0,
 };
+
+const REPORT_STATUSES = [
+  "Draft",
+  "Needs Review",
+  "Approved",
+  "Filed",
+  "Fixed",
+  "Not Reproducible",
+];
 
 function emptyDashboard(project: string | null, target: string | null): WorkbenchDashboard {
   return {
@@ -30,13 +97,32 @@ function emptyDashboard(project: string | null, target: string | null): Workbenc
   };
 }
 
+function emptyEditor(project: string, target: string): ReportEditorState {
+  return {
+    id: null,
+    title: target ? `${target} fuzzing report` : "Untitled fuzzing report",
+    project,
+    target,
+    status: "Draft",
+    content: "",
+  };
+}
+
 export function DashboardView() {
   const { activeProject } = useProject();
   const { target } = useTarget();
+  const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
+  const [reports, setReports] = useState<ReportDraft[]>([]);
+  const [editor, setEditor] = useState<ReportEditorState>(() => emptyEditor(activeProject, target));
+  const [system, setSystem] = useState<SystemStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [issue, setIssue] = useState<GitLabIssueExport | null>(null);
-  const [issueError, setIssueError] = useState<string | null>(null);
+  const [knowledgeQuery, setKnowledgeQuery] = useState("");
+  const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeHit[]>([]);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
 
   const args = useMemo(
     () => ({
@@ -54,18 +140,48 @@ export function DashboardView() {
     }
   }, [activeProject, args, target]);
 
+  const reloadReports = useCallback(async () => {
+    try {
+      const next = await getTransport().invoke<ReportDraft[]>("list_report_drafts");
+      setReports(next);
+      return next;
+    } catch {
+      setReports([]);
+      return [];
+    }
+  }, []);
+
   const reload = useCallback(async () => {
     setLoading(true);
-    setDashboard(await loadDashboard());
+    setError(null);
+    const [nextDashboard, nextReports, nextSystem] = await Promise.all([
+      loadDashboard(),
+      reloadReports(),
+      getTransport().invoke<SystemStatus>("system_status").catch(() => null),
+    ]);
+    setDashboard(nextDashboard);
+    setSystem(nextSystem);
+    if (!editor.content && nextReports.length > 0) {
+      selectReport(nextReports[0]);
+    }
     setLoading(false);
-  }, [loadDashboard]);
+  }, [editor.content, loadDashboard, reloadReports]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadInitialDashboard() {
-      const data = await loadDashboard();
+      const [nextDashboard, nextReports, nextSystem] = await Promise.all([
+        loadDashboard(),
+        reloadReports(),
+        getTransport().invoke<SystemStatus>("system_status").catch(() => null),
+      ]);
       if (!cancelled) {
-        setDashboard(data);
+        setDashboard(nextDashboard);
+        setSystem(nextSystem);
+        setEditor((current) => {
+          if (current.content || nextReports.length === 0) return current;
+          return editorFromReport(nextReports[0]);
+        });
         setLoading(false);
       }
     }
@@ -73,13 +189,90 @@ export function DashboardView() {
     return () => {
       cancelled = true;
     };
-  }, [loadDashboard]);
+  }, [loadDashboard, reloadReports]);
+
+  function selectReport(report: ReportDraft) {
+    setEditor(editorFromReport(report));
+    setNotice(null);
+    setError(null);
+  }
+
+  function startBlankReport() {
+    setEditor(emptyEditor(activeProject, target));
+    setNotice(null);
+    setError(null);
+    setTab("reports");
+  }
+
+  async function generateActiveReport() {
+    setNotice(null);
+    setError(null);
+    if (!activeProject || !target) {
+      setError("Select an active project and target before generating a report.");
+      setTab("reports");
+      return;
+    }
+    try {
+      const content = await getTransport().invoke<string>("generate_report", {
+        project: activeProject,
+        target,
+      });
+      setEditor({
+        id: null,
+        title: `${target} fuzzing report`,
+        project: activeProject,
+        target,
+        status: "Draft",
+        content,
+      });
+      setTab("reports");
+      setNotice("Generated a report draft from the latest campaign data.");
+    } catch (e) {
+      setError(`Report generation failed: ${e}`);
+      setTab("reports");
+    }
+  }
+
+  async function saveDraft() {
+    setNotice(null);
+    setError(null);
+    try {
+      const saved = await getTransport().invoke<ReportDraft>("save_report_draft", {
+        id: editor.id ?? undefined,
+        title: editor.title,
+        project: editor.project,
+        target: editor.target || null,
+        status: editor.status,
+        content: editor.content,
+      });
+      setEditor(editorFromReport(saved));
+      await reloadReports();
+      setNotice("Report draft saved.");
+    } catch (e) {
+      setError(`Save failed: ${e}`);
+    }
+  }
+
+  async function deleteDraft(report: ReportDraft) {
+    if (!window.confirm(`Delete report "${report.title}"?`)) return;
+    setNotice(null);
+    setError(null);
+    try {
+      await getTransport().invoke("delete_report_draft", { id: report.id });
+      const next = await reloadReports();
+      setEditor(next[0] ? editorFromReport(next[0]) : emptyEditor(activeProject, target));
+      setNotice("Report draft deleted.");
+    } catch (e) {
+      setError(`Delete failed: ${e}`);
+    }
+  }
 
   async function exportCrash(crash: CrashReviewItem) {
-    setIssueError(null);
-    setIssue(null);
+    setError(null);
+    setNotice(null);
     if (!activeProject) {
-      setIssueError("Select the project that produced this crash before exporting.");
+      setError("Select the project that produced this crash before exporting.");
+      setTab("gitlab");
       return;
     }
     try {
@@ -88,48 +281,692 @@ export function DashboardView() {
         crash_id: crash.crash_id,
       });
       setIssue(draft);
+      setTab("gitlab");
     } catch (e) {
-      setIssueError(`Export failed: ${e}`);
+      setError(`GitLab export failed: ${e}`);
+      setTab("gitlab");
     }
   }
+
+  async function searchKnowledge() {
+    setError(null);
+    if (!activeProject) {
+      setError("Select a project before searching the knowledge base.");
+      return;
+    }
+    if (!knowledgeQuery.trim()) return;
+    setKnowledgeLoading(true);
+    try {
+      const hits = await getTransport().invoke<KnowledgeHit[]>("knowledge_search", {
+        project: activeProject,
+        query: knowledgeQuery,
+        limit: 8,
+      });
+      setKnowledgeHits(hits);
+    } catch (e) {
+      setError(`Knowledge search failed: ${e}`);
+      setKnowledgeHits([]);
+    } finally {
+      setKnowledgeLoading(false);
+    }
+  }
+
+  const tabs = workbenchTabs(dashboard);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0" style={{ overflowWrap: "anywhere" }}>
           <ViewHeader
-            title="Dashboard"
+            title="Workbench"
             description={activeProject ? `${activeProject}${target ? ` / ${target}` : ""}` : "No active project selected"}
           />
         </div>
-        <Button variant="outline" size="sm" onClick={() => void reload()} disabled={loading}>
-          <RefreshCw size={14} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => void generateActiveReport()}>
+            <FileText size={14} />
+            Draft report
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void reload()} disabled={loading}>
+            <RefreshCw size={14} />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      <div className="flex flex-wrap gap-1 border-b border-border">
+        {tabs.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => setTab(item.id)}
+            className="flex items-center gap-2 rounded-t-md border border-b-0 transition-colors"
+            style={{
+              padding: "7px 10px",
+              fontSize: 12,
+              background: tab === item.id ? "var(--surface-active)" : "transparent",
+              color: tab === item.id ? "var(--text-primary)" : "var(--text-secondary)",
+              borderColor: tab === item.id ? "var(--border)" : "transparent",
+            }}
+          >
+            {item.icon}
+            <span>{item.label}</span>
+            {item.count !== undefined && <span className="text-text-muted">{item.count}</span>}
+          </button>
+        ))}
+      </div>
+
+      {notice && <InlineNotice tone="ok" text={notice} />}
+      {error && <InlineNotice tone="error" text={error} />}
 
       {loading ? (
         <LoadingState label="Loading workbench state..." />
       ) : (
         <>
-          <MetricGrid dashboard={dashboard} />
-
-          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))" }}>
-            <section className="flex flex-col gap-4 min-w-0">
-              <NextActions actions={dashboard.next_actions} />
-              <HarnessQueue items={dashboard.harness_reviews} />
-              <RecentRuns runs={dashboard.recent_runs} />
-            </section>
-
-            <section className="flex flex-col gap-4 min-w-0">
-              <TopTargets targets={dashboard.top_targets} />
-              <CrashQueue items={dashboard.crash_reviews} onExport={(crash) => void exportCrash(crash)} />
-              {issueError && <InlineNotice tone="error" text={issueError} />}
-              {issue && <GitLabDraft draft={issue} />}
-            </section>
-          </div>
+          {tab === "overview" && (
+            <OverviewTab
+              dashboard={dashboard}
+              onReport={() => void generateActiveReport()}
+              onExport={exportCrash}
+            />
+          )}
+          {tab === "reports" && (
+            <ReportStudio
+              reports={reports}
+              editor={editor}
+              onEditor={setEditor}
+              onSelect={selectReport}
+              onBlank={startBlankReport}
+              onGenerate={() => void generateActiveReport()}
+              onSave={() => void saveDraft()}
+              onDelete={(report) => void deleteDraft(report)}
+            />
+          )}
+          {tab === "crashes" && <CrashInbox items={dashboard.crash_reviews} onExport={exportCrash} />}
+          {tab === "harnesses" && <HarnessLibrary items={dashboard.harness_reviews} />}
+          {tab === "targets" && <TargetBoard targets={dashboard.top_targets} />}
+          {tab === "repro" && (
+            <ReproCenter
+              project={activeProject}
+              crashes={dashboard.crash_reviews}
+              harnesses={dashboard.harness_reviews}
+            />
+          )}
+          {tab === "team" && (
+            <TeamReview
+              reports={reports}
+              crashes={dashboard.crash_reviews}
+              harnesses={dashboard.harness_reviews}
+            />
+          )}
+          {tab === "gitlab" && (
+            <GitLabIntegration
+              project={activeProject}
+              crashes={dashboard.crash_reviews}
+              issue={issue}
+              onExport={exportCrash}
+            />
+          )}
+          {tab === "knowledge" && (
+            <KnowledgePanel
+              activeProject={activeProject}
+              query={knowledgeQuery}
+              hits={knowledgeHits}
+              loading={knowledgeLoading}
+              onQuery={setKnowledgeQuery}
+              onSearch={() => void searchKnowledge()}
+            />
+          )}
+          {tab === "health" && <HealthPanel status={system} dashboard={dashboard} />}
         </>
       )}
+    </div>
+  );
+}
+
+function workbenchTabs(dashboard: WorkbenchDashboard): { id: WorkbenchTab; label: string; icon: React.ReactNode; count?: number }[] {
+  return [
+    { id: "overview", label: "Overview", icon: <Activity size={14} /> },
+    { id: "reports", label: "Reports", icon: <FileText size={14} /> },
+    { id: "crashes", label: "Crashes", icon: <Bug size={14} />, count: dashboard.crash_reviews.length },
+    { id: "harnesses", label: "Harnesses", icon: <FileCode size={14} />, count: dashboard.harness_reviews.length },
+    { id: "targets", label: "Targets", icon: <Target size={14} />, count: dashboard.top_targets.length },
+    { id: "repro", label: "Repro", icon: <Play size={14} /> },
+    { id: "team", label: "Team", icon: <Users size={14} /> },
+    { id: "gitlab", label: "GitLab", icon: <GitPullRequest size={14} /> },
+    { id: "knowledge", label: "Knowledge", icon: <BookOpen size={14} /> },
+    { id: "health", label: "Health", icon: <Server size={14} /> },
+  ];
+}
+
+function OverviewTab({
+  dashboard,
+  onReport,
+  onExport,
+}: {
+  dashboard: WorkbenchDashboard;
+  onReport: () => void;
+  onExport: (crash: CrashReviewItem) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <MetricGrid dashboard={dashboard} />
+      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))" }}>
+        <section className="flex flex-col gap-4 min-w-0">
+          <NextActions actions={dashboard.next_actions} onReport={onReport} />
+          <HarnessQueue items={dashboard.harness_reviews} />
+          <RecentRuns runs={dashboard.recent_runs} />
+        </section>
+        <section className="flex flex-col gap-4 min-w-0">
+          <TopTargets targets={dashboard.top_targets} />
+          <CrashQueue items={dashboard.crash_reviews} onExport={onExport} />
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function ReportStudio({
+  reports,
+  editor,
+  onEditor,
+  onSelect,
+  onBlank,
+  onGenerate,
+  onSave,
+  onDelete,
+}: {
+  reports: ReportDraft[];
+  editor: ReportEditorState;
+  onEditor: (next: ReportEditorState) => void;
+  onSelect: (report: ReportDraft) => void;
+  onBlank: () => void;
+  onGenerate: () => void;
+  onSave: () => void;
+  onDelete: (report: ReportDraft) => void;
+}) {
+  const selectedId = editor.id;
+  return (
+    <div className="grid gap-4" style={{ gridTemplateColumns: "minmax(260px, 340px) minmax(0, 1fr)" }}>
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520 }}>
+        <SectionHeader icon={<FileText size={15} />} title="Composed Reports" count={reports.length} />
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onBlank}>
+            <FileText size={13} />
+            New
+          </Button>
+          <Button variant="primary" size="sm" onClick={onGenerate}>
+            <Wrench size={13} />
+            Generate
+          </Button>
+        </div>
+        {reports.length === 0 ? (
+          <EmptyState icon={<FileText size={18} />} hint="No saved reports yet." />
+        ) : (
+          <div className="flex flex-col gap-2 overflow-auto">
+            {reports.map((report) => (
+              <div
+                key={report.id}
+                className="rounded-md border border-border"
+                style={{
+                  padding: "var(--space-sm)",
+                  background: selectedId === report.id ? "var(--surface-active)" : "var(--surface-secondary)",
+                }}
+              >
+                <button className="w-full text-left" onClick={() => onSelect(report)}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium truncate">{report.title}</span>
+                    <StatusBadge value={report.status} />
+                  </div>
+                  <div className="text-xs text-text-muted truncate mt-1">
+                    {report.target || "project report"} · {formatDate(report.updated_at)}
+                  </div>
+                </button>
+                <div className="flex justify-end mt-2">
+                  <Button variant="outline" size="sm" onClick={() => onDelete(report)}>
+                    <Trash2 size={13} />
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520 }}>
+        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(140px, 180px)" }}>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-text-muted">Title</span>
+            <Input value={editor.title} onChange={(e) => onEditor({ ...editor, title: e.target.value })} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-text-muted">Status</span>
+            <Select
+              value={editor.status}
+              options={REPORT_STATUSES.map((status) => ({ value: status, label: status }))}
+              onChange={(status) => onEditor({ ...editor, status })}
+            />
+          </label>
+        </div>
+        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(140px, 240px)" }}>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-text-muted">Project</span>
+            <Input value={editor.project} onChange={(e) => onEditor({ ...editor, project: e.target.value })} mono />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-text-muted">Target</span>
+            <Input value={editor.target} onChange={(e) => onEditor({ ...editor, target: e.target.value })} mono />
+          </label>
+        </div>
+        <Textarea
+          mono
+          value={editor.content}
+          onChange={(e) => onEditor({ ...editor, content: e.target.value })}
+          rows={18}
+          placeholder="Generate a report from the active campaign or write Markdown here."
+        />
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-text-muted">{editor.content.length.toLocaleString()} characters</span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => copyText(editor.content)} disabled={!editor.content}>
+              <Copy size={13} />
+              Copy
+            </Button>
+            <Button variant="primary" size="sm" onClick={onSave} disabled={!editor.content.trim() || !editor.title.trim()}>
+              <Save size={13} />
+              Save draft
+            </Button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CrashInbox({ items, onExport }: { items: CrashReviewItem[]; onExport: (crash: CrashReviewItem) => void }) {
+  const [severity, setSeverity] = useState("all");
+  const [query, setQuery] = useState("");
+  const filtered = items.filter((item) => {
+    const matchesSeverity = severity === "all" || item.severity === severity;
+    const haystack = `${item.target_symbol} ${item.kind} ${item.summary}`.toLowerCase();
+    return matchesSeverity && haystack.includes(query.toLowerCase());
+  });
+  const severities = Array.from(new Set(items.map((item) => item.severity))).sort();
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SectionHeader icon={<Bug size={15} />} title="Crash Inbox" count={filtered.length} />
+        <div className="flex items-center gap-2">
+          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter crashes" />
+          <Select
+            value={severity}
+            options={[{ value: "all", label: "All severities" }, ...severities.map((s) => ({ value: s, label: s }))]}
+            onChange={setSeverity}
+          />
+        </div>
+      </div>
+      {filtered.length === 0 ? (
+        <EmptyState icon={<Bug size={18} />} hint="No crashes match the current filter." />
+      ) : (
+        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))" }}>
+          {filtered.map((crash) => (
+            <CrashCard key={crash.crash_id} crash={crash} onExport={() => onExport(crash)} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () => void }) {
+  return (
+    <div className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold truncate">{crash.target_symbol}</div>
+          <div className="text-xs text-text-muted mt-1">{crash.kind} · {crash.severity}</div>
+        </div>
+        <StatusBadge value={crash.has_bug_report ? "Report ready" : "Needs report"} />
+      </div>
+      <p className="text-xs text-text-secondary mt-3" style={{ minHeight: 34 }}>
+        {crash.summary || "No summary available yet."}
+      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+        <span className="text-xs text-text-muted font-mono">{shortId(crash.crash_id)}</span>
+        <Button variant="outline" size="sm" onClick={onExport}>
+          <GitPullRequest size={13} />
+          GitLab draft
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function HarnessLibrary({ items }: { items: HarnessReviewItem[] }) {
+  const [query, setQuery] = useState("");
+  const filtered = items.filter((item) =>
+    `${item.target_symbol} ${item.engine} ${item.status} ${item.next_action}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SectionHeader icon={<FileCode size={15} />} title="Harness Library" count={filtered.length} />
+        <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter harnesses" />
+      </div>
+      {filtered.length === 0 ? (
+        <EmptyState icon={<FileCode size={18} />} hint="No generated harnesses found." />
+      ) : (
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))" }}>
+          {filtered.map((item) => (
+            <HarnessDetail key={item.harness_id} item={item} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function HarnessDetail({ item }: { item: HarnessReviewItem }) {
+  return (
+    <div className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold truncate">{item.target_symbol}</div>
+          <div className="text-xs text-text-muted mt-1">{item.engine} · {item.language} · {item.status}</div>
+        </div>
+        <StatusBadge value={item.next_action} />
+      </div>
+      <div className="grid gap-2 mt-3" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+        <MiniStat label="Smoke" value={item.smoke_passed ? "passed" : "pending"} />
+        <MiniStat label="Execs/sec" value={Math.round(item.smoke_execs_per_sec).toLocaleString()} />
+      </div>
+      <code className="block text-xs font-mono mt-3 p-2 rounded-md whitespace-pre-wrap" style={{ maxHeight: 170, overflow: "auto", background: "var(--surface-code)", color: "var(--text-secondary)" }}>
+        {item.source_preview || item.build_output || "No source preview available."}
+      </code>
+    </div>
+  );
+}
+
+function TargetBoard({ targets }: { targets: WorkbenchTarget[] }) {
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <SectionHeader icon={<Target size={15} />} title="Target Discovery Board" count={targets.length} />
+      {targets.length === 0 ? (
+        <EmptyState icon={<Target size={18} />} hint="Run discovery to populate target ranking." />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {targets.map((target, index) => (
+            <div key={target.id} className="grid items-start gap-3 rounded-md border border-border" style={{ gridTemplateColumns: "42px minmax(0, 1fr) 90px", padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
+              <span className="text-sm font-semibold text-text-muted">{index + 1}</span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium truncate">{target.symbol}</span>
+                <span className="block text-xs text-text-muted truncate">{target.language} · {shortProject(target.project_root)}</span>
+                <span className="block text-xs text-text-secondary mt-1">{target.rationale || "No rationale persisted."}</span>
+              </span>
+              <span className="text-right text-sm font-semibold" style={{ color: "var(--accent)" }}>
+                {Math.round(target.fit_score * 100)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReproCenter({
+  project,
+  crashes,
+  harnesses,
+}: {
+  project: string;
+  crashes: CrashReviewItem[];
+  harnesses: HarnessReviewItem[];
+}) {
+  const firstHarness = harnesses[0];
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <SectionHeader icon={<Play size={15} />} title="Repro Center" count={crashes.length} />
+      {!project && <InlineNotice tone="warn" text="Select a project to build exact regression commands." />}
+      {crashes.length === 0 ? (
+        <EmptyState icon={<Play size={18} />} hint="No crash reproducers are available yet." />
+      ) : (
+        <div className="flex flex-col gap-3">
+          {crashes.map((crash) => {
+            const target = firstHarness?.target_symbol || crash.target_symbol;
+            const command = project
+              ? `hobot-fuzz regress ${shellQuote(project)} --target ${shellQuote(target)}`
+              : "Select a project to build a command.";
+            return (
+              <div key={crash.crash_id} className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium truncate">{crash.target_symbol}</span>
+                  <StatusBadge value={crash.minimized ? "minimized" : "raw input"} />
+                </div>
+                <code className="block text-xs font-mono mt-3 p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)", color: "var(--text-secondary)" }}>
+                  {command}
+                </code>
+                <div className="flex justify-end mt-2">
+                  <Button variant="outline" size="sm" onClick={() => copyText(command)} disabled={!project}>
+                    <Clipboard size={13} />
+                    Copy command
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TeamReview({
+  reports,
+  crashes,
+  harnesses,
+}: {
+  reports: ReportDraft[];
+  crashes: CrashReviewItem[];
+  harnesses: HarnessReviewItem[];
+}) {
+  const reportNeedsReview = reports.filter((report) => report.status === "Needs Review");
+  const harnessNeedsReview = harnesses.filter((item) => item.needs_review);
+  const crashNeedsReport = crashes.filter((item) => !item.has_bug_report);
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <SectionHeader icon={<Users size={15} />} title="Team Review Flow" />
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <ReviewLane title="Reports needing review" count={reportNeedsReview.length} items={reportNeedsReview.map((r) => r.title)} />
+        <ReviewLane title="Harnesses needing approval" count={harnessNeedsReview.length} items={harnessNeedsReview.map((h) => h.target_symbol)} />
+        <ReviewLane title="Crashes needing reports" count={crashNeedsReport.length} items={crashNeedsReport.map((c) => c.target_symbol)} />
+      </div>
+    </section>
+  );
+}
+
+function ReviewLane({ title, count, items }: { title: string; count: number; items: string[] }) {
+  return (
+    <div className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{title}</span>
+        <span className="text-xs text-text-muted">{count}</span>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-xs text-text-muted mt-3">Nothing queued.</p>
+      ) : (
+        <div className="flex flex-col gap-1 mt-3">
+          {items.slice(0, 6).map((item) => (
+            <span key={item} className="text-xs text-text-secondary truncate">{item}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GitLabIntegration({
+  project,
+  crashes,
+  issue,
+  onExport,
+}: {
+  project: string;
+  crashes: CrashReviewItem[];
+  issue: GitLabIssueExport | null;
+  onExport: (crash: CrashReviewItem) => void;
+}) {
+  return (
+    <div className="grid gap-4" style={{ gridTemplateColumns: "minmax(280px, 420px) minmax(0, 1fr)" }}>
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+        <SectionHeader icon={<GitPullRequest size={15} />} title="GitLab Export" count={crashes.length} />
+        {!project && <InlineNotice tone="warn" text="Select a project so hobot_fuzz can resolve the GitLab remote." />}
+        {crashes.length === 0 ? (
+          <EmptyState icon={<GitPullRequest size={18} />} hint="No crashes are ready for issue export." />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {crashes.map((crash) => (
+              <button
+                key={crash.crash_id}
+                className="rounded-md border border-border text-left"
+                style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}
+                onClick={() => onExport(crash)}
+              >
+                <span className="block text-sm font-medium truncate">{crash.target_symbol}</span>
+                <span className="block text-xs text-text-muted truncate">{crash.kind} · {crash.severity}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+      {issue ? <GitLabDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint="Choose a crash to preview a GitLab issue draft." />}
+    </div>
+  );
+}
+
+function GitLabDraft({ draft }: { draft: GitLabIssueExport }) {
+  const [copied, setCopied] = useState(false);
+  async function copyBody() {
+    await copyText(`${draft.title}\n\n${draft.description}`);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <section className="surface-card" style={{ padding: "var(--space-md)" }}>
+      <SectionHeader icon={<GitPullRequest size={15} />} title="Issue Draft" />
+      <div className="mt-3 flex flex-col gap-2">
+        <div className="text-sm font-medium">{draft.title}</div>
+        <div className="flex flex-wrap gap-1">
+          {draft.labels.map((label) => (
+            <span key={label} className="text-xs px-2 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-secondary)" }}>{label}</span>
+          ))}
+        </div>
+        <Textarea value={draft.description} readOnly rows={12} />
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => void copyBody()}>
+            <Clipboard size={13} />
+            {copied ? "Copied" : "Copy"}
+          </Button>
+          {draft.issue_url && (
+            <Button variant="primary" size="sm" onClick={() => window.open(draft.issue_url ?? "", "_blank", "noopener,noreferrer")}>
+              <ExternalLink size={13} />
+              Open GitLab
+            </Button>
+          )}
+        </div>
+        {!draft.issue_url && <InlineNotice tone="warn" text="No GitLab remote or HF_GITLAB_* config was found for the selected project." />}
+      </div>
+    </section>
+  );
+}
+
+function KnowledgePanel({
+  activeProject,
+  query,
+  hits,
+  loading,
+  onQuery,
+  onSearch,
+}: {
+  activeProject: string;
+  query: string;
+  hits: KnowledgeHit[];
+  loading: boolean;
+  onQuery: (value: string) => void;
+  onSearch: () => void;
+}) {
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <SectionHeader icon={<BookOpen size={15} />} title="Knowledge Base" />
+      {!activeProject && <InlineNotice tone="warn" text="Select a project before searching source knowledge." />}
+      <div className="flex gap-2">
+        <Input value={query} onChange={(e) => onQuery(e.target.value)} placeholder="Search risky APIs, parsers, formats..." />
+        <Button variant="primary" size="sm" onClick={onSearch} disabled={!activeProject || loading}>
+          <Search size={13} />
+          Search
+        </Button>
+      </div>
+      {hits.length === 0 ? (
+        <EmptyState icon={<BookOpen size={18} />} hint="Search results will appear here." />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {hits.map((hit) => (
+            <div key={`${hit.file}:${hit.score}`} className="rounded-md border border-border" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium truncate">{hit.file}</span>
+                <span className="text-xs text-text-muted">{hit.score.toFixed(2)}</span>
+              </div>
+              <p className="text-xs text-text-secondary mt-2 whitespace-pre-wrap">{hit.snippet}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashboard: WorkbenchDashboard }) {
+  const checks = [
+    ["Docker", status?.docker],
+    ["Sandbox image", status?.sandbox_image],
+    ["libFuzzer", status?.libfuzzer],
+    ["AFL++", status?.aflplusplus],
+    ["honggfuzz", status?.honggfuzz],
+    ["ClusterFuzzLite", status?.clusterfuzzlite],
+    ["syzkaller", status?.syzkaller],
+  ] as const;
+  return (
+    <section className="surface-card flex flex-col gap-4" style={{ padding: "var(--space-md)" }}>
+      <SectionHeader icon={<ShieldCheck size={15} />} title="Production Readiness" />
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+        {checks.map(([label, ok]) => (
+          <div key={label} className="rounded-md border border-border flex items-center justify-between gap-3" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
+            <span className="text-sm">{label}</span>
+            <StatusBadge value={ok ? "ready" : "missing"} tone={ok ? "ok" : "warn"} />
+          </div>
+        ))}
+      </div>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <ReadinessItem ready={dashboard.totals.targets > 0} label="Targets discovered" detail={`${dashboard.totals.targets} target(s)`} />
+        <ReadinessItem ready={dashboard.totals.harnesses > 0} label="Harness library" detail={`${dashboard.totals.harnesses} harness(es)`} />
+        <ReadinessItem ready={dashboard.totals.runs > 0} label="Campaign history" detail={`${dashboard.totals.runs} run(s)`} />
+        <ReadinessItem ready={dashboard.totals.harnesses_needing_review === 0} label="Harness review queue" detail={`${dashboard.totals.harnesses_needing_review} pending`} />
+      </div>
+    </section>
+  );
+}
+
+function ReadinessItem({ ready, label, detail }: { ready: boolean; label: string; detail: string }) {
+  return (
+    <div className="rounded-md border border-border flex items-center gap-3" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
+      <span style={{ color: ready ? "var(--success)" : "var(--text-muted)" }}>
+        <CheckCircle2 size={16} />
+      </span>
+      <span>
+        <span className="block text-sm">{label}</span>
+        <span className="block text-xs text-text-muted">{detail}</span>
+      </span>
     </div>
   );
 }
@@ -162,10 +999,16 @@ function Metric({ icon, label, value, detail, accent }: { icon: React.ReactNode;
   );
 }
 
-function NextActions({ actions }: { actions: string[] }) {
+function NextActions({ actions, onReport }: { actions: string[]; onReport: () => void }) {
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<CheckCircle2 size={15} />} title="Attention" />
+      <div className="flex items-center justify-between gap-3">
+        <SectionHeader icon={<CheckCircle2 size={15} />} title="Attention" />
+        <Button variant="outline" size="sm" onClick={onReport}>
+          <FileText size={13} />
+          Draft report
+        </Button>
+      </div>
       <div className="flex flex-col gap-2 mt-3">
         {actions.map((action) => (
           <div key={action} className="flex items-start gap-2 text-sm text-text-secondary">
@@ -203,13 +1046,8 @@ function HarnessRow({ item }: { item: HarnessReviewItem }) {
           <div className="text-sm font-medium truncate">{item.target_symbol}</div>
           <div className="text-xs text-text-muted truncate">{item.engine} / {item.status}</div>
         </div>
-        <span className="text-xs px-2 py-0.5 rounded-sm" style={{ background: item.needs_review ? "var(--accent-subtle)" : "var(--surface-active)", color: item.needs_review ? "var(--accent)" : "var(--text-secondary)" }}>
-          {item.next_action}
-        </span>
+        <StatusBadge value={item.next_action} />
       </div>
-      <code className="block text-xs font-mono mt-2 p-2 rounded-md whitespace-pre-wrap" style={{ maxHeight: 96, overflow: "hidden", background: "var(--surface-code)", color: "var(--text-secondary)" }}>
-        {item.source_preview || item.build_output}
-      </code>
     </div>
   );
 }
@@ -269,63 +1107,10 @@ function CrashQueue({ items, onExport }: { items: CrashReviewItem[]; onExport: (
       ) : (
         <div className="flex flex-col gap-2 mt-3">
           {items.slice(0, 5).map((crash) => (
-            <div key={crash.crash_id} className="rounded-md border border-border" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium truncate">{crash.target_symbol}</div>
-                  <div className="text-xs text-text-muted truncate">{crash.kind} / {crash.severity}</div>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => onExport(crash)}>
-                  <GitPullRequest size={13} />
-                  Export
-                </Button>
-              </div>
-              {crash.summary && (
-                <p className="text-xs text-text-secondary mt-2" style={{ maxHeight: 38, overflow: "hidden" }}>
-                  {crash.summary}
-                </p>
-              )}
-            </div>
+            <CrashCard key={crash.crash_id} crash={crash} onExport={() => onExport(crash)} />
           ))}
         </div>
       )}
-    </section>
-  );
-}
-
-function GitLabDraft({ draft }: { draft: GitLabIssueExport }) {
-  const [copied, setCopied] = useState(false);
-  async function copyBody() {
-    await navigator.clipboard?.writeText(`${draft.title}\n\n${draft.description}`);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  return (
-    <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<GitPullRequest size={15} />} title="GitLab Issue Draft" />
-      <div className="mt-3 flex flex-col gap-2">
-        <div className="text-sm font-medium">{draft.title}</div>
-        <div className="flex flex-wrap gap-1">
-          {draft.labels.map((label) => (
-            <span key={label} className="text-xs px-2 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-secondary)" }}>{label}</span>
-          ))}
-        </div>
-        <Textarea value={draft.description} readOnly rows={8} />
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void copyBody()}>
-            <Clipboard size={13} />
-            {copied ? "Copied" : "Copy"}
-          </Button>
-          {draft.issue_url && (
-            <Button variant="primary" size="sm" onClick={() => window.open(draft.issue_url ?? "", "_blank", "noopener,noreferrer")}>
-              <ExternalLink size={13} />
-              Open GitLab
-            </Button>
-          )}
-        </div>
-        {!draft.issue_url && <InlineNotice tone="warn" text="No GitLab remote or HF_GITLAB_* config was found for the selected project." />}
-      </div>
     </section>
   );
 }
@@ -342,11 +1127,77 @@ function SectionHeader({ icon, title, count }: { icon: React.ReactNode; title: s
   );
 }
 
-function InlineNotice({ tone, text }: { tone: "warn" | "error"; text: string }) {
+function MiniStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-start gap-2 text-xs rounded-md" style={{ padding: "var(--space-sm)", background: tone === "error" ? "var(--error-subtle)" : "rgba(217,119,6,0.12)", color: tone === "error" ? "var(--error)" : "#d97706", border: `1px solid ${tone === "error" ? "var(--error)" : "rgba(217,119,6,0.35)"}` }}>
+    <span className="rounded-md border border-border" style={{ padding: "var(--space-xs) var(--space-sm)", background: "var(--surface-primary)" }}>
+      <span className="block text-xs text-text-muted">{label}</span>
+      <span className="block text-sm text-text-primary">{value}</span>
+    </span>
+  );
+}
+
+function StatusBadge({ value, tone }: { value: string; tone?: "ok" | "warn" }) {
+  const lower = value.toLowerCase();
+  const ok = tone === "ok" || lower.includes("ready") || lower.includes("approved") || lower.includes("passed") || lower.includes("filed");
+  const warn = tone === "warn" || lower.includes("needs") || lower.includes("missing") || lower.includes("draft") || lower.includes("pending");
+  return (
+    <span
+      className="text-xs px-2 py-0.5 rounded-sm"
+      style={{
+        background: ok ? "rgba(34,197,94,0.12)" : warn ? "rgba(217,119,6,0.12)" : "var(--surface-active)",
+        color: ok ? "var(--success)" : warn ? "#d97706" : "var(--text-secondary)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {value}
+    </span>
+  );
+}
+
+function InlineNotice({ tone, text }: { tone: "ok" | "warn" | "error"; text: string }) {
+  const style =
+    tone === "error"
+      ? { background: "var(--error-subtle)", color: "var(--error)", border: "1px solid var(--error)" }
+      : tone === "warn"
+        ? { background: "rgba(217,119,6,0.12)", color: "#d97706", border: "1px solid rgba(217,119,6,0.35)" }
+        : { background: "rgba(34,197,94,0.12)", color: "var(--success)", border: "1px solid rgba(34,197,94,0.35)" };
+  return (
+    <div className="flex items-start gap-2 text-xs rounded-md" style={{ padding: "var(--space-sm)", ...style }}>
       <AlertTriangle size={14} />
       <span>{text}</span>
     </div>
   );
+}
+
+function editorFromReport(report: ReportDraft): ReportEditorState {
+  return {
+    id: report.id,
+    title: report.title,
+    project: report.project,
+    target: report.target ?? "",
+    status: report.status,
+    content: report.content,
+  };
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
+function shortProject(path: string): string {
+  return path.split("/").filter(Boolean).pop() || path;
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+async function copyText(value: string) {
+  await navigator.clipboard?.writeText(value);
 }

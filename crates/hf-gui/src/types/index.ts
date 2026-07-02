@@ -168,3 +168,13 @@ export interface GitLabIssueExport {
   project_web_url: string | null;
   issue_url: string | null;
 }
+
+export interface ReportDraft {
+  id: string;
+  title: string;
+  project: string;
+  target: string | null;
+  status: string;
+  updated_at: string;
+  content: string;
+}
