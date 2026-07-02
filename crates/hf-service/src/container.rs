@@ -1694,7 +1694,8 @@ impl ServiceContainer {
         // Coverage-guided feedback: watch edge readings for stagnation and, once
         // coverage plateaus past the threshold, surface a proposal to iterate.
         // Wrap `on_progress` so every event still flows to the caller unchanged.
-        let feedback = CoverageFeedback::new(STAGNATION_THRESHOLD_SECS, on_progress);
+        let feedback =
+            CoverageFeedback::new(crate::config::coverage_stagnation_secs(), on_progress);
         let watched = |p: FuzzProgress| {
             if let FuzzProgress::EdgesCovered(v) = &p {
                 feedback.on_edges(*v);
@@ -3377,11 +3378,6 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     let _ = write!(body, "    {symbol}({});", args.join(", "));
     body
 }
-
-/// Seconds without a coverage increase before a run surfaces a stagnation
-/// proposal. Chosen so short smoke runs never trip it while a real campaign
-/// that has plateaued does. (A future refinement is to make this configurable.)
-const STAGNATION_THRESHOLD_SECS: u64 = 120;
 
 /// Coverage-guided feedback for a live fuzz run.
 ///
