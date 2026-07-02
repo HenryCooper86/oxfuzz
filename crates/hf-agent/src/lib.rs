@@ -224,9 +224,22 @@ you receive its result and continue until you can give a final answer.",
             })
             .await;
 
-            // Enforce the agent's tool allowlist: a specialist may only call its
-            // own tools. The refusal is fed back so the model can self-correct.
-            let result = if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
+            // A manual-autonomy agent gates every tool (including reads) on
+            // operator approval. Tighten-only: Assist/Auto are unchanged, and a
+            // decline is fed back so the model can adapt rather than silently
+            // bypassing the human gate.
+            let result = if self.definition.autonomy == Autonomy::Manual
+                && !self
+                    .container
+                    .approve_agent_tool(&tool, &self.definition.name)
+                    .await
+            {
+                agent_tools::error_json(format!(
+                    "approval declined: the {} agent runs with manual autonomy, so '{tool}' \
+                     requires operator approval",
+                    self.definition.name
+                ))
+            } else if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
                 // Inspection tools read files relative to the project workspace,
                 // which is also the root reads are confined to. With no project
                 // set there is no root, so an absolute path would escape to the
