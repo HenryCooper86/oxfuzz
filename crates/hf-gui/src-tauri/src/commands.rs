@@ -11,6 +11,8 @@ use hf_core::target::TargetLanguage;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+pub use hf_service::SystemStatus;
+
 // ---------------------------------------------------------------------------
 // Docker daemon management (GUI-specific I/O -- not domain logic)
 // ---------------------------------------------------------------------------
@@ -138,46 +140,10 @@ pub(crate) async fn ensure_docker_ready(
 // Data types
 // ---------------------------------------------------------------------------
 
-/// System status surfaced to the frontend.
-#[derive(Debug, Clone, Serialize)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct SystemStatus {
-    /// Docker daemon is reachable (not merely the CLI installed).
-    pub docker: bool,
-    /// The sandbox image is loaded locally.
-    pub sandbox_image: bool,
-    // Fuzzing engines run inside the sandbox image; each flag reflects whether
-    // that engine's toolchain is actually present in the loaded image (probed
-    // per engine -- the image does not bundle every engine).
-    pub libfuzzer: bool,
-    pub aflplusplus: bool,
-    pub honggfuzz: bool,
-    pub clusterfuzzlite: bool,
-    pub syzkaller: bool,
-}
-
 /// Compute the current system status by probing Docker + the sandbox image.
 #[must_use]
 pub fn system_status() -> SystemStatus {
-    let docker = hf_runtime::docker_daemon_ready();
-    let img = docker && hf_runtime::sandbox_image_present();
-    // Probe the image for each engine's toolchain rather than assuming it
-    // bundles all of them (e.g. ClusterFuzzLite is not installed). Cached and
-    // only re-run when the image changes.
-    let engines = if img {
-        hf_runtime::sandbox_engine_probe()
-    } else {
-        hf_runtime::SandboxEngines::default()
-    };
-    SystemStatus {
-        docker,
-        sandbox_image: img,
-        libfuzzer: engines.libfuzzer,
-        aflplusplus: engines.aflplusplus,
-        honggfuzz: engines.honggfuzz,
-        clusterfuzzlite: engines.clusterfuzzlite,
-        syzkaller: engines.syzkaller,
-    }
+    hf_service::system_status()
 }
 
 // ---------------------------------------------------------------------------
