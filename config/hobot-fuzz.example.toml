@@ -23,3 +23,8 @@ max_harness_iterations = 3
 
 # Smoke fuzz duration in seconds before promoting a harness.
 smoke_fuzz_duration_secs = 60
+
+# Seconds without a coverage increase before a run proposes iterating
+# (regenerate the harness / add seeds). Lower proposes sooner; set it very high
+# to effectively silence the proposal. Override with HF_COVERAGE_STAGNATION_SECS.
+coverage_stagnation_secs = 120
