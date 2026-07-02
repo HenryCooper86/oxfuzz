@@ -9,11 +9,13 @@
 
 pub mod afl;
 pub mod clusterfuzzlite;
+pub mod dict;
 pub mod honggfuzz;
 pub mod libfuzzer;
 pub mod progress;
 pub mod registry;
 pub mod runner;
+pub mod showmap;
 pub mod syzkaller;
 
 pub use registry::{adapter_for, EngineAdapter};
