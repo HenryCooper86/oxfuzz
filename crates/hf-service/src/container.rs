@@ -1152,6 +1152,21 @@ impl ServiceContainer {
         &self.guardrails
     }
 
+    /// Ask the operator to approve an agent's tool call, for an agent running
+    /// with manual autonomy that gates every action. Returns whether it was
+    /// approved. Tighten-only: it only ever adds a prompt via the guardrail
+    /// gate; it never bypasses the policy or auto-allows.
+    pub async fn approve_agent_tool(&self, tool: &str, agent: &str) -> bool {
+        self.guardrails
+            .require_approval(
+                &Action::AgentTool {
+                    name: tool.to_owned(),
+                },
+                &format!("agent '{agent}' runs with manual autonomy and requests tool '{tool}'"),
+            )
+            .await
+    }
+
     /// Construct the canonical container used by every presentation layer
     /// (CLI, web, GUI): a Docker (or stub) runtime, an LLM provider pool from
     /// the environment, and the persistence store from `HF_DB_PATH`.

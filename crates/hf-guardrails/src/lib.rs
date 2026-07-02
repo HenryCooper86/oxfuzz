@@ -169,6 +169,15 @@ impl Guardrails {
         &self.policy
     }
 
+    /// Ask the approval gate to consent to `action`, returning whether it was
+    /// approved. This is a TIGHTEN-only entry point: it always prompts and never
+    /// consults the policy's auto-allow, so a caller can require consent for an
+    /// action the policy would otherwise permit (e.g. a manual-autonomy agent
+    /// gating every tool). It can only add a prompt; it never loosens anything.
+    pub async fn require_approval(&self, action: &Action, reason: &str) -> bool {
+        self.gate.request_approval(action, reason).await
+    }
+
     /// Authorize an action, consulting the approval gate when required.
     ///
     /// # Errors

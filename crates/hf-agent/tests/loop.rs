@@ -139,6 +139,81 @@ async fn agent_applies_configured_temperature() {
     );
 }
 
+/// Build an agent from an inline definition TOML, with a container whose
+/// guardrail gate denies every approval request.
+fn agent_with_deny_gate(autonomy: &str, replies: Vec<&str>) -> Agent {
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(replies));
+    let container =
+        ServiceContainer::new(runtime, Some(pool)).with_guardrails(hf_guardrails::Guardrails::new(
+            hf_guardrails::GuardrailPolicy::permissive(),
+            Arc::new(hf_guardrails::DenyAll),
+        ));
+    let def = hf_agent::AgentDefinition::from_toml(&format!(
+        "id = \"m\"\n\
+         name = \"Tester\"\n\
+         description = \"d\"\n\
+         role = \"orchestrator\"\n\
+         system_prompt = \"s\"\n\
+         autonomy = \"{autonomy}\"\n\
+         allowed_tools = [\"FileRead\"]\n"
+    ))
+    .expect("valid definition toml");
+    Agent::with_definition(container, Some(std::env::temp_dir()), def)
+}
+
+fn last_tool_summary(events: &[AgentEvent]) -> String {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("a tool result was emitted")
+}
+
+#[tokio::test]
+async fn manual_autonomy_gates_tools_on_approval() {
+    // A manual-autonomy agent must get operator approval before ANY tool runs.
+    // With a denying gate the tool is refused (not executed), and the refusal is
+    // fed back so the turn still completes.
+    let agent = agent_with_deny_gate(
+        "manual",
+        vec![
+            r#"{"thought":"peek","tool":"FileRead","args":{"path":"x"}}"#,
+            r#"{"final":"done"}"#,
+        ],
+    );
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "read", &sink).await.unwrap();
+    assert_eq!(out, "done");
+    assert!(
+        last_tool_summary(&sink.events().await).contains("approval declined"),
+        "manual autonomy must gate the tool on the (denied) approval"
+    );
+}
+
+#[tokio::test]
+async fn assist_autonomy_is_not_gated_by_the_manual_path() {
+    // Tighten-only: the same denying gate must NOT block an Assist agent's read
+    // (the manual-approval path is skipped), so the refusal is a normal tool
+    // outcome, not an "approval declined".
+    let agent = agent_with_deny_gate(
+        "assist",
+        vec![
+            r#"{"thought":"peek","tool":"FileRead","args":{"path":"nonexistent"}}"#,
+            r#"{"final":"done"}"#,
+        ],
+    );
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "read", &sink).await.unwrap();
+    assert!(
+        !last_tool_summary(&sink.events().await).contains("approval declined"),
+        "assist autonomy must not go through the manual-approval gate"
+    );
+}
+
 #[tokio::test]
 async fn direct_final_answer() {
     let agent = agent_with(vec![r#"{"thought":"easy","final":"hello there"}"#], None);
