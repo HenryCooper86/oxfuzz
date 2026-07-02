@@ -378,3 +378,86 @@ async fn run_chat_turn_drives_default_agent_without_session() {
         .iter()
         .any(|e| matches!(e, AgentEvent::Complete { content } if content == "shared path works")));
 }
+
+#[tokio::test]
+async fn orchestrator_delegates_to_specialist_and_uses_result() {
+    // The orchestrator delegates a subtask; the specialist's result flows back
+    // as the delegate tool result and the orchestrator uses it in its answer.
+    let agent = agent_with(
+        vec![
+            r#"{"tool":"delegate","args":{"agent":"target-scout","task":"find the best target"}}"#,
+            r#"{"final":"Top target: parse_entry"}"#,
+            r#"{"final":"Scout picked: parse_entry"}"#,
+        ],
+        None,
+    );
+    let sink = CollectingSink::new();
+    let answer = agent
+        .run_turn(Vec::new(), "find and report the best target", &sink)
+        .await
+        .unwrap();
+    assert!(
+        answer.contains("parse_entry"),
+        "orchestrator did not use the delegated result: {answer}"
+    );
+    // The delegate tool call surfaced as an event.
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "delegate")));
+}
+
+#[tokio::test]
+async fn delegation_to_unknown_agent_is_reported_not_fatal() {
+    // Delegating to an unknown specialist feeds an error back; the turn survives
+    // and the orchestrator can still answer.
+    let agent = agent_with(
+        vec![
+            r#"{"tool":"delegate","args":{"agent":"nope","task":"do a thing"}}"#,
+            r#"{"final":"recovered"}"#,
+        ],
+        None,
+    );
+    let sink = CollectingSink::new();
+    let answer = agent
+        .run_turn(Vec::new(), "delegate to a bogus agent", &sink)
+        .await
+        .unwrap();
+    assert_eq!(answer, "recovered");
+}
+
+#[tokio::test]
+async fn over_budget_history_is_compacted_before_the_turn() {
+    // With a history far over the context budget, the agent summarizes the old
+    // messages first (consuming the pool's first reply), so the turn's actual
+    // answer comes from the SECOND reply. If compaction did not run, the first
+    // (non-JSON) reply would be returned verbatim instead.
+    let agent = agent_with(
+        vec![
+            "THIS_IS_THE_SUMMARY", // consumed by compaction's summarize call
+            r#"{"final":"answered after compaction"}"#,
+        ],
+        None,
+    );
+    // ~14 messages of 30k chars each => well over the 96k-token budget.
+    let big = "x".repeat(30_000);
+    let history: Vec<hf_core::types::Message> = (0..14)
+        .map(|i| {
+            if i % 2 == 0 {
+                hf_core::types::Message::user(big.clone())
+            } else {
+                hf_core::types::Message::assistant(big.clone())
+            }
+        })
+        .collect();
+
+    let sink = CollectingSink::new();
+    let answer = agent
+        .run_turn(history, "what did we discuss?", &sink)
+        .await
+        .unwrap();
+    assert_eq!(
+        answer, "answered after compaction",
+        "compaction did not run before the turn"
+    );
+}
