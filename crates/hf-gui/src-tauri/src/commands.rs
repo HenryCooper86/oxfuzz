@@ -1365,6 +1365,10 @@ pub async fn run_fuzzer(
             "edges": summary.edges,
             "crashes": summary.crashes,
             "execs": summary.execs,
+            // A coverage-stagnation proposal (e.g. "new_harness") when the run
+            // plateaued, so the UI can offer an iterate-next affordance; null
+            // when coverage kept progressing.
+            "stagnation": summary.stagnation,
             "exit_code": 0,
         })),
         Err(e) => Err(e.to_string()),
