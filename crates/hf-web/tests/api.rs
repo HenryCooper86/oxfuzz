@@ -163,6 +163,48 @@ async fn chat_history_without_db_returns_empty_array() {
 }
 
 #[tokio::test]
+async fn config_conversion_endpoints_round_trip_json_and_toml() {
+    let (status, json) = post_json(
+        "/config/toml_to_value",
+        serde_json::json!({"content": "enabled = true"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["enabled"], true);
+
+    let (status, json) = post_json(
+        "/config/value_to_toml",
+        serde_json::json!({"value": {"enabled": true}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, "enabled = true\n");
+}
+
+#[tokio::test]
+async fn system_status_returns_json_flags() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/system/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["docker"].is_boolean());
+    assert!(json["sandbox_image"].is_boolean());
+    assert!(json["libfuzzer"].is_boolean());
+}
+
+#[tokio::test]
 async fn knowledge_search_unindexed_returns_empty_array() {
     let (status, json) = post_json(
         "/knowledge/search",
