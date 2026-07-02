@@ -88,6 +88,41 @@ pub fn data_dir() -> PathBuf {
     )
 }
 
+/// Default seconds of flat coverage before a run surfaces a stagnation proposal.
+pub const DEFAULT_STAGNATION_THRESHOLD_SECS: u64 = 120;
+
+/// Seconds without a coverage increase before `run_fuzzer` surfaces a
+/// stagnation proposal (regenerate the harness / add seeds).
+///
+/// Resolution order: the `HF_COVERAGE_STAGNATION_SECS` env override, then
+/// `coverage_stagnation_secs` in `hobot-fuzz.toml`, then
+/// [`DEFAULT_STAGNATION_THRESHOLD_SECS`]. Lower proposes sooner; set it very
+/// high to effectively silence the proposal.
+#[must_use]
+pub fn coverage_stagnation_secs() -> u64 {
+    resolve_stagnation_secs(
+        std::env::var("HF_COVERAGE_STAGNATION_SECS").ok().as_deref(),
+        read_config("hobot-fuzz").ok().as_deref(),
+    )
+}
+
+/// Pure resolver for [`coverage_stagnation_secs`], split out so the precedence
+/// (env over TOML over default) is unit-testable without touching the
+/// environment or filesystem.
+fn resolve_stagnation_secs(env: Option<&str>, hobot_toml: Option<&str>) -> u64 {
+    #[derive(Deserialize)]
+    struct HobotConfig {
+        coverage_stagnation_secs: Option<u64>,
+    }
+    if let Some(v) = env.map(str::trim).and_then(|s| s.parse::<u64>().ok()) {
+        return v;
+    }
+    hobot_toml
+        .and_then(|raw| toml::from_str::<HobotConfig>(raw).ok())
+        .and_then(|c| c.coverage_stagnation_secs)
+        .unwrap_or(DEFAULT_STAGNATION_THRESHOLD_SECS)
+}
+
 /// Resolved config/data locations.
 #[must_use]
 pub fn app_paths() -> AppPaths {
@@ -405,6 +440,35 @@ pub async fn test_provider(mut cfg: ProviderConfig) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stagnation_secs_precedence_env_then_toml_then_default() {
+        // Env wins over everything.
+        assert_eq!(
+            resolve_stagnation_secs(Some("45"), Some("coverage_stagnation_secs = 200")),
+            45
+        );
+        // No env -> the TOML value.
+        assert_eq!(
+            resolve_stagnation_secs(None, Some("coverage_stagnation_secs = 200")),
+            200
+        );
+        // TOML without the key -> the default.
+        assert_eq!(
+            resolve_stagnation_secs(None, Some("log_level = \"info\"")),
+            DEFAULT_STAGNATION_THRESHOLD_SECS
+        );
+        // Nothing configured -> the default.
+        assert_eq!(
+            resolve_stagnation_secs(None, None),
+            DEFAULT_STAGNATION_THRESHOLD_SECS
+        );
+        // A non-numeric env value falls through rather than panicking.
+        assert_eq!(
+            resolve_stagnation_secs(Some("not-a-number"), None),
+            DEFAULT_STAGNATION_THRESHOLD_SECS
+        );
+    }
 
     #[test]
     fn toml_json_round_trip_preserves_values() {
