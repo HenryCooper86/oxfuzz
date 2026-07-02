@@ -39,14 +39,34 @@ pub async fn discover(
     // (persistence dedup keyed on (project, symbol), reports, ranking) can tell
     // which project a target belongs to. The scanner builds candidates without
     // it, so set it once here in the single discovery entry point.
+    //
+    // Also derive a deterministic id from (project_root, symbol). Storage
+    // identity is (project, symbol); a random per-pass id would orphan every
+    // harness/corpus/crash/run stored against the target the next time
+    // discovery ran. A UUIDv5 over the identity key keeps the id stable across
+    // passes and processes while distinct symbols still get distinct ids.
     for c in &mut candidates {
         c.project_root = project_root.to_path_buf();
+        c.id = deterministic_target_id(project_root, &c.symbol);
     }
     Ok(TargetInventory {
         project_root: project_root.to_path_buf(),
         candidates,
         call_graph,
     })
+}
+
+/// Fixed namespace for `hobot_fuzz` target ids so `UUIDv5` derivation is stable
+/// across builds and processes.
+const TARGET_ID_NAMESPACE: Uuid = Uuid::from_bytes([
+    0x8f, 0x2a, 0x1c, 0x9b, 0x4d, 0x6e, 0x47, 0x3a, 0xa1, 0x02, 0x9c, 0x3e, 0x5f, 0x71, 0x8b, 0x40,
+]);
+
+/// Derive a deterministic target id from the persistence identity
+/// `(project_root, symbol)`. Same identity always yields the same id.
+fn deterministic_target_id(project_root: &Path, symbol: &str) -> Uuid {
+    let key = format!("{}::{}", project_root.display(), symbol);
+    Uuid::new_v5(&TARGET_ID_NAMESPACE, key.as_bytes())
 }
 
 /// File extensions considered for C vs C++.

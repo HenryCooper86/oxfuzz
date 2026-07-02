@@ -7,9 +7,16 @@ import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
-import { Play, Activity, AlertTriangle, FolderOpen, Square } from "lucide-react";
+import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw } from "lucide-react";
+import type { ViewType } from "../types";
 
-export function RunView({ embedded = false }: { embedded?: boolean }) {
+export function RunView({
+  embedded = false,
+  onNavigate,
+}: {
+  embedded?: boolean;
+  onNavigate?: (view: ViewType) => void;
+}) {
   const { activeProject, setActiveProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { sandboxArch } = usePrefs();
@@ -264,6 +271,32 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
+      {summary && !running && summary.stagnation && (
+        <div
+          className="surface-card flex items-center gap-3"
+          style={{
+            padding: "var(--space-md)",
+            borderLeft: "3px solid var(--warning, var(--accent))",
+            animation: "slideInUp 0.2s ease",
+          }}
+        >
+          <AlertTriangle size={18} style={{ color: "var(--warning, var(--accent))", flexShrink: 0 }} />
+          <div className="flex-1">
+            <div className="text-sm" style={{ fontWeight: 600 }}>
+              Coverage stalled
+            </div>
+            <div className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
+              {stagnationHint(summary.stagnation)}
+            </div>
+          </div>
+          {summary.stagnation === "new_harness" && onNavigate && (
+            <Button variant="outline" size="sm" onClick={() => onNavigate("harness")}>
+              <RotateCw size={14} /> Regenerate harness
+            </Button>
+          )}
+        </div>
+      )}
+
       {log.length > 0 && (
         <div
           ref={logRef}
@@ -279,6 +312,20 @@ export function RunView({ embedded = false }: { embedded?: boolean }) {
       )}
     </div>
   );
+}
+
+/** User-facing guidance for a backend coverage-stagnation proposal. */
+function stagnationHint(proposal: string): string {
+  switch (proposal) {
+    case "new_harness":
+      return "Coverage plateaued during the run. Regenerating the harness may reach new code paths.";
+    case "custom_mutator":
+      return "Coverage plateaued. Adding a dictionary or seed corpus may help the fuzzer make progress.";
+    case "stop":
+      return "Coverage plateaued and further fuzzing is unlikely to find more. Consider stopping this target.";
+    default:
+      return "Coverage plateaued during the run.";
+  }
 }
 
 function Label({ children }: { children: React.ReactNode }) {
