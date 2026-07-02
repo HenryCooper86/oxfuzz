@@ -158,6 +158,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/providers/status", get(provider_statuses))
         .route("/system/snapshot", get(system_snapshot))
+        .route("/system/status", get(system_status))
         .route("/workbench/dashboard", post(workbench_dashboard))
         .route("/workbench/harnesses", post(harness_review_queue))
         .route("/gitlab/issue", post(gitlab_issue_export))
@@ -184,6 +185,8 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/config/sections", get(list_configs))
         .route("/config/read", post(read_config))
         .route("/config/write", post(write_config))
+        .route("/config/toml_to_value", post(config_toml_to_value))
+        .route("/config/value_to_toml", post(config_value_to_toml))
         .route("/config/providers", get(get_providers).post(set_providers))
         .route("/system/paths", get(app_paths))
         .route("/system/arch", get(host_arch))
@@ -448,6 +451,10 @@ async fn triage(
 async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let snapshot = state.container.system_snapshot().await;
     Ok(Json(serde_json::to_value(&snapshot).unwrap_or_default()))
+}
+
+async fn system_status(State(_): State<AppState>) -> Json<hf_service::SystemStatus> {
+    Json(hf_service::system_status())
 }
 
 #[derive(Debug, Deserialize)]
@@ -939,6 +946,34 @@ async fn write_config(
     hf_service::config::write_config(&req.name, &req.content)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(()))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigTomlToValueRequest {
+    content: String,
+}
+
+async fn config_toml_to_value(
+    State(_): State<AppState>,
+    Json(req): Json<ConfigTomlToValueRequest>,
+) -> ApiResult<serde_json::Value> {
+    let value =
+        hf_service::config::toml_to_json(&req.content).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(value))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigValueToTomlRequest {
+    value: serde_json::Value,
+}
+
+async fn config_value_to_toml(
+    State(_): State<AppState>,
+    Json(req): Json<ConfigValueToTomlRequest>,
+) -> ApiResult<String> {
+    let toml =
+        hf_service::config::json_to_toml(&req.value).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(toml))
 }
 
 async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {

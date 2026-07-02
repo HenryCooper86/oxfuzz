@@ -18,6 +18,7 @@ pub mod recovery;
 pub mod report;
 pub mod sarif;
 pub mod scheduler;
+pub mod system;
 pub mod workbench;
 
 pub use hf_core::engine::EngineKind;
@@ -33,6 +34,7 @@ pub use container::{
     SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
 };
 pub use init::{init_at, init_workspace, InitReport};
+pub use system::{system_status, SystemStatus};
 pub use workbench::{
     CrashReviewItem, GitLabIssueExport, HarnessReviewItem, WorkbenchDashboard, WorkbenchRun,
     WorkbenchTarget, WorkbenchTotals,

@@ -6,6 +6,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useI18n } from "../i18n";
 import { useRunOutput } from "../providers/RunOutputContext";
+import { applyMode, normalizeChatRole, type ChatMode } from "./chatHelpers";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -28,19 +29,6 @@ interface CallableAgent {
 
 const ACTIVE_AGENT_KEY = "hf_active_agent";
 const CHAT_MODE_KEY = "hf_chat_mode";
-
-/** Composer mode. `plan` prepends a planning instruction to the message. */
-export type ChatMode = "auto" | "plan";
-
-/** Instruction prepended in Plan mode (no backend -- pure prompt steering). */
-const PLAN_PREFIX =
-  "[Plan mode] Before taking any action or calling tools, lay out a concise, " +
-  "numbered step-by-step plan for how you will approach this. Then proceed.";
-
-/** Build the message actually sent to the agent for a given mode. */
-export function applyMode(text: string, mode: ChatMode): string {
-  return mode === "plan" ? `${PLAN_PREFIX}\n\n${text}` : text;
-}
 
 // A pending guardrail approval request (mirrors the backend payload).
 interface PermissionRequest {
@@ -311,7 +299,7 @@ export function ChatView() {
       setSessionId(b.id);
       setMessages(
         hist.map((t) => ({
-          role: t.role === "assistant" ? "assistant" : t.role === "system" ? "system" : "user",
+          role: normalizeChatRole(t.role),
           content: t.content,
           timestamp: new Date().toISOString(),
         })),
