@@ -6,7 +6,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useI18n } from "../i18n";
 import { useRunOutput } from "../providers/RunOutputContext";
-import { applyMode, normalizeChatRole, type ChatMode } from "./chatHelpers";
+import { applyMode, normalizeAssistantContent, normalizeChatRole, type ChatMode } from "./chatHelpers";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -298,11 +298,14 @@ export function ChatView() {
       });
       setSessionId(b.id);
       setMessages(
-        hist.map((t) => ({
-          role: normalizeChatRole(t.role),
-          content: t.content,
-          timestamp: new Date().toISOString(),
-        })),
+        hist.map((t) => {
+          const role = normalizeChatRole(t.role);
+          return {
+            role,
+            content: role === "assistant" ? normalizeAssistantContent(t.content) : t.content,
+            timestamp: new Date().toISOString(),
+          };
+        }),
       );
     } catch {
       /* no-op */
@@ -356,7 +359,7 @@ export function ChatView() {
         {
           role: "assistant",
           content:
-            responseText ||
+            (responseText ? normalizeAssistantContent(responseText) : "") ||
             "I couldn't generate a response. Make sure a provider is configured in Settings.",
           timestamp: now(),
         },
