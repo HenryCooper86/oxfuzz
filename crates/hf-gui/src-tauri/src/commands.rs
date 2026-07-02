@@ -649,6 +649,56 @@ pub async fn system_snapshot(
     Ok(snapshot)
 }
 
+/// Internal-team dashboard summary for the active project/target.
+#[tauri::command]
+pub async fn workbench_dashboard(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: Option<String>,
+    target: Option<String>,
+) -> Result<hf_service::WorkbenchDashboard, String> {
+    let project_path = project
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::Path::new);
+    let target = target.as_deref().filter(|t| !t.is_empty());
+    Ok(state
+        .container
+        .workbench_dashboard(project_path, target)
+        .await)
+}
+
+/// Generated harnesses that need human review or promotion.
+#[tauri::command]
+pub async fn harness_review_queue(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: Option<String>,
+    target: Option<String>,
+) -> Result<Vec<hf_service::HarnessReviewItem>, String> {
+    let project_path = project
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::Path::new);
+    let target = target.as_deref().filter(|t| !t.is_empty());
+    Ok(state
+        .container
+        .harness_review_queue(project_path, target)
+        .await)
+}
+
+/// Build a GitLab issue draft/prefilled URL for a triaged crash.
+#[tauri::command]
+pub async fn gitlab_issue_export(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    crash_id: String,
+) -> Result<hf_service::GitLabIssueExport, String> {
+    state
+        .container
+        .gitlab_issue_export(std::path::Path::new(&project), &crash_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Cheap on-disk artifact snapshot (harness built?, corpus size, crash inputs)
 /// for the Info panel.
 #[tauri::command]

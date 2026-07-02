@@ -158,6 +158,9 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/providers/status", get(provider_statuses))
         .route("/system/snapshot", get(system_snapshot))
+        .route("/workbench/dashboard", post(workbench_dashboard))
+        .route("/workbench/harnesses", post(harness_review_queue))
+        .route("/gitlab/issue", post(gitlab_issue_export))
         .route("/chat/send", post(chat_send))
         .route("/chat/agent", post(chat_agent))
         // Session management (parity with the desktop shell).
@@ -445,6 +448,70 @@ async fn triage(
 async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let snapshot = state.container.system_snapshot().await;
     Ok(Json(serde_json::to_value(&snapshot).unwrap_or_default()))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkbenchRequest {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+}
+
+fn opt_project_path(project: Option<&String>) -> Option<&std::path::Path> {
+    project.filter(|p| !p.is_empty()).map(std::path::Path::new)
+}
+
+fn opt_target(target: Option<&String>) -> Option<&str> {
+    target.filter(|t| !t.is_empty()).map(String::as_str)
+}
+
+async fn workbench_dashboard(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchRequest>,
+) -> ApiResult<hf_service::WorkbenchDashboard> {
+    Ok(Json(
+        state
+            .container
+            .workbench_dashboard(
+                opt_project_path(req.project.as_ref()),
+                opt_target(req.target.as_ref()),
+            )
+            .await,
+    ))
+}
+
+async fn harness_review_queue(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchRequest>,
+) -> ApiResult<Vec<hf_service::HarnessReviewItem>> {
+    Ok(Json(
+        state
+            .container
+            .harness_review_queue(
+                opt_project_path(req.project.as_ref()),
+                opt_target(req.target.as_ref()),
+            )
+            .await,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabIssueRequest {
+    project: String,
+    crash_id: String,
+}
+
+async fn gitlab_issue_export(
+    State(state): State<AppState>,
+    Json(req): Json<GitLabIssueRequest>,
+) -> ApiResult<hf_service::GitLabIssueExport> {
+    let export = state
+        .container
+        .gitlab_issue_export(std::path::Path::new(&req.project), &req.crash_id)
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(export))
 }
 
 async fn provider_statuses(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

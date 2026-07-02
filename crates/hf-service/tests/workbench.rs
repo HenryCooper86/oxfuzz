@@ -1,0 +1,238 @@
+//! Tests for internal-team workbench service summaries.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use chrono::Utc;
+use hf_core::crash::{Crash, CrashKind};
+use hf_core::engine::{EngineKind, FuzzRunConfig};
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+use hf_core::target::{
+    InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+};
+use hf_service::ServiceContainer;
+use hf_storage::{RunRecord, Store};
+use uuid::Uuid;
+
+async fn test_container() -> (ServiceContainer, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        Store::connect(dir.path().join("workbench.db"))
+            .await
+            .unwrap(),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
+    (container, dir)
+}
+
+fn sample_target(project: &str) -> TargetCandidate {
+    TargetCandidate {
+        id: Uuid::new_v4(),
+        project_root: PathBuf::from(project),
+        language: TargetLanguage::C,
+        symbol: "parse_packet".to_owned(),
+        kind: TargetKind::Parser,
+        location: SourceLocation {
+            file: PathBuf::from("src/parser.c"),
+            line: 42,
+            col: 1,
+        },
+        signature: Some("int parse_packet(const uint8_t*, size_t)".to_owned()),
+        input_surface: InputSurface::Bytes,
+        complexity: 9,
+        fit_score: 0.91,
+        sanitizers: vec![Sanitizer::Address],
+        rationale: "untrusted packet parser".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 0,
+    }
+}
+
+fn sample_harness(target_id: Uuid) -> Harness {
+    Harness {
+        id: Uuid::new_v4(),
+        target_id,
+        engine: EngineKind::LibFuzzer,
+        source: "int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) { return 0; }"
+            .to_owned(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec!["-fsanitize=fuzzer,address".to_owned()],
+            output: PathBuf::from("fuzz_parse_packet"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    }
+}
+
+fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
+    RunRecord::new(
+        project,
+        EngineKind::LibFuzzer,
+        Some(FuzzRunConfig {
+            harness_id,
+            engine: EngineKind::LibFuzzer,
+            duration: None,
+            max_mem_mb: 512,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+        }),
+        Utc::now(),
+    )
+}
+
+#[tokio::test]
+async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    let run = sample_run("/proj", harness.id);
+    let crash = Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: target.id,
+        input_path: PathBuf::from("out/crash-1"),
+        stack_signature: "sig".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "heap-buffer-overflow".to_owned(),
+        minimized: true,
+        bug_report: None,
+        casr: None,
+    };
+
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+    store.upsert_crash(&crash).await.unwrap();
+
+    let project = PathBuf::from("/proj");
+    let dashboard = container
+        .workbench_dashboard(Some(project.as_path()), Some("parse_packet"))
+        .await;
+
+    assert_eq!(dashboard.totals.targets, 1);
+    assert_eq!(dashboard.totals.harnesses, 1);
+    assert_eq!(dashboard.totals.harnesses_needing_review, 1);
+    assert_eq!(dashboard.totals.runs, 1);
+    assert_eq!(dashboard.totals.crashes, 1);
+    assert_eq!(dashboard.top_targets[0].symbol, "parse_packet");
+    assert_eq!(dashboard.harness_reviews[0].next_action, "Run smoke fuzz");
+    assert_eq!(dashboard.crash_reviews[0].kind, "Asan");
+}
+
+#[tokio::test]
+async fn dashboard_target_filter_scopes_runs_through_harness_config() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let first_target = sample_target("/proj");
+    let mut second_target = sample_target("/proj");
+    second_target.id = Uuid::new_v4();
+    second_target.symbol = "parse_header".to_owned();
+
+    let first_harness = sample_harness(first_target.id);
+    let second_harness = sample_harness(second_target.id);
+    let first_run = sample_run("/proj", first_harness.id);
+    let second_run = sample_run("/proj", second_harness.id);
+
+    store
+        .upsert_target(&first_target, Utc::now())
+        .await
+        .unwrap();
+    store
+        .upsert_target(&second_target, Utc::now())
+        .await
+        .unwrap();
+    store.upsert_harness(&first_harness).await.unwrap();
+    store.upsert_harness(&second_harness).await.unwrap();
+    store.insert_run(&first_run).await.unwrap();
+    store.insert_run(&second_run).await.unwrap();
+
+    let project = PathBuf::from("/proj");
+    let dashboard = container
+        .workbench_dashboard(Some(project.as_path()), Some("parse_packet"))
+        .await;
+
+    assert_eq!(dashboard.totals.targets, 1);
+    assert_eq!(dashboard.totals.runs, 1);
+    assert_eq!(dashboard.recent_runs[0].id, first_run.id.to_string());
+}
+
+#[tokio::test]
+async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/other");
+    let run = RunRecord::new("/other", EngineKind::LibFuzzer, None, Utc::now());
+    let crash = Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: target.id,
+        input_path: PathBuf::from("out/crash-other"),
+        stack_signature: "other".to_owned(),
+        kind: CrashKind::Asan,
+        summary: "other project crash".to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    };
+
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store
+        .upsert_harness(&sample_harness(target.id))
+        .await
+        .unwrap();
+    store.insert_run(&run).await.unwrap();
+    store.upsert_crash(&crash).await.unwrap();
+
+    let project = PathBuf::from("/proj");
+    let dashboard = container
+        .workbench_dashboard(Some(project.as_path()), None)
+        .await;
+
+    assert_eq!(dashboard.totals.targets, 0);
+    assert_eq!(dashboard.totals.harnesses, 0);
+    assert_eq!(dashboard.totals.crashes, 0);
+    assert!(dashboard.harness_reviews.is_empty());
+    assert!(dashboard.crash_reviews.is_empty());
+}
+
+#[tokio::test]
+async fn gitlab_issue_export_returns_reviewable_payload() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    let crash = Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id: target.id,
+        input_path: PathBuf::from("out/crash-2"),
+        stack_signature: "stack".to_owned(),
+        kind: CrashKind::Segv,
+        summary: "segmentation fault".to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    };
+
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+    store.upsert_crash(&crash).await.unwrap();
+
+    let project = PathBuf::from("/proj");
+    let export = container
+        .gitlab_issue_export(project.as_path(), &crash.id.to_string())
+        .await
+        .unwrap();
+
+    assert!(export.title.contains("parse_packet"));
+    assert!(export.description.contains("segmentation fault"));
+    assert!(export.labels.contains(&"hobot-fuzz".to_owned()));
+}

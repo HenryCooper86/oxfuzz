@@ -2,7 +2,7 @@ import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import { useI18n } from "../i18n";
-import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FolderOpen, MessageSquare, Play, Plus, Puzzle, Settings, Target, Workflow, X, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FolderOpen, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, Settings, Target, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -19,6 +19,7 @@ type NavItem = { view: ViewType; label: string; icon: React.ComponentType<{ size
 // order: chat drives the agent, then discover -> harness -> run -> triage ->
 // corpus mirrors a campaign's lifecycle.
 const PIPELINE_ITEMS: NavItem[] = [
+  { view: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { view: "chat", label: "AI Assistant", icon: MessageSquare },
   { view: "workflow", label: "Fuzzing Workflow", icon: Workflow },
   { view: "discover", label: "Discover", icon: Target },
