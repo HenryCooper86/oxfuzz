@@ -24,3 +24,93 @@ export function normalizeChatRole(role: string): ChatRole {
       return "user";
   }
 }
+
+export function normalizeAssistantContent(content: string): string {
+  return extractProtocolFinal(content) ?? content;
+}
+
+function extractProtocolFinal(content: string, depth = 0): string | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed === "string" && depth < 1) {
+      return extractProtocolFinal(parsed, depth + 1);
+    }
+    if (isRecord(parsed) && typeof parsed.final === "string") {
+      return parsed.final;
+    }
+  } catch {
+    /* fall through to relaxed protocol extraction */
+  }
+
+  const objectText = firstObjectLikeText(trimmed);
+  return objectText ? extractRelaxedStringField(objectText, "final") : null;
+}
+
+function firstObjectLikeText(content: string): string | null {
+  const fenced = content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = (fenced?.[1] ?? content).trim();
+  const start = candidate.indexOf("{");
+  return start >= 0 ? candidate.slice(start) : null;
+}
+
+function extractRelaxedStringField(content: string, field: string): string | null {
+  const key = `"${field}"`;
+  const keyPos = content.indexOf(key);
+  if (keyPos < 0) return null;
+
+  const afterKey = content.slice(keyPos + key.length);
+  const colon = afterKey.indexOf(":");
+  if (colon < 0) return null;
+
+  return readRelaxedQuotedString(afterKey.slice(colon + 1).trimStart());
+}
+
+function readRelaxedQuotedString(value: string): string | null {
+  if (!value.startsWith('"')) return null;
+
+  let out = "";
+  let escaped = false;
+  for (const ch of value.slice(1)) {
+    if (escaped) {
+      switch (ch) {
+        case '"':
+          out += '"';
+          break;
+        case "\\":
+          out += "\\";
+          break;
+        case "n":
+          out += "\n";
+          break;
+        case "r":
+          out += "\r";
+          break;
+        case "t":
+          out += "\t";
+          break;
+        default:
+          out += ch;
+          break;
+      }
+      escaped = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escaped = true;
+    } else if (ch === '"') {
+      return out;
+    } else {
+      out += ch;
+    }
+  }
+
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
