@@ -218,6 +218,7 @@ async fn target_and_harness_roundtrip() {
     let got = store.get_harness(hid).await.unwrap().unwrap();
     assert_eq!(got.target_id, target_id);
     assert_eq!(store.list_harnesses(target_id).await.unwrap().len(), 1);
+    assert_eq!(store.list_all_harnesses().await.unwrap().len(), 1);
 }
 
 #[tokio::test]

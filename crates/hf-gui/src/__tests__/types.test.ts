@@ -5,4 +5,9 @@ describe("types", () => {
     const view = "discover" as const;
     expect(view).toBe("discover");
   });
+
+  it("ViewType includes dashboard", () => {
+    const view = "dashboard" as const;
+    expect(view).toBe("dashboard");
+  });
 });
