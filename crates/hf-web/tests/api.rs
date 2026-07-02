@@ -228,6 +228,53 @@ async fn workbench_dashboard_without_db_returns_empty_summary() {
 }
 
 #[tokio::test]
+async fn report_drafts_can_be_saved_listed_and_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: this integration test owns the report-dir override for the
+    // duration of the process and uses a unique temp directory.
+    unsafe {
+        std::env::set_var("HF_REPORTS_DIR", dir.path());
+    }
+
+    let (status, saved) = post_json(
+        "/reports/save",
+        serde_json::json!({
+            "title": "Parser campaign",
+            "project": "/tmp/project",
+            "target": "parse_packet",
+            "status": "Draft",
+            "content": "# Parser campaign\n\nFinding details."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = saved["id"].as_str().unwrap();
+    assert_eq!(saved["title"], "Parser campaign");
+
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/reports")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reports: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reports.as_array().map(Vec::len), Some(1));
+    assert_eq!(reports[0]["id"], id);
+
+    let (status, _) = post_json("/reports/delete", serde_json::json!({ "id": id })).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn schedule_list_without_scheduler_returns_empty_array() {
     allow_open_dev_mode();
     let app = hf_web::router::build();

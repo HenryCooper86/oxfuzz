@@ -154,6 +154,9 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
         .route("/report", post(report))
+        .route("/reports", get(list_report_drafts))
+        .route("/reports/save", post(save_report_draft))
+        .route("/reports/delete", post(delete_report_draft))
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/providers/status", get(provider_statuses))
@@ -519,6 +522,62 @@ async fn gitlab_issue_export(
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(export))
+}
+
+async fn list_report_drafts(
+    State(state): State<AppState>,
+) -> ApiResult<Vec<hf_service::ReportDraft>> {
+    let reports = state
+        .container
+        .list_report_drafts()
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(reports))
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveReportDraftRequest {
+    #[serde(default)]
+    id: Option<String>,
+    title: String,
+    project: String,
+    #[serde(default)]
+    target: Option<String>,
+    status: String,
+    content: String,
+}
+
+async fn save_report_draft(
+    State(state): State<AppState>,
+    Json(req): Json<SaveReportDraftRequest>,
+) -> ApiResult<hf_service::ReportDraft> {
+    let report = state
+        .container
+        .save_report_draft(
+            req.id,
+            &req.title,
+            &req.project,
+            req.target.as_deref(),
+            &req.status,
+            &req.content,
+        )
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(report))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteReportDraftRequest {
+    id: String,
+}
+
+async fn delete_report_draft(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteReportDraftRequest>,
+) -> ApiResult<()> {
+    state
+        .container
+        .delete_report_draft(&req.id)
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(()))
 }
 
 async fn provider_statuses(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

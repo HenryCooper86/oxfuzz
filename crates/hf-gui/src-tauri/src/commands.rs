@@ -668,6 +668,49 @@ pub async fn gitlab_issue_export(
         .map_err(|e| e.to_string())
 }
 
+/// Saved editable report drafts.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn list_report_drafts(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<Vec<hf_service::ReportDraft>, String> {
+    state
+        .container
+        .list_report_drafts()
+        .map_err(|e| e.to_string())
+}
+
+/// Save or update one editable report draft.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn save_report_draft(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: Option<String>,
+    title: String,
+    project: String,
+    target: Option<String>,
+    status: String,
+    content: String,
+) -> Result<hf_service::ReportDraft, String> {
+    state
+        .container
+        .save_report_draft(id, &title, &project, target.as_deref(), &status, &content)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete one editable report draft.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn delete_report_draft(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_report_draft(&id)
+        .map_err(|e| e.to_string())
+}
+
 /// Cheap on-disk artifact snapshot (harness built?, corpus size, crash inputs)
 /// for the Info panel.
 #[tauri::command]
