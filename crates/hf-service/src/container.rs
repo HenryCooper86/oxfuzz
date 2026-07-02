@@ -1174,6 +1174,39 @@ impl ServiceContainer {
         crate::workbench::gitlab_issue_export(self.store.as_deref(), project, crash_id).await
     }
 
+    /// Saved editable report drafts for the internal workbench.
+    pub fn list_report_drafts(
+        &self,
+    ) -> Result<Vec<crate::report_store::ReportDraft>, ClassifiedError> {
+        crate::report_store::list_report_drafts()
+    }
+
+    /// Save or update one editable report draft.
+    ///
+    /// # Errors
+    /// Returns validation errors for invalid input and storage errors for failed
+    /// filesystem writes.
+    pub fn save_report_draft(
+        &self,
+        id: Option<String>,
+        title: &str,
+        project: &str,
+        target: Option<&str>,
+        status: &str,
+        content: &str,
+    ) -> Result<crate::report_store::ReportDraft, ClassifiedError> {
+        crate::report_store::save_report_draft(id, title, project, target, status, content)
+    }
+
+    /// Delete one editable report draft.
+    ///
+    /// # Errors
+    /// Returns validation errors for invalid ids and storage errors for failed
+    /// filesystem deletion.
+    pub fn delete_report_draft(&self, id: &str) -> Result<(), ClassifiedError> {
+        crate::report_store::delete_report_draft(id)
+    }
+
     /// Ingest a document into a project's knowledge base.
     ///
     /// Converts the file (PDF, Office, HTML, CSV, ...) to Markdown with
