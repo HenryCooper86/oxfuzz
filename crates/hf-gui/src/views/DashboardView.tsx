@@ -98,7 +98,7 @@ export function DashboardView() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0" style={{ overflowWrap: "anywhere" }}>
           <ViewHeader
-            title="Team Dashboard"
+            title="Dashboard"
             description={activeProject ? `${activeProject}${target ? ` / ${target}` : ""}` : "No active project selected"}
           />
         </div>

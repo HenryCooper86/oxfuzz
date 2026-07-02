@@ -45,7 +45,7 @@ const en: Dict = {
   "sidebar.removeTarget": "Remove from targets",
 
   // Header (screen titles)
-  "title.dashboard": "Team Dashboard",
+  "title.dashboard": "Dashboard",
   "title.workflow": "Fuzzing Workflow",
   "title.chat": "AI Assistant",
   "title.discover": "Target Discovery",
@@ -131,7 +131,7 @@ const zh: Dict = {
   "sidebar.removeTarget": "从目标中移除",
 
   // Header (screen titles)
-  "title.dashboard": "团队仪表盘",
+  "title.dashboard": "仪表盘",
   "title.workflow": "模糊测试流程",
   "title.chat": "AI 助手",
   "title.discover": "目标发现",
