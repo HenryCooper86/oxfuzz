@@ -154,3 +154,35 @@ async fn discover_skips_static_functions() {
         "static function parse_array must not be a candidate; got {names:?}"
     );
 }
+
+#[tokio::test]
+async fn discover_rust_finds_public_parameterized_functions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn parse_packet(data: &[u8]) -> bool {\n\
+         \x20   if data.is_empty() { return false; }\n\
+         \x20   data[0] == 0x7f\n\
+         }\n\
+         fn private_helper(x: u32) -> u32 { x + 1 }\n\
+         pub fn getter() -> u32 { 42 }\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(dir.path(), TargetLanguage::Rust)
+        .await
+        .expect("rust discovery should succeed");
+
+    // The public, byte-taking parser is found and classified as a Parser.
+    let parse = inv
+        .candidates
+        .iter()
+        .find(|c| c.symbol == "parse_packet")
+        .expect("parse_packet should be discovered");
+    assert_eq!(parse.language, TargetLanguage::Rust);
+    assert_eq!(parse.kind, TargetKind::Parser);
+
+    // Private functions and zero-arg getters are excluded.
+    assert!(inv.candidates.iter().all(|c| c.symbol != "private_helper"));
+    assert!(inv.candidates.iter().all(|c| c.symbol != "getter"));
+}

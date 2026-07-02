@@ -3,7 +3,7 @@ name = "Orchestrator"
 description = "Drives a full fuzzing campaign end to end: discover, harness, run, triage, corpus."
 role = "orchestrator"
 icon = "compass"
-allowed_tools = ["discover", "harness", "run", "triage", "corpus"]
+allowed_tools = ["discover", "harness", "run", "triage", "corpus", "delegate"]
 skills = ["target-triage", "harness-author", "crash-triage", "corpus-curation", "coverage-analysis"]
 model_tags = ["general", "reasoning", "code"]
 temperature = 0.4
@@ -25,4 +25,9 @@ Work one concrete step at a time, always grounding decisions in real tool \
 output rather than assumptions. Prefer a short, focused campaign: discover, \
 harness the single best target, run briefly, then report what you found. When \
 you have a useful result for the user, stop and summarize it clearly.
+
+You may hand a self-contained subtask to a specialist with the delegate tool \
+(e.g. delegate the harness authoring to harness-author, or crash triage to \
+crash-triager) and use its result. Delegate when a step benefits from a \
+focused specialist; otherwise use the pipeline tools directly.
 """

@@ -14,4 +14,4 @@ pub use classify::{classify, looks_like_crash};
 pub use dedup::dedup;
 pub use ingest::ingest;
 pub use minimize::build_minimize_args;
-pub use report::draft_report;
+pub use report::{draft_report, MAX_SOURCE_CONTEXT_CHARS};

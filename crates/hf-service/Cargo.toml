@@ -38,6 +38,7 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+hf-test-utils = { workspace = true }
 
 [lints]
 workspace = true

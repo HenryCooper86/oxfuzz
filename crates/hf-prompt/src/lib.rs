@@ -13,7 +13,10 @@ pub mod section;
 pub mod store;
 pub mod template;
 
-pub use render::{render_discovery_prompt, render_harness_prompt};
+pub use render::{
+    render_discovery_prompt, render_harness_prompt, render_harness_refine_prompt,
+    render_harness_repair_prompt, render_seed_prompt,
+};
 
 pub use budget::{
     estimate_tokens, truncate_to_budget, truncate_tool_result, MAX_TOOL_RESULT_CHARS,

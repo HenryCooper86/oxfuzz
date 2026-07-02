@@ -29,6 +29,7 @@ pub async fn discover(
     tokio::task::yield_now().await;
     let (mut candidates, call_graph) = match lang {
         TargetLanguage::C | TargetLanguage::Cpp => scan_c(project_root, lang)?,
+        TargetLanguage::Rust => scan_rust(project_root),
         _ => {
             return Err(ClassifiedError::Validation(format!(
                 "language {lang:?} not yet supported by the scanner"
@@ -82,6 +83,187 @@ type ScanResult = (
     Vec<TargetCandidate>,
     std::collections::HashMap<String, Vec<String>>,
 );
+
+/// Discover Rust fuzz targets with a dependency-free lexical scan.
+///
+/// Rust grammar is not vendored here, so this extracts public function
+/// definitions (`pub fn`, incl. `async`/`unsafe`) lexically rather than via a
+/// full parse. It finds the functions worth a `cargo-fuzz` harness -- public,
+/// parameter-bearing, non-test -- and scores them with the same heuristics as
+/// the C scanner. It is intentionally conservative: a missed multi-line
+/// signature is a lost candidate, never a wrong one.
+fn scan_rust(root: &Path) -> ScanResult {
+    let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
+    let mut candidates = Vec::new();
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if let Ok(src) = std::fs::read_to_string(path) {
+            extract_rust_functions(&src, path, &mut candidates);
+        }
+    }
+    (candidates, std::collections::HashMap::new())
+}
+
+/// Extract public, parameter-bearing function definitions from Rust source.
+fn extract_rust_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) {
+    let mut byte_off = 0usize;
+    for (idx, line) in src.lines().enumerate() {
+        let line_start = byte_off;
+        byte_off += line.len() + 1; // account for the '\n' lines() stripped
+        let Some(after_fn) = strip_pub_fn(line.trim_start()) else {
+            continue;
+        };
+        let name = read_ident(after_fn);
+        if name.is_empty() || name == "main" || name.starts_with("test_") {
+            continue;
+        }
+        // Parameters: balance parens starting at the first '(' on/after the line.
+        let Some(params) = extract_paren_group(&src[line_start..]) else {
+            continue;
+        };
+        let param_count = if params.trim().is_empty() {
+            0
+        } else {
+            params.split(',').filter(|p| !p.trim().is_empty()).count()
+        };
+        if param_count == 0 {
+            continue; // no untrusted input to feed
+        }
+        let input_surface = rust_input_surface(&params);
+        let kind = if ["parse", "decode", "read", "deserialize", "from_bytes"]
+            .iter()
+            .any(|k| name.contains(k))
+        {
+            TargetKind::Parser
+        } else {
+            TargetKind::Function
+        };
+        let complexity = rust_body_complexity(&src[line_start..]);
+        let fit_score = compute_fit_score(kind, input_surface, complexity, param_count);
+        let signature = line.trim().trim_end_matches('{').trim().to_owned();
+        out.push(TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: PathBuf::new(),
+            language: TargetLanguage::Rust,
+            symbol: name,
+            kind,
+            location: SourceLocation {
+                file: path.to_path_buf(),
+                line: (idx + 1) as u32,
+                col: 1,
+            },
+            signature: Some(signature),
+            input_surface,
+            complexity,
+            fit_score,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        });
+    }
+}
+
+/// If `line` (already left-trimmed) declares a public function, return the slice
+/// starting at the function name. Skips `pub(crate)`/`pub(super)` (not public
+/// API) and `extern` (FFI declarations).
+fn strip_pub_fn(line: &str) -> Option<&str> {
+    let mut rest = line.strip_prefix("pub")?.trim_start();
+    if rest.starts_with('(') {
+        return None; // pub(crate) / pub(super): not public API
+    }
+    loop {
+        if let Some(r) = rest.strip_prefix("async ") {
+            rest = r.trim_start();
+        } else if let Some(r) = rest.strip_prefix("unsafe ") {
+            rest = r.trim_start();
+        } else if let Some(r) = rest.strip_prefix("const ") {
+            rest = r.trim_start();
+        } else if rest.starts_with("extern") {
+            return None;
+        } else {
+            break;
+        }
+    }
+    rest.strip_prefix("fn ").map(str::trim_start)
+}
+
+/// Read a leading Rust identifier (letters, digits, `_`).
+fn read_ident(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// Return the contents of the first balanced `(...)` group in `s`, or `None`.
+fn extract_paren_group(s: &str) -> Option<String> {
+    let start = s.find('(')?;
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for ch in s[start..].chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                if depth == 1 {
+                    continue;
+                }
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+            }
+            _ => {}
+        }
+        out.push(ch);
+    }
+    None
+}
+
+/// Infer the input surface from a Rust parameter list.
+fn rust_input_surface(params: &str) -> InputSurface {
+    // Byte slices/vectors and string types are all direct untrusted-input
+    // surfaces a fuzzer can feed raw bytes into.
+    let byte_like = ["[u8]", "Vec<u8>", "&[ u8", "&str", "String"];
+    if byte_like.iter().any(|p| params.contains(p)) {
+        InputSurface::Bytes
+    } else {
+        InputSurface::Structured
+    }
+}
+
+/// Approximate cyclomatic complexity: 1 plus the number of control-flow
+/// keywords/operators in the function body (the first balanced `{...}` after
+/// the signature). Lexical, so it is an estimate, not exact.
+fn rust_body_complexity(s: &str) -> u32 {
+    let Some(open) = s.find('{') else {
+        return 1;
+    };
+    let mut depth = 0i32;
+    let mut body = String::new();
+    for ch in s[open..].chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        body.push(ch);
+    }
+    let mut count = 1u32;
+    for kw in ["if ", "match ", "for ", "while ", "loop ", "&&", "||", "?"] {
+        count += u32::try_from(body.matches(kw).count()).unwrap_or(0);
+    }
+    count.min(200)
+}
 
 fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedError> {
     let mut parser = TsParser::new();
