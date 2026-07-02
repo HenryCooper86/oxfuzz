@@ -5,4 +5,7 @@
 
 pub mod generator;
 
-pub use generator::{build_command, compile, draft, smoke_fuzz};
+pub use generator::{
+    build_command, compile, draft, generate_seeds, refine, repair, smoke_fuzz, try_compile,
+    CompileFailure, CompileResult, MAX_REPAIR_DIAGNOSTICS_CHARS,
+};

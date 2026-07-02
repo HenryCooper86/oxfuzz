@@ -52,6 +52,8 @@ fn sample_crash() -> Crash {
             repro_steps: "Run the harness on crash-001.".to_owned(),
             stack: "parse_header\nmain".to_owned(),
             severity_guess: "High".to_owned(),
+            root_cause: Some("Length field is used unchecked as a memcpy size.".to_owned()),
+            suggested_fix: Some("Bound the length against the buffer size.".to_owned()),
         }),
         casr: Some(CasrReport {
             severity: CrashSeverity::Exploitable,

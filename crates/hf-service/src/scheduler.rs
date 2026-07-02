@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hf_core::engine::{EngineKind, FuzzProgress};
+use hf_core::engine::EngineKind;
+use hf_core::target::TargetLanguage;
 use hf_guardrails::Guardrails;
 use hf_scheduler::dispatcher::{DispatchError, DispatchResult, WorkflowDispatcher};
 use hf_scheduler::{
@@ -235,27 +236,41 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             params.engine,
             params.duration_secs
         );
-        let noop = |_: FuzzProgress| {};
         let started = std::time::Instant::now();
+        // Run the full autonomous campaign (discover -> harness+repair -> seed ->
+        // run -> triage -> refine), not just a single fixed run. A named target
+        // pins the campaign; an empty one lets it pick the top-ranked target.
+        let target = if params.target.trim().is_empty() {
+            None
+        } else {
+            Some(params.target.as_str())
+        };
         let result = self
             .container
-            .run_fuzzer(
+            .run_campaign(
                 Path::new(&params.project),
-                &params.target,
+                target,
                 engine,
+                TargetLanguage::C,
                 params.duration_secs,
-                &noop,
+                2,
+                3,
             )
             .await;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match result {
-            Ok(summary) => Ok(DispatchResult {
+            Ok(outcome) => Ok(DispatchResult {
                 success: true,
-                summary: format!("{} crashes, {} edges", summary.crashes, summary.edges),
+                summary: format!(
+                    "{} crash(es), {} edges over {} iteration(s) on {}",
+                    outcome.crashes, outcome.edges, outcome.iterations, outcome.target
+                ),
                 output: serde_json::json!({
-                    "crashes": summary.crashes,
-                    "edges": summary.edges,
-                    "execs": summary.execs,
+                    "target": outcome.target,
+                    "crashes": outcome.crashes,
+                    "edges": outcome.edges,
+                    "iterations": outcome.iterations,
+                    "repairs_used": outcome.repairs_used,
                 }),
                 duration_ms,
                 error: None,

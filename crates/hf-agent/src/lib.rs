@@ -55,6 +55,43 @@ pub struct Agent {
     definition: AgentDefinition,
     max_iterations: usize,
     registry: OnceCell<Arc<ToolRegistryImpl>>,
+    /// How many delegation hops deep this agent is. The orchestrator runs at 0
+    /// and may delegate to specialists (depth 1); specialists cannot delegate
+    /// further, which bounds fan-out and prevents delegation cycles.
+    delegation_depth: usize,
+}
+
+/// Maximum delegation depth: the orchestrator (0) may spawn specialists (1);
+/// a specialist may not delegate again.
+const MAX_DELEGATION_DEPTH: usize = 1;
+
+/// The tool name the orchestrator uses to hand a scoped task to a specialist
+/// sub-agent.
+pub const DELEGATE_TOOL: &str = "delegate";
+
+/// Number of most-recent messages kept verbatim when compacting a long
+/// conversation; everything older is summarized into one message.
+const COMPACTION_RETAIN: usize = 6;
+
+/// A [`CompactionLlm`](hf_context::CompactionLlm) backed by the provider pool,
+/// so the agent can summarize old turns with a real model instead of dropping
+/// them. This is what turns long conversations from "silently truncated" into
+/// "summarized", preserving earlier context across the turn.
+struct PoolCompactionLlm {
+    pool: Arc<dyn hf_core::provider::ProviderPool>,
+}
+
+#[async_trait::async_trait]
+impl hf_context::CompactionLlm for PoolCompactionLlm {
+    async fn summarize(&self, prompt: &str) -> Result<String, String> {
+        let req = ChatRequest::from_messages(vec![Message::user(prompt.to_owned())]);
+        let resp = self
+            .pool
+            .chat_completion(&req, &RouteRequest::with_tags(ROUTE_TAGS))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(resp.text().trim().to_owned())
+    }
 }
 
 impl Agent {
@@ -79,7 +116,15 @@ impl Agent {
             definition,
             max_iterations,
             registry: OnceCell::new(),
+            delegation_depth: 0,
         }
+    }
+
+    /// Set this agent's delegation depth (used when spawned as a sub-agent).
+    #[must_use]
+    fn at_delegation_depth(mut self, depth: usize) -> Self {
+        self.delegation_depth = depth;
+        self
     }
 
     /// The definition driving this agent.
@@ -148,6 +193,11 @@ you receive its result and continue until you can give a final answer.",
         messages.push(Message::system(self.system_prompt()));
         messages.extend(history);
         messages.push(Message::user(user_message.to_owned()));
+
+        // Summarize older turns into memory when the conversation is over budget,
+        // so long sessions retain earlier context instead of losing it to plain
+        // window truncation.
+        self.maybe_compact(&mut messages).await;
 
         // Route to the providers this agent prefers, falling back to the
         // default tag set when the agent specifies none.
@@ -239,6 +289,17 @@ you receive its result and continue until you can give a final answer.",
                      requires operator approval",
                     self.definition.name
                 ))
+            } else if tool == DELEGATE_TOOL {
+                // Delegation is a permitted tool like any other, so respect the
+                // agent's allow-list before spawning a sub-agent.
+                if self.definition.allowed_tools.iter().all(|t| t != &tool) {
+                    agent_tools::error_json(format!(
+                        "tool '{tool}' is not permitted for the {} agent",
+                        self.definition.name
+                    ))
+                } else {
+                    self.handle_delegate(&args).await
+                }
             } else if agent_tools::INSPECTION_TOOLS.contains(&tool.as_str()) {
                 // Inspection tools read files relative to the project workspace,
                 // which is also the root reads are confined to. With no project
@@ -306,6 +367,96 @@ you receive its result and continue until you can give a final answer.",
         })
         .await;
         Ok(exhausted)
+    }
+
+    /// Handle a `delegate` tool call: run a scoped task on a specialist
+    /// sub-agent and return its final answer as the tool result. The sub-agent
+    /// runs to completion with no streaming (per the autonomy standard) and
+    /// cannot delegate further, which bounds fan-out and prevents cycles.
+    ///
+    /// Returns an `error_json` string (never `Err`) for any problem, so a bad
+    /// delegation is fed back to the model rather than aborting the parent turn.
+    async fn handle_delegate(&self, args: &Value) -> String {
+        if self.delegation_depth >= MAX_DELEGATION_DEPTH {
+            return agent_tools::error_json(
+                "delegation depth exceeded: a delegated sub-agent may not delegate again",
+            );
+        }
+        let Some(agent_id) = args.get("agent").and_then(Value::as_str) else {
+            return agent_tools::error_json("delegate requires a string 'agent' id");
+        };
+        let Some(task) = args.get("task").and_then(Value::as_str) else {
+            return agent_tools::error_json("delegate requires a string 'task'");
+        };
+        // Resolve the specialist from the built-in roster.
+        let registry = AgentRegistry::builtin();
+        let Some(definition) = registry.get(agent_id).cloned() else {
+            return agent_tools::error_json(format!("unknown agent '{agent_id}' to delegate to"));
+        };
+        // The orchestrator must not delegate to itself (that is just recursion
+        // with no specialization).
+        if definition.id == self.definition.id {
+            return agent_tools::error_json("cannot delegate to self");
+        }
+        let sub = Agent::with_definition(self.container.clone(), self.project.clone(), definition)
+            .at_delegation_depth(self.delegation_depth + 1);
+        // Box the recursive turn: an async fn that awaits itself needs indirection.
+        let run = Box::pin(sub.run_turn(Vec::new(), task, &NullSink));
+        match run.await {
+            Ok(answer) => answer,
+            Err(e) => agent_tools::error_json(format!("delegated agent '{agent_id}' failed: {e}")),
+        }
+    }
+
+    /// When the conversation exceeds the context budget, summarize the older
+    /// messages (keeping the system prompt and the most recent
+    /// [`COMPACTION_RETAIN`] messages) into a single summary message via the
+    /// LLM, so earlier context is preserved as memory rather than silently
+    /// dropped by window truncation. Best-effort: any failure leaves `messages`
+    /// unchanged (the loop still trims to budget before each call).
+    async fn maybe_compact(&self, messages: &mut Vec<Message>) {
+        if hf_context::total_tokens(messages) <= hf_context::DEFAULT_BUDGET_TOKENS {
+            return;
+        }
+        // Need the system prompt + a summary + retained tail to be worthwhile.
+        if messages.len() <= COMPACTION_RETAIN + 2 {
+            return;
+        }
+        let Some(pool) = self.container.provider_pool() else {
+            return;
+        };
+
+        // Split: [system] [middle .. to summarize] [recent tail].
+        let system = messages.first().cloned();
+        let tail_start = messages.len() - COMPACTION_RETAIN;
+        let middle: Vec<String> = messages[1..tail_start]
+            .iter()
+            .map(|m| format!("{:?}: {}", m.role, m.content))
+            .collect();
+        if middle.is_empty() {
+            return;
+        }
+
+        let engine = hf_context::CompactionEngine::with_llm(
+            hf_context::CompactionConfig::default(),
+            Box::new(PoolCompactionLlm { pool }),
+        );
+        // Summarize everything in `middle` (retain 0 -- the tail is kept below).
+        let result = engine.compact_async_with_retain(&middle, 0).await;
+        if result.summary.trim().is_empty() {
+            return;
+        }
+
+        let mut rebuilt = Vec::with_capacity(COMPACTION_RETAIN + 2);
+        if let Some(sys) = system {
+            rebuilt.push(sys);
+        }
+        rebuilt.push(Message::new(
+            Role::System,
+            format!("[Summary of earlier conversation]\n{}", result.summary),
+        ));
+        rebuilt.extend_from_slice(&messages[tail_start..]);
+        *messages = rebuilt;
     }
 }
 

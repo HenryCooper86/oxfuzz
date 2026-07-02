@@ -9,7 +9,10 @@ use hf_core::provider::{ChatRequest, LlmProvider};
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
-use hf_prompt::render_harness_prompt;
+use hf_prompt::{
+    render_harness_prompt, render_harness_refine_prompt, render_harness_repair_prompt,
+    render_seed_prompt,
+};
 
 /// Draft a harness for a target using the LLM.
 ///
@@ -37,16 +40,222 @@ pub async fn draft(
     })
 }
 
+/// Maximum characters of build diagnostics to feed back into a repair prompt.
+/// Compiler output can be huge; the first errors are the actionable ones and a
+/// bounded slice keeps the prompt inside the model's context budget.
+pub const MAX_REPAIR_DIAGNOSTICS_CHARS: usize = 4000;
+
+/// Re-draft a harness that failed to build, given the failing source and the
+/// compiler/smoke diagnostics. This is one repair step; the caller decides how
+/// many attempts to make.
+///
+/// `diagnostics` is truncated to [`MAX_REPAIR_DIAGNOSTICS_CHARS`] before being
+/// sent, so an enormous compiler dump does not blow the context window.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the LLM call fails or the response contains no
+/// fenced code block.
+pub async fn repair(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    failing_source: &str,
+    diagnostics: &str,
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
+    let diagnostics = truncate_diagnostics(diagnostics);
+    let prompt = render_harness_repair_prompt(target, engine, failing_source, diagnostics);
+    let messages = vec![Message::user(prompt)];
+    let req = ChatRequest::from_messages(messages);
+    let resp = llm.chat_completion(&req).await?;
+    let source = extract_code_block(resp.text()).ok_or_else(|| {
+        ClassifiedError::Harness("repair response contained no fenced code block".to_owned())
+    })?;
+    Ok(HarnessDraft {
+        target_id: target.id,
+        engine,
+        source,
+        rationale: "repair".to_owned(),
+        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+    })
+}
+
+/// Re-draft a harness that runs but has left `uncovered` reachable functions
+/// unexercised, asking the LLM to reshape the input handling so the fuzzer can
+/// drive into them. One refinement step; the caller loops on coverage feedback.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the LLM call fails or the response contains no
+/// fenced code block.
+pub async fn refine(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    current_source: &str,
+    uncovered: &[String],
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
+    let prompt = render_harness_refine_prompt(target, engine, current_source, uncovered);
+    let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
+    let resp = llm.chat_completion(&req).await?;
+    let source = extract_code_block(resp.text()).ok_or_else(|| {
+        ClassifiedError::Harness("refine response contained no fenced code block".to_owned())
+    })?;
+    Ok(HarnessDraft {
+        target_id: target.id,
+        engine,
+        source,
+        rationale: "refine".to_owned(),
+        build_cmd: build_command(engine, target.language, &format!("fuzz_{}", target.symbol)),
+    })
+}
+
+/// Generate structural seed inputs for a target using the LLM.
+///
+/// Returns the decoded seed byte strings (at most `count`). A good seed corpus
+/// lets a coverage-guided fuzzer start deep in the input format rather than
+/// rediscovering it byte by byte. The caller writes the seeds to disk and may
+/// fall back to heuristic seeds when this returns an empty vec.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the LLM call fails. A response that parses to
+/// no seeds is returned as an empty vec (not an error) so the caller can fall
+/// back gracefully.
+pub async fn generate_seeds(
+    target: &TargetCandidate,
+    count: usize,
+    llm: Box<dyn LlmProvider>,
+) -> Result<Vec<Vec<u8>>, ClassifiedError> {
+    let prompt = render_seed_prompt(target, count);
+    let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
+    let resp = llm.chat_completion(&req).await?;
+    Ok(parse_seed_array(resp.text(), count))
+}
+
+/// Parse an LLM seed response into raw seed byte strings. The model is asked for
+/// a JSON array of hex strings; each element is hex-decoded, falling back to the
+/// element's UTF-8 bytes when it is not valid hex. At most `max` non-empty seeds
+/// are returned.
+fn parse_seed_array(text: &str, max: usize) -> Vec<Vec<u8>> {
+    let Some(start) = text.find('[') else {
+        return Vec::new();
+    };
+    let mut iter = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Vec<String>>();
+    let Some(Ok(items)) = iter.next() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let decoded = decode_hex(&item).unwrap_or_else(|| item.into_bytes());
+        if !decoded.is_empty() {
+            out.push(decoded);
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// Decode an even-length ASCII-hex string to bytes, or `None` if it is not
+/// valid hex.
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.is_empty() || !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        out.push(hex_nibble(bytes[i]) * 16 + hex_nibble(bytes[i + 1]));
+        i += 2;
+    }
+    Some(out)
+}
+
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
+
+/// Truncate build diagnostics to the repair-prompt budget, keeping the head
+/// (where the first, most actionable compiler errors appear).
+fn truncate_diagnostics(diagnostics: &str) -> &str {
+    if diagnostics.len() <= MAX_REPAIR_DIAGNOSTICS_CHARS {
+        return diagnostics;
+    }
+    // Cut on a char boundary at or below the limit.
+    let mut end = MAX_REPAIR_DIAGNOSTICS_CHARS;
+    while end > 0 && !diagnostics.is_char_boundary(end) {
+        end -= 1;
+    }
+    &diagnostics[..end]
+}
+
+/// A build that ran in the sandbox but returned a non-zero exit code. Carries
+/// the diagnostics a repair step needs; distinct from an infrastructure error
+/// (Docker unavailable, write failure), which surfaces as `ClassifiedError`.
+#[derive(Debug, Clone)]
+pub struct CompileFailure {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl CompileFailure {
+    /// The combined stdout+stderr, the signal a repair prompt is built from.
+    #[must_use]
+    pub fn diagnostics(&self) -> String {
+        if self.stdout.trim().is_empty() {
+            self.stderr.clone()
+        } else {
+            format!("{}\n{}", self.stdout, self.stderr)
+        }
+    }
+}
+
+/// The result of a compile attempt: either a compiled harness or a structured
+/// build failure. Only infrastructure problems return `Err`.
+#[derive(Debug)]
+pub enum CompileResult {
+    Ok(Box<Harness>),
+    Failed(CompileFailure),
+}
+
 /// Compile a harness in the sandbox.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the build command returns a non-zero exit
-/// code.
+/// code (or the sandbox itself fails).
 pub async fn compile(
-    mut harness: Harness,
+    harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
 ) -> Result<Harness, ClassifiedError> {
+    match try_compile(harness, rt, workspace).await? {
+        CompileResult::Ok(h) => Ok(*h),
+        CompileResult::Failed(f) => Err(ClassifiedError::Harness(format!(
+            "compile failed (exit {}): {}",
+            f.exit_code, f.stderr
+        ))),
+    }
+}
+
+/// Compile a harness in the sandbox, returning a structured [`CompileResult`]
+/// so callers can inspect the diagnostics (e.g. to drive a repair attempt)
+/// rather than only receiving an opaque error string.
+///
+/// # Errors
+/// Returns `ClassifiedError` only for infrastructure failures (cannot write the
+/// source, sandbox cannot run). A non-zero compiler exit is `CompileResult::Failed`.
+pub async fn try_compile(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+) -> Result<CompileResult, ClassifiedError> {
     // Write the harness source to the host workspace (the Docker mount
     // makes it visible inside the container at container_workspace). Use a
     // language-appropriate filename so the compiler treats it correctly
@@ -96,16 +305,17 @@ pub async fn compile(
     };
     let result = rt.run_command(&cmd, workspace, &limits).await?;
     if result.exit_code != 0 {
-        return Err(ClassifiedError::Harness(format!(
-            "compile failed (exit {}): {}",
-            result.exit_code, result.stderr
-        )));
+        return Ok(CompileResult::Failed(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
     }
     // Update the output path to the host workspace path so the binary
     // can be referenced by subsequent run steps.
     harness.build_cmd.output = workspace.join(output_name);
     harness.status = HarnessStatus::Compiled;
-    Ok(harness)
+    Ok(CompileResult::Ok(Box::new(harness)))
 }
 
 /// Run a 60-second smoke fuzz on a compiled harness.
@@ -452,6 +662,202 @@ fn sh_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_core::target::{InputSurface, SourceLocation, TargetKind};
+    use hf_test_utils::mock_provider::MockProvider;
+
+    fn sample_target() -> TargetCandidate {
+        TargetCandidate {
+            id: uuid::Uuid::nil(),
+            project_root: PathBuf::from("/proj"),
+            language: TargetLanguage::C,
+            symbol: "parse_header".to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from("src/parse.c"),
+                line: 1,
+                col: 1,
+            },
+            signature: Some("int parse_header(const uint8_t*, size_t)".to_owned()),
+            input_surface: InputSurface::Bytes,
+            complexity: 3,
+            fit_score: 0.5,
+            sanitizers: Vec::new(),
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 3,
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_extracts_corrected_source_from_fenced_block() {
+        let target = sample_target();
+        // The model returns a corrected harness in a fenced block.
+        let llm = MockProvider::fixed(
+            "Here is the fix:\n```c\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}\n```",
+        );
+        let draft = repair(
+            &target,
+            EngineKind::LibFuzzer,
+            "int LLVMFuzzerTestOneInput(){ frobnicate(); }",
+            "error: implicit declaration of function 'frobnicate'",
+            Box::new(llm),
+        )
+        .await
+        .expect("repair should succeed");
+        assert!(draft
+            .source
+            .contains("LLVMFuzzerTestOneInput(const uint8_t"));
+        assert_eq!(draft.rationale, "repair");
+    }
+
+    #[tokio::test]
+    async fn repair_errors_when_no_code_block() {
+        let target = sample_target();
+        let llm = MockProvider::fixed("I cannot fix this.");
+        let err = repair(
+            &target,
+            EngineKind::LibFuzzer,
+            "bad source",
+            "some error",
+            Box::new(llm),
+        )
+        .await;
+        assert!(err.is_err());
+    }
+
+    /// A runtime whose compile command returns a fixed exit code + output, so
+    /// the compile-failure path is exercised without Docker.
+    struct ScriptedRuntime {
+        exit_code: i32,
+        stderr: String,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeAdapter for ScriptedRuntime {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &hf_core::runtime::ResourceLimits,
+        ) -> Result<hf_core::runtime::CommandResult, ClassifiedError> {
+            Ok(hf_core::runtime::CommandResult {
+                exit_code: self.exit_code,
+                stdout: String::new(),
+                stderr: self.stderr.clone(),
+                workspace: cwd.to_path_buf(),
+            })
+        }
+        async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+            Ok(())
+        }
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            Ok(String::new())
+        }
+    }
+
+    fn sample_harness() -> Harness {
+        Harness {
+            id: uuid::Uuid::nil(),
+            target_id: uuid::Uuid::nil(),
+            engine: EngineKind::LibFuzzer,
+            source: "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}".to_owned(),
+            language: TargetLanguage::C,
+            build_cmd: build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t"),
+            sanitizer: hf_core::target::Sanitizer::Address,
+            status: HarnessStatus::Draft,
+            smoke_run: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn try_compile_reports_structured_failure_on_nonzero_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ScriptedRuntime {
+            exit_code: 1,
+            stderr: "harness.c:1:5: error: implicit declaration of 'frob'".to_owned(),
+        };
+        let result = try_compile(sample_harness(), &rt, dir.path())
+            .await
+            .expect("infra ok");
+        match result {
+            CompileResult::Failed(f) => {
+                assert_eq!(f.exit_code, 1);
+                assert!(f.diagnostics().contains("implicit declaration of 'frob'"));
+            }
+            CompileResult::Ok(_) => panic!("expected a compile failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn try_compile_returns_compiled_harness_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ScriptedRuntime {
+            exit_code: 0,
+            stderr: String::new(),
+        };
+        let result = try_compile(sample_harness(), &rt, dir.path())
+            .await
+            .expect("infra ok");
+        match result {
+            CompileResult::Ok(h) => assert_eq!(h.status, HarnessStatus::Compiled),
+            CompileResult::Failed(_) => panic!("expected success"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refine_extracts_improved_source() {
+        let target = sample_target();
+        let llm = MockProvider::fixed(
+            "```c\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){ if(n>0) decode_frame(d,n); return 0; }\n```",
+        );
+        let draft = refine(
+            &target,
+            EngineKind::LibFuzzer,
+            "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}",
+            &["decode_frame".to_owned()],
+            Box::new(llm),
+        )
+        .await
+        .expect("refine should succeed");
+        assert!(draft.source.contains("decode_frame"));
+        assert_eq!(draft.rationale, "refine");
+    }
+
+    #[tokio::test]
+    async fn generate_seeds_decodes_hex_array() {
+        let target = sample_target();
+        // "89504e47" = PNG magic; "7b7d" = "{}".
+        let llm = MockProvider::fixed("Sure: [\"89504e47\", \"7b7d\"]");
+        let seeds = generate_seeds(&target, 8, Box::new(llm)).await.unwrap();
+        assert_eq!(seeds.len(), 2);
+        assert_eq!(seeds[0], vec![0x89, 0x50, 0x4e, 0x47]);
+        assert_eq!(seeds[1], b"{}".to_vec());
+    }
+
+    #[test]
+    fn parse_seed_array_falls_back_to_utf8_and_caps() {
+        // "PNG" is not even-length hex -> treated as UTF-8 bytes.
+        let seeds = parse_seed_array("[\"PNG\", \"7b7d\", \"00\"]", 2);
+        assert_eq!(seeds.len(), 2, "capped at max");
+        assert_eq!(seeds[0], b"PNG".to_vec());
+        assert_eq!(seeds[1], b"{}".to_vec());
+    }
+
+    #[test]
+    fn parse_seed_array_empty_on_no_array() {
+        assert!(parse_seed_array("no json here", 8).is_empty());
+    }
+
+    #[test]
+    fn truncate_diagnostics_caps_length_on_char_boundary() {
+        let big = "e".repeat(MAX_REPAIR_DIAGNOSTICS_CHARS + 500);
+        assert_eq!(
+            truncate_diagnostics(&big).len(),
+            MAX_REPAIR_DIAGNOSTICS_CHARS
+        );
+        let small = "short";
+        assert_eq!(truncate_diagnostics(small), "short");
+    }
 
     #[test]
     fn parses_libfuzzer_exec_per_sec_peak() {
