@@ -320,6 +320,18 @@ pub async fn run_chat_turn(
 ) -> Result<String, ClassifiedError> {
     // Resolve the conversation history: prefer the persisted transcript.
     let has_session = session.is_some() && container.session_manager().is_some();
+
+    // Serialize turns on the same session for the whole read-modify-write below:
+    // reading the history, running the turn, then appending user+assistant and
+    // checkpointing. Two concurrent turns on one session would otherwise read the
+    // same pre-turn length, mint duplicate checkpoint turn numbers, and interleave
+    // their four appends. The guard is held until this function returns; distinct
+    // sessions take distinct locks and still run concurrently.
+    let _turn_guard = match &session {
+        Some(id) if has_session => Some(container.session_turn_lock(id).lock_owned().await),
+        _ => None,
+    };
+
     let history = if let (Some(id), Some(manager)) = (&session, container.session_manager()) {
         manager
             .read_transcript(id)

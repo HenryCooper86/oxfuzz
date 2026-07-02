@@ -538,6 +538,16 @@ pub struct ServiceContainer {
     /// A turn registers via [`Self::track_agent`] and is removed when the
     /// returned guard drops. Shared across clones of this container.
     active_agents: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Per-session locks serializing chat turns on the same session. A turn is a
+    /// read-modify-write over the transcript (read history, run the turn, append
+    /// user+assistant + checkpoint); two concurrent turns on one session would
+    /// otherwise interleave appends and mint duplicate checkpoint turn numbers.
+    /// Different sessions still run concurrently. Shared across clones.
+    session_turn_locks: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
+        >,
+    >,
 }
 
 /// RAII guard that removes a run's cancellation token from the active-runs map
@@ -629,6 +639,7 @@ impl ServiceContainer {
             run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -862,6 +873,21 @@ impl ServiceContainer {
     #[must_use]
     pub fn session_manager(&self) -> Option<&Arc<hf_session::SessionManager>> {
         self.session_manager.as_ref()
+    }
+
+    /// The lock serializing chat turns on `session`, creating it on first use.
+    /// Held for the whole turn so concurrent turns on one session run one at a
+    /// time; distinct sessions take distinct locks and are unaffected.
+    #[must_use]
+    pub fn session_turn_lock(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .session_turn_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(session.clone()).or_default())
     }
 
     /// Replace the guardrail engine (e.g. install an interactive HITL gate),
@@ -1172,6 +1198,7 @@ impl ServiceContainer {
             run_journal,
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
