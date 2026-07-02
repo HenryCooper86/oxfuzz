@@ -47,32 +47,65 @@ pub fn config_dir() -> PathBuf {
 /// Falls back to a temp directory so writes always land on a writable volume.
 #[must_use]
 pub fn user_app_dir() -> PathBuf {
+    let candidate =
+        platform_user_app_dir().unwrap_or_else(|| std::env::temp_dir().join("hobot_fuzz"));
+    writable_or_temp(candidate)
+}
+
+fn platform_user_app_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("hobot_fuzz");
+        return Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("hobot_fuzz"),
+        );
     }
     #[cfg(target_os = "windows")]
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata).join("hobot_fuzz");
+        return Some(PathBuf::from(appdata).join("hobot_fuzz"));
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
             if !xdg.is_empty() {
-                return PathBuf::from(xdg).join("hobot_fuzz");
+                return Some(PathBuf::from(xdg).join("hobot_fuzz"));
             }
         }
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("hobot_fuzz");
+            return Some(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("hobot_fuzz"),
+            );
         }
     }
-    std::env::temp_dir().join("hobot_fuzz")
+    None
+}
+
+fn writable_or_temp(candidate: PathBuf) -> PathBuf {
+    if writable_dir(&candidate) {
+        candidate
+    } else {
+        std::env::temp_dir().join("hobot_fuzz")
+    }
+}
+
+pub(crate) fn writable_dir(path: &Path) -> bool {
+    if std::fs::create_dir_all(path).is_err() {
+        return false;
+    }
+
+    let probe = path.join(format!(".write-probe-{}", uuid::Uuid::new_v4()));
+    match std::fs::create_dir(&probe) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Resolve the database path the same way [`Store::connect_from_env`] does.
@@ -125,4 +158,24 @@ pub async fn init_at(config_dir: &Path, db_path: &Path) -> Result<InitReport, Cl
         created_configs: created,
         db_path: db_path.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writable_or_temp_keeps_writable_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(writable_or_temp(dir.path().to_path_buf()), dir.path());
+    }
+
+    #[test]
+    fn writable_or_temp_falls_back_when_candidate_is_not_a_directory() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let resolved = writable_or_temp(file.path().to_path_buf());
+
+        assert_eq!(resolved, std::env::temp_dir().join("hobot_fuzz"));
+    }
 }

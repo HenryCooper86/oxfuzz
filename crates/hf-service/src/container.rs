@@ -632,6 +632,15 @@ impl ServiceContainer {
         }
     }
 
+    /// Create a non-persistent container backed by the stub runtime.
+    ///
+    /// Intended for presentation-layer tests and health checks that need the
+    /// service API surface without Docker, an LLM provider, or a database.
+    #[must_use]
+    pub fn stubbed() -> Self {
+        Self::new(Arc::new(hf_runtime::StubRuntime), None)
+    }
+
     /// The LLM cost/trace diagnostics recorder for this session.
     #[must_use]
     pub fn diagnostics(&self) -> &Arc<crate::diagnostics::DiagnosticsRecorder> {
@@ -3312,16 +3321,15 @@ mod workspace_tests {
     }
 
     #[test]
-    fn workspace_root_is_persistent_not_temp() {
-        // With no override the workspace root must NOT live under the OS temp
-        // dir, or artifacts get purged between sessions.
+    fn workspace_root_uses_dedicated_app_workspace_root() {
+        // With no override the workspace root normally lives under the
+        // platform app-data dir. In restricted environments that path can be
+        // unwritable, so `user_app_dir` may fall back to temp; either way,
+        // artifacts stay under a dedicated hobot_fuzz/workspaces root rather
+        // than directly in the OS temp directory.
         let root = super::workspace_root_from(None);
-        assert!(
-            !root.starts_with(std::env::temp_dir()),
-            "workspace root must be persistent, got {}",
-            root.display()
-        );
-        assert!(root.ends_with("workspaces"));
+        assert!(root.ends_with(std::path::Path::new("hobot_fuzz").join("workspaces")));
+        assert_ne!(root, std::env::temp_dir());
     }
 
     #[test]

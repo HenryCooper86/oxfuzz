@@ -14,9 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 
-use hf_core::engine::EngineKind;
-use hf_core::target::TargetLanguage;
-use hf_service::ServiceContainer;
+use hf_service::{EngineKind, Message, Role, ServiceContainer, SessionId, TargetLanguage};
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -113,10 +111,7 @@ fn map_err<E: std::fmt::Display>(
 /// Build the application router with a minimal stub container (no Docker, no
 /// LLM, no persistence). Intended for tests and health checks.
 pub fn build() -> Router {
-    build_with_state(AppState::new(hf_service::ServiceContainer::new(
-        std::sync::Arc::new(hf_runtime::StubRuntime),
-        None,
-    )))
+    build_with_state(AppState::new(ServiceContainer::stubbed()))
 }
 
 /// Build the application router from the canonical
@@ -545,14 +540,11 @@ async fn chat_agent(
     Json(req): Json<ChatAgentRequest>,
 ) -> ApiResult<String> {
     let project = req.project.filter(|p| !p.is_empty()).map(PathBuf::from);
-    let session = req
-        .session_id
-        .filter(|s| !s.is_empty())
-        .map(hf_core::types::SessionId);
-    let history_fallback: Vec<hf_core::types::Message> = req
+    let session = req.session_id.filter(|s| !s.is_empty()).map(SessionId);
+    let history_fallback: Vec<Message> = req
         .history
         .into_iter()
-        .map(|t| hf_core::types::Message::new(parse_role(&t.role), t.content))
+        .map(|t| Message::new(parse_role(&t.role), t.content))
         .collect();
     let answer = hf_agent::run_chat_turn(
         state.container.clone(),
@@ -569,13 +561,13 @@ async fn chat_agent(
     Ok(Json(answer))
 }
 
-/// Parse a transcript role string into a [`Role`](hf_core::types::Role),
+/// Parse a transcript role string into a [`Role`],
 /// defaulting unknown values to `User`.
-fn parse_role(role: &str) -> hf_core::types::Role {
+fn parse_role(role: &str) -> Role {
     match role.to_ascii_lowercase().as_str() {
-        "assistant" => hf_core::types::Role::Assistant,
-        "system" => hf_core::types::Role::System,
-        _ => hf_core::types::Role::User,
+        "assistant" => Role::Assistant,
+        "system" => Role::System,
+        _ => Role::User,
     }
 }
 
@@ -611,8 +603,8 @@ struct SessionRequest {
 async fn chat_history(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<hf_core::types::Message>> {
-    let id = hf_core::types::SessionId(req.session_id);
+) -> Json<Vec<Message>> {
+    let id = SessionId(req.session_id);
     Json(state.container.chat_history(&id).await)
 }
 
@@ -620,7 +612,7 @@ async fn chat_rollback(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
 ) -> Json<usize> {
-    let id = hf_core::types::SessionId(req.session_id);
+    let id = SessionId(req.session_id);
     Json(state.container.chat_rollback_last(&id).await)
 }
 
@@ -634,7 +626,7 @@ async fn chat_rollback_to(
     State(state): State<AppState>,
     Json(req): Json<RollbackToRequest>,
 ) -> Json<usize> {
-    let id = hf_core::types::SessionId(req.session_id);
+    let id = SessionId(req.session_id);
     Json(
         state
             .container
@@ -647,7 +639,7 @@ async fn chat_checkpoints(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
 ) -> Json<Vec<hf_service::checkpoints::CheckpointView>> {
-    let id = hf_core::types::SessionId(req.session_id);
+    let id = SessionId(req.session_id);
     Json(state.container.chat_checkpoints(&id).await)
 }
 
@@ -663,7 +655,7 @@ async fn chat_branch(
     State(state): State<AppState>,
     Json(req): Json<BranchRequest>,
 ) -> Json<Option<String>> {
-    let id = hf_core::types::SessionId(req.session_id);
+    let id = SessionId(req.session_id);
     Json(
         state
             .container
@@ -680,7 +672,7 @@ async fn chat_branches(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
 ) -> Json<Vec<hf_service::checkpoints::BranchView>> {
-    let id = hf_core::types::SessionId(req.session_id);
+    let id = SessionId(req.session_id);
     Json(state.container.chat_branches(&id).await)
 }
 
@@ -904,7 +896,7 @@ async fn app_paths(State(_): State<AppState>) -> Json<serde_json::Value> {
 }
 
 async fn host_arch() -> Json<String> {
-    Json(hf_runtime::host_platform())
+    Json(hf_service::host_platform())
 }
 
 // -- SSE -------------------------------------------------------------------
