@@ -69,11 +69,28 @@ fn workspace_root_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
 /// workspace).
 #[must_use]
 pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
+    workspace_root()
+        .join(project_slug(project))
+        .join(sanitize_target(target))
+}
+
+/// A per-project workspace directory name: the human-readable basename plus a
+/// short deterministic hash of the full path. The hash disambiguates projects
+/// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
+/// workspaces -- and thus compiled binaries, corpora, and crash reproducers --
+/// never collide, while the basename keeps the directory recognizable. Stable
+/// across processes (SHA-256, unlike `DefaultHasher`), so the same project maps
+/// to the same workspace on every invocation.
+fn project_slug(project: &Path) -> String {
+    use sha2::{Digest, Sha256};
     let name = project
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("default");
-    workspace_root().join(name).join(sanitize_target(target))
+    let mut hasher = Sha256::new();
+    hasher.update(project.to_string_lossy().as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{name}-{}", &digest[..8])
 }
 
 /// Whether the in-container qemu for a syzkaller run can use KVM hardware
@@ -3673,7 +3690,7 @@ mod workspace_tests {
 
     /// The per-project workspace base every resolved path must stay within.
     fn base(project: &Path) -> std::path::PathBuf {
-        super::workspace_root().join(project.file_name().unwrap())
+        super::workspace_root().join(super::project_slug(project))
     }
 
     #[test]
@@ -3702,6 +3719,27 @@ mod workspace_tests {
         let project = Path::new("/home/user/myproj");
         let ws = workspace_dir(project, "parse_json");
         assert_eq!(ws, base(project).join("parse_json"));
+    }
+
+    #[test]
+    fn projects_sharing_a_basename_get_distinct_workspaces() {
+        // Two different projects with the same directory name must not share a
+        // workspace, or one's compiled binary/corpus/crashes would be used for
+        // the other's runs/triage.
+        let a = workspace_dir(Path::new("/a/libfoo"), "parse");
+        let b = workspace_dir(Path::new("/b/libfoo"), "parse");
+        assert_ne!(a, b, "same-basename projects collided");
+    }
+
+    #[test]
+    fn same_project_maps_to_a_stable_workspace() {
+        // The slug must be deterministic so compile -> run -> triage across
+        // separate invocations all resolve to the same on-disk workspace.
+        let project = Path::new("/home/user/myproj");
+        assert_eq!(
+            workspace_dir(project, "parse_json"),
+            workspace_dir(project, "parse_json")
+        );
     }
 
     #[test]
