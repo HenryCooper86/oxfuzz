@@ -68,6 +68,41 @@ describe("transport", () => {
     }
   });
 
+  it("maps report draft commands to the web API", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("list_report_drafts");
+      await transport.invoke("save_report_draft", { title: "T", project: "/p", status: "Draft", content: "# T" });
+      await transport.invoke("delete_report_draft", { id: "report-1" });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        "http://localhost:8081/reports",
+        "http://localhost:8081/reports/save",
+        "http://localhost:8081/reports/delete",
+      ]);
+      expect(calls[0].init.method).toBe("GET");
+      expect(calls[0].init.body).toBeUndefined();
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({
+        title: "T",
+        project: "/p",
+        status: "Draft",
+        content: "# T",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps system status commands to a JSON endpoint in web mode", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;
