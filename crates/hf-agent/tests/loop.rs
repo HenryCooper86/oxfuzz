@@ -15,12 +15,15 @@ use tokio::sync::Mutex;
 /// A provider pool that returns pre-scripted replies in order.
 struct ScriptedPool {
     replies: Mutex<VecDeque<String>>,
+    /// The `temperature` on the most recent request (to assert it was applied).
+    last_temperature: Mutex<Option<f64>>,
 }
 
 impl ScriptedPool {
     fn new(replies: Vec<&str>) -> Self {
         Self {
             replies: Mutex::new(replies.into_iter().map(str::to_owned).collect()),
+            last_temperature: Mutex::new(None),
         }
     }
 }
@@ -29,9 +32,10 @@ impl ScriptedPool {
 impl ProviderPool for ScriptedPool {
     async fn chat_completion(
         &self,
-        _request: &ChatRequest,
+        request: &ChatRequest,
         _route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        *self.last_temperature.lock().await = request.temperature;
         let content = self
             .replies
             .lock()
@@ -44,7 +48,12 @@ impl ProviderPool for ScriptedPool {
             content: Some(content),
             reasoning_content: None,
             tool_calls: Vec::new(),
-            usage: hf_core::types::TokenUsage::default(),
+            // Non-zero usage so a recorded diagnostic carries real token counts.
+            usage: hf_core::types::TokenUsage {
+                input_tokens: 12,
+                output_tokens: 8,
+                ..Default::default()
+            },
             finish_reason: FinishReason::Stop,
             raw_request: None,
             raw_response: None,
@@ -76,6 +85,58 @@ fn agent_with(replies: Vec<&str>, project: Option<std::path::PathBuf>) -> Agent 
     let pool = Arc::new(ScriptedPool::new(replies));
     let container = ServiceContainer::new(runtime, Some(pool));
     Agent::new(container, project)
+}
+
+#[tokio::test]
+async fn agent_turn_records_diagnostics_cost() {
+    // An interactive agent turn must show up in the cost summary, like
+    // rank/harness/triage -- otherwise interactive-agent spend is invisible.
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"thought":"easy","final":"done"}"#,
+    ]));
+    let container = ServiceContainer::new(runtime, Some(pool));
+    let agent = Agent::new(container.clone(), None);
+    let sink = CollectingSink::new();
+
+    let before = container.cost_summary().await.calls;
+    agent.run_turn(vec![], "hi", &sink).await.unwrap();
+    let after = container.cost_summary().await;
+
+    assert_eq!(
+        after.calls,
+        before + 1,
+        "the turn's LLM call must be recorded"
+    );
+    assert_eq!(after.input_tokens, 12);
+    assert_eq!(after.output_tokens, 8);
+}
+
+#[tokio::test]
+async fn agent_applies_configured_temperature() {
+    let runtime = Arc::new(hf_runtime::StubRuntime);
+    let pool = Arc::new(ScriptedPool::new(vec![r#"{"final":"ok"}"#]));
+    let captured = Arc::clone(&pool);
+    let container = ServiceContainer::new(runtime, Some(pool));
+
+    let def = hf_agent::AgentDefinition::from_toml(
+        "id = \"tempy\"\n\
+         name = \"Tempy\"\n\
+         description = \"d\"\n\
+         role = \"orchestrator\"\n\
+         system_prompt = \"you are a test\"\n\
+         temperature = 0.25\n",
+    )
+    .expect("valid definition toml");
+    let agent = Agent::with_definition(container, None, def);
+    let sink = CollectingSink::new();
+    agent.run_turn(vec![], "hi", &sink).await.unwrap();
+
+    assert_eq!(
+        *captured.last_temperature.lock().await,
+        Some(0.25),
+        "the agent's configured temperature must reach the provider request"
+    );
 }
 
 #[tokio::test]
