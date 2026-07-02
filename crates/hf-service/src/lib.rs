@@ -19,6 +19,11 @@ pub mod report;
 pub mod sarif;
 pub mod scheduler;
 
+pub use hf_core::engine::EngineKind;
+pub use hf_core::target::TargetLanguage;
+pub use hf_core::types::{Message, Role, SessionId};
+pub use hf_runtime::host_platform;
+
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, provider_pool_from_config,
     provider_pool_from_env, repo_root, runtime_from_env, workspace_dir, workspace_root,

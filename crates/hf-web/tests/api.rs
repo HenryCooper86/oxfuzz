@@ -4,6 +4,32 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+#[test]
+fn manifest_does_not_depend_on_domain_or_runtime_crates() {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("read hf-web manifest");
+    let forbidden = [
+        "hf-core",
+        "hf-runtime",
+        "hf-harness",
+        "hf-discovery",
+        "hf-corpus",
+        "hf-crash",
+    ];
+
+    for crate_name in forbidden {
+        let prefix = format!("{crate_name} =");
+        assert!(
+            !manifest
+                .lines()
+                .any(|line| line.trim_start().starts_with(&prefix)),
+            "hf-web must go through hf-service, but depends directly on {crate_name}"
+        );
+    }
+}
+
 /// These integration tests exercise endpoints without a bearer token, so they
 /// run in the explicit unauthenticated local-dev mode. Setting the same value
 /// in every test (and never `HF_WEB_TOKEN`) keeps the process-global env
