@@ -601,8 +601,11 @@ fn build_session_managers(
     let display: Arc<dyn DisplayTranscriptStore> = Arc::new(
         hf_storage::JsonlDisplayTranscriptStore::new(base.join("display")),
     );
-    let checkpoint_store: Arc<dyn ChatCheckpointStore> =
-        Arc::new(crate::checkpoints::InMemoryChatCheckpointStore::default());
+    // Persist checkpoints in the DB so turn-level rollback survives a restart
+    // (the in-memory store lost them on exit, silently no-op'ing rollback).
+    let checkpoint_store: Arc<dyn ChatCheckpointStore> = Arc::new(
+        hf_storage::SqliteChatCheckpointStore::new(store.pool().clone()),
+    );
 
     let manager = Arc::new(hf_session::SessionManager::new(
         Arc::clone(&session_store),
@@ -742,8 +745,12 @@ impl ServiceContainer {
             .await
             .unwrap_or_default();
         let transcript = sessions.read_transcript(session).await.unwrap_or_default();
-        list.into_iter()
-            .filter(|c| !c.invalidated)
+        let mut valid: Vec<_> = list.into_iter().filter(|c| !c.invalidated).collect();
+        // Present turns oldest-first for the picker, regardless of the store's
+        // list ordering (the trait returns them newest-first).
+        valid.sort_by_key(|c| c.turn_number);
+        valid
+            .into_iter()
             .map(|c| {
                 let preview = transcript
                     .get(c.message_count_before as usize)

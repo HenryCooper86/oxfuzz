@@ -7,6 +7,7 @@
 
 mod store;
 
+pub mod checkpoint_store;
 pub mod config;
 mod error;
 pub mod migration;
@@ -15,6 +16,7 @@ pub mod session_store;
 pub mod transcript;
 pub mod transcript_display;
 
+pub use checkpoint_store::SqliteChatCheckpointStore;
 pub use config::StorageConfig;
 pub use pool::create_pool;
 pub use session_store::SqliteSessionStore;

@@ -23,7 +23,7 @@
 /// Tables built by `migrations/` in production AND by `schema.sql` in tests, and
 /// queried by the same production code in both contexts -- so their column sets
 /// must stay identical.
-const CROSS_EXERCISED_TABLES: &[&str] = &["session_metadata"];
+const CROSS_EXERCISED_TABLES: &[&str] = &["session_metadata", "chat_checkpoints"];
 
 use std::collections::BTreeSet;
 
