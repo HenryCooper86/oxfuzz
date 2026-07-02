@@ -386,16 +386,21 @@ fn collect_casreps_into(dir: &Path, out: &mut Vec<(PathBuf, hf_core::crash::Casr
     }
 }
 
-/// Map a `.casrep` path back to the crash input it analyzed: CASR names each
-/// report after its input (`crash-abc.casrep` -> `crash-abc`), so the report's
-/// file stem under `out` gives a clean input name for display. (The libFuzzer
-/// path's input sits directly in `out`; the AFL path's lives deeper, but the
-/// stem still carries the crash id.)
-fn casrep_input_path(out_dir: &Path, casrep: &Path) -> PathBuf {
-    casrep
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map_or_else(|| casrep.to_path_buf(), |stem| out_dir.join(stem))
+/// Map a `.casrep` path back to the crash input it analyzed. CASR names each
+/// report after its input file (`id:000….casrep` -> `id:000…`); match that
+/// filename against the actual crash inputs so an AFL++ input nested under
+/// `out/<instance>/crashes/` resolves to its real location rather than a
+/// nonexistent `out/<name>` (which broke `verify_regressions`/reproduce). Falls
+/// back to the flat `out_dir/<name>` layout (libFuzzer) when not found.
+fn casrep_input_path(out_dir: &Path, casrep: &Path, crash_inputs: &[PathBuf]) -> PathBuf {
+    let Some(stem) = casrep.file_stem().and_then(|s| s.to_str()) else {
+        return casrep.to_path_buf();
+    };
+    crash_inputs
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(stem))
+        .cloned()
+        .unwrap_or_else(|| out_dir.join(stem))
 }
 
 /// A stable crash id derived from its run, stack signature, and input file, so
@@ -2608,10 +2613,13 @@ impl ServiceContainer {
             tracing::info!("casr produced no reports; falling back to built-in triage");
             return None;
         }
+        // The actual crash inputs, including AFL++'s nested
+        // out/<instance>/crashes/ layout, so each casrep resolves to a real file.
+        let crash_inputs = collect_crash_inputs(&out_dir);
         let mut crashes = reports
             .into_iter()
             .map(|(path, casr)| {
-                let input_path = casrep_input_path(&out_dir, &path);
+                let input_path = casrep_input_path(&out_dir, &path, &crash_inputs);
                 let signature = if casr.crashline.is_empty() {
                     casr.stack.first().cloned().unwrap_or_default()
                 } else {
@@ -3523,6 +3531,35 @@ mod harness_link_tests {
     #[test]
     fn returns_none_without_any_harness() {
         assert_eq!(select_run_harness(&[], EngineKind::LibFuzzer), None);
+    }
+}
+
+#[cfg(test)]
+mod casrep_path_tests {
+    use super::casrep_input_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn resolves_afl_nested_crash_input() {
+        // AFL++ nests the input under out/<instance>/crashes/; the casrep sits in
+        // casr_out. The resolved path must point at the real nested file.
+        let out = Path::new("/work/out");
+        let nested = PathBuf::from("/work/out/default/crashes/id:000001,sig:06");
+        let inputs = vec![nested.clone()];
+        let casrep = Path::new("/work/casr_out/id:000001,sig:06.casrep");
+        assert_eq!(casrep_input_path(out, casrep, &inputs), nested);
+    }
+
+    #[test]
+    fn falls_back_to_flat_layout_for_libfuzzer() {
+        // libFuzzer crashes sit directly in out/; when the input list does not
+        // contain a match, fall back to out/<name>.
+        let out = Path::new("/work/out");
+        let casrep = Path::new("/work/casr_out/crash-abc.casrep");
+        assert_eq!(
+            casrep_input_path(out, casrep, &[]),
+            PathBuf::from("/work/out/crash-abc")
+        );
     }
 }
 
