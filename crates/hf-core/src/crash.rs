@@ -25,6 +25,14 @@ pub struct BugReport {
     pub repro_steps: String,
     pub stack: String,
     pub severity_guess: String,
+    /// The likely root cause of the crash in the target source (what is wrong
+    /// and why the input triggers it). `None` when triage could not infer one.
+    #[serde(default)]
+    pub root_cause: Option<String>,
+    /// A suggested fix, ideally as a unified-diff patch against the target
+    /// source. `None` when triage could not propose one.
+    #[serde(default)]
+    pub suggested_fix: Option<String>,
 }
 
 /// CASR exploitability classification for a crash.

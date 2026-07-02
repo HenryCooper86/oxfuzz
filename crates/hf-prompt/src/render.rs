@@ -1,7 +1,7 @@
 //! Prompt rendering functions.
 
 use hf_core::engine::EngineKind;
-use hf_core::target::TargetCandidate;
+use hf_core::target::{TargetCandidate, TargetLanguage};
 
 /// Render the discovery (target ranking) prompt.
 ///
@@ -41,7 +41,14 @@ pub fn render_discovery_prompt(candidates: &[TargetCandidate]) -> String {
 /// Render the harness generation prompt for a target + engine.
 #[must_use]
 pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> String {
-    let entry_point = engine_entry_point(engine);
+    // Rust harnesses use cargo-fuzz's `fuzz_target!` macro regardless of engine
+    // (it wraps libFuzzer), so the entry point is language-, not engine-, driven.
+    let entry_point = if matches!(target.language, TargetLanguage::Rust) {
+        "cargo-fuzz: #![no_main] use libfuzzer_sys::fuzz_target; \
+         fuzz_target!(|data: &[u8]| { /* call the target with data */ });"
+    } else {
+        engine_entry_point(engine)
+    };
     let engine_name = engine_name(engine);
     // List the project functions this target reaches, so the harness shapes its
     // input to exercise them (capped to keep the prompt focused).
@@ -96,6 +103,109 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
     )
 }
 
+/// Render a harness *repair* prompt: the original generation instructions plus
+/// the source that failed and the compiler/smoke diagnostics, asking the LLM to
+/// return a corrected harness.
+///
+/// `diagnostics` is the compiler stderr (or smoke-startup output) truncated by
+/// the caller; it is the single most useful signal for the fix, so it is placed
+/// last, immediately before the output instruction.
+#[must_use]
+pub fn render_harness_repair_prompt(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    failing_source: &str,
+    diagnostics: &str,
+) -> String {
+    let base = render_harness_prompt(target, engine);
+    format!(
+        "{base}\n\
+         \n\
+         A previous attempt to build this harness FAILED. Fix it.\n\
+         \n\
+         Previous harness source:\n\
+         ```\n{failing_source}\n```\n\
+         \n\
+         Build/smoke diagnostics (fix the root cause, do not suppress warnings):\n\
+         ```\n{diagnostics}\n```\n\
+         \n\
+         Output only the corrected harness source, in a single fenced code block. \
+         Keep the same engine entry point and rules as above.",
+    )
+}
+
+/// Render a harness *refinement* prompt: the target context, the current
+/// harness, and the reachable functions coverage has NOT reached yet, asking
+/// the LLM to reshape the harness so the fuzzer can drive into them.
+///
+/// Used when coverage stagnates: the harness compiles and runs but leaves known
+/// reachable code unexercised, usually because it does not decode the input in
+/// a way that reaches those branches.
+#[must_use]
+pub fn render_harness_refine_prompt(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    current_source: &str,
+    uncovered: &[String],
+) -> String {
+    let base = render_harness_prompt(target, engine);
+    let uncovered_list = if uncovered.is_empty() {
+        "(none reported -- broaden the input surface generally)".to_owned()
+    } else {
+        uncovered
+            .iter()
+            .take(30)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{base}\n\
+         \n\
+         The current harness compiles and runs but coverage has STAGNATED: these \
+         reachable functions are still not exercised.\n\
+         Uncovered reachable functions: {uncovered_list}\n\
+         \n\
+         Current harness source:\n\
+         ```\n{current_source}\n```\n\
+         \n\
+         Reshape the harness so the fuzzer can drive execution into those functions \
+         (e.g. split the input into fields, dispatch on a leading selector byte, or \
+         feed sub-buffers to the relevant calls). Keep the same engine entry point.\n\
+         Output only the improved harness source, in a single fenced code block.",
+    )
+}
+
+/// Render a prompt asking the LLM for structural seed inputs for a target.
+///
+/// Seeds are requested as a JSON array of hex-encoded byte strings so binary
+/// formats (magic headers, length-prefixed records) are representable; the
+/// caller decodes them. A good seed corpus lets a coverage-guided fuzzer start
+/// deep in the input format instead of rediscovering it byte by byte.
+#[must_use]
+pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
+    format!(
+        "You are the seed-corpus author for hobot_fuzz.\n\
+         Produce up to {count} diverse, INTERESTING seed inputs for the fuzz target below: \
+         well-formed examples, boundary cases, and minimal-but-valid inputs that exercise \
+         its parsing/decoding paths.\n\
+         Output ONLY a JSON array of hex-encoded byte strings (e.g. [\"89504e47\", \"7b7d\"]). \
+         No prose, no code fences.\n\
+         \n\
+         Target:\n\
+         - symbol: {symbol}\n\
+         - language: {lang:?}\n\
+         - kind: {kind:?}\n\
+         - input_surface: {input_surface:?}\n\
+         - signature: {sig}",
+        symbol = target.symbol,
+        lang = target.language,
+        kind = target.kind,
+        input_surface = target.input_surface,
+        sig = target.signature.as_deref().unwrap_or("(unknown)"),
+    )
+}
+
 fn engine_entry_point(engine: EngineKind) -> &'static str {
     match engine {
         EngineKind::Honggfuzz => {
@@ -117,5 +227,92 @@ fn engine_name(engine: EngineKind) -> &'static str {
         EngineKind::Honggfuzz => "honggfuzz",
         EngineKind::ClusterFuzzLite => "ClusterFuzzLite (libFuzzer-compatible)",
         EngineKind::Syzkaller => "syzkaller (kernel)",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hf_core::target::{
+        InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use std::path::PathBuf;
+
+    fn sample_target() -> TargetCandidate {
+        TargetCandidate {
+            id: uuid::Uuid::nil(),
+            project_root: PathBuf::from("/proj"),
+            language: TargetLanguage::C,
+            symbol: "parse_header".to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from("src/parse.c"),
+                line: 42,
+                col: 1,
+            },
+            signature: Some("int parse_header(const uint8_t*, size_t)".to_owned()),
+            input_surface: InputSurface::Bytes,
+            complexity: 7,
+            fit_score: 0.8,
+            sanitizers: Vec::new(),
+            rationale: String::new(),
+            reachable_functions: vec!["decode".to_owned()],
+            accumulated_complexity: 12,
+        }
+    }
+
+    #[test]
+    fn repair_prompt_includes_source_and_diagnostics() {
+        let target = sample_target();
+        let prompt = render_harness_repair_prompt(
+            &target,
+            EngineKind::LibFuzzer,
+            "int LLVMFuzzerTestOneInput(){ return frobnicate(); }",
+            "error: use of undeclared identifier 'frobnicate'",
+        );
+        // Carries the original generation context (engine entry point).
+        assert!(prompt.contains("LLVMFuzzerTestOneInput"));
+        // Includes the failing source verbatim so the model can edit it.
+        assert!(prompt.contains("frobnicate()"));
+        // Includes the compiler diagnostics that drive the fix.
+        assert!(prompt.contains("undeclared identifier 'frobnicate'"));
+        // Asks for a single fenced code block back.
+        assert!(prompt.to_ascii_lowercase().contains("fenced code block"));
+    }
+
+    #[test]
+    fn harness_prompt_uses_cargo_fuzz_entry_for_rust() {
+        let mut target = sample_target();
+        target.language = TargetLanguage::Rust;
+        let prompt = render_harness_prompt(&target, EngineKind::LibFuzzer);
+        assert!(
+            prompt.contains("fuzz_target!"),
+            "rust harness prompt should use the cargo-fuzz macro: {prompt}"
+        );
+    }
+
+    #[test]
+    fn refine_prompt_lists_uncovered_and_current_source() {
+        let target = sample_target();
+        let prompt = render_harness_refine_prompt(
+            &target,
+            EngineKind::LibFuzzer,
+            "int LLVMFuzzerTestOneInput(const uint8_t*d,size_t n){return 0;}",
+            &["decode_frame".to_owned(), "handle_opcode".to_owned()],
+        );
+        assert!(prompt.contains("decode_frame"));
+        assert!(prompt.contains("handle_opcode"));
+        assert!(prompt.to_ascii_lowercase().contains("stagnat"));
+        assert!(prompt.contains("return 0;"));
+    }
+
+    #[test]
+    fn seed_prompt_requests_hex_json_array() {
+        let target = sample_target();
+        let prompt = render_seed_prompt(&target, 8);
+        assert!(prompt.contains("parse_header"));
+        assert!(prompt.contains("JSON array"));
+        assert!(prompt.to_ascii_lowercase().contains("hex"));
+        assert!(prompt.contains("up to 8"));
     }
 }

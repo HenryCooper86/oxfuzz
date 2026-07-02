@@ -51,6 +51,14 @@ enum Commands {
         /// Skip compile and smoke fuzz (draft only).
         #[arg(long)]
         draft_only: bool,
+        /// Auto-repair: on a compile failure, feed the diagnostics back to the
+        /// LLM and retry up to N times before giving up (0 = no repair).
+        #[arg(long, default_value_t = 0)]
+        repair: usize,
+        /// Coverage-guided refinement: reshape the EXISTING harness to reach the
+        /// target's still-uncovered reachable functions, then recompile.
+        #[arg(long)]
+        refine: bool,
     },
     /// Run a fuzz campaign.
     Run {
@@ -68,6 +76,27 @@ enum Commands {
         /// Duration (e.g. 60m).
         #[arg(long)]
         duration: Option<String>,
+    },
+    /// Run an autonomous campaign: discover -> harness (auto-repair) -> seed ->
+    /// run -> triage -> refine, end to end.
+    Campaign {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol to fuzz. Omit to auto-pick the top-ranked target.
+        #[arg(long)]
+        target: Option<String>,
+        /// Fuzzing engine.
+        #[arg(long, default_value = "libfuzzer")]
+        engine: String,
+        /// Target language (c, cpp). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
+        /// Per-iteration fuzz duration in seconds.
+        #[arg(long, default_value_t = 60)]
+        duration_secs: u64,
+        /// Max run -> triage -> refine iterations.
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
     },
     /// Triage crashes from a run.
     Triage {
@@ -522,10 +551,52 @@ async fn cmd_harness(
     engine: &str,
     lang: &str,
     draft_only: bool,
+    repair: usize,
+    refine: bool,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
     let container = ServiceContainer::bootstrap().await;
+
+    // With --refine, reshape the existing harness toward uncovered reachable
+    // functions (coverage-guided), then recompile with auto-repair.
+    if refine {
+        println!("--- Refining harness (coverage-guided) ---");
+        let outcome = container
+            .harness_refine(&project, target, engine, lang, repair.max(1))
+            .await?;
+        println!(
+            "refined: status={:?} repairs_used={}",
+            outcome.status, outcome.repairs_used
+        );
+        return Ok(());
+    }
+
+    // With --repair, use the draft -> compile -> repair loop, which recovers
+    // harnesses that fail to build on the first draft.
+    if repair > 0 && !draft_only {
+        println!("--- Generating harness (auto-repair up to {repair}x) ---");
+        let outcome = container
+            .harness_generate(&project, target, engine, lang, repair)
+            .await?;
+        println!(
+            "compile: status={:?} repairs_used={}",
+            outcome.status, outcome.repairs_used
+        );
+        println!("\n--- Smoke fuzz ---");
+        match container
+            .harness_smoke(&project, target, engine, lang)
+            .await
+        {
+            Ok(sr) => println!(
+                "smoke: execs/sec={:.0} crashes={} passed={}",
+                sr.execs_per_sec, sr.crashes, sr.passed
+            ),
+            Err(e) => eprintln!("smoke fuzz failed: {e}"),
+        }
+        return Ok(());
+    }
+
     let draft = container
         .harness_draft(&project, target, engine, lang)
         .await?;
@@ -652,6 +723,12 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             let n = container.corpus_seed(&project, target).await?;
             println!("Seeded {n} entries.");
         }
+        "llmseed" => {
+            let entries = container
+                .generate_seeds_llm(&project, target, TargetLanguage::C, 12)
+                .await?;
+            println!("Generated {} LLM seed(s).", entries.len());
+        }
         "grow" => {
             let n = container.corpus_grow(&project, target).await?;
             println!("Corpus now has {n} entries.");
@@ -659,6 +736,13 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
         "prune" => {
             let n = container.corpus_prune(&project, target)?;
             println!("Pruned to {n} entries.");
+        }
+        "cprune" => {
+            let outcome = container.corpus_prune_coverage(&project, target).await?;
+            println!(
+                "Coverage-pruned {} -> {} entries.",
+                outcome.before, outcome.after
+            );
         }
         "minimize" | "cmin" => {
             let outcome = container.corpus_minimize(&project, target).await?;
@@ -673,7 +757,10 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             println!("{}", serde_json::to_string_pretty(&corpus.entries)?);
         }
         other => {
-            anyhow::bail!("unknown corpus op: {other} (use seed|grow|prune|minimize|absorb|list)")
+            anyhow::bail!(
+                "unknown corpus op: {other} \
+                 (use seed|llmseed|grow|prune|cprune|minimize|absorb|list)"
+            )
         }
     }
     Ok(())
@@ -834,6 +921,33 @@ async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_campaign(
+    project: PathBuf,
+    target: Option<&str>,
+    engine: &str,
+    lang: &str,
+    duration_secs: u64,
+    iterations: usize,
+) -> anyhow::Result<()> {
+    let engine = parse_engine(engine)?;
+    let lang = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    println!("--- Running autonomous campaign ---");
+    let outcome = container
+        .run_campaign(&project, target, engine, lang, duration_secs, 2, iterations)
+        .await?;
+    println!(
+        "target={} harness={:?} repairs={} iterations={} edges={} crashes={}",
+        outcome.target,
+        outcome.harness_status,
+        outcome.repairs_used,
+        outcome.iterations,
+        outcome.edges,
+        outcome.crashes
+    );
+    Ok(())
+}
+
 async fn cmd_report(
     project: PathBuf,
     target: &str,
@@ -878,7 +992,9 @@ async fn main() -> anyhow::Result<()> {
             engine,
             lang,
             draft_only,
-        } => cmd_harness(project, &target, &engine, &lang, draft_only).await?,
+            repair,
+            refine,
+        } => cmd_harness(project, &target, &engine, &lang, draft_only, repair, refine).await?,
         Commands::Run {
             project,
             target,
@@ -886,6 +1002,24 @@ async fn main() -> anyhow::Result<()> {
             lang,
             duration,
         } => cmd_run(project, &target, &engine, &lang, duration.as_deref()).await?,
+        Commands::Campaign {
+            project,
+            target,
+            engine,
+            lang,
+            duration_secs,
+            iterations,
+        } => {
+            cmd_campaign(
+                project,
+                target.as_deref(),
+                &engine,
+                &lang,
+                duration_secs,
+                iterations,
+            )
+            .await?;
+        }
         Commands::Triage {
             project,
             target,

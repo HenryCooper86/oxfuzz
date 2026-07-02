@@ -180,7 +180,7 @@ async fn draft_report_parses_llm_json() {
         .to_owned(),
     };
     let crash = crash("sig", CrashKind::Asan);
-    let report = draft_report(&crash, "==ERROR: asan==", Box::new(llm))
+    let report = draft_report(&crash, "==ERROR: asan==", None, Box::new(llm))
         .await
         .expect("draft should succeed");
     assert_eq!(report.title, "heap-buffer-overflow in parse_string");
@@ -194,7 +194,7 @@ async fn draft_report_falls_back_on_invalid_json() {
         response: "not json".to_owned(),
     };
     let crash = crash("sig", CrashKind::Asan);
-    let report = draft_report(&crash, "asan log", Box::new(llm))
+    let report = draft_report(&crash, "asan log", None, Box::new(llm))
         .await
         .expect("should not error on bad json");
     assert!(report.title.contains("Asan"));
