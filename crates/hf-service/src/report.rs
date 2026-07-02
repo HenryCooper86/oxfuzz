@@ -473,6 +473,25 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
             let _ = writeln!(md, "_Reproduction:_ {}", report.repro_steps.trim());
             let _ = writeln!(md);
         }
+        if let Some(root_cause) = report
+            .root_cause
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let _ = writeln!(md, "_Root cause:_ {}", root_cause.trim());
+            let _ = writeln!(md);
+        }
+        if let Some(fix) = report
+            .suggested_fix
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let _ = writeln!(md, "_Suggested fix:_");
+            let _ = writeln!(md, "```diff");
+            let _ = writeln!(md, "{}", fix.trim());
+            let _ = writeln!(md, "```");
+            let _ = writeln!(md);
+        }
     }
     let _ = writeln!(md);
 }

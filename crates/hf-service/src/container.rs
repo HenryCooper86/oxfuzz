@@ -179,6 +179,97 @@ pub fn generate_target_seeds(target: &str) -> Vec<(Vec<u8>, String)> {
     }
 }
 
+/// Build a fuzzing dictionary from the C/C++ sources in `workspace`, writing it
+/// to `<workspace>/<dict_name>` and returning that path.
+///
+/// The literals a target compares against (magic bytes, format keywords) are
+/// among the cheapest ways to get a fuzzer past shallow `memcmp`/keyword gates,
+/// so seeding the engine dictionary with them measurably deepens coverage.
+/// Returns `None` when no usable literals were found (so the caller adds no
+/// dictionary flag) or the file cannot be written.
+fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathBuf> {
+    let mut tokens: Vec<Vec<u8>> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let entries = std::fs::read_dir(workspace).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
+            continue;
+        }
+        // Skip the generated harness itself -- its literals are hobot's, not
+        // the target's, and add noise.
+        if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
+            continue;
+        }
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            for token in hf_engine::dict::extract_tokens(&src) {
+                if seen.insert(token.clone()) {
+                    tokens.push(token);
+                }
+            }
+        }
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    let dict_path = workspace.join(dict_name);
+    std::fs::write(&dict_path, hf_engine::dict::render_dict(&tokens)).ok()?;
+    Some(dict_path)
+}
+
+/// Concatenate the target's C/C++ sources (excluding the generated harness)
+/// into a single, size-bounded string for root-cause analysis. Returns `None`
+/// when there are no sources to include.
+fn gather_source_context(workspace: &Path) -> Option<String> {
+    let mut out = String::new();
+    let entries = std::fs::read_dir(workspace).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
+            continue;
+        }
+        if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
+            continue;
+        }
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            use std::fmt::Write as _;
+            if out.len() >= hf_crash::MAX_SOURCE_CONTEXT_CHARS {
+                break;
+            }
+            let _ = writeln!(out, "// {}", path.display());
+            out.push_str(&src);
+            out.push('\n');
+        }
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Read the current harness source from a target workspace, trying the known
+/// per-language harness filenames. Returns `None` when none exists yet.
+fn read_current_harness_source(workspace: &Path) -> Option<String> {
+    for name in [
+        "harness.c",
+        "harness.cc",
+        "harness.cpp",
+        "harness.cxx",
+        "harness.rs",
+        "harness.go",
+    ] {
+        if let Ok(src) = std::fs::read_to_string(workspace.join(name)) {
+            if !src.trim().is_empty() {
+                return Some(src);
+            }
+        }
+    }
+    None
+}
+
 /// Map a host path inside the workspace to its container path under `/work`
 /// (the mount point), falling back to `/work/out/<filename>`.
 fn container_input_path(workspace: &Path, host_path: &Path) -> String {
@@ -1532,6 +1623,320 @@ impl ServiceContainer {
         })
     }
 
+    /// Draft the harness source for a candidate: LLM-authored when a provider is
+    /// configured, otherwise the heuristic template. Never fails -- an LLM error
+    /// degrades to the heuristic draft so generation can proceed.
+    async fn draft_harness_source(
+        &self,
+        candidate: &TargetCandidate,
+        engine: EngineKind,
+    ) -> String {
+        if let Some(pool) = self.provider_pool() {
+            let provider = LlmProviderBridge::new(pool)
+                .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
+            match hf_harness::draft(candidate, engine, Box::new(provider)).await {
+                Ok(draft) => return draft.source,
+                Err(e) => tracing::warn!(
+                    "LLM harness draft for '{}' failed ({e}); using heuristic draft",
+                    candidate.symbol
+                ),
+            }
+        }
+        heuristic_draft(candidate, engine).source
+    }
+
+    /// Generate a harness end to end with automatic repair: draft -> compile,
+    /// and on a compile failure feed the diagnostics back to the LLM for up to
+    /// `max_repairs` corrective passes before giving up.
+    ///
+    /// This is the recommended entry point over calling `harness_draft` +
+    /// `harness_compile` separately: a large fraction of first-draft harnesses
+    /// fail to compile, and abandoning the target on the first failure wastes a
+    /// discovered, potentially high-value target. Repair recovers many of them.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Validation` if the target is unknown,
+    /// `ClassifiedError::Harness` if the harness still fails to build after
+    /// `max_repairs` attempts, or an infrastructure error from the sandbox.
+    pub async fn harness_generate(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        max_repairs: usize,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.guardrails.authorize(Action::CompileHarness).await?;
+        let inv = self.discover(project, lang).await?;
+        let candidate = inv
+            .candidates
+            .iter()
+            .find(|c| c.symbol == target)
+            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
+            .clone();
+
+        let workspace = workspace_dir(project, target);
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
+        copy_project_sources(project, &workspace);
+
+        let source = self.draft_harness_source(&candidate, engine).await;
+        self.compile_source_with_repair(&candidate, engine, lang, &workspace, source, max_repairs)
+            .await
+    }
+
+    /// Compile `initial_source` in the sandbox, and on a compile failure feed the
+    /// diagnostics back to the LLM for up to `max_repairs` corrective passes.
+    /// Shared by harness generation and coverage-guided refinement.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Harness` if the harness still fails to build
+    /// after `max_repairs` attempts, or an infrastructure error from the sandbox.
+    async fn compile_source_with_repair(
+        &self,
+        candidate: &TargetCandidate,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        workspace: &Path,
+        initial_source: String,
+        max_repairs: usize,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        let target = &candidate.symbol;
+        let mut source = initial_source;
+        let mut repairs_used = 0usize;
+        let mut last_diagnostics = String::new();
+
+        loop {
+            let mut build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{target}"));
+            build_cmd.output = PathBuf::from(format!("fuzz_{target}"));
+            let harness = Harness {
+                id: Uuid::new_v4(),
+                target_id: candidate.id,
+                engine,
+                source: source.clone(),
+                language: lang,
+                build_cmd,
+                sanitizer: Sanitizer::Address,
+                status: HarnessStatus::Draft,
+                smoke_run: None,
+            };
+            match hf_harness::try_compile(harness, self.runtime.as_ref(), workspace).await? {
+                hf_harness::CompileResult::Ok(compiled) => {
+                    if let Some(store) = &self.store {
+                        if let Err(e) = store.upsert_harness(&compiled).await {
+                            tracing::warn!("failed to persist harness {}: {e}", compiled.id);
+                        }
+                    }
+                    let binary_name = compiled
+                        .build_cmd
+                        .output
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(target)
+                        .to_string();
+                    return Ok(HarnessGenOutcome {
+                        status: compiled.status,
+                        binary_name,
+                        workspace: workspace.to_path_buf(),
+                        repairs_used,
+                    });
+                }
+                hf_harness::CompileResult::Failed(failure) => {
+                    last_diagnostics = failure.diagnostics();
+                    if repairs_used >= max_repairs {
+                        break;
+                    }
+                    let Some(pool) = self.provider_pool() else {
+                        // No LLM to repair with; the first failure is terminal.
+                        break;
+                    };
+                    let provider = LlmProviderBridge::new(pool)
+                        .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
+                    match hf_harness::repair(
+                        candidate,
+                        engine,
+                        &source,
+                        &last_diagnostics,
+                        Box::new(provider),
+                    )
+                    .await
+                    {
+                        Ok(draft) => {
+                            source = draft.source;
+                            repairs_used += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!("harness repair for '{target}' failed: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let diag: String = last_diagnostics.chars().take(600).collect();
+        Err(ClassifiedError::Harness(format!(
+            "harness for '{target}' failed to build after {repairs_used} repair attempt(s): {diag}"
+        )))
+    }
+
+    /// Coverage-guided harness refinement: when coverage has stagnated, ask the
+    /// LLM to reshape the current harness so the fuzzer reaches the target's
+    /// still-uncovered reachable functions, then compile the result (with the
+    /// same auto-repair loop as generation).
+    ///
+    /// Recomputes coverage to determine which reachable functions are still
+    /// uncovered, so the model gets a concrete goal rather than "improve this".
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Validation` if the target is unknown or has no
+    /// current harness, `ClassifiedError::Provider` if no LLM is configured, or
+    /// an error from the refine/compile steps.
+    pub async fn harness_refine(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        max_repairs: usize,
+    ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        self.guardrails.authorize(Action::CompileHarness).await?;
+        let inv = self.discover(project, lang).await?;
+        let candidate = inv
+            .candidates
+            .iter()
+            .find(|c| c.symbol == target)
+            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
+            .clone();
+
+        let workspace = workspace_dir(project, target);
+        let current_source = read_current_harness_source(&workspace).ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "no current harness for '{target}' to refine; generate one first"
+            ))
+        })?;
+
+        // Which reachable functions has coverage not reached yet?
+        let covered: std::collections::HashSet<String> = self
+            .coverage_functions(project, target)
+            .await
+            .into_iter()
+            .collect();
+        let uncovered: Vec<String> = candidate
+            .reachable_functions
+            .iter()
+            .filter(|f| !covered.contains(*f))
+            .cloned()
+            .collect();
+
+        let pool = self.provider_pool().ok_or_else(|| {
+            ClassifiedError::Provider("no LLM provider configured for refinement".to_owned())
+        })?;
+        let provider = LlmProviderBridge::new(pool)
+            .with_diagnostics(Arc::clone(&self.diagnostics), "harness_refine");
+        let refined = hf_harness::refine(
+            &candidate,
+            engine,
+            &current_source,
+            &uncovered,
+            Box::new(provider),
+        )
+        .await?;
+
+        self.compile_source_with_repair(
+            &candidate,
+            engine,
+            lang,
+            &workspace,
+            refined.source,
+            max_repairs,
+        )
+        .await
+    }
+
+    /// Run an autonomous fuzzing campaign end to end: discover (and pick the
+    /// best target when none is given) -> generate + auto-repair a harness ->
+    /// seed the corpus -> loop [run -> triage -> feed crashes back -> refine on
+    /// stagnation] until a crash is found or `max_iterations` is reached.
+    ///
+    /// This is the coded orchestration the scheduler and "just fuzz this" flows
+    /// use, so a scheduled campaign runs the whole pipeline rather than a single
+    /// fixed run. Each iteration is bounded by `duration_secs`.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if discovery finds no target, or harness
+    /// generation / the first run fails. Triage and refinement failures within
+    /// the loop are logged and do not abort the campaign.
+    pub async fn run_campaign(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        duration_secs: u64,
+        max_repairs: usize,
+        max_iterations: usize,
+    ) -> Result<CampaignOutcome, ClassifiedError> {
+        // 1. Choose a target: the caller's, else the top-ranked candidate.
+        let inv = self.discover(project, lang).await?;
+        let target = match target.filter(|t| !t.is_empty()) {
+            Some(t) => t.to_owned(),
+            None => inv
+                .ranked()
+                .first()
+                .map(|c| c.symbol.clone())
+                .ok_or_else(|| {
+                    ClassifiedError::Validation("no fuzzable targets discovered".to_owned())
+                })?,
+        };
+
+        // 2. Generate a harness (with auto-repair) and seed the corpus.
+        let gen = self
+            .harness_generate(project, &target, engine, lang, max_repairs)
+            .await?;
+        let _ = self.generate_seeds_llm(project, &target, lang, 12).await;
+
+        // 3. Run -> triage loop, stopping on the first crash or the iteration cap.
+        let noop = |_: FuzzProgress| {};
+        let mut edges = 0u64;
+        let mut crashes = 0usize;
+        let mut iterations = 0usize;
+        let cap = max_iterations.max(1);
+        while iterations < cap {
+            iterations += 1;
+            let summary = self
+                .run_fuzzer(project, &target, engine, duration_secs, &noop)
+                .await?;
+            edges = edges.max(summary.edges);
+
+            let triaged = self.triage(project, &target).await.unwrap_or_default();
+            crashes = triaged.len();
+            // Feed any crash reproducers back into the corpus (close the loop).
+            let _ = self.corpus_absorb_crashes(project, &target).await;
+
+            if crashes > 0 || iterations >= cap {
+                break;
+            }
+            // No crash yet and iterations remain: refine the harness toward
+            // uncovered code before the next run. Best-effort.
+            if let Err(e) = self
+                .harness_refine(project, &target, engine, lang, max_repairs)
+                .await
+            {
+                tracing::info!("campaign refine step skipped for '{target}': {e}");
+            }
+        }
+
+        Ok(CampaignOutcome {
+            target,
+            harness_status: gen.status,
+            repairs_used: gen.repairs_used,
+            crashes,
+            edges,
+            iterations,
+        })
+    }
+
     /// Run a 60-second smoke fuzz on an already-compiled harness binary in the
     /// per-target workspace.
     ///
@@ -1592,6 +1997,70 @@ impl ServiceContainer {
             let mut hasher = Sha256::new();
             hasher.update(&data);
             let sha = format!("{:x}", hasher.finalize());
+            entries.push(SeedEntry {
+                name,
+                size: data.len(),
+                sha256: sha,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Generate a seed corpus for a target using the LLM (structural, format-
+    /// aware seeds), falling back to the heuristic seeds when no provider is
+    /// configured or the model returns nothing usable. Seeds are written into
+    /// the target's corpus directory and deduplicated by content hash.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the corpus directory or a seed file cannot
+    /// be written.
+    pub async fn generate_seeds_llm(
+        &self,
+        project: &Path,
+        target: &str,
+        lang: TargetLanguage,
+        count: usize,
+    ) -> Result<Vec<SeedEntry>, ClassifiedError> {
+        use sha2::{Digest, Sha256};
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        std::fs::create_dir_all(&corpus_dir)
+            .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
+
+        // LLM seeds when a provider and the target candidate are available.
+        let mut datas: Vec<Vec<u8>> = Vec::new();
+        if let Some(pool) = self.provider_pool() {
+            if let Ok(inv) = self.discover(project, lang).await {
+                if let Some(candidate) = inv.candidates.iter().find(|c| c.symbol == target) {
+                    let provider = LlmProviderBridge::new(pool)
+                        .with_diagnostics(Arc::clone(&self.diagnostics), "seed_gen");
+                    match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
+                        Ok(seeds) => datas = seeds,
+                        Err(e) => tracing::warn!("LLM seed generation for '{target}' failed: {e}"),
+                    }
+                }
+            }
+        }
+        // Fall back to the heuristic seeds so a corpus is always produced.
+        if datas.is_empty() {
+            datas = generate_target_seeds(target)
+                .into_iter()
+                .map(|(data, _)| data)
+                .collect();
+        }
+
+        let mut entries = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (i, data) in datas.into_iter().enumerate() {
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let sha = format!("{:x}", hasher.finalize());
+            if !seen.insert(sha.clone()) {
+                continue;
+            }
+            let name = format!("llmseed_{i}");
+            std::fs::write(corpus_dir.join(&name), &data)
+                .map_err(|e| ClassifiedError::Internal(format!("write seed: {e}")))?;
             entries.push(SeedEntry {
                 name,
                 size: data.len(),
@@ -1684,6 +2153,16 @@ impl ServiceContainer {
         }
         let binary_str = format!("/work/{bin}");
 
+        // Build a dictionary from the target sources and point the engine at it.
+        // A dictionary of the literals the target compares against is one of the
+        // cheapest coverage multipliers; absent literals just yield no flag.
+        let dict_name = format!("{target}.dict");
+        let extra_args = if build_workspace_dictionary(&workspace, &dict_name).is_some() {
+            hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
+        } else {
+            Vec::new()
+        };
+
         let run_cfg = FuzzRunConfig {
             // Link the run to the target's compiled harness so the target-scoped
             // workbench dashboard can attribute it. A throwaway id here would
@@ -1696,7 +2175,7 @@ impl ServiceContainer {
             seed_corpus: Some(corpus_dir.clone()),
             sanitizer: hf_core::target::Sanitizer::Address,
             env: Vec::new(),
-            extra_args: Vec::new(),
+            extra_args,
         };
         // Record the run so campaigns survive restarts (best-effort).
         let run_record = self.store.as_ref().map(|_| {
@@ -2114,6 +2593,8 @@ impl ServiceContainer {
         // configured, using the captured sanitizer trace (capped, see above).
         if let Some(pool) = self.provider_pool() {
             let unique = deduped.len();
+            // Target source context lets the model infer a root cause and fix.
+            let source_context = gather_source_context(&workspace);
             for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
                 let bridge = LlmProviderBridge::new(Arc::clone(&pool))
                     .with_diagnostics(Arc::clone(&self.diagnostics), "triage_report");
@@ -2122,7 +2603,14 @@ impl ServiceContainer {
                     .filter(|l| !l.trim().is_empty())
                     .cloned()
                     .unwrap_or_else(|| crash.summary.clone());
-                match hf_crash::draft_report(crash, &log, Box::new(bridge)).await {
+                match hf_crash::draft_report(
+                    crash,
+                    &log,
+                    source_context.as_deref(),
+                    Box::new(bridge),
+                )
+                .await
+                {
                     Ok(report) => crash.bug_report = Some(report),
                     Err(e) => tracing::warn!("bug report drafting failed for {}: {e}", crash.id),
                 }
@@ -2821,6 +3309,61 @@ impl ServiceContainer {
         Ok(pruned.entries.len())
     }
 
+    /// Coverage-based corpus minimization: run each input through `afl-showmap`
+    /// in the sandbox to fingerprint the edges it covers, then drop inputs whose
+    /// coverage is already represented by another. This is a true distillation
+    /// (keep one input per distinct coverage set), unlike `corpus_prune` which,
+    /// absent coverage data, can only collapse byte-identical files.
+    ///
+    /// Inputs whose coverage cannot be measured (the binary is missing, or the
+    /// engine is not AFL-instrumented so `afl-showmap` yields nothing) keep a
+    /// `None` coverage hash and fall back to content-dedup -- so this never
+    /// collapses two genuinely distinct inputs under an empty key.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the corpus cannot be read.
+    pub async fn corpus_prune_coverage(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<MinimizeOutcome, ClassifiedError> {
+        let workspace = workspace_dir(project, target);
+        let corpus_dir = workspace.join("corpus");
+        let mut corpus = hf_corpus::list(&corpus_dir)?;
+        let before = corpus.entries.len();
+
+        let bin = format!("fuzz_{target}");
+        let binary = workspace.join(&bin);
+        if binary.exists() {
+            let binary_container = format!("/work/{bin}");
+            let limits = hf_core::runtime::ResourceLimits {
+                max_mem_mb: 2048,
+                max_cpus: 1,
+                max_duration_secs: 30,
+                env: std::collections::HashMap::new(),
+                ptrace: false,
+            };
+            for entry in &mut corpus.entries {
+                let input_container = container_input_path(&workspace, &entry.path);
+                let args =
+                    hf_engine::showmap::build_showmap_args(&binary_container, &input_container);
+                if let Ok(result) = self.runtime.run_command(&args, &workspace, &limits).await {
+                    if let Some(hash) = hf_engine::showmap::coverage_hash(&result.stdout) {
+                        entry.coverage_hash = Some(hash);
+                    }
+                }
+            }
+        }
+
+        let pruned = hf_corpus::prune(corpus)?;
+        let after = pruned.entries.len();
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+        self.persist_corpus(target_id, &pruned).await;
+        Ok(MinimizeOutcome { before, after })
+    }
+
     /// Feed triaged crash reproducers back into the corpus.
     ///
     /// Closes the run -> triage -> corpus loop: every crash-triggering input
@@ -3058,6 +3601,18 @@ pub struct CompileOutcome {
     pub workspace: PathBuf,
 }
 
+/// Outcome of an end-to-end harness generation with automatic repair: the
+/// compiled harness plus how many repair attempts it took to get there.
+#[derive(Debug, Clone)]
+pub struct HarnessGenOutcome {
+    pub status: HarnessStatus,
+    pub binary_name: String,
+    pub workspace: PathBuf,
+    /// Number of LLM repair passes applied before the harness compiled (0 when
+    /// the first draft built cleanly).
+    pub repairs_used: usize,
+}
+
 /// A generated seed entry.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SeedEntry {
@@ -3071,6 +3626,24 @@ pub struct SeedEntry {
 pub struct MinimizeOutcome {
     pub before: usize,
     pub after: usize,
+}
+
+/// Outcome of an autonomous end-to-end campaign
+/// ([`ServiceContainer::run_campaign`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CampaignOutcome {
+    /// The target the campaign fuzzed (chosen automatically when not supplied).
+    pub target: String,
+    /// Harness build status after generation + repair.
+    pub harness_status: HarnessStatus,
+    /// Number of LLM repair passes the harness needed.
+    pub repairs_used: usize,
+    /// Unique crashes surfaced by the final triage.
+    pub crashes: usize,
+    /// Peak edge coverage observed across the campaign's runs.
+    pub edges: u64,
+    /// How many run -> triage iterations the campaign performed.
+    pub iterations: usize,
 }
 
 /// Outcome of replaying one stored crash input against the current harness.
@@ -3788,6 +4361,42 @@ mod workspace_tests {
             workspace_dir(project, "../.."),
             base(project).join("default")
         );
+    }
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    use super::build_workspace_dictionary;
+
+    #[test]
+    fn builds_dictionary_from_source_literals_excluding_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("parse.c"),
+            "int f(){ return strcmp(s, \"MAGIC\"); }",
+        )
+        .unwrap();
+        // The generated harness literals must NOT pollute the dictionary.
+        std::fs::write(
+            dir.path().join("harness.c"),
+            "int LLVMFuzzerTestOneInput(){ puts(\"HARNESS_ONLY\"); return 0; }",
+        )
+        .unwrap();
+
+        let path = build_workspace_dictionary(dir.path(), "t.dict").expect("dict built");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\"MAGIC\""), "missing target literal: {body}");
+        assert!(
+            !body.contains("HARNESS_ONLY"),
+            "harness literal leaked: {body}"
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_literals() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("empty.c"), "int f(){ return 0; }").unwrap();
+        assert!(build_workspace_dictionary(dir.path(), "t.dict").is_none());
     }
 }
 
