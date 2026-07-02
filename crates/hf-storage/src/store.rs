@@ -420,6 +420,17 @@ impl Store {
             .collect()
     }
 
+    /// List every persisted harness across targets.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn list_all_harnesses(&self) -> Result<Vec<Harness>, StorageError> {
+        let rows = sqlx::query("SELECT data_json FROM harnesses")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| json_col(r, "data_json")).collect()
+    }
+
     // -- crashes ------------------------------------------------------------
 
     /// Insert or replace a crash record.
