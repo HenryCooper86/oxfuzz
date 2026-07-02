@@ -157,7 +157,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
           patch(k, (d) => ({ ...d, stats: { ...d.stats, edges: Math.max(d.stats.edges, v) } }));
         } else if (p?.type === "CrashesFound") {
           patch(k, (d) => ({ ...d, stats: { ...d.stats, crashes: d.stats.crashes + 1 } }));
-          appendLog("  ⚠ CRASH DETECTED");
+          appendLog("  [!] CRASH DETECTED");
         } else if (p?.type === "LogLine") {
           appendLog(`  ${p.data}`);
         }
