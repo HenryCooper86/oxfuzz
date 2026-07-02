@@ -555,10 +555,71 @@ fn parse_step(content: &str) -> Option<Step> {
     // The streaming deserializer stops at the end of the first value, so it
     // ignores any trailing characters (closing fences, extra braces, prose).
     let start = content.find('{')?;
-    serde_json::Deserializer::from_str(&content[start..])
+    if let Ok(step) = serde_json::Deserializer::from_str(&content[start..])
         .into_iter::<Step>()
         .next()?
-        .ok()
+    {
+        return Some(step);
+    }
+
+    parse_relaxed_final_step(&content[start..])
+}
+
+/// Recover the final answer from JSON-looking protocol output that is not valid
+/// JSON, most commonly because a provider emitted literal newlines inside the
+/// `"final"` string. This fallback intentionally only recovers final answers:
+/// malformed tool calls are not executed.
+fn parse_relaxed_final_step(content: &str) -> Option<Step> {
+    let final_answer = extract_relaxed_string_field(content, "final")?;
+    Some(Step {
+        thought: extract_relaxed_string_field(content, "thought"),
+        tool: None,
+        args: None,
+        final_answer: Some(final_answer),
+    })
+}
+
+/// Extract a quoted string field from a JSON-like object, accepting literal
+/// newlines in the string value.
+fn extract_relaxed_string_field(content: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\"");
+    let key_pos = content.find(&key)?;
+    let after_key = &content[key_pos + key.len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim_start();
+    read_relaxed_quoted_string(after_colon)
+}
+
+/// Read a JSON-style quoted string, with common escapes decoded and literal
+/// newlines accepted. Returns `None` when `value` does not start with a quote.
+fn read_relaxed_quoted_string(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            match ch {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => out.push(other),
+            }
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(out),
+            other => out.push(other),
+        }
+    }
+    None
 }
 
 /// Truncate a string to `max` chars with an ellipsis, for event summaries.

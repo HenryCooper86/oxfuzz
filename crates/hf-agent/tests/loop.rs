@@ -228,6 +228,25 @@ async fn direct_final_answer() {
 }
 
 #[tokio::test]
+async fn malformed_json_final_does_not_leak_thought_to_user() {
+    // Some providers follow the protocol shape but emit literal newlines inside
+    // the JSON string, which is invalid JSON. The agent should still recover the
+    // final answer instead of showing the raw {"thought":...,"final":...} blob.
+    let raw = "{\"thought\":\"greet first\",\"final\":\"Hi! I'm the hobot_fuzz Orchestrator.\n\nWhat would you like to fuzz?\"}";
+    let agent = agent_with(vec![raw], None);
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "hi", &sink).await.unwrap();
+    assert_eq!(
+        out,
+        "Hi! I'm the hobot_fuzz Orchestrator.\n\nWhat would you like to fuzz?"
+    );
+    assert!(
+        !out.contains("\"thought\""),
+        "raw protocol JSON leaked to the user: {out}"
+    );
+}
+
+#[tokio::test]
 async fn tool_call_then_final() {
     // Step 1 calls an unknown tool (deterministic error fed back), step 2 ends.
     let agent = agent_with(
