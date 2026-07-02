@@ -22,6 +22,7 @@ type Dict = Record<string, string>;
 
 const en: Dict = {
   // Sidebar navigation
+  "nav.dashboard": "Dashboard",
   "nav.chat": "AI Assistant",
   "nav.workflow": "Fuzzing Workflow",
   "nav.discover": "Discover",
@@ -44,6 +45,7 @@ const en: Dict = {
   "sidebar.removeTarget": "Remove from targets",
 
   // Header (screen titles)
+  "title.dashboard": "Team Dashboard",
   "title.workflow": "Fuzzing Workflow",
   "title.chat": "AI Assistant",
   "title.discover": "Target Discovery",
@@ -106,6 +108,7 @@ const en: Dict = {
 
 const zh: Dict = {
   // Sidebar navigation
+  "nav.dashboard": "仪表盘",
   "nav.chat": "AI 助手",
   "nav.workflow": "模糊测试流程",
   "nav.discover": "发现",
@@ -128,6 +131,7 @@ const zh: Dict = {
   "sidebar.removeTarget": "从目标中移除",
 
   // Header (screen titles)
+  "title.dashboard": "团队仪表盘",
   "title.workflow": "模糊测试流程",
   "title.chat": "AI 助手",
   "title.discover": "目标发现",

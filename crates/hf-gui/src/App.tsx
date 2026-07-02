@@ -13,6 +13,7 @@ import { SetupWizard } from "./components/wizard/SetupWizard";
 import { SettingsView } from "./components/settings/SettingsView";
 import { ChatView } from "./views/ChatView";
 import { WorkflowView } from "./views/WorkflowView";
+import { DashboardView } from "./views/DashboardView";
 import { DiscoverView } from "./views/DiscoverView";
 import { HarnessView } from "./views/HarnessView";
 import { RunView } from "./views/RunView";
@@ -30,7 +31,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap } from "lucide-react";
+import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -46,7 +47,7 @@ function AppInner() {
   const { theme, setTheme } = usePrefs();
   const { t } = useI18n();
   const { setActiveProject } = useProject();
-  const [activeView, setActiveView] = useState<ViewType>("chat");
+  const [activeView, setActiveView] = useState<ViewType>("dashboard");
   // Bumping this key remounts ChatView, clearing the conversation for a new target.
   const [chatResetKey, setChatResetKey] = useState(0);
 
@@ -124,6 +125,11 @@ function AppInner() {
               <main className="flex-1 overflow-hidden flex flex-col">
                 <RecoveryBanner />
                 {activeView === "chat" && <ChatView key={chatResetKey} />}
+                {activeView === "dashboard" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <DashboardView />
+                  </div>
+                )}
                 {activeView === "workflow" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
                     <WorkflowView />
@@ -259,6 +265,7 @@ function HeaderToggle({ active, onClick, icon, label }: { active: boolean; onCli
 // Screen titles are translated at render via `t(\`title.${view}\`)` (see i18n.tsx).
 
 const viewIcons: Record<ViewType, React.ReactNode> = {
+  dashboard: <LayoutDashboard size={18} />,
   workflow: <ListChecks size={18} />,
   chat: <MessageSquare size={18} />,
   discover: <Target size={18} />,

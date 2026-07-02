@@ -174,6 +174,18 @@ async fn knowledge_search_unindexed_returns_empty_array() {
 }
 
 #[tokio::test]
+async fn workbench_dashboard_without_db_returns_empty_summary() {
+    let (status, json) = post_json(
+        "/workbench/dashboard",
+        serde_json::json!({"project": ".", "target": "parse_packet"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["totals"]["targets"], 0);
+    assert!(json["next_actions"].is_array());
+}
+
+#[tokio::test]
 async fn schedule_list_without_scheduler_returns_empty_array() {
     allow_open_dev_mode();
     let app = hf_web::router::build();

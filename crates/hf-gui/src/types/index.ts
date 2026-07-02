@@ -1,6 +1,7 @@
 // Shared types for hobot_fuzz GUI.
 
 export type ViewType =
+  | "dashboard"
   | "workflow"
   | "discover"
   | "harness"
@@ -89,3 +90,81 @@ export interface SystemStatus {
 
 /** Engine identifiers used across the Run view and status bar. */
 export type EngineId = "libfuzzer" | "afl++" | "honggfuzz" | "clusterfuzzlite" | "syzkaller";
+
+export interface WorkbenchTotals {
+  projects: number;
+  targets: number;
+  harnesses: number;
+  harnesses_needing_review: number;
+  runs: number;
+  active_runs: number;
+  crashes: number;
+  corpus_entries: number;
+}
+
+export interface WorkbenchRun {
+  id: string;
+  project_root: string;
+  engine: string;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  crash_count: number;
+}
+
+export interface WorkbenchTarget {
+  id: string;
+  project_root: string;
+  symbol: string;
+  language: string;
+  fit_score: number;
+  rationale: string;
+}
+
+export interface HarnessReviewItem {
+  harness_id: string;
+  target_id: string;
+  project_root: string;
+  target_symbol: string;
+  engine: string;
+  language: string;
+  status: string;
+  build_output: string;
+  smoke_passed: boolean;
+  smoke_execs_per_sec: number;
+  needs_review: boolean;
+  next_action: string;
+  source_preview: string;
+}
+
+export interface CrashReviewItem {
+  crash_id: string;
+  run_id: string;
+  target_id: string;
+  target_symbol: string;
+  kind: string;
+  summary: string;
+  severity: string;
+  minimized: boolean;
+  has_bug_report: boolean;
+}
+
+export interface WorkbenchDashboard {
+  active_project: string | null;
+  active_target: string | null;
+  totals: WorkbenchTotals;
+  recent_runs: WorkbenchRun[];
+  top_targets: WorkbenchTarget[];
+  harness_reviews: HarnessReviewItem[];
+  crash_reviews: CrashReviewItem[];
+  next_actions: string[];
+}
+
+export interface GitLabIssueExport {
+  crash_id: string;
+  title: string;
+  description: string;
+  labels: string[];
+  project_web_url: string | null;
+  issue_url: string | null;
+}
