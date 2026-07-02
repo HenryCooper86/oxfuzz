@@ -21,20 +21,51 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   workbench_dashboard: { method: "POST", path: "/workbench/dashboard" },
   harness_review_queue: { method: "POST", path: "/workbench/harnesses" },
   gitlab_issue_export: { method: "POST", path: "/gitlab/issue" },
-  system_status: { method: "GET", path: "/health" },
-  system_status_cmd: { method: "GET", path: "/health" },
-  // ChatView invokes `chat_agent`; the web router exposes the chat handler at
-  // POST /chat/send (it ignores the extra agent fields it doesn't deserialize).
-  chat_agent: { method: "POST", path: "/chat/send" },
+  system_status: { method: "GET", path: "/system/status" },
+  system_status_cmd: { method: "GET", path: "/system/status" },
+  ensure_docker: { method: "GET", path: "/system/status" },
+  chat_agent: { method: "POST", path: "/chat/agent" },
+  create_session: { method: "POST", path: "/chat/session" },
+  chat_history: { method: "POST", path: "/chat/history" },
+  chat_rollback: { method: "POST", path: "/chat/rollback" },
+  chat_rollback_to: { method: "POST", path: "/chat/rollback_to" },
+  chat_checkpoints: { method: "POST", path: "/chat/checkpoints" },
+  chat_branch: { method: "POST", path: "/chat/branch" },
+  chat_branches: { method: "POST", path: "/chat/branches" },
   list_models: { method: "GET", path: "/config/models" },
   list_configs: { method: "GET", path: "/config/sections" },
   read_config: { method: "POST", path: "/config/read" },
   write_config: { method: "POST", path: "/config/write" },
+  config_toml_to_value: { method: "POST", path: "/config/toml_to_value" },
+  config_value_to_toml: { method: "POST", path: "/config/value_to_toml" },
   get_providers: { method: "GET", path: "/config/providers" },
   set_providers: { method: "POST", path: "/config/providers" },
+  provider_statuses: { method: "GET", path: "/providers/status" },
   app_paths: { method: "GET", path: "/system/paths" },
   host_arch: { method: "GET", path: "/system/arch" },
+  knowledge_index: { method: "POST", path: "/knowledge/index" },
+  knowledge_ingest: { method: "POST", path: "/knowledge/ingest" },
+  knowledge_search: { method: "POST", path: "/knowledge/search" },
 };
+
+function toWebArgs(args?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!args) return undefined;
+  const mapped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    const webKey =
+      key === "sessionId"
+        ? "session_id"
+        : key === "agentId"
+          ? "agent_id"
+          : key === "checkpointId"
+            ? "checkpoint_id"
+            : key === "forkCount"
+              ? "fork_message_count"
+              : key;
+    mapped[webKey] = value;
+  }
+  return mapped;
+}
 
 export function createHttpTransport(): Transport {
   const sse = new SseAdapter(BASE_URL);
@@ -43,7 +74,7 @@ export function createHttpTransport(): Transport {
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "ensure_docker", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report", "provider_statuses", "artifact_summary", "knowledge_ingest"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report", "artifact_summary"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {
@@ -74,7 +105,10 @@ export function createHttpTransport(): Transport {
       const response = await fetch(url, {
         method: endpoint.method,
         headers: { "content-type": "application/json" },
-        body: args ? JSON.stringify(args) : undefined,
+        body:
+          endpoint.method === "GET"
+            ? undefined
+            : JSON.stringify(toWebArgs(args) ?? {}),
       });
       if (!response.ok) {
         throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);
