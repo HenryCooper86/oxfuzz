@@ -527,6 +527,10 @@ fn deterministic_crash_id(run_id: Uuid, signature: &str, input: &Path) -> Uuid {
 
 /// Copy C/C++ source and header files from a project into the workspace
 /// so the sandbox can compile the harness + target together.
+///
+/// For Rust projects it also stages the crate under test -- `Cargo.toml`,
+/// `Cargo.lock`, and the `src/` tree -- so the cargo-fuzz project's path
+/// dependency on the crate resolves inside the sandbox.
 pub fn copy_project_sources(project: &Path, workspace: &Path) {
     let exts = ["c", "h", "cc", "cpp", "cxx", "hpp"];
     if let Ok(entries) = std::fs::read_dir(project) {
@@ -550,6 +554,46 @@ pub fn copy_project_sources(project: &Path, workspace: &Path) {
             }
         }
     }
+    stage_rust_crate(project, workspace);
+}
+
+/// Stage a Rust crate (its manifest + `src/` tree) from `project` into
+/// `workspace` so a cargo-fuzz project can depend on it by path. A no-op when the
+/// project has no `Cargo.toml` (i.e. is not a Rust crate).
+fn stage_rust_crate(project: &Path, workspace: &Path) {
+    let manifest = project.join("Cargo.toml");
+    if !manifest.is_file() {
+        return;
+    }
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        let src = project.join(name);
+        if src.is_file() {
+            if let Err(e) = std::fs::copy(&src, workspace.join(name)) {
+                tracing::warn!("failed to stage {} into workspace: {e}", src.display());
+            }
+        }
+    }
+    let src_dir = project.join("src");
+    if src_dir.is_dir() {
+        if let Err(e) = copy_dir_recursive(&src_dir, &workspace.join("src")) {
+            tracing::warn!("failed to stage crate src/ into workspace: {e}");
+        }
+    }
+}
+
+/// Recursively copy a directory tree, creating destination directories as needed.
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let path = entry.path();
+        let dest = to.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dest)?;
+        } else if path.is_file() {
+            std::fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build the sandbox image from the repo's Dockerfile for a given platform.
@@ -4430,6 +4474,55 @@ mod dictionary_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("empty.c"), "int f(){ return 0; }").unwrap();
         assert!(build_workspace_dictionary(dir.path(), "t.dict").is_none());
+    }
+}
+
+#[cfg(test)]
+mod rust_staging_tests {
+    use super::copy_project_sources;
+
+    #[test]
+    fn stages_rust_crate_manifest_and_src_tree() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"lib\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join("src").join("inner")).unwrap();
+        std::fs::write(project.path().join("src").join("lib.rs"), "pub fn f() {}").unwrap();
+        std::fs::write(
+            project.path().join("src").join("inner").join("mod.rs"),
+            "// nested",
+        )
+        .unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        assert!(workspace.path().join("Cargo.toml").is_file());
+        assert!(workspace.path().join("src").join("lib.rs").is_file());
+        // The src/ tree is copied recursively so multi-file crates build.
+        assert!(workspace
+            .path()
+            .join("src")
+            .join("inner")
+            .join("mod.rs")
+            .is_file());
+    }
+
+    #[test]
+    fn non_rust_project_stages_no_crate() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("parse.c"), "int f(){ return 0; }").unwrap();
+
+        copy_project_sources(project.path(), workspace.path());
+
+        // C sources copy; no Cargo.toml means no Rust staging.
+        assert!(workspace.path().join("parse.c").is_file());
+        assert!(!workspace.path().join("Cargo.toml").exists());
+        assert!(!workspace.path().join("src").exists());
     }
 }
 
