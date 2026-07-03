@@ -106,10 +106,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rustup self uninstall -y \
     && rm -rf "$HOME/.cargo" "$HOME/.rustup"
 
+# ---------------------------------------------------------------------------
+# Rust + cargo-fuzz (libFuzzer) toolchain for fuzzing Rust crates.
+#
+# cargo-fuzz drives libfuzzer-sys and requires a nightly toolchain (it passes
+# -Z sanitizer flags), so we install rustup with nightly as the default
+# toolchain plus cargo-fuzz, and KEEP them (unlike the casr layer above, which
+# removes its temporary toolchain). Installed under /opt/rust so it is
+# independent of the casr layer's $HOME/.cargo cleanup. hf-runtime builds a Rust
+# harness by scaffolding a cargo-fuzz project beside the staged crate and running
+# `cargo fuzz build`; the produced libFuzzer binary is then driven by the normal
+# libFuzzer run path.
+# ---------------------------------------------------------------------------
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo \
+    PATH=/opt/rust/cargo/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain nightly \
+    && rustup component add --toolchain nightly llvm-tools-preview \
+    && cargo install cargo-fuzz --locked
+
 # Verify tools are present.
 RUN clang --version && afl-fuzz --version && honggfuzz --version 2>&1 || true
 RUN syz-manager --help 2>&1 | head -1 || true
 RUN casr-san --help 2>&1 | head -1 && casr-cluster --help 2>&1 | head -1 || true
+RUN cargo fuzz --version 2>&1 | head -1 && cargo +nightly --version 2>&1 | head -1 || true
 
 WORKDIR /work
 

@@ -5,10 +5,10 @@ Status legend: [x] done - [~] partial - [ ] not started.
 ## Phase 1: Foundation
 
 - [x] hf-core: `FuzzEngine`, `TargetCandidate`, `Harness`, `Crash`, `Corpus` traits.
-- [~] hf-provider: LLM provider pool (OpenAI-compatible). Freeze/thaw failover
-  + error classification ported from y-agent (rate-limit/auth/5xx no longer
-  kills a campaign). Multi-provider backends (Anthropic/Gemini/Ollama), lease,
-  and token streaming not yet ported.
+- [~] hf-provider: LLM provider pool with multi-provider backends (OpenAI,
+  Azure, Anthropic, Gemini, Ollama). Freeze/thaw failover + error classification
+  ported from y-agent (rate-limit/auth/5xx no longer kills a campaign). Token
+  streaming not yet ported.
 - [x] hf-storage: SQLite schema for runs, targets, harnesses, crashes, corpora.
 - [x] hf-runtime: Docker sandbox adapter for isolated builds and fuzz runs.
 - [x] hf-cli: `init`, `discover`, `harness`, `run`, `triage` subcommands (a thin
@@ -16,8 +16,14 @@ Status legend: [x] done - [~] partial - [ ] not started.
 
 ## Phase 2: Discovery & Harness
 
-- [x] hf-discovery: project scanner for C/C++ (Tree-sitter). Rust/Go/Python
-  scanners not yet implemented.
+- [x] hf-discovery: project scanner for C/C++ (Tree-sitter) + lexical Rust
+  scanner. Go/Python scanners not yet implemented.
+- [x] hf-harness: Rust cargo-fuzz backend (`cargo_fuzz` module: project
+  scaffold + `cargo fuzz build`; language-aware `build_command`; `try_compile`
+  Rust branch stages the crate via `copy_project_sources` and produces a
+  libFuzzer binary the existing run path drives). Sandbox image gains a
+  persistent nightly + cargo-fuzz toolchain. Not yet E2E-verified in-sandbox
+  (needs the rebuilt image + a real cargo crate).
 - [x] hf-discovery: target ranking (fit score, input surface, complexity).
 - [x] hf-harness: LLM-driven harness generation with compile validation.
 - [x] hf-harness: smoke fuzz step (60s) before promoting a harness.
@@ -80,8 +86,10 @@ Status legend: [x] done - [~] partial - [ ] not started.
   `ServiceContainer::cancel_run`/`cancel_all_runs`/`active_run_ids`; CLI Ctrl-C;
   `RunStatus::Cancelled`; GUI Stop button (`cancel_run` Tauri command +
   RunView). syzkaller (separate streaming path) not yet cancellable.
-- [ ] Diagnostics/Observability panels: instrument the provider pool and expose
-  `hf-diagnostics::CostTracker` via a command (panels currently mocked).
+- [x] Diagnostics/Observability panels: LLM calls flow through
+  `LlmProviderBridge` -> `DiagnosticsRecorder`, aggregated by
+  `ServiceContainer::cost_summary` and surfaced via the `diagnostics_cost_summary`
+  command; the DiagnosticsPanel renders real per-model cost/usage.
 - [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
   command surface; `hf-knowledge` + sub-agent pools are still scaffolds).
 - [ ] Remaining scaffold crates: hf-bot, hf-mcp, hf-scheduler, hf-knowledge,
