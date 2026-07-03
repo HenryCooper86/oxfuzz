@@ -3,6 +3,7 @@
 //! See `docs/design/harness-generation-design.md` and
 //! `docs/standards/HARNESS_STANDARD.md`.
 
+pub mod cargo_fuzz;
 pub mod generator;
 
 pub use generator::{
