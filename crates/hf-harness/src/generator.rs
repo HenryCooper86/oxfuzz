@@ -256,6 +256,12 @@ pub async fn try_compile(
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
 ) -> Result<CompileResult, ClassifiedError> {
+    // Rust fuzz targets take the cargo-fuzz path (project scaffold + `cargo fuzz
+    // build`) rather than the single-file compile below, which assumes a C-style
+    // `compiler args source -o output` invocation.
+    if harness.language == TargetLanguage::Rust {
+        return try_compile_cargo_fuzz(harness, rt, workspace).await;
+    }
     // Write the harness source to the host workspace (the Docker mount
     // makes it visible inside the container at container_workspace). Use a
     // language-appropriate filename so the compiler treats it correctly
@@ -314,6 +320,88 @@ pub async fn try_compile(
     // Update the output path to the host workspace path so the binary
     // can be referenced by subsequent run steps.
     harness.build_cmd.output = workspace.join(output_name);
+    harness.status = HarnessStatus::Compiled;
+    Ok(CompileResult::Ok(Box::new(harness)))
+}
+
+/// Compile a Rust harness with cargo-fuzz: scaffold `fuzz/Cargo.toml` +
+/// `fuzz/fuzz_targets/<name>.rs` beside the staged crate under test, then run
+/// `cargo fuzz build`, copying the produced libFuzzer binary to the workspace
+/// under the `output` name the run step expects.
+///
+/// The crate under test must already be staged into `workspace` (its
+/// `Cargo.toml` + `src/`); its package name is read from that `Cargo.toml` so the
+/// fuzz manifest's path dependency resolves.
+async fn try_compile_cargo_fuzz(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+) -> Result<CompileResult, ClassifiedError> {
+    let output_name = harness
+        .build_cmd
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let target_name = crate::cargo_fuzz::sanitize_target_name(&output_name);
+
+    // Derive the crate-under-test's package name from its staged Cargo.toml so
+    // the fuzz manifest can depend on it by path. Without a staged crate there is
+    // nothing to fuzz, so surface a clear validation error rather than a cryptic
+    // cargo failure.
+    let crate_toml_path = workspace.join("Cargo.toml");
+    let crate_toml = std::fs::read_to_string(&crate_toml_path).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "Rust harness needs the target crate staged at {}, but its Cargo.toml \
+             could not be read: {e}",
+            crate_toml_path.display()
+        ))
+    })?;
+    let crate_name =
+        crate::cargo_fuzz::crate_name_from_cargo_toml(&crate_toml).ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "could not find [package] name in {}",
+                crate_toml_path.display()
+            ))
+        })?;
+
+    // Lay out the cargo-fuzz project inside the workspace (Docker-mounted at
+    // /work). fuzz_targets/<name>.rs is the generated `fuzz_target!` harness.
+    rt.write_file(
+        &workspace.join("fuzz").join("Cargo.toml"),
+        &crate::cargo_fuzz::fuzz_cargo_toml(&crate_name, &target_name),
+    )
+    .await?;
+    rt.write_file(
+        &workspace
+            .join("fuzz")
+            .join("fuzz_targets")
+            .join(format!("{target_name}.rs")),
+        &harness.source,
+    )
+    .await?;
+
+    let script = crate::cargo_fuzz::build_script(&target_name, &output_name, "/work");
+    let cmd = vec!["bash".to_owned(), "-c".to_owned(), script];
+    let limits = hf_core::runtime::ResourceLimits {
+        max_mem_mb: 4096,
+        max_cpus: 2,
+        // cargo-fuzz compiles the crate + libfuzzer-sys from source; give it more
+        // headroom than a single-file C build.
+        max_duration_secs: 600,
+        env: std::collections::HashMap::new(),
+        ptrace: false,
+    };
+    let result = rt.run_command(&cmd, workspace, &limits).await?;
+    if result.exit_code != 0 {
+        return Ok(CompileResult::Failed(CompileFailure {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }));
+    }
+    harness.build_cmd.output = workspace.join(&output_name);
     harness.status = HarnessStatus::Compiled;
     Ok(CompileResult::Ok(Box::new(harness)))
 }
@@ -480,8 +568,24 @@ fn smoke_cfg(engine: EngineKind) -> hf_core::engine::FuzzRunConfig {
 }
 
 /// Construct a build command for an engine + language.
+///
+/// Rust targets are always built with cargo-fuzz (libfuzzer-sys), regardless of
+/// the requested engine, since that is the only supported Rust fuzzing backend;
+/// the produced libFuzzer binary is then driven by the libFuzzer run path. C/C++
+/// targets use the engine-correct instrumenting compiler.
 #[must_use]
-pub fn build_command(engine: EngineKind, _lang: TargetLanguage, output_name: &str) -> BuildCommand {
+pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str) -> BuildCommand {
+    if lang == TargetLanguage::Rust {
+        return BuildCommand {
+            compiler: "cargo".to_owned(),
+            args: vec![
+                "fuzz".to_owned(),
+                "build".to_owned(),
+                crate::cargo_fuzz::sanitize_target_name(output_name),
+            ],
+            output: PathBuf::from(output_name),
+        };
+    }
     match engine {
         EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => BuildCommand {
             compiler: "clang".to_owned(),
