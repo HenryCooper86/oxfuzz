@@ -3,11 +3,11 @@ import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
-import type { TargetInventory } from "../types";
+import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
-  CheckCircle2, XCircle, ArrowRight, Sparkles,
+  CheckCircle2, XCircle, ArrowRight, Sparkles, Archive,
 } from "lucide-react";
 
 interface HarnessResult {
@@ -40,6 +40,11 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
   const [harness, setHarness] = useState<HarnessResult | null>(null);
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
   const [seeds, setSeeds] = useState<SeedResult["seeds"] | null>(null);
+  // A harness already persisted for the selected target (e.g. built in the
+  // Fuzzing Workflow). Hydrated from the store so this view reflects work done
+  // elsewhere, not just what was generated in this component instance.
+  const [existing, setExisting] = useState<HarnessReviewItem | null>(null);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
 
   const [harnessStatus, setHarnessStatus] = useState<StepStatus>("idle");
   const [compileStatus, setCompileStatus] = useState<StepStatus>("idle");
@@ -57,16 +62,51 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     getTransport().invoke<TargetInventory>("discover", { project, lang })
       .then((inv) => {
         if (cancelled) return;
+        setDiscoverError(null);
         setInventory(inv);
         if (inv.candidates.length > 0) {
           setSelectedTarget(inv.candidates.sort((a, b) => b.fit_score - a.fit_score)[0].symbol);
         }
       })
-      .catch(() => {});
+      .catch((e) => {
+        // Don't leave the view silently blank -- tell the user discovery failed.
+        if (!cancelled) setDiscoverError(String(e));
+      });
     return () => { cancelled = true; };
   }, [project, lang, setSelectedTarget]);
 
-  async function generateHarness(target: string) {
+  // Hydrate any harness already persisted for the selected target so a harness
+  // built elsewhere (e.g. in the Fuzzing Workflow) is visible here too. The
+  // review item carries only a source preview, so we surface it as an "existing
+  // harness" banner rather than loading it as editable source.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!project || !selectedTarget) {
+        if (!cancelled) setExisting(null);
+        return;
+      }
+      try {
+        const items = await getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", {
+          project,
+          target: selectedTarget,
+        });
+        if (cancelled) return;
+        const match = items.find((h) => h.target_symbol === selectedTarget) ?? null;
+        setExisting(match);
+        // Reflect a persisted compiled harness in the shared target state so the
+        // Run handoff and pipeline badges agree across views.
+        if (match && (match.status === "Compiled" || match.status === "SmokePassed" || match.smoke_passed)) {
+          setCompiled(true);
+        }
+      } catch {
+        if (!cancelled) setExisting(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [project, selectedTarget, harness, setCompiled]);
+
+  async function generateHarness(target: string): Promise<HarnessResult | null> {
     setHarnessStatus("loading");
     setCompileStatus("idle");
     setSeedStatus("idle");
@@ -81,17 +121,23 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
       setHarness(result);
       setHarnessStatus("done");
       markDone("harness");
+      return result;
     } catch {
       setHarnessStatus("error");
+      return null;
     }
   }
 
-  async function compileHarness() {
-    if (!harness) return;
+  // Accepts the source explicitly so "Generate All" can compile the harness it
+  // just produced without waiting for the `harness` state to settle (the old
+  // setTimeout read a stale null and silently skipped compilation).
+  async function compileHarness(source?: string) {
+    const src = source ?? harness?.source;
+    if (!src) return;
     setCompileStatus("loading");
     try {
       const result = await getTransport().invoke<CompileResult>("harness_compile", {
-        source: harness.source, project, engine, target: selectedTarget, lang,
+        source: src, project, engine, target: selectedTarget, lang,
       });
       setCompileResult(result);
       const compiled = result.status === "Compiled";
@@ -120,12 +166,10 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
 
   async function runAll() {
     if (!selectedTarget) return;
-    await generateHarness(selectedTarget);
-    // Auto-compile and seed after harness is generated.
-    setTimeout(async () => {
-      await compileHarness();
-      await generateSeeds();
-    }, 100);
+    const built = await generateHarness(selectedTarget);
+    if (!built) return; // harness draft failed; don't proceed to compile/seed
+    await compileHarness(built.source);
+    await generateSeeds();
   }
 
   return (
@@ -152,6 +196,46 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
             </Button>
           </div>
         </>
+      )}
+
+      {discoverError && (
+        <div
+          className="surface-card text-xs"
+          style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--danger, #e5484d)", borderColor: "var(--danger, #e5484d)" }}
+        >
+          Discovery failed: {discoverError}
+        </div>
+      )}
+
+      {/* An existing harness for this target (e.g. built in the Fuzzing Workflow),
+          surfaced so this view reflects work done elsewhere. Hidden once a fresh
+          harness is generated in this session. */}
+      {existing && !harness && (
+        <div className="surface-card" style={{ padding: "var(--space-md)", animation: "slideInUp 0.2s ease" }}>
+          <div className="flex items-center gap-2">
+            <Archive size={16} className="text-text-muted" />
+            <span className="text-sm font-medium text-text-primary flex-1">
+              Existing harness for <code style={{ color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{existing.target_symbol}</code>
+            </span>
+            <span
+              className="text-xs px-2 py-0.5 rounded-sm"
+              style={{ background: "var(--surface-active)", border: "1px solid var(--border)" }}
+            >
+              {existing.engine} · {existing.status}{existing.smoke_passed ? " · smoke ok" : ""}
+            </span>
+          </div>
+          {existing.source_preview && (
+            <pre
+              className="text-xs p-3 mt-2 rounded-md overflow-auto max-h-40"
+              style={{ background: "var(--surface-code)", border: "1px solid var(--border)", fontFamily: "var(--font-mono)", lineHeight: 1.5, color: "var(--text-secondary)" }}
+            >
+              {existing.source_preview}
+            </pre>
+          )}
+          <p className="text-xs text-text-muted mt-2">
+            Generated previously. Use "Generate" to produce a fresh, editable harness, or proceed to Run.
+          </p>
+        </div>
       )}
 
       {/* Target + Engine selection */}
@@ -240,7 +324,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
             icon={<Terminal size={16} />}
             status={compileStatus}
             actionLabel="Compile"
-            actionClick={compileHarness}
+            actionClick={() => compileHarness()}
             disabled={!harness}
           >
             {compileResult && (
