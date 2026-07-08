@@ -158,6 +158,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/reports", get(list_report_drafts))
         .route("/reports/save", post(save_report_draft))
         .route("/reports/delete", post(delete_report_draft))
+        .route("/report/formats", get(report_formats))
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
@@ -172,6 +173,7 @@ pub fn build_with_state(state: AppState) -> Router {
         // Session management (parity with the desktop shell).
         .route("/chat/session", post(create_session))
         .route("/chat/history", post(chat_history))
+        .route("/chat/delete", post(delete_session))
         .route("/chat/rollback", post(chat_rollback))
         .route("/chat/rollback_to", post(chat_rollback_to))
         .route("/chat/checkpoints", post(chat_checkpoints))
@@ -369,6 +371,10 @@ async fn harness_compile(
 struct GenerateSeedsRequest {
     project: String,
     target: String,
+}
+
+async fn report_formats(State(state): State<AppState>) -> ApiResult<Vec<String>> {
+    Ok(Json(state.container.report_formats()))
 }
 
 async fn generate_seeds(
@@ -778,6 +784,14 @@ async fn chat_history(
 ) -> Json<Vec<Message>> {
     let id = SessionId(req.session_id);
     Json(state.container.chat_history(&id).await)
+}
+
+async fn delete_session(
+    State(state): State<AppState>,
+    Json(req): Json<SessionRequest>,
+) -> Json<bool> {
+    let id = SessionId(req.session_id);
+    Json(state.container.delete_chat_session(&id).await)
 }
 
 async fn chat_rollback(

@@ -255,6 +255,29 @@ export function RunView({
         )}
       </div>
 
+      {/* No target for this project yet (e.g. opened Run straight from Projects):
+          the run button is disabled, so point the user at where to get one. */}
+      {!isSyz && !target && project && !running && (
+        <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}>
+          No harness target selected for this project yet.
+          {onNavigate ? (
+            <>
+              {" "}
+              <button
+                onClick={() => onNavigate("harness")}
+                className="underline"
+                style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0 }}
+              >
+                Discover and build a harness first
+              </button>
+              .
+            </>
+          ) : (
+            " Discover and build a harness first (Harness view)."
+          )}
+        </div>
+      )}
+
       {/* Live stats while fuzzing (updates in place from streamed events). */}
       {running && !isSyz && (
         <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
