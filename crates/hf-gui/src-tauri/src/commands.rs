@@ -1155,6 +1155,17 @@ pub async fn chat_branch(
         .await)
 }
 
+/// Delete a chat session and its transcript (the "clear history" action).
+/// Returns whether a session was deleted.
+#[tauri::command]
+pub async fn delete_session(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+) -> Result<bool, String> {
+    let id = hf_core::types::SessionId(session_id);
+    Ok(state.container.delete_chat_session(&id).await)
+}
+
 /// Load a session's transcript as chat turns (for switching branches).
 #[tauri::command]
 pub async fn chat_history(
@@ -1484,6 +1495,98 @@ pub async fn save_report(
         .into_path()
         .map_err(|e| format!("invalid save path: {e}"))?;
     std::fs::write(&path, markdown).map_err(|e| format!("write report: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Report export formats available on this host (always includes md + html;
+/// docx/pdf when pandoc and a PDF engine are installed).
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn report_formats(state: tauri::State<'_, crate::state::AppState>) -> Vec<String> {
+    state.container.report_formats()
+}
+
+/// Compose the report for a target and save it in `format` (md/html/pdf/docx)
+/// via a native save dialog with the matching extension. Returns the saved path
+/// or `None` if the dialog was cancelled.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn export_report(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    format: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let ext = match format.trim().to_ascii_lowercase().as_str() {
+        "md" | "markdown" => "md",
+        "html" | "htm" => "html",
+        "pdf" => "pdf",
+        "docx" | "doc" => "docx",
+        other => return Err(format!("unknown report format: {other}")),
+    };
+    let default_name = format!("hobot_fuzz_report_{}.{ext}", sanitize_filename(&target));
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title("Export fuzzing report")
+        .set_file_name(&default_name)
+        .add_filter(ext.to_uppercase(), &[ext])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    state
+        .container
+        .export_report(std::path::Path::new(&project), &target, ext, &path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Export already-composed report `content` (e.g. a saved draft) in `format`
+/// via a native save dialog. Returns the saved path or `None` if cancelled.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn export_markdown(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    content: String,
+    title: String,
+    format: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let ext = match format.trim().to_ascii_lowercase().as_str() {
+        "md" | "markdown" => "md",
+        "html" | "htm" => "html",
+        "pdf" => "pdf",
+        "docx" | "doc" => "docx",
+        other => return Err(format!("unknown report format: {other}")),
+    };
+    let default_name = format!("{}.{ext}", sanitize_filename(&title));
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title("Export report")
+        .set_file_name(&default_name)
+        .add_filter(ext.to_uppercase(), &[ext])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    state
+        .container
+        .export_markdown(&content, &title, ext, &path)
+        .map_err(|e| e.to_string())?;
     Ok(Some(path.to_string_lossy().to_string()))
 }
 

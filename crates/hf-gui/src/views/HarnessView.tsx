@@ -131,9 +131,9 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
   // Accepts the source explicitly so "Generate All" can compile the harness it
   // just produced without waiting for the `harness` state to settle (the old
   // setTimeout read a stale null and silently skipped compilation).
-  async function compileHarness(source?: string) {
+  async function compileHarness(source?: string): Promise<boolean> {
     const src = source ?? harness?.source;
-    if (!src) return;
+    if (!src) return false;
     setCompileStatus("loading");
     try {
       const result = await getTransport().invoke<CompileResult>("harness_compile", {
@@ -146,9 +146,11 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
         markDone("compile");
         setCompiled(true);
       }
+      return compiled;
     } catch (e) {
       setCompileResult({ status: "Failed", message: String(e) });
       setCompileStatus("error");
+      return false;
     }
   }
 
@@ -168,8 +170,10 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     if (!selectedTarget) return;
     const built = await generateHarness(selectedTarget);
     if (!built) return; // harness draft failed; don't proceed to compile/seed
-    await compileHarness(built.source);
-    await generateSeeds();
+    const compiled = await compileHarness(built.source);
+    // Only seed a harness that actually built, so the pipeline never shows
+    // "seeds done" for a harness that failed to compile.
+    if (compiled) await generateSeeds();
   }
 
   return (

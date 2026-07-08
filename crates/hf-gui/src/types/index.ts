@@ -12,6 +12,7 @@ export type ViewType =
   | "chat"
   | "projects"
   | "artifacts"
+  | "reports"
   | "agents"
   | "skills"
   | "knowledge"
