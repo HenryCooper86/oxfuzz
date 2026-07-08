@@ -151,6 +151,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/harness/draft", post(harness_draft))
         .route("/harness/compile", post(harness_compile))
         .route("/seeds/generate", post(generate_seeds))
+        .route("/seeds/generate-llm", post(generate_seeds_llm))
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
         .route("/report", post(report))
@@ -377,6 +378,31 @@ async fn generate_seeds(
     let entries = state
         .container
         .generate_seeds(std::path::Path::new(&req.project), &req.target)
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({"seeds": entries})))
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateSeedsLlmRequest {
+    project: String,
+    target: String,
+    lang: Option<String>,
+    count: Option<usize>,
+}
+
+async fn generate_seeds_llm(
+    State(state): State<AppState>,
+    Json(req): Json<GenerateSeedsLlmRequest>,
+) -> ApiResult<serde_json::Value> {
+    let lang = match req.lang.as_deref() {
+        Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
+        None => TargetLanguage::C,
+    };
+    let count = req.count.unwrap_or(12).clamp(1, 64);
+    let entries = state
+        .container
+        .generate_seeds_llm(std::path::Path::new(&req.project), &req.target, lang, count)
+        .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({"seeds": entries})))
 }

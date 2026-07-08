@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { Button } from "../components/ui";
+import { useToast } from "../components/ui/Toast";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useI18n } from "../i18n";
@@ -63,6 +64,7 @@ type AgentEvent =
 
 export function ChatView() {
   const { activeProject, recentProjects, setActiveProject } = useProject();
+  const { toast } = useToast();
   const { sendOnEnter } = usePrefs();
   const { t } = useI18n();
   // In-flight fuzz runs surface as the composer's task count.
@@ -272,8 +274,8 @@ export function ChatView() {
         title: null,
       });
       if (id) setSessionId(id);
-    } catch {
-      /* no-op; branching unavailable */
+    } catch (e) {
+      toast({ title: "Branch failed", description: String(e), variant: "error" });
     }
   }
 
@@ -307,8 +309,8 @@ export function ChatView() {
           };
         }),
       );
-    } catch {
-      /* no-op */
+    } catch (e) {
+      toast({ title: "Could not switch branch", description: String(e), variant: "error" });
     }
   }
 
@@ -785,6 +787,8 @@ function WelcomeProjectSelector({
     <div className="relative inline-block">
       <button
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
         className="inline-flex items-center gap-2 rounded-lg transition-colors duration-150"
         style={{
           padding: "10px 14px",
@@ -934,6 +938,8 @@ function AgentDropdown({
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
         title="Active agent"
         className="inline-flex items-center gap-1 rounded-md transition-all duration-150"
         style={{
@@ -1010,10 +1016,44 @@ function Dropdown({
   subtle?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // On open, move focus to the selected option so the menu is keyboard-drivable.
+  useEffect(() => {
+    if (!open || !menuRef.current) return;
+    const items = menuRef.current.querySelectorAll<HTMLButtonElement>('[role="option"]');
+    items[Math.max(0, options.indexOf(value))]?.focus();
+  }, [open, value, options]);
+
+  function close(returnFocus = true) {
+    setOpen(false);
+    if (returnFocus) triggerRef.current?.focus();
+  }
+
+  function onMenuKey(e: React.KeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
+    const idx = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); items[Math.min(items.length - 1, idx + 1)]?.focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); items[Math.max(0, idx - 1)]?.focus(); }
+    else if (e.key === "Home") { e.preventDefault(); items[0]?.focus(); }
+    else if (e.key === "End") { e.preventDefault(); items[items.length - 1]?.focus(); }
+  }
+
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onKeyDown={(e) => {
+          if (!open && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            setOpen(true);
+          }
+        }}
         className="inline-flex items-center gap-1 rounded-md transition-all duration-150"
         style={{
           padding: "5px 8px",
@@ -1033,8 +1073,11 @@ function Dropdown({
       </button>
       {open && (
         <>
-          <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => setOpen(false)} />
+          <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => close(false)} />
           <div
+            ref={menuRef}
+            role="listbox"
+            onKeyDown={onMenuKey}
             className="absolute bottom-full mb-1 min-w-[140px] rounded-lg overflow-hidden"
             style={{
               left: 0,
@@ -1047,9 +1090,11 @@ function Dropdown({
             {options.map((opt) => (
               <button
                 key={opt}
+                role="option"
+                aria-selected={opt === value}
                 onClick={() => {
                   onSelect(opt);
-                  setOpen(false);
+                  close();
                 }}
                 className="flex items-center w-full text-left transition-colors duration-150"
                 style={{

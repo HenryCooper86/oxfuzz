@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
-import { getTransport } from "../lib";
+import { getTransport, emitDataChanged } from "../lib";
 
 const STORAGE_KEY = "hf_recent_projects";
 const ACTIVE_KEY = "hf_active_project";
@@ -120,6 +120,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       // does not silently hide a project whose data still exists.
       await getTransport().invoke("delete_project", { project: p });
       removeRecent(p);
+      emitDataChanged();
     },
     [removeRecent],
   );

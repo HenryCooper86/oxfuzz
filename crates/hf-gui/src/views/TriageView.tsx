@@ -46,12 +46,14 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [reporting, setReporting] = useState(false);
   const [reportMsg, setReportMsg] = useState<string | null>(null);
   const [reportMd, setReportMd] = useState<string | null>(null);
+  const [triageError, setTriageError] = useState<string | null>(null);
 
   // Whether the last run produced crashes (null = no run yet this session).
   const ranWithCrashes = summary ? summary.crashes > 0 : null;
 
   const triage = useCallback(async () => {
     setLoading(true);
+    setTriageError(null);
     try {
       const result = await getTransport().invoke<Crash[]>("triage", {
         project: activeProject || ".",
@@ -60,12 +62,33 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       setCrashes(result);
       if (result.length > 0) markDone("triage");
       else markSkipped("triage");
-    } catch {
+    } catch (e) {
+      // A failed scan previously looked identical to "no crashes found".
       setCrashes([]);
+      setTriageError(String(e));
     } finally {
       setLoading(false);
     }
   }, [activeProject, lastTarget, markDone, markSkipped]);
+
+  // Save the composed report into the Workbench "Composed Reports" list so it is
+  // not lost between the Triage and Dashboard surfaces.
+  const saveToWorkbench = useCallback(async () => {
+    if (!reportMd) return;
+    setReportMsg(null);
+    try {
+      await getTransport().invoke("save_report_draft", {
+        title: `Triage report — ${lastTarget || "target"}`,
+        project: activeProject || ".",
+        target: lastTarget || undefined,
+        status: "draft",
+        content: reportMd,
+      });
+      setReportMsg("Saved to Workbench reports.");
+    } catch (e) {
+      setReportMsg(`Save to Workbench failed: ${e}`);
+    }
+  }, [reportMd, lastTarget, activeProject]);
 
   const reportArgs = useCallback(
     () => ({ project: activeProject || ".", target: lastTarget }),
@@ -177,6 +200,17 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           >
             <FileDown size={14} />
           </Button>
+          {reportMd && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void saveToWorkbench()}
+              title="Save this report to the Workbench Composed Reports list"
+            >
+              <FileText size={14} />
+              Save to Workbench
+            </Button>
+          )}
           <Button
             variant="primary"
             onClick={triage}
@@ -192,6 +226,15 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       {reportMsg && (
         <div className="text-xs text-text-muted" style={{ marginTop: "-0.5rem" }}>
           {reportMsg}
+        </div>
+      )}
+
+      {triageError && (
+        <div
+          className="surface-card text-xs"
+          style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--danger, #e5484d)", borderColor: "var(--danger, #e5484d)" }}
+        >
+          Scan failed: {triageError}
         </div>
       )}
 

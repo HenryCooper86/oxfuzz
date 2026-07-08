@@ -286,6 +286,26 @@ pub async fn generate_seeds(
     Ok(serde_json::json!({"seeds": entries}))
 }
 
+/// AI-generated corpus seeds for a target via the configured LLM provider,
+/// persisted as tracked corpus entries. Falls back to heuristic seeds when no
+/// provider is configured, so it always produces a corpus.
+#[tauri::command]
+pub async fn generate_seeds_llm(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    lang: String,
+    count: usize,
+) -> Result<serde_json::Value, String> {
+    let lang = parse_lang(&lang)?;
+    let entries = state
+        .container
+        .generate_seeds_llm(std::path::Path::new(&project), &target, lang, count)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"seeds": entries}))
+}
+
 #[tauri::command]
 pub async fn corpus_list(
     state: tauri::State<'_, crate::state::AppState>,
