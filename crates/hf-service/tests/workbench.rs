@@ -6,12 +6,12 @@ use std::sync::Arc;
 use chrono::Utc;
 use hf_core::crash::{Crash, CrashKind};
 use hf_core::engine::{EngineKind, FuzzRunConfig};
-use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+use hf_core::harness::{BuildCommand, Harness, HarnessStatus, SmokeRunSummary};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_service::ServiceContainer;
-use hf_storage::{RunRecord, Store};
+use hf_storage::{RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
 async fn test_container() -> (ServiceContainer, tempfile::TempDir) {
@@ -201,6 +201,50 @@ async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
     assert_eq!(dashboard.totals.crashes, 0);
     assert!(dashboard.harness_reviews.is_empty());
     assert!(dashboard.crash_reviews.is_empty());
+}
+
+#[tokio::test]
+async fn dashboard_readiness_tracks_operational_state() {
+    let (container, _dir) = test_container().await;
+    let project = PathBuf::from("/proj");
+
+    let empty = container
+        .workbench_dashboard(Some(project.as_path()), None)
+        .await;
+
+    assert_eq!(empty.readiness.state, "setup_required");
+    assert!(empty.readiness.score < 50);
+    assert!(empty
+        .readiness
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("targets")));
+
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let mut harness = sample_harness(target.id);
+    harness.status = HarnessStatus::Promoted;
+    harness.smoke_run = Some(SmokeRunSummary {
+        duration_secs: 60,
+        execs_per_sec: 1_250.0,
+        crashes: 0,
+        passed: true,
+    });
+    let mut run = sample_run("/proj", harness.id);
+    run.status = RunStatus::Done;
+    run.ended_at = Some(Utc::now());
+
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&run).await.unwrap();
+
+    let ready = container
+        .workbench_dashboard(Some(project.as_path()), None)
+        .await;
+
+    assert_eq!(ready.readiness.state, "ready");
+    assert!(ready.readiness.score >= 80);
+    assert!(ready.readiness.blockers.is_empty());
 }
 
 #[tokio::test]

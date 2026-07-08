@@ -30,6 +30,16 @@ pub struct WorkbenchTotals {
     pub corpus_entries: usize,
 }
 
+/// Service-owned readiness summary for the current workbench scope.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkbenchReadiness {
+    pub state: String,
+    pub score: u8,
+    pub headline: String,
+    pub detail: String,
+    pub blockers: Vec<String>,
+}
+
 /// One recent fuzz run row for the dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkbenchRun {
@@ -95,6 +105,7 @@ pub struct WorkbenchDashboard {
     pub top_targets: Vec<WorkbenchTarget>,
     pub harness_reviews: Vec<HarnessReviewItem>,
     pub crash_reviews: Vec<CrashReviewItem>,
+    pub readiness: WorkbenchReadiness,
     pub next_actions: Vec<String>,
 }
 
@@ -228,6 +239,7 @@ pub async fn dashboard(
         crashes: crash_reviews.len(),
         corpus_entries: corpus_entry_count,
     };
+    let readiness = readiness_summary(&totals, true);
 
     let recent_runs = filtered_runs
         .into_iter()
@@ -249,6 +261,7 @@ pub async fn dashboard(
         top_targets,
         harness_reviews,
         crash_reviews,
+        readiness,
         next_actions,
     }
 }
@@ -316,6 +329,7 @@ fn empty_dashboard(
         top_targets: Vec::new(),
         harness_reviews: Vec::new(),
         crash_reviews: Vec::new(),
+        readiness: readiness_summary(&WorkbenchTotals::default(), false),
         next_actions: vec![
             "Initialize persistence to start tracking team fuzzing work.".to_owned(),
         ],
@@ -481,6 +495,124 @@ fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
         actions.push("No urgent work queued; schedule deeper nightly campaigns.".to_owned());
     }
     actions
+}
+
+fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> WorkbenchReadiness {
+    if !store_configured {
+        return WorkbenchReadiness {
+            state: "setup_required".to_owned(),
+            score: 0,
+            headline: "Persistence setup required".to_owned(),
+            detail: "Initialize persistence before tracking targets, harnesses, runs, and crashes."
+                .to_owned(),
+            blockers: vec!["Persistence is not initialized.".to_owned()],
+        };
+    }
+
+    let mut blockers = Vec::new();
+    if totals.targets == 0 {
+        blockers.push("No fuzzing targets discovered.".to_owned());
+    }
+    if totals.targets > 0 && totals.harnesses == 0 {
+        blockers.push("No generated harnesses exist for discovered targets.".to_owned());
+    }
+    if totals.harnesses_needing_review > 0 {
+        blockers.push(format!(
+            "{} generated harness{} need human approval.",
+            totals.harnesses_needing_review,
+            plural_suffix(totals.harnesses_needing_review),
+        ));
+    }
+    if totals.harnesses > 0 && totals.harnesses_needing_review == 0 && totals.runs == 0 {
+        blockers.push("No fuzzing campaign history exists yet.".to_owned());
+    }
+    if totals.crashes > 0 {
+        blockers.push(format!(
+            "{} crash{} need triage or issue export.",
+            totals.crashes,
+            plural_suffix(totals.crashes),
+        ));
+    }
+
+    let mut score = 10_u16;
+    if totals.targets > 0 {
+        score += 25;
+    }
+    if totals.harnesses > 0 {
+        score += 20;
+    }
+    if totals.harnesses > 0 && totals.harnesses_needing_review == 0 {
+        score += 15;
+    }
+    if totals.runs > 0 {
+        score += 15;
+    }
+    if totals.runs > 0 && totals.crashes == 0 {
+        score += 15;
+    }
+    if totals.active_runs > 0 {
+        score = (score + 5).min(100);
+    }
+
+    let (state, headline, detail) = if totals.targets == 0 {
+        (
+            "setup_required",
+            "Discovery needed",
+            "Run target discovery before creating harnesses or campaigns.",
+        )
+    } else if totals.harnesses == 0 {
+        (
+            "harness_required",
+            "Harness generation needed",
+            "Generate a sandbox-built harness for the highest-ranked target.",
+        )
+    } else if totals.harnesses_needing_review > 0 {
+        (
+            "review_required",
+            "Harness review required",
+            "Approve generated harnesses before full fuzzing campaigns.",
+        )
+    } else if totals.crashes > 0 {
+        (
+            "triage_required",
+            "Crash triage required",
+            "Triage crashes and export issue drafts before expanding campaign scope.",
+        )
+    } else if totals.active_runs > 0 {
+        (
+            "active",
+            "Campaign running",
+            "Monitor the active fuzzing campaign and review new findings as they land.",
+        )
+    } else if totals.runs == 0 {
+        (
+            "campaign_ready",
+            "Ready for smoke campaign",
+            "Start a short sandboxed fuzz run to establish baseline stability.",
+        )
+    } else {
+        (
+            "ready",
+            "Ready for deeper campaigns",
+            "The selected scope has targets, reviewed harnesses, and campaign history.",
+        )
+    };
+
+    WorkbenchReadiness {
+        state: state.to_owned(),
+        score: u8::try_from(score.min(100)).unwrap_or(100),
+        headline: headline.to_owned(),
+        detail: detail.to_owned(),
+        blockers,
+    }
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn issue_title(crash: &Crash, target: Option<&TargetCandidate>) -> String {

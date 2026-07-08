@@ -149,6 +149,14 @@ export interface CrashReviewItem {
   has_bug_report: boolean;
 }
 
+export interface WorkbenchReadiness {
+  state: string;
+  score: number;
+  headline: string;
+  detail: string;
+  blockers: string[];
+}
+
 export interface WorkbenchDashboard {
   active_project: string | null;
   active_target: string | null;
@@ -157,6 +165,7 @@ export interface WorkbenchDashboard {
   top_targets: WorkbenchTarget[];
   harness_reviews: HarnessReviewItem[];
   crash_reviews: CrashReviewItem[];
+  readiness: WorkbenchReadiness;
   next_actions: string[];
 }
 

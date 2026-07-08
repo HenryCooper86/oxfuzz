@@ -21,7 +21,14 @@ pub trait FuzzService: Send + Sync {
 }
 ```
 
-## 3. Orchestration Flow
+## 3. Workbench Readiness
+
+`hf-service` owns workbench readiness derivation. Presentation layers receive a
+dashboard DTO with state, score, blockers, and detail text instead of
+re-deriving readiness from raw counts. This keeps REST, Tauri, CLI, and future
+surfaces aligned on the same operational status.
+
+## 4. Orchestration Flow
 
 1. `discover` -> `TargetInventory` persisted; HITL selects targets.
 2. For each selected target: `generate_harness` -> `Harness` (Promoted).
@@ -30,13 +37,13 @@ pub trait FuzzService: Send + Sync {
 5. Background: `corpus_ops` + `coverage_report` loop; on stagnation, propose
    new harness.
 
-## 4. Sub-Agents
+## 5. Sub-Agents
 
 - `discovery-agent` -- owns target ranking.
 - `harness-agent` -- owns harness draft/iterate.
 - `triage-agent` -- owns crash classification and bug report drafting.
 - `coverage-agent` -- owns stagnation detection and harness proposals.
 
-## 5. Tests
+## 6. Tests
 
 - Integration: end-to-end loop with mocked LLM and mocked engine.
