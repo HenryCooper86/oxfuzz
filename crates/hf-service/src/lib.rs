@@ -38,6 +38,6 @@ pub use init::{init_at, init_workspace, InitReport};
 pub use report_store::ReportDraft;
 pub use system::{system_status, SystemStatus};
 pub use workbench::{
-    CrashReviewItem, GitLabIssueExport, HarnessReviewItem, WorkbenchDashboard, WorkbenchRun,
-    WorkbenchTarget, WorkbenchTotals,
+    CrashReviewItem, GitLabIssueExport, HarnessReviewItem, WorkbenchDashboard, WorkbenchReadiness,
+    WorkbenchRun, WorkbenchTarget, WorkbenchTotals,
 };

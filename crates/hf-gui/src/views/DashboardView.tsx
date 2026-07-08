@@ -33,6 +33,7 @@ import type {
   ReportDraft,
   SystemStatus,
   WorkbenchDashboard,
+  WorkbenchReadiness,
   WorkbenchRun,
   WorkbenchTarget,
 } from "../types";
@@ -93,6 +94,13 @@ function emptyDashboard(project: string | null, target: string | null): Workbenc
     top_targets: [],
     harness_reviews: [],
     crash_reviews: [],
+    readiness: {
+      state: "setup_required",
+      score: 0,
+      headline: "Discovery needed",
+      detail: "Run target discovery before creating harnesses or campaigns.",
+      blockers: ["No fuzzing targets discovered."],
+    },
     next_actions: ["Run target discovery on an internal project."],
   };
 }
@@ -431,7 +439,7 @@ function workbenchTabs(dashboard: WorkbenchDashboard): { id: WorkbenchTab; label
     { id: "harnesses", label: "Harnesses", icon: <FileCode size={14} />, count: dashboard.harness_reviews.length },
     { id: "targets", label: "Targets", icon: <Target size={14} />, count: dashboard.top_targets.length },
     { id: "repro", label: "Repro", icon: <Play size={14} /> },
-    { id: "team", label: "Team", icon: <Users size={14} /> },
+    { id: "team", label: "Review", icon: <Users size={14} /> },
     { id: "gitlab", label: "GitLab", icon: <GitPullRequest size={14} /> },
     { id: "knowledge", label: "Knowledge", icon: <BookOpen size={14} /> },
     { id: "health", label: "Health", icon: <Server size={14} /> },
@@ -449,6 +457,7 @@ function OverviewTab({
 }) {
   return (
     <div className="flex flex-col gap-4">
+      <ReadinessSummary readiness={dashboard.readiness} />
       <MetricGrid dashboard={dashboard} />
       <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))" }}>
         <section className="flex flex-col gap-4 min-w-0">
@@ -462,6 +471,52 @@ function OverviewTab({
         </section>
       </div>
     </div>
+  );
+}
+
+function ReadinessSummary({ readiness }: { readiness: WorkbenchReadiness }) {
+  const isReady = readiness.state === "ready" || readiness.state === "active";
+  const tone = isReady ? "ok" : "warn";
+  return (
+    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <SectionHeader icon={<ShieldCheck size={15} />} title="Operational Readiness" />
+          <h2 className="mt-2 text-lg font-semibold text-text-primary">{readiness.headline}</h2>
+          <p className="mt-1 text-sm text-text-secondary">{readiness.detail}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <StatusBadge value={readiness.state.replace(/_/g, " ")} tone={tone} />
+          <span className="text-sm font-semibold" style={{ color: isReady ? "var(--success)" : "var(--warning)" }}>
+            {readiness.score}%
+          </span>
+        </div>
+      </div>
+      <div className="h-2 rounded-sm overflow-hidden" style={{ background: "var(--surface-secondary)" }}>
+        <div
+          className="h-full"
+          style={{
+            width: `${Math.max(0, Math.min(100, readiness.score))}%`,
+            background: isReady ? "var(--success)" : "var(--warning)",
+          }}
+        />
+      </div>
+      {readiness.blockers.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          {readiness.blockers.slice(0, 4).map((blocker) => (
+            <div key={blocker} className="flex items-start gap-2 text-xs text-text-secondary">
+              <AlertTriangle size={13} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 1 }} />
+              <span>{blocker}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-xs text-text-secondary">
+          <CheckCircle2 size={13} style={{ color: "var(--success)" }} />
+          <span>No readiness blockers in the selected scope.</span>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -775,7 +830,7 @@ function TeamReview({
   const crashNeedsReport = crashes.filter((item) => !item.has_bug_report);
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Users size={15} />} title="Team Review Flow" />
+      <SectionHeader icon={<Users size={15} />} title="Review Flow" />
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
         <ReviewLane title="Reports needing review" count={reportNeedsReview.length} items={reportNeedsReview.map((r) => r.title)} />
         <ReviewLane title="Harnesses needing approval" count={harnessNeedsReview.length} items={harnessNeedsReview.map((h) => h.target_symbol)} />
