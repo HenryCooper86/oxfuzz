@@ -95,14 +95,14 @@ export function RunView({
         ? await runSyzkaller({
             project,
             arch: sandboxArch,
-            duration: Number(duration) || 60,
+            duration: Math.max(1, Math.floor(Number(duration) || 60)),
             kernel_image: kernelImage || null,
             disk_image: diskImage || null,
             ssh_key: sshKey || null,
             manager_cfg: managerCfg || null,
             vm_count: Number(vmCount) || 2,
           })
-        : await runFuzzer({ project, target, engine, duration: Number(duration) || 60, arch: sandboxArch });
+        : await runFuzzer({ project, target, engine, duration: Math.max(1, Math.floor(Number(duration) || 60)), arch: sandboxArch });
       markDone("run");
       // If the run found no crashes, there is nothing to triage.
       if (crashes === 0) markSkipped("triage");
@@ -187,6 +187,7 @@ export function RunView({
           <Label>Duration (seconds)</Label>
           <Input
             type="number"
+            min={1}
             value={duration}
             onChange={(e) => setDuration(e.target.value)}
           />
@@ -237,16 +238,16 @@ export function RunView({
           {running ? "Running..." : isSyz ? "Launch Campaign" : "Run Fuzzer"}
         </Button>
 
-        {/* Stop is offered while a harness fuzz run is in flight. Kernel
-            (syzkaller) campaigns run through a separate path not covered by the
-            cancellation registry, so the button is scoped to non-syzkaller runs. */}
-        {running && !isSyz && (
+        {/* Stop is offered for any in-flight run. Both harness fuzzing and
+            kernel (syzkaller) campaigns register a cancellation token, and
+            cancel_run signals every active run, so this works for both. */}
+        {running && (
           <Button
             variant="danger"
             className="self-start"
             onClick={() => void cancelRun()}
             loading={cancelling}
-            title="Cancel the running fuzz campaign"
+            title="Cancel the running campaign"
           >
             {!cancelling && <Square size={14} />}
             {cancelling ? "Stopping..." : "Stop"}

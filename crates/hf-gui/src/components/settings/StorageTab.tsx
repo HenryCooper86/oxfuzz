@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { Database, FolderOpen } from "lucide-react";
-import { getTransport } from "../../lib";
+import { getTransport, pickFile, emitDataChanged } from "../../lib";
 import { useToast } from "../ui/Toast";
 import { Button, Input } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
@@ -35,6 +35,11 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
     onChange({ ...value, ...next });
   }
 
+  async function browseDb() {
+    const file = await pickFile("Select the SQLite database file");
+    if (file) patch({ db_path: file });
+  }
+
   async function clearWorkspace() {
     if (!confirmClear) {
       setConfirmClear(true);
@@ -43,6 +48,8 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
     setClearing(true);
     try {
       await getTransport().invoke("clear_workspace");
+      // Corpus/artifact views read from these now-deleted files -- refresh them.
+      emitDataChanged();
       toast({ title: "Workspace cleared", description: "On-disk fuzz artifacts were removed.", variant: "success" });
     } catch (e) {
       toast({ title: "Clear failed", description: String(e), variant: "error" });
@@ -58,7 +65,7 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
         <SettingsItem title="SQLite Path">
           <div style={{ display: "flex", gap: 4, width: 220 }}>
             <Input value={dbPath} onChange={(e) => patch({ db_path: e.target.value })} mono />
-            <button aria-label="Browse for database file" className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
+            <button onClick={browseDb} aria-label="Browse for database file" className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
               <FolderOpen size={14} />
             </button>
           </div>

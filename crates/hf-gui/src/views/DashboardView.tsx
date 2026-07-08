@@ -23,7 +23,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
-import { getTransport } from "../lib";
+import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type {
@@ -194,10 +194,14 @@ export function DashboardView() {
       }
     }
     void loadInitialDashboard();
+    // Re-fetch when another view clears knowledge / workspace or deletes a
+    // project, so the Workbench counts never disagree with what was just wiped.
+    const unsubscribe = onDataChanged(() => void reload());
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [loadDashboard, reloadReports]);
+  }, [loadDashboard, reloadReports, reload]);
 
   function selectReport(report: ReportDraft) {
     setEditor(editorFromReport(report));
@@ -342,10 +346,31 @@ export function DashboardView() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1 border-b border-border">
+      <div
+        className="flex flex-wrap gap-1 border-b border-border"
+        role="tablist"
+        aria-label="Workbench sections"
+        onKeyDown={(e) => {
+          const ids = tabs.map((t) => t.id);
+          const idx = ids.indexOf(tab);
+          let next = idx;
+          if (e.key === "ArrowRight") next = (idx + 1) % ids.length;
+          else if (e.key === "ArrowLeft") next = (idx - 1 + ids.length) % ids.length;
+          else if (e.key === "Home") next = 0;
+          else if (e.key === "End") next = ids.length - 1;
+          else return;
+          e.preventDefault();
+          setTab(ids[next]);
+          const btns = e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+          btns[next]?.focus();
+        }}
+      >
         {tabs.map((item) => (
           <button
             key={item.id}
+            role="tab"
+            aria-selected={tab === item.id}
+            tabIndex={tab === item.id ? 0 : -1}
             onClick={() => setTab(item.id)}
             className="flex items-center gap-2 rounded-t-md border border-b-0 transition-colors"
             style={{
@@ -963,7 +988,10 @@ function KnowledgePanel({
         </Button>
       </div>
       {hits.length === 0 ? (
-        <EmptyState icon={<BookOpen size={18} />} hint="Search results will appear here." />
+        <EmptyState
+          icon={<BookOpen size={18} />}
+          hint="Search results will appear here. No matches? Open the Knowledge view to index the project or add documents first."
+        />
       ) : (
         <div className="flex flex-col gap-2">
           {hits.map((hit) => (
