@@ -20,6 +20,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   save_report_draft: { method: "POST", path: "/reports/save" },
   delete_report_draft: { method: "POST", path: "/reports/delete" },
   clear_knowledge: { method: "POST", path: "/knowledge/clear" },
+  delete_project: { method: "POST", path: "/projects/delete" },
   system_snapshot: { method: "GET", path: "/system/snapshot" },
   workbench_dashboard: { method: "POST", path: "/workbench/dashboard" },
   harness_review_queue: { method: "POST", path: "/workbench/harnesses" },
