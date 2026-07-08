@@ -3,6 +3,7 @@ import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, 
 import { getTransport, pickFolder } from "../lib";
 import { Button } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { useListboxNav } from "../hooks/useListboxNav";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useI18n } from "../i18n";
@@ -232,8 +233,9 @@ export function ChatView() {
     if (sessionId) {
       try {
         await getTransport().invoke("chat_rollback", { sessionId });
-      } catch {
-        /* best-effort; still undo locally */
+      } catch (e) {
+        // The local undo still happens below; note the backend didn't persist it.
+        toast({ title: "Rollback not saved on server", description: String(e), variant: "error" });
       }
     }
     setMessages((m) => m.slice(0, -2));
@@ -256,8 +258,8 @@ export function ChatView() {
     if (sessionId) {
       try {
         await getTransport().invoke("chat_rollback_to", { sessionId, checkpointId: cp.checkpoint_id });
-      } catch {
-        /* best-effort; still truncate locally */
+      } catch (e) {
+        toast({ title: "Rollback not saved on server", description: String(e), variant: "error" });
       }
     }
     setMessages((m) => m.slice(0, cp.message_count_before));
@@ -781,12 +783,15 @@ function WelcomeProjectSelector({
   onBrowse: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const { triggerRef, menuRef, onMenuKey, onTriggerKey } = useListboxNav(open, () => setOpen(false));
   const { t } = useI18n();
   const name = activeProject ? activeProject.split("/").pop() || activeProject : t("common.noProject");
   return (
     <div className="relative inline-block">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => onTriggerKey(e, () => setOpen(true))}
         aria-haspopup="listbox"
         aria-expanded={open}
         className="inline-flex items-center gap-2 rounded-lg transition-colors duration-150"
@@ -809,6 +814,9 @@ function WelcomeProjectSelector({
         <>
           <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => setOpen(false)} />
           <div
+            ref={menuRef}
+            role="listbox"
+            onKeyDown={onMenuKey}
             className="absolute left-0 right-0 mt-1 rounded-lg overflow-hidden text-left"
             style={{
               background: "var(--surface-primary)",
@@ -825,6 +833,8 @@ function WelcomeProjectSelector({
               recentProjects.map((p) => (
                 <button
                   key={p}
+                  role="option"
+                  aria-selected={p === activeProject}
                   onClick={() => {
                     onSelect(p);
                     setOpen(false);
@@ -933,11 +943,14 @@ function AgentDropdown({
   onSelect: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const { triggerRef, menuRef, onMenuKey, onTriggerKey } = useListboxNav(open, () => setOpen(false));
   const active = agents.find((a) => a.id === value);
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => onTriggerKey(e, () => setOpen(true))}
         aria-haspopup="listbox"
         aria-expanded={open}
         title="Active agent"
@@ -962,6 +975,9 @@ function AgentDropdown({
         <>
           <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => setOpen(false)} />
           <div
+            ref={menuRef}
+            role="listbox"
+            onKeyDown={onMenuKey}
             className="absolute bottom-full mb-1 min-w-[180px] rounded-lg overflow-hidden"
             style={{
               left: 0,
@@ -974,6 +990,8 @@ function AgentDropdown({
             {agents.map((a) => (
               <button
                 key={a.id}
+                role="option"
+                aria-selected={a.id === value}
                 onClick={() => {
                   onSelect(a.id);
                   setOpen(false);
