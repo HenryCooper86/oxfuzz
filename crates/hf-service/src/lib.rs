@@ -16,6 +16,7 @@ pub mod init;
 pub mod knowledge;
 pub mod recovery;
 pub mod report;
+pub mod report_export;
 pub mod report_store;
 pub mod sarif;
 pub mod scheduler;
