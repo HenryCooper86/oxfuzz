@@ -165,7 +165,7 @@ export function DashboardView() {
     const [nextDashboard, nextReports, nextSystem] = await Promise.all([
       loadDashboard(),
       reloadReports(),
-      getTransport().invoke<SystemStatus>("system_status").catch(() => null),
+      getTransport().invoke<SystemStatus>("system_status_cmd").catch(() => null),
     ]);
     setDashboard(nextDashboard);
     setSystem(nextSystem);
@@ -181,7 +181,7 @@ export function DashboardView() {
       const [nextDashboard, nextReports, nextSystem] = await Promise.all([
         loadDashboard(),
         reloadReports(),
-        getTransport().invoke<SystemStatus>("system_status").catch(() => null),
+        getTransport().invoke<SystemStatus>("system_status_cmd").catch(() => null),
       ]);
       if (!cancelled) {
         setDashboard(nextDashboard);

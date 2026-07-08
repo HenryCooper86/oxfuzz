@@ -1,6 +1,6 @@
 //! Tests for internal-team workbench service summaries.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -279,4 +279,80 @@ async fn gitlab_issue_export_returns_reviewable_payload() {
     assert!(export.title.contains("parse_packet"));
     assert!(export.description.contains("segmentation fault"));
     assert!(export.labels.contains(&"hobot-fuzz".to_owned()));
+}
+
+fn isolate_workspace() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var(
+            "HF_WORKSPACE_DIR",
+            std::env::temp_dir().join("hobot_fuzz_workbench_it_workspace"),
+        );
+    });
+}
+
+#[tokio::test]
+async fn delete_project_removes_db_records_and_workspace_and_isolates_others() {
+    isolate_workspace();
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+
+    // Seed two projects in the store, each with a target + harness + run.
+    for root in ["/gone", "/kept"] {
+        let mut target = sample_target(root);
+        target.id = Uuid::new_v4();
+        target.project_root = PathBuf::from(root);
+        let harness = sample_harness(target.id);
+        let run = sample_run(root, harness.id);
+        store.upsert_target(&target, Utc::now()).await.unwrap();
+        store.upsert_harness(&harness).await.unwrap();
+        store.insert_run(&run).await.unwrap();
+    }
+
+    // Give each project an on-disk workspace directory.
+    let gone_dir = hf_service::project_workspace_dir(Path::new("/gone"));
+    let kept_dir = hf_service::project_workspace_dir(Path::new("/kept"));
+    std::fs::create_dir_all(&gone_dir).unwrap();
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    std::fs::write(gone_dir.join("marker"), b"x").unwrap();
+
+    container.delete_project(Path::new("/gone")).await.unwrap();
+
+    // DB rows for the deleted project are gone; the kept project is intact.
+    assert!(store.list_targets("/gone").await.unwrap().is_empty());
+    assert!(store.list_runs(Some("/gone")).await.unwrap().is_empty());
+    assert_eq!(store.list_targets("/kept").await.unwrap().len(), 1);
+    // No orphaned harnesses linger (only the kept project's harness remains).
+    assert_eq!(store.list_all_harnesses().await.unwrap().len(), 1);
+
+    // On-disk workspace for the deleted project is removed; the other survives.
+    assert!(!gone_dir.exists());
+    assert!(kept_dir.exists());
+}
+
+#[tokio::test]
+async fn dashboard_without_active_project_is_empty_not_global_aggregate() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+
+    // Persist work under a real project.
+    let target = sample_target("/proj");
+    let harness = sample_harness(target.id);
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+
+    // With no project selected the workbench shows nothing (not a whole-DB roll-up).
+    let dashboard = container.workbench_dashboard(None, None).await;
+    assert_eq!(dashboard.totals.targets, 0);
+    assert_eq!(dashboard.totals.harnesses, 0);
+    assert!(dashboard.top_targets.is_empty());
+    assert!(dashboard.harness_reviews.is_empty());
+    assert!(dashboard.active_project.is_none());
+
+    // Selecting the project surfaces its data.
+    let scoped = container
+        .workbench_dashboard(Some(Path::new("/proj")), None)
+        .await;
+    assert_eq!(scoped.totals.targets, 1);
+    assert_eq!(scoped.totals.harnesses, 1);
 }
