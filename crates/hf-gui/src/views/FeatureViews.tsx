@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
-import { getTransport, pickFile } from "../lib";
+import { getTransport, pickFile, emitDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 
@@ -828,6 +828,7 @@ function KnowledgeBaseSearch() {
   const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [ingesting, setIngesting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
   // sandbox and add it to this project's knowledge base.
@@ -837,10 +838,13 @@ function KnowledgeBaseSearch() {
     if (!file) return;
     setIngesting(true);
     setHits(null);
+    setError(null);
     try {
       setStats(await getTransport().invoke<KnowledgeStats>("knowledge_ingest", { project: activeProject, file }));
-    } catch {
-      /* surfaced by the empty state / stats not updating */
+    } catch (e) {
+      // Previously swallowed -- an ingest failure (missing markitdown, bad path
+      // in browser mode, etc.) looked identical to "nothing happened".
+      setError(`Add document failed: ${String(e)}`);
     } finally {
       setIngesting(false);
     }
@@ -850,10 +854,12 @@ function KnowledgeBaseSearch() {
     if (!activeProject) return;
     setIndexing(true);
     setHits(null);
+    setError(null);
     try {
       setStats(await getTransport().invoke<KnowledgeStats>("knowledge_index", { project: activeProject }));
-    } catch {
+    } catch (e) {
       setStats(null);
+      setError(`Index failed: ${String(e)}`);
     } finally {
       setIndexing(false);
     }
@@ -862,10 +868,12 @@ function KnowledgeBaseSearch() {
   async function search() {
     if (!activeProject || !query.trim() || !stats) return;
     setSearching(true);
+    setError(null);
     try {
       setHits(await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project: activeProject, query, limit: 10 }));
-    } catch {
-      setHits([]);
+    } catch (e) {
+      setHits(null);
+      setError(`Search failed: ${String(e)}`);
     } finally {
       setSearching(false);
     }
@@ -906,6 +914,19 @@ function KnowledgeBaseSearch() {
       <p className="text-xs text-text-muted">
         BM25 search over this project's source and ingested documents (specs, RFCs). Index or add a document, then search.
       </p>
+      {!activeProject && (
+        <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
+          Select a project first — the knowledge base is scoped to the active project.
+        </p>
+      )}
+      {error && (
+        <div
+          className="text-xs rounded-md"
+          style={{ padding: "var(--space-sm)", background: "var(--surface-code)", color: "var(--danger, #e5484d)", border: "1px solid var(--danger, #e5484d)" }}
+        >
+          {error}
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <Input
           value={query}
@@ -962,7 +983,7 @@ export function KnowledgeView() {
       (data?.targets.length ?? 0) + (data?.runs.length ?? 0) + (data?.crashes.length ?? 0);
     if (
       !window.confirm(
-        `Clear all learned knowledge (${total} entries: discovered targets, runs, and crashes)?\n\nCorpus inputs and configuration are not affected. This cannot be undone.`,
+        `Clear all learned knowledge (${total} entries: discovered targets, runs, and crashes) across every project?\n\nThis also removes generated harnesses and corpus entries. Configuration is not affected. This cannot be undone.`,
       )
     ) {
       return;
@@ -971,6 +992,8 @@ export function KnowledgeView() {
     try {
       await getTransport().invoke("clear_knowledge");
       load();
+      // Other views (Workbench counts, corpus) reflect this wipe -- tell them.
+      emitDataChanged();
     } catch {
       /* surfaced by the empty state on reload */
     } finally {
@@ -1160,8 +1183,30 @@ export function AutomationView() {
   }, []);
 
   const canSave = !!activeProject && !!target;
+
+  // Validate the trigger value client-side so a malformed schedule is rejected
+  // with a clear message rather than failing opaquely on the backend.
+  function validateTrigger(): string | null {
+    const v = triggerValue.trim();
+    if (!v) return "Enter a trigger value.";
+    if (triggerKind === "interval") {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 10) return "Interval must be a number of seconds >= 10.";
+    } else if (triggerKind === "cron") {
+      if (v.split(/\s+/).length < 5) return "Cron must have 5 fields, e.g. 0 2 * * *.";
+    } else if (triggerKind === "once") {
+      if (Number.isNaN(Date.parse(v))) return "Once must be an RFC3339 timestamp, e.g. 2026-07-01T02:00:00Z.";
+    }
+    return null;
+  }
+
   async function save() {
     if (!canSave) return;
+    const invalid = validateTrigger();
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -1182,10 +1227,21 @@ export function AutomationView() {
     }
   }
   async function remove(id: string) {
-    setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_delete", { id }));
+    if (!window.confirm("Delete this scheduled campaign? This cannot be undone.")) return;
+    setError(null);
+    try {
+      setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_delete", { id }));
+    } catch (e) {
+      setError(String(e));
+    }
   }
   async function toggle(id: string, enabled: boolean) {
-    setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_set_enabled", { id, enabled }));
+    setError(null);
+    try {
+      setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_set_enabled", { id, enabled }));
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   const placeholder =
