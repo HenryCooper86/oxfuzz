@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { getTransport } from "../lib";
 
 const STORAGE_KEY = "hf_recent_projects";
 const ACTIVE_KEY = "hf_active_project";
@@ -13,8 +14,14 @@ interface ProjectContextValue {
   setActiveProject: (path: string) => void;
   /** Record a project in the recents list without changing focus. */
   addRecent: (path: string) => void;
-  /** Remove a project from recents. */
+  /** Remove a project from recents (local only; leaves persisted data intact). */
   removeRecent: (path: string) => void;
+  /**
+   * Permanently delete a project's persisted data (targets, harnesses, corpus,
+   * crashes, runs) and its on-disk workspace, then drop it from recents. Unlike
+   * {@link removeRecent}, this is destructive and touches the backend.
+   */
+  deleteProjectData: (path: string) => Promise<void>;
 }
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
@@ -104,9 +111,29 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     [persistRecents, recentProjects, activeProject],
   );
 
+  const deleteProjectData = useCallback(
+    async (path: string) => {
+      const p = path.trim();
+      if (!p) return;
+      // Wipe backend records + on-disk workspace first; only forget the folder
+      // locally once the backend has actually cleared it, so a failed delete
+      // does not silently hide a project whose data still exists.
+      await getTransport().invoke("delete_project", { project: p });
+      removeRecent(p);
+    },
+    [removeRecent],
+  );
+
   const value = useMemo(
-    () => ({ activeProject, recentProjects, setActiveProject, addRecent, removeRecent }),
-    [activeProject, recentProjects, setActiveProject, addRecent, removeRecent],
+    () => ({
+      activeProject,
+      recentProjects,
+      setActiveProject,
+      addRecent,
+      removeRecent,
+      deleteProjectData,
+    }),
+    [activeProject, recentProjects, setActiveProject, addRecent, removeRecent, deleteProjectData],
   );
 
   return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>;
@@ -122,6 +149,7 @@ export function useProject(): ProjectContextValue {
       setActiveProject: () => {},
       addRecent: () => {},
       removeRecent: () => {},
+      deleteProjectData: async () => {},
     };
   }
   return ctx;

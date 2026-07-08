@@ -245,20 +245,31 @@ async fn rediscovering_a_symbol_does_not_accumulate_duplicates() {
 }
 
 #[tokio::test]
-async fn clear_knowledge_empties_targets_runs_and_crashes() {
+async fn clear_knowledge_empties_all_domain_tables() {
     let (store, _dir) = temp_store().await;
 
-    // Seed one of each.
+    // Seed one of every domain record, linked as they would be in practice.
+    let target = sample_target("/proj");
+    let target_id = target.id;
+    store.upsert_target(&target, Utc::now()).await.unwrap();
     store
-        .upsert_target(&sample_target("/proj"), Utc::now())
+        .upsert_harness(&sample_harness(target_id))
         .await
         .unwrap();
+    let entry = CorpusEntry {
+        path: PathBuf::from("corpus/seed_1"),
+        sha256: "abc123".to_owned(),
+        size: 42,
+        source: CorpusSource::Seed,
+        coverage_hash: None,
+    };
+    store.upsert_corpus_entry(target_id, &entry).await.unwrap();
     let run = RunRecord::new("/proj".to_owned(), EngineKind::LibFuzzer, None, Utc::now());
     store.insert_run(&run).await.unwrap();
     let crash = Crash {
         id: Uuid::new_v4(),
         run_id: run.id,
-        target_id: Uuid::new_v4(),
+        target_id,
         input_path: PathBuf::from("out/crash-1"),
         stack_signature: "sig".to_owned(),
         kind: CrashKind::Asan,
@@ -271,9 +282,143 @@ async fn clear_knowledge_empties_targets_runs_and_crashes() {
 
     store.clear_knowledge().await.unwrap();
 
+    // Every table is emptied -- no orphaned harnesses or corpus left behind.
     assert!(store.list_targets("/proj").await.unwrap().is_empty());
     assert!(store.list_runs(Some("/proj")).await.unwrap().is_empty());
     assert!(store.list_crashes_by_run(run.id).await.unwrap().is_empty());
+    assert!(store.list_all_harnesses().await.unwrap().is_empty());
+    assert!(store.list_all_corpus_entries().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_project_cascades_and_isolates_other_projects() {
+    let (store, _dir) = temp_store().await;
+
+    // Seed two projects with a full record set each.
+    let seed = |root: &'static str| {
+        let store = &store;
+        async move {
+            let mut target = sample_target(root);
+            target.id = Uuid::new_v4();
+            let target_id = target.id;
+            store.upsert_target(&target, Utc::now()).await.unwrap();
+            store
+                .upsert_harness(&sample_harness(target_id))
+                .await
+                .unwrap();
+            let entry = CorpusEntry {
+                path: PathBuf::from("corpus/seed"),
+                sha256: "sha".to_owned(),
+                size: 10,
+                source: CorpusSource::Seed,
+                coverage_hash: None,
+            };
+            store.upsert_corpus_entry(target_id, &entry).await.unwrap();
+            let run = RunRecord::new(root.to_owned(), EngineKind::LibFuzzer, None, Utc::now());
+            let run_id = run.id;
+            store.insert_run(&run).await.unwrap();
+            store
+                .upsert_crash(&Crash {
+                    id: Uuid::new_v4(),
+                    run_id,
+                    target_id,
+                    input_path: PathBuf::from("out/crash"),
+                    stack_signature: "sig".to_owned(),
+                    kind: CrashKind::Asan,
+                    summary: "boom".to_owned(),
+                    minimized: false,
+                    bug_report: None,
+                    casr: None,
+                })
+                .await
+                .unwrap();
+            (target_id, run_id)
+        }
+    };
+    let (_gone_target, gone_run) = seed("/gone").await;
+    let (kept_target, kept_run) = seed("/kept").await;
+
+    store.delete_project("/gone").await.unwrap();
+
+    // The deleted project is gone across every table.
+    assert!(store.list_targets("/gone").await.unwrap().is_empty());
+    assert!(store.list_runs(Some("/gone")).await.unwrap().is_empty());
+    assert!(store
+        .list_crashes_by_run(gone_run)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // The other project is fully intact.
+    assert_eq!(store.list_targets("/kept").await.unwrap().len(), 1);
+    assert_eq!(store.list_runs(Some("/kept")).await.unwrap().len(), 1);
+    assert_eq!(store.list_harnesses(kept_target).await.unwrap().len(), 1);
+    assert_eq!(
+        store.list_corpus_entries(kept_target).await.unwrap().len(),
+        1
+    );
+    assert_eq!(store.list_crashes_by_run(kept_run).await.unwrap().len(), 1);
+    // No orphaned children survive the delete.
+    assert_eq!(store.list_all_harnesses().await.unwrap().len(), 1);
+    assert_eq!(store.list_all_corpus_entries().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn delete_orphans_removes_dangling_children_keeps_valid() {
+    let (store, _dir) = temp_store().await;
+
+    // A valid target with a linked harness/corpus.
+    let target = sample_target("/proj");
+    let valid_target = target.id;
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store
+        .upsert_harness(&sample_harness(valid_target))
+        .await
+        .unwrap();
+
+    // An orphaned harness/corpus/crash pointing at a target that never existed
+    // (as older partial clears left behind -- these render as "unknown").
+    let ghost = Uuid::new_v4();
+    store.upsert_harness(&sample_harness(ghost)).await.unwrap();
+    store
+        .upsert_corpus_entry(
+            ghost,
+            &CorpusEntry {
+                path: PathBuf::from("c"),
+                sha256: "x".to_owned(),
+                size: 1,
+                source: CorpusSource::Seed,
+                coverage_hash: None,
+            },
+        )
+        .await
+        .unwrap();
+    let run_id = Uuid::new_v4();
+    store
+        .upsert_crash(&Crash {
+            id: Uuid::new_v4(),
+            run_id,
+            target_id: ghost,
+            input_path: PathBuf::from("out/crash"),
+            stack_signature: "sig".to_owned(),
+            kind: CrashKind::Asan,
+            summary: "boom".to_owned(),
+            minimized: false,
+            bug_report: None,
+            casr: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(store.list_all_harnesses().await.unwrap().len(), 2);
+
+    store.delete_orphans().await.unwrap();
+
+    // The valid harness survives; the ghosts are purged.
+    assert_eq!(store.list_all_harnesses().await.unwrap().len(), 1);
+    assert_eq!(store.list_harnesses(valid_target).await.unwrap().len(), 1);
+    assert!(store.list_all_corpus_entries().await.unwrap().is_empty());
+    assert!(store.list_crashes_by_run(run_id).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -418,4 +563,30 @@ async fn chat_checkpoints_survive_a_reconnect() {
         Some("cp-1".to_owned()),
         "the latest non-invalidated checkpoint is now cp-1"
     );
+}
+
+#[tokio::test]
+async fn reopening_a_store_self_heals_orphaned_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("heal.db");
+
+    // First connection: a valid target+harness, plus an orphaned harness whose
+    // target never existed (as an older partial clear would have left behind).
+    {
+        let store = Store::connect(&path).await.unwrap();
+        let target = sample_target("/proj");
+        let valid = target.id;
+        store.upsert_target(&target, Utc::now()).await.unwrap();
+        store.upsert_harness(&sample_harness(valid)).await.unwrap();
+        store
+            .upsert_harness(&sample_harness(Uuid::new_v4()))
+            .await
+            .unwrap();
+        assert_eq!(store.list_all_harnesses().await.unwrap().len(), 2);
+    }
+
+    // Reconnecting runs the on-open cleanup, dropping the orphan.
+    let store = Store::connect(&path).await.unwrap();
+    let remaining = store.list_all_harnesses().await.unwrap();
+    assert_eq!(remaining.len(), 1);
 }

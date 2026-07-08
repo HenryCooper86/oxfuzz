@@ -38,11 +38,11 @@ const en: Dict = {
   "nav.automation": "Automation",
   "nav.settings": "Settings",
   "sidebar.newTarget": "New fuzzing target",
-  "sidebar.targets": "Targets",
+  "sidebar.targets": "Recent",
   "sidebar.pipeline": "Pipeline",
   "sidebar.library": "Library",
-  "sidebar.noTargets": "No targets yet. Add a project folder to start fuzzing.",
-  "sidebar.removeTarget": "Remove from targets",
+  "sidebar.noTargets": "No projects yet. Add a project folder to start fuzzing.",
+  "sidebar.removeTarget": "Remove from recents",
 
   // Header (screen titles)
   "title.dashboard": "Dashboard",
@@ -124,11 +124,11 @@ const zh: Dict = {
   "nav.automation": "自动化",
   "nav.settings": "设置",
   "sidebar.newTarget": "新建模糊测试目标",
-  "sidebar.targets": "目标",
+  "sidebar.targets": "最近",
   "sidebar.pipeline": "流程",
   "sidebar.library": "资源库",
-  "sidebar.noTargets": "暂无目标。添加一个项目文件夹以开始模糊测试。",
-  "sidebar.removeTarget": "从目标中移除",
+  "sidebar.noTargets": "暂无项目。添加一个项目文件夹以开始模糊测试。",
+  "sidebar.removeTarget": "从最近列表中移除",
 
   // Header (screen titles)
   "title.dashboard": "仪表盘",

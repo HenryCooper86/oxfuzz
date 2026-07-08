@@ -2,16 +2,33 @@ import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { pickFolder } from "../lib";
 import { Button, EmptyState, ViewHeader } from "../components/ui";
-import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder } from "lucide-react";
+import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2 } from "lucide-react";
 
 export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => void }) {
-  const { activeProject, recentProjects, setActiveProject, removeRecent } = useProject();
+  const { activeProject, recentProjects, setActiveProject, removeRecent, deleteProjectData } =
+    useProject();
 
   async function addProject() {
     const path = await pickFolder();
     if (path) {
       setActiveProject(path);
       onNavigate("discover");
+    }
+  }
+
+  async function deleteData(path: string) {
+    const name = path.split("/").pop() || path;
+    if (
+      !window.confirm(
+        `Permanently delete all fuzzing data for "${name}"?\n\nThis removes its targets, harnesses, corpus, crashes, and runs from the database and deletes its on-disk workspace. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteProjectData(path);
+    } catch (e) {
+      window.alert(`Failed to delete project data: ${String(e)}`);
     }
   }
 
@@ -83,12 +100,29 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
                   onClick={() => removeRecent(path)}
                   className="inline-flex items-center justify-center rounded-md transition-colors duration-150"
                   style={{ width: "28px", height: "28px", color: "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
-                  title="Remove from recents"
+                  title="Remove from recents (keeps data)"
                   aria-label="Remove from recents"
                   onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                 >
                   <X size={14} />
+                </button>
+                <button
+                  onClick={() => deleteData(path)}
+                  className="inline-flex items-center justify-center rounded-md transition-colors duration-150"
+                  style={{ width: "28px", height: "28px", color: "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
+                  title="Delete all data for this project"
+                  aria-label="Delete all data for this project"
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--surface-hover)";
+                    e.currentTarget.style.color = "var(--danger, #e5484d)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "transparent";
+                    e.currentTarget.style.color = "var(--text-muted)";
+                  }}
+                >
+                  <Trash2 size={14} />
                 </button>
               </div>
             );

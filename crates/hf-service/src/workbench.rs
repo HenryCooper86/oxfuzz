@@ -130,8 +130,25 @@ pub async fn dashboard(
     let project_filter_ref = project_filter.as_deref();
 
     let Some(store) = store else {
-        return empty_dashboard(project_filter, active_target);
+        return empty_dashboard(
+            project_filter,
+            active_target,
+            "Initialize persistence to start tracking team fuzzing work.",
+        );
     };
+
+    // With a store but no project selected, the workbench has no scope: return
+    // an empty, project-prompt dashboard rather than a whole-database aggregate.
+    // Showing global counts here is what made the header read "No active project
+    // selected" while tabs still listed unrelated targets/harnesses/crashes. The
+    // intentional cross-project view lives in the Artifacts screen.
+    if project_filter_ref.is_none() {
+        return empty_dashboard(
+            None,
+            active_target,
+            "Select a project to view its fuzzing workbench.",
+        );
+    }
 
     let targets = store.list_all_targets().await.unwrap_or_default();
     let runs = store
@@ -204,10 +221,10 @@ pub async fn dashboard(
     let target_by_id: HashMap<Uuid, TargetCandidate> =
         targets.iter().map(|t| (t.id, t.clone())).collect();
     let crash_count_by_run = crash_count_by_run(&filtered_crashes);
-    let project_count = match project_filter_ref {
-        Some(_) => usize::from(!project_scoped_targets.is_empty() || !filtered_runs.is_empty()),
-        None => project_count(&targets, &filtered_runs),
-    };
+    // A project is always selected past the early return above, so the count is
+    // 0 or 1 depending on whether this project has any persisted work.
+    let project_count =
+        usize::from(!project_scoped_targets.is_empty() || !filtered_runs.is_empty());
 
     let harness_reviews = harness_review_items(filtered_harnesses, &target_by_id);
     let crash_reviews = crash_review_items(filtered_crashes, &target_by_id);
@@ -320,6 +337,7 @@ pub async fn gitlab_issue_export(
 fn empty_dashboard(
     active_project: Option<String>,
     active_target: Option<&str>,
+    next_action: &str,
 ) -> WorkbenchDashboard {
     WorkbenchDashboard {
         active_project,
@@ -330,9 +348,7 @@ fn empty_dashboard(
         harness_reviews: Vec::new(),
         crash_reviews: Vec::new(),
         readiness: readiness_summary(&WorkbenchTotals::default(), false),
-        next_actions: vec![
-            "Initialize persistence to start tracking team fuzzing work.".to_owned(),
-        ],
+        next_actions: vec![next_action.to_owned()],
     }
 }
 
@@ -342,15 +358,6 @@ fn path_key(path: &Path) -> String {
 
 fn project_matches(project: &Path, filter: Option<&str>) -> bool {
     filter.is_none_or(|f| project.to_string_lossy() == f)
-}
-
-fn project_count(targets: &[TargetCandidate], runs: &[RunRecord]) -> usize {
-    let mut projects: HashSet<String> = targets
-        .iter()
-        .map(|t| t.project_root.to_string_lossy().to_string())
-        .collect();
-    projects.extend(runs.iter().map(|r| r.project_root.clone()));
-    projects.len()
 }
 
 fn crash_count_by_run(crashes: &[Crash]) -> BTreeMap<Uuid, usize> {
