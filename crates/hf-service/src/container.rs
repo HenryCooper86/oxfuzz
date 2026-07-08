@@ -2186,6 +2186,16 @@ impl ServiceContainer {
                 sha256: sha,
             });
         }
+
+        // Make the AI seeds first-class, tracked corpus entries (parity with
+        // corpus_seed/corpus_grow), so they show in the browse-all corpus view
+        // and survive as persisted rows -- previously LLM seeds only landed on
+        // disk. Listing the dir also folds in any pre-existing entries; the
+        // upsert is keyed on (target_id, sha256), so this stays idempotent.
+        let target_id = self.resolve_target_id(project, target, lang).await;
+        if let Ok(corpus) = hf_corpus::list(&corpus_dir) {
+            self.persist_corpus(target_id, &corpus).await;
+        }
         Ok(entries)
     }
 
