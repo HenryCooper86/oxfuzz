@@ -13,6 +13,7 @@ import {
   GitPullRequest,
   Play,
   RefreshCw,
+  RotateCw,
   Save,
   Search,
   Server,
@@ -976,17 +977,40 @@ function KnowledgePanel({
   onQuery: (value: string) => void;
   onSearch: () => void;
 }) {
+  const [indexing, setIndexing] = useState(false);
+  const [indexMsg, setIndexMsg] = useState<string | null>(null);
+  async function indexProject() {
+    if (!activeProject) return;
+    setIndexing(true);
+    setIndexMsg(null);
+    try {
+      const stats = await getTransport().invoke<{ files: number; chunks: number }>("knowledge_index", {
+        project: activeProject,
+      });
+      setIndexMsg(`Indexed ${stats.files} files (${stats.chunks} chunks). You can search now.`);
+    } catch (e) {
+      setIndexMsg(`Index failed: ${String(e)}`);
+    } finally {
+      setIndexing(false);
+    }
+  }
+
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
       <SectionHeader icon={<BookOpen size={15} />} title="Knowledge Base" />
       {!activeProject && <InlineNotice tone="warn" text="Select a project before searching source knowledge." />}
       <div className="flex gap-2">
         <Input value={query} onChange={(e) => onQuery(e.target.value)} placeholder="Search risky APIs, parsers, formats..." />
+        <Button variant="outline" size="sm" onClick={() => void indexProject()} disabled={!activeProject || indexing} title="Index this project's source so it can be searched">
+          <RotateCw size={13} />
+          {indexing ? "Indexing..." : "Index"}
+        </Button>
         <Button variant="primary" size="sm" onClick={onSearch} disabled={!activeProject || loading}>
           <Search size={13} />
           Search
         </Button>
       </div>
+      {indexMsg && <p className="text-xs text-text-muted">{indexMsg}</p>}
       {hits.length === 0 ? (
         <EmptyState
           icon={<BookOpen size={18} />}
