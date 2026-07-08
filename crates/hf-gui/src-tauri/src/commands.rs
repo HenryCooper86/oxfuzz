@@ -725,8 +725,9 @@ pub fn artifact_summary(
         .artifact_summary(std::path::Path::new(&project), &target)
 }
 
-/// Clear learned knowledge (discovered targets, runs, crashes). Corpus inputs
-/// and configuration are untouched.
+/// Clear all learned knowledge across every project: discovered targets and
+/// their harnesses, corpus entries, and crashes, plus all runs. Configuration
+/// and on-disk workspaces are untouched.
 #[tauri::command]
 pub async fn clear_knowledge(
     state: tauri::State<'_, crate::state::AppState>,
@@ -734,6 +735,21 @@ pub async fn clear_knowledge(
     state
         .container
         .clear_knowledge()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete every trace of a single project: its persisted records (targets,
+/// runs, harnesses, corpus entries, crashes) and its on-disk workspace. Other
+/// projects are untouched.
+#[tauri::command]
+pub async fn delete_project(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_project(std::path::Path::new(&project))
         .await
         .map_err(|e| e.to_string())
 }

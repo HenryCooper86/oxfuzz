@@ -146,6 +146,10 @@ impl Store {
         // One-time, self-healing cleanup of legacy duplicate crash rows left by
         // pre-deterministic-id triages. Idempotent: a no-op on a clean DB.
         store.dedupe_crashes().await?;
+        // Purge children orphaned by older partial clears (harnesses/corpus were
+        // once left behind when targets were deleted), which is why such
+        // harnesses render with an "unknown" symbol. Idempotent on a clean DB.
+        store.delete_orphans().await?;
         Ok(store)
     }
 
@@ -305,17 +309,88 @@ impl Store {
         Ok(())
     }
 
-    /// Clear learned campaign knowledge: all discovered targets, fuzz runs, and
-    /// crashes. Corpus inputs and configuration are left untouched.
+    /// Clear all learned campaign knowledge: every discovered target and its
+    /// children (harnesses, corpus entries, crashes) plus all fuzz runs, across
+    /// every project. Configuration is left untouched. Deletes children before
+    /// parents so no row is orphaned mid-clear.
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn clear_knowledge(&self) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
-        for table in ["crashes", "runs", "targets"] {
+        for table in ["crashes", "corpus_entries", "harnesses", "runs", "targets"] {
             sqlx::query(&format!("DELETE FROM {table}"))
                 .execute(&mut *tx)
                 .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Delete every persisted record belonging to a single project: its targets
+    /// and runs, plus all children linked through them (harnesses, corpus
+    /// entries, crashes). Other projects are left untouched. Runs in one
+    /// transaction so a project is never partially deleted.
+    ///
+    /// Child tables carry only `target_id`/`run_id`, not `project_root`, so the
+    /// project's target and run ids are resolved first and drive the child
+    /// deletes.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn delete_project(&self, project_root: &str) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let target_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM targets WHERE project_root = ?1")
+                .bind(project_root)
+                .fetch_all(&mut *tx)
+                .await?;
+        let run_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM runs WHERE project_root = ?1")
+                .bind(project_root)
+                .fetch_all(&mut *tx)
+                .await?;
+        for tid in &target_ids {
+            for table in ["harnesses", "corpus_entries", "crashes"] {
+                sqlx::query(&format!("DELETE FROM {table} WHERE target_id = ?1"))
+                    .bind(tid)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        for rid in &run_ids {
+            sqlx::query("DELETE FROM crashes WHERE run_id = ?1")
+                .bind(rid)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("DELETE FROM runs WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM targets WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Remove child rows whose parent target no longer exists: harnesses,
+    /// corpus entries, and crashes pointing at a `target_id` absent from
+    /// `targets`. Repairs data orphaned by older partial clears (which is why
+    /// such harnesses render with an "unknown" symbol). Idempotent.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn delete_orphans(&self) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        for table in ["harnesses", "corpus_entries", "crashes"] {
+            sqlx::query(&format!(
+                "DELETE FROM {table} WHERE target_id NOT IN (SELECT id FROM targets)"
+            ))
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(())

@@ -74,6 +74,14 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
         .join(sanitize_target(target))
 }
 
+/// The on-disk workspace directory holding every target's artifacts for a
+/// single project (compiled harnesses, corpora, crash reproducers, coverage
+/// builds). This is the parent of the per-target [`workspace_dir`] directories,
+/// and the unit removed when a project is deleted.
+pub fn project_workspace_dir(project: &Path) -> PathBuf {
+    workspace_root().join(project_slug(project))
+}
+
 /// A per-project workspace directory name: the human-readable basename plus a
 /// short deterministic hash of the full path. The hash disambiguates projects
 /// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
@@ -1428,9 +1436,10 @@ impl ServiceContainer {
         self.store.as_ref()
     }
 
-    /// Clear learned knowledge: all discovered targets, runs, and crashes.
-    /// Corpus inputs on disk and configuration are left untouched. A no-op when
-    /// no store is configured.
+    /// Clear all learned knowledge across every project: discovered targets and
+    /// their harnesses, corpus entries, and crashes, plus all runs.
+    /// Configuration and on-disk workspaces are left untouched. A no-op when no
+    /// store is configured.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the delete fails.
@@ -1444,14 +1453,39 @@ impl ServiceContainer {
         Ok(())
     }
 
-    /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
-    /// reproducers, coverage builds), reclaiming disk space. Since the
-    /// workspace is now persistent, it grows over time; this is the affordance
-    /// to reset it. Persistent DB records (targets, runs, crashes) are left
-    /// intact -- re-running a campaign rebuilds the workspace on disk.
+    /// Delete every trace of a single project: its persisted records (targets,
+    /// runs, harnesses, corpus entries, crashes) and its on-disk workspace
+    /// (compiled harnesses, corpora, crash reproducers, coverage builds). Other
+    /// projects are untouched. The DB delete and the disk delete are done
+    /// together so a project never lingers in one place after being cleared from
+    /// the other. A no-op when no store is configured.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` if the workspace directory cannot be removed.
+    /// Returns `ClassifiedError` if either the DB delete or the workspace
+    /// removal fails.
+    pub async fn delete_project(&self, project: &Path) -> Result<(), ClassifiedError> {
+        if let Some(store) = &self.store {
+            let key = project.to_string_lossy();
+            store
+                .delete_project(&key)
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("delete project: {e}")))?;
+        }
+        let dir = project_workspace_dir(project);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            // Already absent is success -- nothing on disk to reclaim.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(ClassifiedError::Internal(format!(
+                    "delete project workspace {}: {e}",
+                    dir.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Register an executing agent turn labelled `label` (e.g. the agent id) so
     /// the Observability panel reflects live activity. The turn stays tracked
     /// until the returned [`AgentTurnGuard`] is dropped.
@@ -1492,6 +1526,14 @@ impl ServiceContainer {
         }
     }
 
+    /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
+    /// reproducers, coverage builds), reclaiming disk space. Since the
+    /// workspace is now persistent, it grows over time; this is the affordance
+    /// to reset it. Persistent DB records (targets, runs, crashes) are left
+    /// intact -- re-running a campaign rebuilds the workspace on disk.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the workspace directory cannot be removed.
     pub fn clear_workspace(&self) -> Result<(), ClassifiedError> {
         let root = workspace_root();
         match std::fs::remove_dir_all(&root) {

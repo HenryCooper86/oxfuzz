@@ -56,7 +56,7 @@ export function StatusBar() {
     t.invoke<SystemStatus>("ensure_docker", { arch: sandboxArch })
       .then(setStatus)
       .catch(() =>
-        t.invoke<SystemStatus>("system_status").then(setStatus).catch(() => setStatus(EMPTY_STATUS)),
+        t.invoke<SystemStatus>("system_status_cmd").then(setStatus).catch(() => setStatus(EMPTY_STATUS)),
       );
 
     // Read which engines are enabled in settings so disabled ones can be dimmed.
@@ -82,7 +82,7 @@ export function StatusBar() {
     // Keep the indicators fresh (the daemon can stop/start under us; engine
     // enable/disable can change in Settings).
     const poll = setInterval(() => {
-      t.invoke<SystemStatus>("system_status").then(setStatus).catch(() => {});
+      t.invoke<SystemStatus>("system_status_cmd").then(setStatus).catch(() => {});
       refreshEnabled();
     }, 5000);
 
