@@ -164,6 +164,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/runs/history", post(run_history))
         .route("/runs/coverage", post(run_coverage_series))
         .route("/runs/harness-source", post(run_harness_source))
+        .route("/runs/revert-harness", post(revert_harness_from_run))
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
@@ -413,6 +414,21 @@ async fn run_harness_source(
     Json(req): Json<RunIdRequest>,
 ) -> ApiResult<String> {
     Ok(Json(state.container.run_harness_source(&req.run_id).await))
+}
+
+async fn revert_harness_from_run(
+    State(state): State<AppState>,
+    Json(req): Json<RunIdRequest>,
+) -> ApiResult<serde_json::Value> {
+    let out = state
+        .container
+        .revert_harness_from_run(&req.run_id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({
+        "status": format!("{:?}", out.status),
+        "message": "Reverted and recompiled the harness in the sandbox.",
+    })))
 }
 
 async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

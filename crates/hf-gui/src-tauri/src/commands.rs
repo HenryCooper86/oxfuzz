@@ -1550,6 +1550,24 @@ pub async fn run_harness_source(
     Ok(state.container.run_harness_source(&run_id).await)
 }
 
+/// Restore the harness a run used (recompiling it), reverting the target to that
+/// revision.
+#[tauri::command]
+pub async fn revert_harness_from_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    let out = state
+        .container
+        .revert_harness_from_run(&run_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "status": format!("{:?}", out.status),
+        "message": "Reverted and recompiled the harness in the sandbox.",
+    }))
+}
+
 /// Export a project's fuzzing data (targets, runs, harnesses, crashes, corpus)
 /// as a JSON bundle via a native save dialog. Returns the saved path or `None`.
 #[tauri::command]

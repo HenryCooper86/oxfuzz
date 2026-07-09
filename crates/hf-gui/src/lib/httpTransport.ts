@@ -15,6 +15,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   run_history: { method: "POST", path: "/runs/history" },
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
+  revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
   generate_seeds: { method: "POST", path: "/seeds/generate" },
   generate_seeds_llm: { method: "POST", path: "/seeds/generate-llm" },
   corpus_list: { method: "POST", path: "/corpus/list" },
