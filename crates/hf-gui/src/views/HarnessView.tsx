@@ -244,8 +244,8 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
 
       {/* Target + Engine selection */}
       {inventory && inventory.candidates.length > 0 && (
-        <div className="flex gap-3 items-end">
-          <div className="flex flex-col gap-1 flex-1">
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex flex-col gap-1 flex-1 min-w-0" style={{ minWidth: 180 }}>
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Target</label>
             <Select
               mono

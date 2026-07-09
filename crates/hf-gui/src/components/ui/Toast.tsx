@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { X } from "lucide-react";
 
 interface Toast {
   id: number;
@@ -13,21 +14,38 @@ interface ToastCtx {
 
 const Ctx = createContext<ToastCtx | null>(null);
 
+// Errors linger so they can actually be read; routine toasts auto-clear fast.
+const DISMISS_MS = { error: 8000, default: 3500, success: 3500 } as const;
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const toast = useCallback((t: Omit<Toast, "id">) => {
-    const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev, { ...t, id }]);
-    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== id)), 3000);
+  const dismiss = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((x) => x.id !== id));
   }, []);
+  const toast = useCallback(
+    (t: Omit<Toast, "id">) => {
+      const id = Date.now() + Math.random();
+      setToasts((prev) => [...prev, { ...t, id }]);
+      const ms = DISMISS_MS[t.variant ?? "default"];
+      setTimeout(() => dismiss(id), ms);
+    },
+    [dismiss],
+  );
   return (
     <Ctx.Provider value={{ toast }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-9999 flex flex-col gap-2">
+      {/* Announced to assistive tech; assertive so errors interrupt. */}
+      <div
+        className="fixed bottom-4 right-4 z-9999 flex flex-col gap-2"
+        role="region"
+        aria-label="Notifications"
+        aria-live="assertive"
+      >
         {toasts.map((t) => (
           <div
             key={t.id}
-            className="surface-card flex flex-col gap-1"
+            role={t.variant === "error" ? "alert" : "status"}
+            className="surface-card flex items-start gap-2"
             style={{
               padding: "var(--space-sm) var(--space-md)",
               minWidth: 240,
@@ -37,8 +55,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               borderColor: t.variant === "success" ? "var(--success)" : t.variant === "error" ? "var(--error)" : "var(--border)",
             }}
           >
-            <span className="text-sm font-medium text-text-primary">{t.title}</span>
-            {t.description && <span className="text-xs text-text-secondary">{t.description}</span>}
+            <div className="flex flex-col gap-1 min-w-0 flex-1">
+              <span className="text-sm font-medium text-text-primary">{t.title}</span>
+              {t.description && (
+                <span className="text-xs text-text-secondary" style={{ overflowWrap: "anywhere" }}>
+                  {t.description}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => dismiss(t.id)}
+              className="shrink-0 rounded p-0.5 text-text-muted transition-colors hover:text-text-primary hover:bg-surface-hover"
+              aria-label="Dismiss notification"
+              title="Dismiss"
+            >
+              <X size={13} />
+            </button>
           </div>
         ))}
       </div>
