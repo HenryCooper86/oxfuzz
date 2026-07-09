@@ -24,6 +24,7 @@ import {
   Users,
   Wrench,
 } from "lucide-react";
+import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRevertBadge";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
 import { useConfirm } from "../providers/ConfirmContext";
@@ -137,6 +138,34 @@ export function DashboardView() {
   const [knowledgeQuery, setKnowledgeQuery] = useState("");
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeHit[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  // The active project's effective auto-revert policy (override or global), for
+  // the header badge. Null until loaded or when no project is active.
+  const [autoRevert, setAutoRevert] = useState<(AutoRevertPolicyView & { overridden: boolean }) | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!activeProject) {
+        if (!cancelled) setAutoRevert(null);
+        return;
+      }
+      try {
+        const v = await getTransport().invoke<AutoRevertPolicyView & { overridden: boolean }>(
+          "effective_auto_revert_policy",
+          { project: activeProject },
+        );
+        if (!cancelled) setAutoRevert(v);
+      } catch {
+        if (!cancelled) setAutoRevert(null);
+      }
+    };
+    void load();
+    const unsub = onDataChanged(() => void load());
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [activeProject]);
 
   const args = useMemo(
     () => ({
@@ -344,6 +373,9 @@ export function DashboardView() {
           />
         </div>
         <div className="flex items-center gap-2">
+          {activeProject && autoRevert && (
+            <AutoRevertBadge policy={autoRevert} overridden={autoRevert.overridden} showScope />
+          )}
           <Button variant="outline" size="sm" onClick={() => void generateActiveReport()}>
             <FileText size={14} />
             Draft report

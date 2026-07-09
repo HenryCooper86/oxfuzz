@@ -32,9 +32,9 @@ pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, project_workspace_dir,
     provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,
     workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot, ArtifactSummary, CompileOutcome,
-    CoverageSample, MemorySnapshot, MinimizeOutcome, ProviderSnapshot, RegressionResult,
-    RunHistoryItem, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot, SyzkallerRunOpts,
-    SyzkallerSummary,
+    CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome, ProviderSnapshot,
+    RegressionResult, RunHistoryItem, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot,
+    SyzkallerRunOpts, SyzkallerSummary,
 };
 pub use hf_storage::ProjectAutoRevert;
 pub use init::{init_at, init_workspace, InitReport};

@@ -1585,6 +1585,19 @@ pub async fn project_auto_revert_override(
         .await)
 }
 
+/// The active project's effective auto-revert policy (override merged over the
+/// global default) plus whether an override applies, for the Workbench badge.
+#[tauri::command]
+pub async fn effective_auto_revert_policy(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<hf_service::EffectiveAutoRevert, String> {
+    Ok(state
+        .container
+        .effective_auto_revert_view(std::path::Path::new(&project))
+        .await)
+}
+
 /// Every project's auto-revert override, keyed by project root, for badging the
 /// projects overview.
 #[tauri::command]
