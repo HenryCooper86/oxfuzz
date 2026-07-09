@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { getTransport, onDataChanged } from "../lib";
+import { getTransport, onDataChanged, emitDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
+import { useToast } from "../components/ui/Toast";
+import { useConfirm } from "../providers/ConfirmContext";
 import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
-import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle } from "lucide-react";
+import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 
 function fmtDuration(secs: number | null): string {
@@ -35,8 +37,15 @@ export function RunsView() {
   const [expanded, setExpanded] = useState<string | null>(null);
   // Per-run coverage curve cache: undefined = not fetched, "loading", or samples.
   const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading">>({});
+  const { toast } = useToast();
+  const confirm = useConfirm();
   // The harness diff modal opened from a coverage-trend change marker.
-  const [diff, setDiff] = useState<{ from: string; to: string; oldText: string; newText: string } | "loading" | null>(null);
+  const [diff, setDiff] = useState<
+    | { from: string; to: string; fromId: string; toId: string; oldText: string; newText: string }
+    | "loading"
+    | null
+  >(null);
+  const [reverting, setReverting] = useState(false);
 
   const toggleCurve = useCallback(async (id: string) => {
     setExpanded((cur) => (cur === id ? null : id));
@@ -122,9 +131,45 @@ export function RunsView() {
         getTransport().invoke<string>("run_harness_source", { run_id: prev.id }),
         getTransport().invoke<string>("run_harness_source", { run_id: cur.id }),
       ]);
-      setDiff({ from: revLabel(prev.harness_rev) ?? "previous", to: revLabel(cur.harness_rev) ?? "current", oldText, newText });
+      setDiff({
+        from: revLabel(prev.harness_rev) ?? "previous",
+        to: revLabel(cur.harness_rev) ?? "current",
+        fromId: prev.id,
+        toId: cur.id,
+        oldText,
+        newText,
+      });
     } catch {
       setDiff(null);
+    }
+  }
+
+  // Revert the target's harness to the revision a given run used (recompiles).
+  async function revertTo(runId: string, label: string) {
+    if (
+      !(await confirm({
+        title: `Revert harness to ${label}?`,
+        message: "This restores that revision's harness source and recompiles it in the sandbox, making it the current harness for the target.",
+        confirmLabel: "Revert & recompile",
+      }))
+    ) {
+      return;
+    }
+    setReverting(true);
+    try {
+      const res = await getTransport().invoke<{ status: string; message: string }>("revert_harness_from_run", { run_id: runId });
+      const ok = res?.status === "Compiled";
+      toast({
+        title: ok ? `Reverted to ${label}` : "Revert finished with a compile issue",
+        description: res?.message,
+        variant: ok ? "success" : "error",
+      });
+      setDiff(null);
+      emitDataChanged();
+    } catch (e) {
+      toast({ title: "Revert failed", description: String(e), variant: "error" });
+    } finally {
+      setReverting(false);
     }
   }
 
@@ -355,6 +400,21 @@ export function RunsView() {
                 <DiffView oldText={diff.oldText} newText={diff.newText} />
               )}
             </div>
+            {diff !== "loading" && (diff.oldText || diff.newText) && (
+              <div className="flex items-center justify-end gap-2 border-t border-border" style={{ padding: "var(--space-md)" }}>
+                <span className="text-xs text-text-muted mr-auto">Restore either revision as the current harness (recompiles):</span>
+                {diff.oldText && (
+                  <Button variant="primary" size="sm" onClick={() => void revertTo(diff.fromId, diff.from)} loading={reverting} disabled={reverting}>
+                    <RotateCcw size={13} /> Revert to {diff.from}
+                  </Button>
+                )}
+                {diff.newText && diff.newText !== diff.oldText && (
+                  <Button variant="outline" size="sm" onClick={() => void revertTo(diff.toId, diff.to)} disabled={reverting}>
+                    <RotateCcw size={13} /> Restore {diff.to}
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
