@@ -4,6 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart } from "lucide-react";
+import { DiffView } from "../components/DiffView";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -34,6 +35,8 @@ export function RunsView() {
   const [expanded, setExpanded] = useState<string | null>(null);
   // Per-run coverage curve cache: undefined = not fetched, "loading", or samples.
   const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading">>({});
+  // The harness diff modal opened from a coverage-trend change marker.
+  const [diff, setDiff] = useState<{ from: string; to: string; oldText: string; newText: string } | "loading" | null>(null);
 
   const toggleCurve = useCallback(async (id: string) => {
     setExpanded((cur) => (cur === id ? null : id));
@@ -101,6 +104,23 @@ export function RunsView() {
   );
   const anyRevChange = changeAt.some(Boolean);
 
+  // Open the harness diff between a run and the one before it, from a marker.
+  async function openRevDiff(i: number) {
+    const cur = trend[i];
+    const prev = trend[i - 1];
+    if (!cur || !prev) return;
+    setDiff("loading");
+    try {
+      const [oldText, newText] = await Promise.all([
+        getTransport().invoke<string>("run_harness_source", { run_id: prev.id }),
+        getTransport().invoke<string>("run_harness_source", { run_id: cur.id }),
+      ]);
+      setDiff({ from: revLabel(prev.harness_rev) ?? "previous", to: revLabel(cur.harness_rev) ?? "current", oldText, newText });
+    } catch {
+      setDiff(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
@@ -130,6 +150,7 @@ export function RunsView() {
               value={(r) => r.edges ?? 0}
               color="var(--success)"
               marks={changeAt}
+              onMark={(i) => void openRevDiff(i)}
             />
             <MiniTrend
               title="Throughput (execs/sec)"
@@ -149,7 +170,7 @@ export function RunsView() {
           {anyRevChange && (
             <p className="text-xs text-text-muted flex items-center gap-1">
               <span style={{ color: "var(--accent)" }}>▲</span>
-              marks a run where the harness revision changed — line it up with the coverage bars to see the impact.
+              marks a run where the harness revision changed — click it to see exactly what changed in the harness.
             </p>
           )}
         </section>
@@ -273,6 +294,41 @@ export function RunsView() {
           {selected.length === 1 && <span>Select one more run to compare.</span>}
         </div>
       )}
+
+      {diff !== null && (
+        <div
+          className="fixed inset-0 z-9999 flex items-center justify-center"
+          style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }}
+          onClick={() => setDiff(null)}
+        >
+          <div
+            className="surface-card flex flex-col"
+            style={{ width: "min(820px, 94vw)", maxHeight: "86vh", padding: 0, boxShadow: "var(--shadow-lg)", animation: "dialogContentIn 0.15s ease" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border" style={{ padding: "var(--space-md)" }}>
+              <span className="text-sm font-semibold flex items-center gap-2">
+                <GitCompare size={15} style={{ color: "var(--accent)" }} />
+                Harness diff{diff !== "loading" ? `: ${diff.from} → ${diff.to}` : ""}
+              </span>
+              <button onClick={() => setDiff(null)} className="hf-action-btn" title="Close" aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="overflow-auto" style={{ padding: "var(--space-md)" }}>
+              {diff === "loading" ? (
+                <p className="text-xs text-text-muted">Loading harness diff…</p>
+              ) : diff.oldText === diff.newText ? (
+                <p className="text-xs text-text-muted">The stored harness sources are identical.</p>
+              ) : !diff.oldText && !diff.newText ? (
+                <p className="text-xs text-text-muted">No harness source was recorded for these runs (older runs).</p>
+              ) : (
+                <DiffView oldText={diff.oldText} newText={diff.newText} />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -285,6 +341,7 @@ function MiniTrend({
   value,
   color,
   marks,
+  onMark,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -293,6 +350,8 @@ function MiniTrend({
   color: string;
   /** Per-bar flag: a harness revision change occurred at this run. */
   marks?: boolean[];
+  /** Clicking a change marker opens the harness diff for that run. */
+  onMark?: (index: number) => void;
 }) {
   const values = runs.map(value);
   const max = Math.max(1, ...values);
@@ -319,9 +378,20 @@ function MiniTrend({
           const changed = marks?.[i];
           return (
             <div key={i} className="flex flex-col items-center justify-end" style={{ flex: 1, minWidth: 2, height: "100%" }}>
-              <span style={{ height: 8, lineHeight: "8px", fontSize: 8, color: "var(--accent)" }}>
-                {changed ? "▲" : ""}
-              </span>
+              {changed && onMark ? (
+                <button
+                  onClick={() => onMark(i)}
+                  title="View the harness diff that caused this"
+                  aria-label="View harness diff"
+                  style={{ height: 8, lineHeight: "8px", fontSize: 8, color: "var(--accent)", background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
+                >
+                  ▲
+                </button>
+              ) : (
+                <span style={{ height: 8, lineHeight: "8px", fontSize: 8, color: "var(--accent)" }}>
+                  {changed ? "▲" : ""}
+                </span>
+              )}
               <div
                 title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${changed ? " (harness changed)" : ""}`}
                 style={{

@@ -163,6 +163,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/corpus/all", get(all_corpus))
         .route("/runs/history", post(run_history))
         .route("/runs/coverage", post(run_coverage_series))
+        .route("/runs/harness-source", post(run_harness_source))
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
@@ -405,6 +406,13 @@ async fn run_coverage_series(
         serde_json::to_value(state.container.run_coverage_series(&req.run_id).await)
             .unwrap_or(serde_json::Value::Null),
     ))
+}
+
+async fn run_harness_source(
+    State(state): State<AppState>,
+    Json(req): Json<RunIdRequest>,
+) -> ApiResult<String> {
+    Ok(Json(state.container.run_harness_source(&req.run_id).await))
 }
 
 async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
