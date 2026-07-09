@@ -1585,6 +1585,15 @@ pub async fn project_auto_revert_override(
         .await)
 }
 
+/// Every project's auto-revert override, keyed by project root, for badging the
+/// projects overview.
+#[tauri::command]
+pub async fn project_auto_revert_overrides(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<std::collections::HashMap<String, hf_service::ProjectAutoRevert>, String> {
+    Ok(state.container.project_auto_revert_overrides().await)
+}
+
 /// Set (or replace) a project's auto-revert override.
 #[tauri::command]
 pub async fn set_project_auto_revert_override(
