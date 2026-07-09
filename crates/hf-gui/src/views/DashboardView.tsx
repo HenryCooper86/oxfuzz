@@ -5,6 +5,7 @@ import {
   BookOpen,
   Bug,
   CheckCircle2,
+  ChevronRight,
   Clipboard,
   Copy,
   ExternalLink,
@@ -24,6 +25,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
+import { useToast } from "../components/ui/Toast";
 import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -120,6 +122,7 @@ function emptyEditor(project: string, target: string): ReportEditorState {
 export function DashboardView() {
   const { activeProject } = useProject();
   const { target } = useTarget();
+  const { toast } = useToast();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
   const [reports, setReports] = useState<ReportDraft[]>([]);
@@ -144,21 +147,24 @@ export function DashboardView() {
   const loadDashboard = useCallback(async () => {
     try {
       return await getTransport().invoke<WorkbenchDashboard>("workbench_dashboard", args);
-    } catch {
+    } catch (e) {
+      // Don't silently show a zeroed dashboard as if there were no data.
+      toast({ title: "Failed to load workbench", description: String(e), variant: "error" });
       return emptyDashboard(activeProject, target);
     }
-  }, [activeProject, args, target]);
+  }, [activeProject, args, target, toast]);
 
   const reloadReports = useCallback(async () => {
     try {
       const next = await getTransport().invoke<ReportDraft[]>("list_report_drafts");
       setReports(next);
       return next;
-    } catch {
+    } catch (e) {
       setReports([]);
+      toast({ title: "Failed to load reports", description: String(e), variant: "error" });
       return [];
     }
-  }, []);
+  }, [toast]);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -430,6 +436,12 @@ export function DashboardView() {
               reports={reports}
               crashes={dashboard.crash_reviews}
               harnesses={dashboard.harness_reviews}
+              onOpenReport={(r) => {
+                selectReport(r);
+                setTab("reports");
+              }}
+              onOpenHarnesses={() => setTab("harnesses")}
+              onOpenCrashes={() => setTab("crashes")}
             />
           )}
           {tab === "gitlab" && (
@@ -567,8 +579,8 @@ function ReportStudio({
 }) {
   const selectedId = editor.id;
   return (
-    <div className="grid gap-4" style={{ gridTemplateColumns: "minmax(260px, 340px) minmax(0, 1fr)" }}>
-      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520 }}>
+    <div className="flex flex-wrap gap-4 min-w-0">
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520, flex: "1 1 260px", maxWidth: 360, minWidth: 0 }}>
         <SectionHeader icon={<FileText size={15} />} title="Composed Reports" count={reports.length} />
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={onBlank}>
@@ -614,9 +626,9 @@ function ReportStudio({
         )}
       </section>
 
-      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520 }}>
-        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(140px, 180px)" }}>
-          <label className="flex flex-col gap-1">
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520, flex: "2 1 380px", minWidth: 0 }}>
+        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(120px, 180px)" }}>
+          <label className="flex flex-col gap-1 min-w-0">
             <span className="text-xs text-text-muted">Title</span>
             <Input value={editor.title} onChange={(e) => onEditor({ ...editor, title: e.target.value })} />
           </label>
@@ -629,8 +641,8 @@ function ReportStudio({
             />
           </label>
         </div>
-        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(140px, 240px)" }}>
-          <label className="flex flex-col gap-1">
+        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(120px, 240px)" }}>
+          <label className="flex flex-col gap-1 min-w-0">
             <span className="text-xs text-text-muted">Project</span>
             <Input value={editor.project} onChange={(e) => onEditor({ ...editor, project: e.target.value })} mono />
           </label>
@@ -846,40 +858,77 @@ function TeamReview({
   reports,
   crashes,
   harnesses,
+  onOpenReport,
+  onOpenHarnesses,
+  onOpenCrashes,
 }: {
   reports: ReportDraft[];
   crashes: CrashReviewItem[];
   harnesses: HarnessReviewItem[];
+  onOpenReport: (report: ReportDraft) => void;
+  onOpenHarnesses: () => void;
+  onOpenCrashes: () => void;
 }) {
   const reportNeedsReview = reports.filter((report) => report.status === "Needs Review");
   const harnessNeedsReview = harnesses.filter((item) => item.needs_review);
   const crashNeedsReport = crashes.filter((item) => !item.has_bug_report);
   return (
-    <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+    <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
       <SectionHeader icon={<Users size={15} />} title="Review Flow" />
-      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-        <ReviewLane title="Reports needing review" count={reportNeedsReview.length} items={reportNeedsReview.map((r) => r.title)} />
-        <ReviewLane title="Harnesses needing approval" count={harnessNeedsReview.length} items={harnessNeedsReview.map((h) => h.target_symbol)} />
-        <ReviewLane title="Crashes needing reports" count={crashNeedsReport.length} items={crashNeedsReport.map((c) => c.target_symbol)} />
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
+        <ReviewLane
+          title="Reports needing review"
+          count={reportNeedsReview.length}
+          items={reportNeedsReview.map((r) => ({ label: r.title, onClick: () => onOpenReport(r) }))}
+        />
+        <ReviewLane
+          title="Harnesses needing approval"
+          count={harnessNeedsReview.length}
+          items={harnessNeedsReview.map((h) => ({ label: h.target_symbol, onClick: onOpenHarnesses }))}
+        />
+        <ReviewLane
+          title="Crashes needing reports"
+          count={crashNeedsReport.length}
+          items={crashNeedsReport.map((c) => ({ label: c.target_symbol, onClick: onOpenCrashes }))}
+        />
       </div>
     </section>
   );
 }
 
-function ReviewLane({ title, count, items }: { title: string; count: number; items: string[] }) {
+function ReviewLane({
+  title,
+  count,
+  items,
+}: {
+  title: string;
+  count: number;
+  items: { label: string; onClick: () => void }[];
+}) {
   return (
-    <div className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
+    <div className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-semibold">{title}</span>
-        <span className="text-xs text-text-muted">{count}</span>
+        <span className="text-sm font-semibold truncate">{title}</span>
+        <span className="text-xs text-text-muted shrink-0">{count}</span>
       </div>
       {items.length === 0 ? (
         <p className="text-xs text-text-muted mt-3">Nothing queued.</p>
       ) : (
-        <div className="flex flex-col gap-1 mt-3">
-          {items.slice(0, 6).map((item) => (
-            <span key={item} className="text-xs text-text-secondary truncate">{item}</span>
+        <div className="flex flex-col gap-0.5 mt-3">
+          {items.slice(0, 6).map((item, i) => (
+            <button
+              key={`${item.label}:${i}`}
+              onClick={item.onClick}
+              title={`Open ${item.label}`}
+              className="flex items-center gap-1.5 text-left text-xs text-text-secondary truncate rounded px-1.5 py-1 -mx-1.5 transition-colors hover:bg-surface-hover hover:text-text-primary"
+            >
+              <ChevronRight size={11} className="shrink-0 text-text-muted" />
+              <span className="truncate">{item.label}</span>
+            </button>
           ))}
+          {items.length > 6 && (
+            <span className="text-xs text-text-muted mt-1">+{items.length - 6} more</span>
+          )}
         </div>
       )}
     </div>
@@ -898,8 +947,8 @@ function GitLabIntegration({
   onExport: (crash: CrashReviewItem) => void;
 }) {
   return (
-    <div className="grid gap-4" style={{ gridTemplateColumns: "minmax(280px, 420px) minmax(0, 1fr)" }}>
-      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+    <div className="flex flex-wrap gap-4 min-w-0">
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", flex: "1 1 300px", maxWidth: 440, minWidth: 0 }}>
         <SectionHeader icon={<GitPullRequest size={15} />} title="GitLab Export" count={crashes.length} />
         {!project && <InlineNotice tone="warn" text="Select a project so hobot_fuzz can resolve the GitLab remote." />}
         {crashes.length === 0 ? (
@@ -920,7 +969,9 @@ function GitLabIntegration({
           </div>
         )}
       </section>
-      {issue ? <GitLabDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint="Choose a crash to preview a GitLab issue draft." />}
+      <div style={{ flex: "2 1 380px", minWidth: 0 }}>
+        {issue ? <GitLabDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint="Choose a crash to preview a GitLab issue draft." />}
+      </div>
     </div>
   );
 }
@@ -1046,7 +1097,7 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
   return (
     <section className="surface-card flex flex-col gap-4" style={{ padding: "var(--space-md)" }}>
       <SectionHeader icon={<ShieldCheck size={15} />} title="Production Readiness" />
-      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 180px), 1fr))" }}>
         {checks.map(([label, ok]) => (
           <div key={label} className="rounded-md border border-border flex items-center justify-between gap-3" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
             <span className="text-sm">{label}</span>
@@ -1054,7 +1105,7 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
           </div>
         ))}
       </div>
-      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
         <ReadinessItem ready={dashboard.totals.targets > 0} label="Targets discovered" detail={`${dashboard.totals.targets} target(s)`} />
         <ReadinessItem ready={dashboard.totals.harnesses > 0} label="Harness library" detail={`${dashboard.totals.harnesses} harness(es)`} />
         <ReadinessItem ready={dashboard.totals.runs > 0} label="Campaign history" detail={`${dashboard.totals.runs} run(s)`} />
@@ -1081,7 +1132,7 @@ function ReadinessItem({ ready, label, detail }: { ready: boolean; label: string
 function MetricGrid({ dashboard }: { dashboard: WorkbenchDashboard }) {
   const t = dashboard.totals;
   return (
-    <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+    <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))" }}>
       <Metric icon={<Target size={16} />} label="Targets" value={t.targets} />
       <Metric icon={<FileCode size={16} />} label="Harnesses" value={t.harnesses} accent={t.harnesses_needing_review > 0} detail={`${t.harnesses_needing_review} review`} />
       <Metric icon={<Play size={16} />} label="Runs" value={t.runs} detail={`${t.active_runs} active`} />
