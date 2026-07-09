@@ -1572,6 +1572,53 @@ pub async fn revert_harness_from_run(
     }))
 }
 
+/// A project's auto-revert override, or `null` when it inherits the global
+/// policy. Drives the per-project toggle in the Run History policy card.
+#[tauri::command]
+pub async fn project_auto_revert_override(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<Option<hf_service::ProjectAutoRevert>, String> {
+    Ok(state
+        .container
+        .project_auto_revert_override(std::path::Path::new(&project))
+        .await)
+}
+
+/// Set (or replace) a project's auto-revert override.
+#[tauri::command]
+pub async fn set_project_auto_revert_override(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    enabled: bool,
+    threshold_pct: f64,
+    notify_only: bool,
+) -> Result<(), String> {
+    state
+        .container
+        .set_project_auto_revert_override(
+            std::path::Path::new(&project),
+            enabled,
+            threshold_pct,
+            notify_only,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Clear a project's auto-revert override, so it inherits the global policy.
+#[tauri::command]
+pub async fn clear_project_auto_revert_override(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<(), String> {
+    state
+        .container
+        .clear_project_auto_revert_override(std::path::Path::new(&project))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Export a project's fuzzing data (targets, runs, harnesses, crashes, corpus)
 /// as a JSON bundle via a native save dialog. Returns the saved path or `None`.
 #[tauri::command]
