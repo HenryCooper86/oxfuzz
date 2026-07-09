@@ -1531,6 +1531,16 @@ pub async fn run_history(
     Ok(state.container.run_history(path).await)
 }
 
+/// The intra-run coverage/throughput curve for a single run (empty if none was
+/// recorded).
+#[tauri::command]
+pub async fn run_coverage_series(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<Vec<hf_service::CoverageSample>, String> {
+    Ok(state.container.run_coverage_series(&run_id).await)
+}
+
 /// Export a project's fuzzing data (targets, runs, harnesses, crashes, corpus)
 /// as a JSON bundle via a native save dialog. Returns the saved path or `None`.
 #[tauri::command]
