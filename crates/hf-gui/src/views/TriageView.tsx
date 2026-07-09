@@ -39,7 +39,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const { markDone, markSkipped } = usePipeline();
   // The target + crash count from the most recent run, so triage scans the
   // right workspace and we know whether there is anything to triage.
-  const { lastTarget, summary } = useRunOutput();
+  const { lastTarget, lastEngine, summary } = useRunOutput();
+  // Kernel (syzkaller) crashes live in the syzkaller workdir, not a per-target
+  // workspace, so per-target triage does not apply to them.
+  const isKernelRun = lastEngine === "syzkaller";
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
@@ -164,6 +167,9 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   // dashboard automatically -- once per run. Buttons remain for manual re-runs.
   const autoTriagedRef = useRef<typeof summary>(null);
   useEffect(() => {
+    // Skip kernel runs: their crashes are not in a per-target workspace, so an
+    // auto per-target scan would find nothing and read as "no crashes".
+    if (isKernelRun) return;
     if (summary && summary.crashes > 0 && autoTriagedRef.current !== summary) {
       autoTriagedRef.current = summary;
       void (async () => {
@@ -171,7 +177,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         if (list.length > 0) await composeAndSaveReport();
       })();
     }
-  }, [summary, triage, composeAndSaveReport]);
+  }, [summary, triage, composeAndSaveReport, isKernelRun]);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -202,9 +208,15 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           <Button
             variant="primary"
             onClick={triage}
-            disabled={loading || !lastTarget}
+            disabled={loading || !lastTarget || isKernelRun}
             loading={loading}
-            title={lastTarget ? "Scan the last run's output for crashes" : "Run a fuzz campaign first"}
+            title={
+              isKernelRun
+                ? "Kernel crashes are collected by syzkaller, not per-target triage"
+                : lastTarget
+                  ? "Scan the last run's output for crashes"
+                  : "Run a fuzz campaign first"
+            }
           >
             {!loading && <Bug size={14} />}
             {loading ? "Scanning..." : "Scan for Crashes"}
@@ -227,8 +239,22 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
+      {/* Kernel campaigns collect crashes in the syzkaller workdir, outside the
+          per-target triage path -- explain rather than scan into an empty result. */}
+      {isKernelRun && summary && (
+        <div
+          className="surface-card text-sm"
+          style={{ padding: "var(--space-md)", borderLeft: `3px solid ${summary.crashes > 0 ? "var(--error)" : "var(--success)"}` }}
+        >
+          Kernel (syzkaller) campaign reported <strong>{summary.crashes}</strong> crash
+          {summary.crashes === 1 ? "" : "es"}. Kernel crashes are collected in the syzkaller
+          workspace (reproducers + logs under the run&apos;s workdir), not the per-target triage
+          path, so per-target scanning does not apply here.
+        </div>
+      )}
+
       {/* Context from the last run, so the user knows what to expect. */}
-      {summary && crashes.length === 0 && (
+      {!isKernelRun && summary && crashes.length === 0 && (
         <div
           className="surface-card text-sm"
           style={{ padding: "var(--space-md)", borderLeft: `3px solid ${ranWithCrashes ? "var(--error)" : "var(--success)"}` }}
@@ -248,7 +274,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
-      {crashes.length === 0 && !loading && (
+      {crashes.length === 0 && !loading && !isKernelRun && (
         <div
           className="surface-card flex flex-col items-center justify-center"
           style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
