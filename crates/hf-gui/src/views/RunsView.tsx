@@ -86,6 +86,21 @@ export function RunsView() {
     .slice(0, 24)
     .reverse();
 
+  // Label each distinct harness revision in chronological order of first use,
+  // so a coverage jump can be tied to the harness change that produced it.
+  const revOrder: string[] = [];
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const h = runs[i].harness_rev;
+    if (h && !revOrder.includes(h)) revOrder.push(h);
+  }
+  const revLabel = (h: string | null): string | null =>
+    h ? `rev ${revOrder.indexOf(h) + 1}` : null;
+  // Per trend bar: did the harness change vs the previous run?
+  const changeAt = trend.map(
+    (r, i) => i > 0 && r.harness_rev != null && r.harness_rev !== trend[i - 1].harness_rev,
+  );
+  const anyRevChange = changeAt.some(Boolean);
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
@@ -114,6 +129,7 @@ export function RunsView() {
               runs={trend}
               value={(r) => r.edges ?? 0}
               color="var(--success)"
+              marks={changeAt}
             />
             <MiniTrend
               title="Throughput (execs/sec)"
@@ -130,6 +146,12 @@ export function RunsView() {
               color="var(--error)"
             />
           </div>
+          {anyRevChange && (
+            <p className="text-xs text-text-muted flex items-center gap-1">
+              <span style={{ color: "var(--accent)" }}>▲</span>
+              marks a run where the harness revision changed — line it up with the coverage bars to see the impact.
+            </p>
+          )}
         </section>
       )}
 
@@ -148,6 +170,7 @@ export function RunsView() {
                 <div className="text-sm font-semibold truncate">{r.engine}</div>
                 <div className="text-xs text-text-muted mb-2">{new Date(r.started_at).toLocaleString()}</div>
                 <CompareRow label="Status" value={r.status} />
+                <CompareRow label="Harness" value={revLabel(r.harness_rev) ?? "—"} />
                 <CompareRow label="Coverage (edges)" value={r.edges != null ? r.edges.toLocaleString() : "—"} />
                 <CompareRow label="Execs/sec (peak)" value={r.execs != null ? Math.round(r.execs).toLocaleString() : "—"} />
                 <CompareRow label="Crashes" value={String(r.crashes)} />
@@ -189,6 +212,15 @@ export function RunsView() {
                     <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
                     <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
                     <span className="text-xs shrink-0" style={{ color: STATUS_COLOR[r.status] ?? "var(--text-muted)" }}>{r.status}</span>
+                    {r.harness_rev && (
+                      <span
+                        className="text-xs shrink-0 px-1.5 py-0.5 rounded-sm hidden md:inline"
+                        style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}
+                        title={`Harness revision ${r.harness_rev}`}
+                      >
+                        {revLabel(r.harness_rev)}
+                      </span>
+                    )}
                     <span className="flex-1" />
                     <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak edge coverage">
                       <Activity size={12} />
@@ -252,12 +284,15 @@ function MiniTrend({
   runs,
   value,
   color,
+  marks,
 }: {
   title: string;
   icon: React.ReactNode;
   runs: RunHistoryItem[];
   value: (r: RunHistoryItem) => number;
   color: string;
+  /** Per-bar flag: a harness revision change occurred at this run. */
+  marks?: boolean[];
 }) {
   const values = runs.map(value);
   const max = Math.max(1, ...values);
@@ -279,20 +314,26 @@ function MiniTrend({
           </span>
         )}
       </div>
-      <div className="flex items-end gap-0.5 mt-2" style={{ height: 34 }}>
-        {values.map((v, i) => (
-          <div
-            key={i}
-            title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}`}
-            style={{
-              flex: 1,
-              minWidth: 2,
-              height: `${Math.max(3, (v / max) * 100)}%`,
-              background: i === values.length - 1 ? color : "var(--border)",
-              borderRadius: 1,
-            }}
-          />
-        ))}
+      <div className="flex items-end gap-0.5 mt-2" style={{ height: 40 }}>
+        {values.map((v, i) => {
+          const changed = marks?.[i];
+          return (
+            <div key={i} className="flex flex-col items-center justify-end" style={{ flex: 1, minWidth: 2, height: "100%" }}>
+              <span style={{ height: 8, lineHeight: "8px", fontSize: 8, color: "var(--accent)" }}>
+                {changed ? "▲" : ""}
+              </span>
+              <div
+                title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${changed ? " (harness changed)" : ""}`}
+                style={{
+                  width: "100%",
+                  height: `${Math.max(3, (v / max) * 100)}%`,
+                  background: changed ? "var(--accent)" : i === values.length - 1 ? color : "var(--border)",
+                  borderRadius: 1,
+                }}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
