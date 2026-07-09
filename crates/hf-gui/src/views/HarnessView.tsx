@@ -7,8 +7,9 @@ import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
-  CheckCircle2, XCircle, ArrowRight, Sparkles, Archive,
+  CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare,
 } from "lucide-react";
+import { lineDiff } from "../lib/diff";
 
 interface HarnessResult {
   source: string;
@@ -38,6 +39,8 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
   const project = embedded ? activeProject : localProject;
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [harness, setHarness] = useState<HarnessResult | null>(null);
+  const [prevSource, setPrevSource] = useState<string | null>(null);
+  const [showDiff, setShowDiff] = useState(false);
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
   const [seeds, setSeeds] = useState<SeedResult["seeds"] | null>(null);
   // A harness already persisted for the selected target (e.g. built in the
@@ -107,6 +110,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
   }, [project, selectedTarget, harness, setCompiled]);
 
   async function generateHarness(target: string): Promise<HarnessResult | null> {
+    const prior = harness?.source ?? null;
     setHarnessStatus("loading");
     setCompileStatus("idle");
     setSeedStatus("idle");
@@ -114,11 +118,14 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     setCompileResult(null);
     setSeeds(null);
     setCompiled(false);
+    setShowDiff(false);
     try {
       const result = await getTransport().invoke<HarnessResult>("harness_draft", {
         project, target, engine, lang,
       });
       setHarness(result);
+      // Keep the prior revision so the user can see what regeneration changed.
+      setPrevSource(prior && prior !== result.source ? prior : null);
       setHarnessStatus("done");
       markDone("harness");
       return result;
@@ -305,13 +312,43 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
           >
             {harness && (
               <div className="mt-2">
+                {prevSource && (
+                  <div className="flex items-center justify-end mb-1.5">
+                    <button
+                      onClick={() => setShowDiff((d) => !d)}
+                      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+                      title="Show what regeneration changed vs the previous harness"
+                    >
+                      <GitCompare size={12} />
+                      {showDiff ? "Hide diff" : "Diff vs previous"}
+                    </button>
+                  </div>
+                )}
                 <div
                   className="rounded-md overflow-auto max-h-64"
                   style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}
                 >
-                  <pre className="text-xs p-3" style={{ fontFamily: "var(--font-mono)", lineHeight: 1.5, color: "var(--text-secondary)" }}>
-                    {harness.source}
-                  </pre>
+                  {showDiff && prevSource ? (
+                    <pre className="text-xs p-3" style={{ fontFamily: "var(--font-mono)", lineHeight: 1.5 }}>
+                      {lineDiff(prevSource, harness.source).map((d, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            background: d.type === "add" ? "rgba(111,207,151,0.12)" : d.type === "del" ? "rgba(229,72,77,0.12)" : "transparent",
+                            color: d.type === "add" ? "var(--success)" : d.type === "del" ? "var(--error)" : "var(--text-secondary)",
+                            whiteSpace: "pre-wrap",
+                          }}
+                        >
+                          {d.type === "add" ? "+ " : d.type === "del" ? "- " : "  "}
+                          {d.text}
+                        </div>
+                      ))}
+                    </pre>
+                  ) : (
+                    <pre className="text-xs p-3" style={{ fontFamily: "var(--font-mono)", lineHeight: 1.5, color: "var(--text-secondary)" }}>
+                      {harness.source}
+                    </pre>
+                  )}
                 </div>
                 <div className="flex gap-2 mt-2 text-xs text-text-muted">
                   <span>Compiler: <code style={{ color: "var(--accent)" }}>{harness.build_cmd.compiler}</code></span>
