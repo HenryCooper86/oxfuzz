@@ -6,6 +6,7 @@ import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
 import { Button, ViewHeader } from "../components/ui";
 import { Bug, ChevronRight, FileText } from "lucide-react";
+import { PathActions } from "../components/PathActions";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
 // when the user opens a report, keeping it out of the initial bundle.
@@ -345,7 +346,8 @@ function CrashDetail({ crash }: { crash: Crash }) {
           {crash.kind}
         </span>
         {crash.casr && <SeverityBadge casr={crash.casr} />}
-        <span className="text-xs text-text-muted font-mono">{crash.input_path.split("/").pop()}</span>
+        <span className="text-xs text-text-muted font-mono truncate min-w-0 flex-1" title={crash.input_path}>{crash.input_path.split("/").pop()}</span>
+        <PathActions path={crash.input_path} />
       </div>
       {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
       {crash.casr && (
