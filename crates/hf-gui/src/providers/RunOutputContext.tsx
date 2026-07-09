@@ -105,6 +105,10 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     keyRef.current = key;
   }, [key]);
+  // The project bucket a run is writing to, captured at run start. While a run
+  // is in flight, progress/log/summary all target this key -- so switching the
+  // active project mid-run does not split a run's output across two buckets.
+  const activeRunKeyRef = useRef<string | null>(null);
 
   const [byProject, setByProject] = useState<Record<string, RunData>>(loadSummaries);
   const [running, setRunning] = useState(false);
@@ -141,7 +145,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
 
   const appendLog = useCallback(
     (line: string) => {
-      patch(keyRef.current, (d) => ({
+      patch(activeRunKeyRef.current ?? keyRef.current, (d) => ({
         ...d,
         log: d.log.length >= LOG_CAP ? [...d.log.slice(-(LOG_CAP - 1)), line] : [...d.log, line],
       }));
@@ -157,7 +161,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
     getTransport()
       .listen<{ type: string; data: unknown }>("run:progress", (ev) => {
         const p = ev.payload;
-        const k = keyRef.current;
+        const k = activeRunKeyRef.current ?? keyRef.current;
         if (p?.type === "ExecsPerSec") {
           const v = Number(p.data) || 0;
           patch(k, (d) => ({ ...d, stats: { ...d.stats, execs: Math.max(d.stats.execs, v) } }));
@@ -190,6 +194,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   const runFuzzer = useCallback<RunOutputValue["runFuzzer"]>(
     async (p) => {
       const k = p.project || "__none__";
+      activeRunKeyRef.current = k;
       patch(k, () => ({
         ...EMPTY,
         lastTarget: p.target,
@@ -227,6 +232,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       } finally {
         setRunning(false);
         setCancelling(false);
+        activeRunKeyRef.current = null;
       }
     },
     [appendLog, patch],
@@ -248,8 +254,12 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
 
   const runSyzkaller = useCallback<RunOutputValue["runSyzkaller"]>(
     async (opts) => {
-      const k = keyRef.current;
-      patch(k, () => ({ ...EMPTY, lastEngine: "syzkaller", log: [`[${now()}] Starting syzkaller campaign`] }));
+      // Key on the run's project (not just the active one) so a mid-run project
+      // switch doesn't split output; label the target "kernel" so downstream
+      // (Triage) knows this was a kernel campaign, not an empty per-target run.
+      const k = (typeof opts.project === "string" && opts.project) || keyRef.current || "__none__";
+      activeRunKeyRef.current = k;
+      patch(k, () => ({ ...EMPTY, lastTarget: "kernel", lastEngine: "syzkaller", log: [`[${now()}] Starting syzkaller campaign`] }));
       setRunning(true);
       try {
         const result = await getTransport().invoke<RunResult>("run_syzkaller", { opts });
@@ -270,6 +280,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       } finally {
         setRunning(false);
         setCancelling(false);
+        activeRunKeyRef.current = null;
       }
     },
     [appendLog, patch],

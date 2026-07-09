@@ -999,6 +999,16 @@ impl ServiceContainer {
             .map(|node| node.id.0)
     }
 
+    /// Delete a chat session and its transcript (used by the "clear history"
+    /// action). No-op when no session store is configured. Returns whether a
+    /// deletion was performed.
+    pub async fn delete_chat_session(&self, session: &hf_core::types::SessionId) -> bool {
+        let Some(manager) = self.session_manager.as_ref() else {
+            return false;
+        };
+        manager.delete_session(session).await.is_ok()
+    }
+
     /// All sessions in the same conversation tree as `session` (the main session
     /// plus every branch), for the branch switcher.
     pub async fn chat_branches(
@@ -3067,6 +3077,53 @@ impl ServiceContainer {
             }
         }
         Ok(facts)
+    }
+
+    /// Document formats this host can export a report to (see
+    /// [`crate::report_export::available_formats`]).
+    #[must_use]
+    pub fn report_formats(&self) -> Vec<String> {
+        crate::report_export::available_formats()
+    }
+
+    /// Compose the report for `target` and write it to `out_path` in `format`.
+    /// Markdown and HTML always work; PDF/DOCX require pandoc (and, for PDF, a
+    /// PDF engine).
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if composition, format parsing, or the export
+    /// (IO / external tool) fails.
+    pub async fn export_report(
+        &self,
+        project: &Path,
+        target: &str,
+        format: &str,
+        out_path: &Path,
+    ) -> Result<(), ClassifiedError> {
+        let fmt = crate::report_export::ReportFormat::parse(format).ok_or_else(|| {
+            ClassifiedError::Validation(format!("unknown report format: {format}"))
+        })?;
+        let markdown = self.generate_report(project, target).await?;
+        let title = format!("hobot_fuzz report — {target}");
+        crate::report_export::write_report(&markdown, &title, fmt, out_path)
+    }
+
+    /// Write already-composed report `markdown` (e.g. a saved draft) to
+    /// `out_path` in `format`, without recomposing it.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on unknown format or export failure.
+    pub fn export_markdown(
+        &self,
+        markdown: &str,
+        title: &str,
+        format: &str,
+        out_path: &Path,
+    ) -> Result<(), ClassifiedError> {
+        let fmt = crate::report_export::ReportFormat::parse(format).ok_or_else(|| {
+            ClassifiedError::Validation(format!("unknown report format: {format}"))
+        })?;
+        crate::report_export::write_report(markdown, title, fmt, out_path)
     }
 
     /// Compose the narrative report with the LLM, grounded in the fact-sheet.

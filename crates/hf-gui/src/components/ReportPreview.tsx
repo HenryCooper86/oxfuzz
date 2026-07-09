@@ -1,9 +1,10 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { X, Download, Copy, Check } from "lucide-react";
+import { X, Download, Copy, Check, ChevronDown } from "lucide-react";
 import { Button } from "./ui";
 import { Mermaid } from "./Mermaid";
+import { useListboxNav } from "../hooks/useListboxNav";
 
 /**
  * Extract the language + text from a react-markdown `code` node so fenced
@@ -20,16 +21,27 @@ export function codeInfo(className: unknown, children: unknown): { lang: string;
  * Download and Copy actions. The rendered Markdown mirrors what the user gets
  * in any external Markdown tool, so the preview is faithful.
  */
+const FORMAT_LABELS: Record<string, string> = {
+  md: "Markdown (.md)",
+  html: "HTML (.html)",
+  pdf: "PDF (.pdf)",
+  docx: "Word (.docx)",
+};
+
 export function ReportPreview({
   markdown,
   onClose,
-  onDownload,
+  onExport,
+  formats,
 }: {
   markdown: string;
   onClose: () => void;
-  onDownload: () => void;
+  onExport: (format: string) => void;
+  formats: string[];
 }) {
   const [copied, setCopied] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const { triggerRef, menuRef, onMenuKey, onTriggerKey } = useListboxNav(exportOpen, () => setExportOpen(false));
 
   const copy = async () => {
     try {
@@ -69,10 +81,52 @@ export function ReportPreview({
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {copied ? "Copied" : "Copy"}
             </Button>
-            <Button variant="outline" size="sm" onClick={onDownload} title="Download .md">
-              <Download size={14} />
-              Download
-            </Button>
+            <div className="relative">
+              <Button
+                ref={triggerRef}
+                variant="outline"
+                size="sm"
+                onClick={() => setExportOpen((o) => !o)}
+                onKeyDown={(e) => onTriggerKey(e, () => setExportOpen(true))}
+                aria-haspopup="listbox"
+                aria-expanded={exportOpen}
+                title="Export the report"
+              >
+                <Download size={14} />
+                Export
+                <ChevronDown size={13} style={{ opacity: 0.7 }} />
+              </Button>
+              {exportOpen && (
+                <>
+                  <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => setExportOpen(false)} />
+                  <div
+                    ref={menuRef}
+                    role="listbox"
+                    onKeyDown={onMenuKey}
+                    className="absolute right-0 mt-1 min-w-[170px] rounded-lg overflow-hidden"
+                    style={{ background: "var(--surface-primary)", border: "1px solid var(--border)", boxShadow: "0 8px 24px rgba(0,0,0,0.3)", zIndex: 50 }}
+                  >
+                    {formats.map((f) => (
+                      <button
+                        key={f}
+                        role="option"
+                        aria-selected={false}
+                        onClick={() => {
+                          setExportOpen(false);
+                          onExport(f);
+                        }}
+                        className="flex items-center w-full text-left transition-colors duration-150"
+                        style={{ padding: "8px 12px", fontSize: "13px", background: "transparent", color: "var(--text-secondary)", border: "none", cursor: "pointer" }}
+                        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
+                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                      >
+                        {FORMAT_LABELS[f] ?? f.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
             <button onClick={onClose} className="hf-action-btn" title="Close" aria-label="Close">
               <X size={16} />
             </button>
