@@ -126,7 +126,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
           <ActionButton icon={<Plus size={14} />} label="Seed" loading={loading === "corpus_seed"} disabled={!target} onClick={() => action("corpus_seed")} />
           <ActionButton icon={<Sprout size={14} />} label="Grow" loading={loading === "corpus_grow"} disabled={!target} onClick={() => action("corpus_grow")} />
           <ActionButton icon={<Scissors size={14} />} label="Prune" loading={loading === "corpus_prune"} disabled={!target} onClick={() => action("corpus_prune")} />
-          <ActionButton icon={<Database size={14} />} label="List" loading={loading === "corpus_list"} onClick={() => action("corpus_list")} />
+          <ActionButton icon={<Database size={14} />} label="List" loading={loading === "corpus_list"} disabled={!target} onClick={() => action("corpus_list")} />
         </div>
       </div>
 

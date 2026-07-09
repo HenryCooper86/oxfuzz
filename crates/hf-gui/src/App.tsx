@@ -21,6 +21,7 @@ import { TriageView } from "./views/TriageView";
 import { CorpusView } from "./views/CorpusView";
 import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
+import { ReportsView } from "./views/ReportsView";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
 import { ProjectProvider, useProject } from "./providers/ProjectContext";
 import { PipelineProvider } from "./providers/PipelineContext";
@@ -31,7 +32,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard } from "lucide-react";
+import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, FileText, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -170,6 +171,11 @@ function AppInner() {
                     <ArtifactsView />
                   </div>
                 )}
+                {activeView === "reports" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <ReportsView />
+                  </div>
+                )}
                 {activeView === "agents" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
                     <AgentsView />
@@ -276,6 +282,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   settings: <Settings size={18} />,
   projects: <FolderOpen size={18} />,
   artifacts: <Boxes size={18} />,
+  reports: <FileText size={18} />,
   agents: <Bot size={18} />,
   skills: <Puzzle size={18} />,
   knowledge: <BookOpen size={18} />,

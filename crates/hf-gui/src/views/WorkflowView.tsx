@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Check, Minus, Target, FileCode, Play, Bug, D
 import { pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline, type StageId } from "../providers/PipelineContext";
+import type { ViewType } from "../types";
 import { DiscoverView } from "./DiscoverView";
 import { HarnessView } from "./HarnessView";
 import { RunView } from "./RunView";
@@ -25,7 +26,9 @@ interface CoreStage {
   label: string;
   hint: string;
   icon: React.ComponentType<{ size?: number }>;
-  Component: React.ComponentType<{ embedded?: boolean }>;
+  // Embedded stage views accept an optional navigate callback; in the workflow
+  // it expands the target section (e.g. Run's "regenerate harness" -> Harness).
+  Component: React.ComponentType<{ embedded?: boolean; onNavigate?: (view: ViewType) => void }>;
 }
 
 const CORE_STAGES: CoreStage[] = [
@@ -182,7 +185,14 @@ export function WorkflowView() {
             {open && (
               <div style={{ padding: "0 14px 16px", borderTop: "1px solid var(--border)" }}>
                 <div style={{ paddingTop: "14px" }}>
-                  <Component embedded />
+                  <Component
+                    embedded
+                    onNavigate={(view) => {
+                      // Stay in the workflow: expand the requested stage's
+                      // section (its ViewType id matches the section id).
+                      if (!gated) setExpanded(view as SectionId);
+                    }}
+                  />
                 </div>
               </div>
             )}
