@@ -29,6 +29,9 @@ struct RunEvent {
     target: String,
     #[serde(default)]
     engine: String,
+    /// Free-form detail for non-lifecycle events (e.g. an auto-revert note).
+    #[serde(default)]
+    detail: String,
     ts: i64,
 }
 
@@ -134,6 +137,22 @@ impl RunJournal {
             project: project.to_string_lossy().into_owned(),
             target: target.to_owned(),
             engine: format!("{engine:?}"),
+            detail: String::new(),
+            ts: now(),
+        });
+    }
+
+    /// Record a non-lifecycle note against a run (e.g. an auto-revert firing).
+    /// Appended to the WAL for the audit trail; ignored by recovery replay
+    /// (unknown event strings do not reopen a scope).
+    pub fn note(&self, run_id: Uuid, event: &str, detail: &str) {
+        self.append(&RunEvent {
+            event: event.to_owned(),
+            run_id: run_id.to_string(),
+            project: String::new(),
+            target: String::new(),
+            engine: String::new(),
+            detail: detail.to_owned(),
             ts: now(),
         });
     }
@@ -150,6 +169,7 @@ impl RunJournal {
             project: String::new(),
             target: String::new(),
             engine: String::new(),
+            detail: String::new(),
             ts: now(),
         });
     }
@@ -169,6 +189,7 @@ impl RunJournal {
             project: String::new(),
             target: String::new(),
             engine: String::new(),
+            detail: String::new(),
             ts: now(),
         });
     }

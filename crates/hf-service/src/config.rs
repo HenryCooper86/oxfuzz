@@ -91,6 +91,79 @@ pub fn data_dir() -> PathBuf {
 /// Default seconds of flat coverage before a run surfaces a stagnation proposal.
 pub const DEFAULT_STAGNATION_THRESHOLD_SECS: u64 = 120;
 
+/// Default coverage-drop threshold (percent) at which the auto-revert policy
+/// restores the previous harness revision.
+pub const DEFAULT_AUTO_REVERT_THRESHOLD_PCT: f64 = 20.0;
+
+/// The auto-revert policy: whether a harness change that regresses coverage
+/// past [`Self::threshold_pct`] should automatically restore the previous
+/// (last-good) harness revision, and by how much coverage must drop to trigger.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoRevertPolicy {
+    /// Whether the policy is armed. Off by default -- restoring a harness is a
+    /// mutation, so a user must opt in.
+    pub enabled: bool,
+    /// The edge-coverage drop (percent, vs the previous run's harness) at or
+    /// above which the revert fires.
+    pub threshold_pct: f64,
+}
+
+/// The resolved auto-revert policy.
+///
+/// Resolution order: the `HF_AUTO_REVERT` / `HF_AUTO_REVERT_THRESHOLD_PCT` env
+/// overrides, then `auto_revert_enabled` / `auto_revert_threshold_pct` in
+/// `hobot-fuzz.toml`, then off with a [`DEFAULT_AUTO_REVERT_THRESHOLD_PCT`]
+/// threshold.
+#[must_use]
+pub fn auto_revert_policy() -> AutoRevertPolicy {
+    resolve_auto_revert_policy(
+        std::env::var("HF_AUTO_REVERT").ok().as_deref(),
+        std::env::var("HF_AUTO_REVERT_THRESHOLD_PCT")
+            .ok()
+            .as_deref(),
+        read_config("hobot-fuzz").ok().as_deref(),
+    )
+}
+
+/// Parse a permissive boolean env value (`1/true/yes/on` vs `0/false/no/off`);
+/// `None` when unset or unrecognized so the next precedence tier applies.
+fn parse_flag(s: Option<&str>) -> Option<bool> {
+    match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "yes" | "on") => Some(true),
+        Some("0" | "false" | "no" | "off") => Some(false),
+        _ => None,
+    }
+}
+
+/// Pure resolver for [`auto_revert_policy`], split out so the precedence (env
+/// over TOML over default) is unit-testable without touching the environment or
+/// filesystem.
+fn resolve_auto_revert_policy(
+    env_enabled: Option<&str>,
+    env_threshold: Option<&str>,
+    hobot_toml: Option<&str>,
+) -> AutoRevertPolicy {
+    #[derive(Deserialize)]
+    struct HobotConfig {
+        auto_revert_enabled: Option<bool>,
+        auto_revert_threshold_pct: Option<f64>,
+    }
+    let parsed = hobot_toml.and_then(|raw| toml::from_str::<HobotConfig>(raw).ok());
+    let enabled = parse_flag(env_enabled)
+        .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_enabled))
+        .unwrap_or(false);
+    let threshold_pct = env_threshold
+        .map(str::trim)
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_threshold_pct))
+        .filter(|v| *v > 0.0)
+        .unwrap_or(DEFAULT_AUTO_REVERT_THRESHOLD_PCT);
+    AutoRevertPolicy {
+        enabled,
+        threshold_pct,
+    }
+}
+
 /// Seconds without a coverage increase before `run_fuzzer` surfaces a
 /// stagnation proposal (regenerate the harness / add seeds).
 ///
@@ -468,6 +541,34 @@ mod tests {
             resolve_stagnation_secs(Some("not-a-number"), None),
             DEFAULT_STAGNATION_THRESHOLD_SECS
         );
+    }
+
+    #[test]
+    fn auto_revert_policy_precedence_env_then_toml_then_default() {
+        // Default: off, with the default threshold.
+        let p = resolve_auto_revert_policy(None, None, None);
+        assert!(!p.enabled);
+        assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
+
+        // TOML supplies both values when no env is set.
+        let toml = "auto_revert_enabled = true\nauto_revert_threshold_pct = 35.0\n";
+        let p = resolve_auto_revert_policy(None, None, Some(toml));
+        assert!(p.enabled);
+        assert!((p.threshold_pct - 35.0).abs() < f64::EPSILON);
+
+        // Env overrides the TOML for both the flag and the threshold.
+        let toml = "auto_revert_enabled = false\nauto_revert_threshold_pct = 35.0\n";
+        let p = resolve_auto_revert_policy(Some("1"), Some("50"), Some(toml));
+        assert!(p.enabled);
+        assert!((p.threshold_pct - 50.0).abs() < f64::EPSILON);
+
+        // A non-positive or non-numeric threshold falls through to the default.
+        let p = resolve_auto_revert_policy(Some("yes"), Some("-5"), None);
+        assert!(p.enabled);
+        assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
+
+        // An unrecognized flag value leaves the policy off.
+        assert!(!resolve_auto_revert_policy(Some("maybe"), None, None).enabled);
     }
 
     #[test]
