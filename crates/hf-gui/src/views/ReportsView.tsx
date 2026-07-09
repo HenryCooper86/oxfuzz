@@ -20,14 +20,17 @@ export function ReportsView() {
   const [open, setOpen] = useState<ReportDraft | null>(null);
   const [formats, setFormats] = useState<string[]>(["md", "html"]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
   const load = useCallback(async () => {
     try {
       const list = await getTransport().invoke<ReportDraft[]>("list_report_drafts");
       setReports(list);
-    } catch {
+      setLoadError(null);
+    } catch (e) {
       setReports([]);
+      setLoadError(String(e));
     } finally {
       setLoading(false);
     }
@@ -113,7 +116,17 @@ export function ReportsView() {
         </div>
       )}
 
-      {loading ? (
+      {loadError ? (
+        <div className="surface-card flex items-center justify-between gap-3" style={{ padding: "var(--space-md)", borderColor: "var(--error)" }}>
+          <div className="min-w-0">
+            <p className="text-sm font-medium" style={{ color: "var(--error)" }}>Failed to load reports</p>
+            <p className="text-xs text-text-muted mt-1 font-mono truncate">{loadError}</p>
+          </div>
+          <button onClick={() => void load()} className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-md" style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none", cursor: "pointer" }}>
+            Retry
+          </button>
+        </div>
+      ) : loading ? (
         <p className="text-sm text-text-muted">Loading reports…</p>
       ) : reports.length === 0 ? (
         <EmptyState
