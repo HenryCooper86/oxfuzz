@@ -28,6 +28,8 @@ export interface RunHistoryItem {
   ended_at: string | null;
   duration_secs: number | null;
   crashes: number;
+  edges: number | null;
+  execs: number | null;
 }
 
 export interface TargetCandidate {

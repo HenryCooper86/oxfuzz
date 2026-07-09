@@ -3,7 +3,7 @@ import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import type { RunHistoryItem } from "../types";
 import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
-import { Play, Bug, Clock, GitCompare, X, Search } from "lucide-react";
+import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp } from "lucide-react";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -64,6 +64,13 @@ export function RunsView() {
   const q = filter.trim().toLowerCase();
   const shownRuns = q ? runs.filter((r) => `${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
 
+  // Chronological (oldest->newest) finished runs with recorded coverage, for the
+  // trend charts. Capped so a long history stays readable.
+  const trend = runs
+    .filter((r) => r.edges != null)
+    .slice(0, 24)
+    .reverse();
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
@@ -76,6 +83,39 @@ export function RunsView() {
           <span className="text-xs min-w-0 truncate" style={{ color: "var(--error)" }}>Failed to load run history: {error}</span>
           <Button variant="outline" size="sm" onClick={() => void load()}>Retry</Button>
         </div>
+      )}
+
+      {trend.length >= 2 && (
+        <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
+          <div className="flex items-center gap-2">
+            <TrendingUp size={15} style={{ color: "var(--accent)" }} />
+            <span className="text-sm font-semibold">Trends</span>
+            <span className="text-xs text-text-muted">last {trend.length} runs</span>
+          </div>
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
+            <MiniTrend
+              title="Coverage (edges)"
+              icon={<Activity size={13} />}
+              runs={trend}
+              value={(r) => r.edges ?? 0}
+              color="var(--success)"
+            />
+            <MiniTrend
+              title="Throughput (execs/sec)"
+              icon={<Zap size={13} />}
+              runs={trend}
+              value={(r) => Math.round(r.execs ?? 0)}
+              color="var(--accent)"
+            />
+            <MiniTrend
+              title="Crashes"
+              icon={<Bug size={13} />}
+              runs={trend}
+              value={(r) => r.crashes}
+              color="var(--error)"
+            />
+          </div>
+        </section>
       )}
 
       {compareRuns.length === 2 && (
@@ -93,6 +133,8 @@ export function RunsView() {
                 <div className="text-sm font-semibold truncate">{r.engine}</div>
                 <div className="text-xs text-text-muted mb-2">{new Date(r.started_at).toLocaleString()}</div>
                 <CompareRow label="Status" value={r.status} />
+                <CompareRow label="Coverage (edges)" value={r.edges != null ? r.edges.toLocaleString() : "—"} />
+                <CompareRow label="Execs/sec (peak)" value={r.execs != null ? Math.round(r.execs).toLocaleString() : "—"} />
                 <CompareRow label="Crashes" value={String(r.crashes)} />
                 <CompareRow label="Duration" value={fmtDuration(r.duration_secs)} />
               </div>
@@ -127,6 +169,14 @@ export function RunsView() {
                 <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
                 <span className="text-xs shrink-0" style={{ color: STATUS_COLOR[r.status] ?? "var(--text-muted)" }}>{r.status}</span>
                 <span className="flex-1" />
+                <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak edge coverage">
+                  <Activity size={12} />
+                  {r.edges != null ? r.edges.toLocaleString() : "—"}
+                </span>
+                <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak execs/sec">
+                  <Zap size={12} />
+                  {r.execs != null ? Math.round(r.execs).toLocaleString() : "—"}
+                </span>
                 <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Crashes">
                   <Bug size={12} style={{ color: r.crashes > 0 ? "var(--error)" : "var(--text-muted)" }} />
                   {r.crashes}
@@ -148,6 +198,59 @@ export function RunsView() {
           {selected.length === 1 && <span>Select one more run to compare.</span>}
         </div>
       )}
+    </div>
+  );
+}
+
+// A compact bar chart of a metric across successive runs (oldest -> newest).
+function MiniTrend({
+  title,
+  icon,
+  runs,
+  value,
+  color,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  runs: RunHistoryItem[];
+  value: (r: RunHistoryItem) => number;
+  color: string;
+}) {
+  const values = runs.map(value);
+  const max = Math.max(1, ...values);
+  const latest = values[values.length - 1] ?? 0;
+  const prev = values[values.length - 2] ?? latest;
+  const delta = latest - prev;
+  return (
+    <div className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-sm) var(--space-md)", background: "var(--surface-secondary)" }}>
+      <div className="flex items-center gap-1.5 text-xs text-text-muted">
+        {icon}
+        <span className="truncate">{title}</span>
+      </div>
+      <div className="flex items-baseline gap-2 mt-1">
+        <span className="text-lg font-semibold" style={{ color }}>{latest.toLocaleString()}</span>
+        {delta !== 0 && (
+          <span className="text-xs" style={{ color: delta > 0 ? "var(--success)" : "var(--text-muted)" }}>
+            {delta > 0 ? "+" : ""}
+            {delta.toLocaleString()} vs prev
+          </span>
+        )}
+      </div>
+      <div className="flex items-end gap-0.5 mt-2" style={{ height: 34 }}>
+        {values.map((v, i) => (
+          <div
+            key={i}
+            title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}`}
+            style={{
+              flex: 1,
+              minWidth: 2,
+              height: `${Math.max(3, (v / max) * 100)}%`,
+              background: i === values.length - 1 ? color : "var(--border)",
+              borderRadius: 1,
+            }}
+          />
+        ))}
+      </div>
     </div>
   );
 }

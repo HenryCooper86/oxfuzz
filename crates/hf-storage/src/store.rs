@@ -76,6 +76,12 @@ pub struct RunRecord {
     pub ended_at: Option<DateTime<Utc>>,
     /// The run configuration, if captured.
     pub config: Option<FuzzRunConfig>,
+    /// Peak edge coverage reached, once the run finished.
+    pub edges: Option<u64>,
+    /// Peak executions/second reached, once the run finished.
+    pub execs: Option<f64>,
+    /// Crashes the fuzzer reported during the run (raw, pre-triage-dedup).
+    pub crash_count: Option<u64>,
 }
 
 impl RunRecord {
@@ -95,6 +101,9 @@ impl RunRecord {
             started_at: now,
             ended_at: None,
             config,
+            edges: None,
+            execs: None,
+            crash_count: None,
         }
     }
 }
@@ -199,8 +208,8 @@ impl Store {
             None => None,
         };
         sqlx::query(
-            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(run.id.to_string())
         .bind(&run.project_root)
@@ -209,8 +218,33 @@ impl Store {
         .bind(run.started_at.to_rfc3339())
         .bind(run.ended_at.map(|t| t.to_rfc3339()))
         .bind(config_json)
+        .bind(run.edges.map(|e| i64::try_from(e).unwrap_or(i64::MAX)))
+        .bind(run.execs)
+        .bind(run.crash_count.map(|c| i64::try_from(c).unwrap_or(i64::MAX)))
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Record a finished run's peak coverage (edges), throughput (execs/sec),
+    /// and raw crash count.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn set_run_stats(
+        &self,
+        id: Uuid,
+        edges: u64,
+        execs: f64,
+        crashes: u64,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE runs SET edges = ?2, execs = ?3, crash_count = ?4 WHERE id = ?1")
+            .bind(id.to_string())
+            .bind(i64::try_from(edges).unwrap_or(i64::MAX))
+            .bind(execs)
+            .bind(i64::try_from(crashes).unwrap_or(i64::MAX))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -806,6 +840,9 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
         Some(c) => Some(serde_json::from_str(&c)?),
         None => None,
     };
+    let edges: Option<i64> = row.try_get("edges")?;
+    let execs: Option<f64> = row.try_get("execs")?;
+    let crash_count: Option<i64> = row.try_get("crash_count")?;
     Ok(RunRecord {
         id: Uuid::parse_str(&id_str)
             .map_err(|e| StorageError::Timestamp(format!("bad uuid: {e}")))?,
@@ -815,6 +852,9 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
         started_at: ts(&started_at)?,
         ended_at: ended_at.as_deref().map(ts).transpose()?,
         config,
+        edges: edges.map(|e| u64::try_from(e).unwrap_or(0)),
+        execs,
+        crash_count: crash_count.map(|c| u64::try_from(c).unwrap_or(0)),
     })
 }
 
