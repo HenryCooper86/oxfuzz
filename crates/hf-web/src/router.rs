@@ -177,6 +177,7 @@ pub fn build_with_state(state: AppState) -> Router {
             "/projects/auto-revert/effective",
             post(effective_auto_revert_policy),
         )
+        .route("/audit/auto-revert", post(auto_revert_events))
         .route(
             "/projects/auto-revert/set",
             post(set_project_auto_revert_override),
@@ -469,6 +470,31 @@ async fn project_auto_revert_override(
         .await;
     Ok(Json(
         serde_json::to_value(over).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditRequest {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn auto_revert_events(
+    State(state): State<AppState>,
+    Json(req): Json<AuditRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = req.project.filter(|p| !p.is_empty());
+    let events = state
+        .container
+        .auto_revert_events(
+            project.as_deref().map(std::path::Path::new),
+            req.limit.unwrap_or(200),
+        )
+        .await;
+    Ok(Json(
+        serde_json::to_value(events).unwrap_or(serde_json::Value::Null),
     ))
 }
 

@@ -10,7 +10,7 @@ use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
-use hf_storage::{ProjectAutoRevert, RunRecord, RunStatus, Store};
+use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
 async fn temp_store() -> (Store, tempfile::TempDir) {
@@ -125,6 +125,66 @@ async fn all_project_auto_reverts_lists_only_overridden_projects() {
     let all = store.all_project_auto_reverts().await.unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].0, "/p/b");
+}
+
+#[tokio::test]
+async fn auto_revert_events_record_list_scope_and_order() {
+    let (store, _dir) = temp_store().await;
+    assert!(store
+        .list_auto_revert_events(None, 50)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let mk = |id: &str, ts: &str, project: &str, reverted: bool| AutoRevertEvent {
+        id: id.to_owned(),
+        ts: ts.to_owned(),
+        project_root: project.to_owned(),
+        target: "parse".to_owned(),
+        run_id: "run-1".to_owned(),
+        from_rev: "aaaaaaaaaaaa".to_owned(),
+        to_rev: "bbbbbbbbbbbb".to_owned(),
+        previous_edges: 1000,
+        regressed_edges: 700,
+        drop_pct: 30.0,
+        reverted,
+    };
+    store
+        .record_auto_revert_event(&mk("e1", "2026-07-01T10:00:00Z", "/p/a", true))
+        .await
+        .unwrap();
+    store
+        .record_auto_revert_event(&mk("e2", "2026-07-02T10:00:00Z", "/p/a", false))
+        .await
+        .unwrap();
+    store
+        .record_auto_revert_event(&mk("e3", "2026-07-03T10:00:00Z", "/p/b", true))
+        .await
+        .unwrap();
+
+    // Newest first, across all projects.
+    let all = store.list_auto_revert_events(None, 50).await.unwrap();
+    assert_eq!(
+        all.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        ["e3", "e2", "e1"]
+    );
+
+    // Scoped to one project.
+    let a = store
+        .list_auto_revert_events(Some("/p/a"), 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        ["e2", "e1"]
+    );
+    assert!(!a[0].reverted, "e2 was notify-only");
+
+    // Limit caps the rows.
+    assert_eq!(
+        store.list_auto_revert_events(None, 1).await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]

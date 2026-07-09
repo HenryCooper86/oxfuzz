@@ -1585,6 +1585,24 @@ pub async fn project_auto_revert_override(
         .await)
 }
 
+/// The auto-revert audit trail (newest first). `project` scopes to one project;
+/// omit it for every project. `limit` caps the rows.
+#[tauri::command]
+pub async fn auto_revert_events(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<hf_service::AutoRevertEvent>, String> {
+    let path = project.filter(|p| !p.is_empty());
+    Ok(state
+        .container
+        .auto_revert_events(
+            path.as_deref().map(std::path::Path::new),
+            limit.unwrap_or(200),
+        )
+        .await)
+}
+
 /// The active project's effective auto-revert policy (override merged over the
 /// global default) plus whether an override applies, for the Workbench badge.
 #[tauri::command]
