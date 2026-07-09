@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
 import { useConfirm } from "../providers/ConfirmContext";
+import { PathActions } from "../components/PathActions";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type { CorpusEntry } from "../types";
@@ -189,6 +190,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
                 <th className="text-right text-xs text-text-muted uppercase px-3 py-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
                   Size
                 </th>
+                <th className="px-3 py-2" />
               </tr>
             </thead>
             <tbody>
@@ -198,6 +200,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
                   <td className="px-3 py-2 font-mono text-xs text-text-muted">{e.sha256.slice(0, 16)}...</td>
                   <td className="px-3 py-2 text-xs text-text-secondary">{e.source}</td>
                   <td className="px-3 py-2 text-right text-xs text-text-secondary">{e.size}b</td>
+                  <td className="px-3 py-2 text-right"><PathActions path={e.path} /></td>
                 </tr>
               ))}
             </tbody>

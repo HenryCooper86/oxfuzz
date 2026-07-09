@@ -205,8 +205,11 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           active={activeView === "settings"}
           onNavigate={onNavigate}
         />
-        <div className="text-text-muted text-center" style={{ padding: "6px 10px 0", fontSize: "11px" }}>
-          hobot_fuzz v0.1.0
+        <div className="text-text-muted text-center flex flex-col items-center gap-0.5" style={{ padding: "6px 10px 0", fontSize: "11px" }}>
+          <span>
+            Press <kbd style={{ padding: "0 3px", border: "1px solid var(--border)", borderRadius: 3 }}>⌘K</kbd> to search
+          </span>
+          <span>hobot_fuzz v0.1.0</span>
         </div>
       </div>
     </nav>

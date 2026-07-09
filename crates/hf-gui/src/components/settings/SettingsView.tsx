@@ -12,6 +12,7 @@ import { ArrowLeft, Server, HardDrive, Crosshair, Shield, Database, Info, Slider
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18n";
 import { useToast } from "../ui/Toast";
+import { useConfirm } from "../../providers/ConfirmContext";
 import { Button } from "../ui/Button";
 import { LoadingState } from "../ui";
 import { GeneralTab } from "./GeneralTab";
@@ -103,6 +104,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const { toast } = useToast();
+  const confirm = useConfirm();
 
   const section = SECTIONS.find((s) => s.id === active)!;
   const hasConfig = section.config !== null;
@@ -190,9 +192,9 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
     setDirty(true);
   }
 
-  function selectSection(id: SectionId) {
+  async function selectSection(id: SectionId) {
     if (id === active) return;
-    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    if (dirty && !(await confirm({ title: "Discard unsaved changes?", message: "You have unsaved settings changes.", danger: true, confirmLabel: "Discard" }))) return;
     setMode("form");
     setActive(id);
   }

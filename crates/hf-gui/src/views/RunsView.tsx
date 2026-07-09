@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import type { RunHistoryItem } from "../types";
-import { ViewHeader, EmptyState, Button } from "../components/ui";
-import { Play, Bug, Clock, GitCompare, X } from "lucide-react";
+import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
+import { Play, Bug, Clock, GitCompare, X, Search } from "lucide-react";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -30,6 +30,7 @@ export function RunsView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
+  const [filter, setFilter] = useState("");
 
   const load = useCallback(async () => {
     setError(null);
@@ -60,6 +61,9 @@ export function RunsView() {
     .map((id) => runs.find((r) => r.id === id))
     .filter((r): r is RunHistoryItem => !!r);
 
+  const q = filter.trim().toLowerCase();
+  const shownRuns = q ? runs.filter((r) => `${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
@@ -68,8 +72,9 @@ export function RunsView() {
       />
 
       {error && (
-        <div className="surface-card text-xs" style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--error)", borderColor: "var(--error)" }}>
-          Failed to load run history: {error}
+        <div className="surface-card flex items-center justify-between gap-3" style={{ padding: "var(--space-sm) var(--space-md)", borderColor: "var(--error)" }}>
+          <span className="text-xs min-w-0 truncate" style={{ color: "var(--error)" }}>Failed to load run history: {error}</span>
+          <Button variant="outline" size="sm" onClick={() => void load()}>Retry</Button>
         </div>
       )}
 
@@ -102,7 +107,13 @@ export function RunsView() {
         <EmptyState icon={<Play size={20} />} title="No runs yet" hint="Start a fuzz campaign from the Run view; each run is recorded here." />
       ) : (
         <div className="flex flex-col gap-1.5">
-          {runs.map((r) => {
+          {runs.length > 4 && (
+            <div className="flex items-center gap-2 mb-1">
+              <Search size={14} className="text-text-muted shrink-0" />
+              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by engine or status..." className="flex-1" />
+            </div>
+          )}
+          {shownRuns.map((r) => {
             const isSel = selected.includes(r.id);
             return (
               <button
