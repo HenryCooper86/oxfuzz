@@ -1322,6 +1322,109 @@ impl ServiceContainer {
             .await
     }
 
+    /// The target a persisted run exercised, resolved through its harness
+    /// (`run.config.harness_id -> harness.target_id`). `None` if unrecorded.
+    async fn run_target_id(&self, store: &Store, run: &RunRecord) -> Option<Uuid> {
+        let harness_id = run.config.as_ref().map(|c| c.harness_id)?;
+        let harness = store.get_harness(harness_id).await.ok().flatten()?;
+        Some(harness.target_id)
+    }
+
+    /// Evaluate the auto-revert policy for a just-finished run and, if it
+    /// triggered, restore the previous (last-good) harness revision.
+    ///
+    /// The policy fires only when it is enabled and this run's harness revision
+    /// differs from the previous finished run for the same target *and* this
+    /// run's peak edge coverage dropped by at least the configured percentage
+    /// versus that previous run. The restore reuses
+    /// [`Self::revert_harness_from_run`], so the recompile is HITL-gated exactly
+    /// like a manual revert -- a denied approval simply leaves the harness
+    /// unchanged. Returns the outcome only when the revert actually applied.
+    async fn maybe_auto_revert(
+        &self,
+        project: &Path,
+        target: &str,
+        this_run_id: Uuid,
+        this_edges: u64,
+        this_rev: Option<&str>,
+    ) -> Option<AutoRevertOutcome> {
+        let policy = crate::config::auto_revert_policy();
+        if !policy.enabled {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        // Without a recorded revision we cannot attribute a change to a harness.
+        let this_rev = this_rev.filter(|r| !r.is_empty())?;
+        let target_id = self
+            .resolve_target_id(project, target, TargetLanguage::C)
+            .await;
+
+        // The most recent finished run for this same target, before this one,
+        // that recorded edge coverage and a harness revision -- the baseline.
+        let key = project.to_string_lossy().to_string();
+        let mut runs = store.list_runs(Some(&key)).await.unwrap_or_default();
+        runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+        let this_started = runs
+            .iter()
+            .find(|r| r.id == this_run_id)
+            .map(|r| r.started_at);
+        let mut prev = None;
+        for r in runs {
+            if r.id == this_run_id
+                || r.status != RunStatus::Done
+                || r.edges.is_none()
+                || r.harness_rev.is_none()
+            {
+                continue;
+            }
+            if let Some(t) = this_started {
+                if r.started_at >= t {
+                    continue;
+                }
+            }
+            if self.run_target_id(store, &r).await == Some(target_id) {
+                prev = Some(r);
+                break;
+            }
+        }
+        let prev = prev?;
+        let prev_rev = prev.harness_rev.clone().unwrap_or_default();
+        let prev_edges = prev.edges.unwrap_or(0);
+        let drop_pct = auto_revert_decision(
+            &prev_rev,
+            this_rev,
+            prev_edges,
+            this_edges,
+            policy.threshold_pct,
+        )?;
+
+        // Regression confirmed: restore the previous run's harness. The recompile
+        // is HITL-gated inside `harness_compile`; if approval is denied the
+        // revert errors and we leave everything as-is.
+        let prev_id = prev.id.to_string();
+        match self.revert_harness_from_run(&prev_id).await {
+            Ok(_) => {
+                let detail = format!(
+                    "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev} -> restored {prev_rev} from run {prev_id}"
+                );
+                tracing::warn!("auto-revert: {detail}");
+                self.run_journal.note(this_run_id, "auto-revert", &detail);
+                Some(AutoRevertOutcome {
+                    reverted_to_run: prev_id,
+                    from_rev: this_rev.to_owned(),
+                    to_rev: prev_rev,
+                    previous_edges: prev_edges,
+                    regressed_edges: this_edges,
+                    drop_pct,
+                })
+            }
+            Err(e) => {
+                tracing::warn!("auto-revert declined or failed: {e}");
+                None
+            }
+        }
+    }
+
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
@@ -2653,11 +2756,23 @@ impl ServiceContainer {
                 }
             }
         }
+        // Auto-revert policy: if this run's harness revision regressed coverage
+        // past the threshold versus the previous run for this target, restore
+        // that last-good revision (HITL-gated recompile). Skipped for cancelled
+        // runs, whose truncated coverage is not a fair comparison.
+        let auto_revert = if was_cancelled {
+            None
+        } else {
+            let this_rev = run_record.as_ref().and_then(|r| r.harness_rev.clone());
+            self.maybe_auto_revert(project, target, run_id, edges, this_rev.as_deref())
+                .await
+        };
         Ok(RunSummary {
             edges,
             execs,
             crashes: u64::from(crashes),
             stagnation: feedback.proposal(),
+            auto_revert,
         })
     }
 
@@ -4185,6 +4300,31 @@ fn downsample(series: &[(f64, u64, f64)], cap: usize) -> Vec<(f64, u64, f64)> {
     out
 }
 
+/// The auto-revert decision, isolated from the async plumbing so its rules are
+/// unit-testable. Returns `Some(drop_pct)` when the policy should restore the
+/// previous harness: the revision changed (`prev_rev != this_rev`), there is a
+/// non-zero baseline, coverage dropped, and the drop meets the threshold.
+/// Returns `None` otherwise.
+fn auto_revert_decision(
+    prev_rev: &str,
+    this_rev: &str,
+    prev_edges: u64,
+    this_edges: u64,
+    threshold_pct: f64,
+) -> Option<f64> {
+    // Only a genuine revision change can be a revision regression; an unchanged
+    // harness covering fewer edges is run-to-run noise.
+    if prev_rev == this_rev {
+        return None;
+    }
+    // No baseline, or coverage held/improved -> nothing to revert.
+    if prev_edges == 0 || this_edges >= prev_edges {
+        return None;
+    }
+    let drop_pct = (prev_edges - this_edges) as f64 / prev_edges as f64 * 100.0;
+    (drop_pct >= threshold_pct).then_some(drop_pct)
+}
+
 /// One run in the persisted run history (see [`ServiceContainer::run_history`]).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunHistoryItem {
@@ -4215,6 +4355,31 @@ pub struct RunSummary {
     /// layer offer an iterate-next affordance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stagnation: Option<hf_coverage::StagnationProposal>,
+    /// Set when the auto-revert policy fired: this run's harness regressed
+    /// coverage past the configured threshold, so an earlier (last-good)
+    /// revision was restored and recompiled. Lets a presentation layer surface
+    /// the automatic action. `None` when the policy is off or did not trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_revert: Option<AutoRevertOutcome>,
+}
+
+/// The outcome of the auto-revert policy firing for a finished run: its harness
+/// revision changed and coverage dropped past the threshold, so the previous
+/// run's (last-good) harness was restored and recompiled.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AutoRevertOutcome {
+    /// The id of the earlier run whose harness was restored.
+    pub reverted_to_run: String,
+    /// The regressed run's harness revision (the one that was replaced).
+    pub from_rev: String,
+    /// The restored run's harness revision.
+    pub to_rev: String,
+    /// Peak edge coverage of the restored (previous) run.
+    pub previous_edges: u64,
+    /// Peak edge coverage of the regressed run.
+    pub regressed_edges: u64,
+    /// The percent coverage drop that triggered the revert.
+    pub drop_pct: f64,
 }
 
 /// Inputs for a syzkaller kernel-fuzzing campaign.
@@ -4941,6 +5106,47 @@ mod downsample_tests {
         let out = downsample(&s, 10);
         assert!(out.len() <= 11, "capped near the target, got {}", out.len());
         assert_eq!(out.last().unwrap().1, 99, "always keeps the final sample");
+    }
+}
+
+#[cfg(test)]
+mod auto_revert_tests {
+    use super::auto_revert_decision;
+
+    #[test]
+    fn fires_when_changed_harness_drops_coverage_past_threshold() {
+        // 1000 -> 700 edges is a 30% drop with a changed revision.
+        let drop = auto_revert_decision("old", "new", 1000, 700, 20.0);
+        assert!(matches!(drop, Some(p) if (p - 30.0).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn does_not_fire_when_harness_unchanged() {
+        // Same revision: a coverage dip is noise, not a revision regression.
+        assert!(auto_revert_decision("same", "same", 1000, 100, 20.0).is_none());
+    }
+
+    #[test]
+    fn does_not_fire_below_threshold() {
+        // 1000 -> 900 is only a 10% drop; threshold is 20%.
+        assert!(auto_revert_decision("old", "new", 1000, 900, 20.0).is_none());
+    }
+
+    #[test]
+    fn does_not_fire_when_coverage_held_or_improved() {
+        assert!(auto_revert_decision("old", "new", 1000, 1000, 20.0).is_none());
+        assert!(auto_revert_decision("old", "new", 1000, 1200, 20.0).is_none());
+    }
+
+    #[test]
+    fn does_not_fire_without_a_baseline() {
+        assert!(auto_revert_decision("old", "new", 0, 0, 20.0).is_none());
+    }
+
+    #[test]
+    fn fires_exactly_at_threshold() {
+        let drop = auto_revert_decision("old", "new", 100, 80, 20.0);
+        assert!(matches!(drop, Some(p) if (p - 20.0).abs() < f64::EPSILON));
     }
 }
 
