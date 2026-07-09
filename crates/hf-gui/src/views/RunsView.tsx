@@ -432,6 +432,7 @@ function AutoRevertPolicyCard() {
   const { toast } = useToast();
   const [enabled, setEnabled] = useState(false);
   const [threshold, setThreshold] = useState(20);
+  const [notifyOnly, setNotifyOnly] = useState(false);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -444,8 +445,9 @@ function AutoRevertPolicyCard() {
         if (cancelled) return;
         if (typeof val.auto_revert_enabled === "boolean") setEnabled(val.auto_revert_enabled);
         if (typeof val.auto_revert_threshold_pct === "number") setThreshold(val.auto_revert_threshold_pct);
+        if (typeof val.auto_revert_notify_only === "boolean") setNotifyOnly(val.auto_revert_notify_only);
       } catch {
-        // Keep the safe defaults (off, 20%) if the config cannot be read.
+        // Keep the safe defaults (off, 20%, apply) if the config cannot be read.
       } finally {
         if (!cancelled) setReady(true);
       }
@@ -457,17 +459,20 @@ function AutoRevertPolicyCard() {
   }, []);
 
   const persist = useCallback(
-    async (next: { enabled: boolean; threshold: number }) => {
+    async (next: { enabled: boolean; threshold: number; notifyOnly: boolean }) => {
       setSaving(true);
       try {
         const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
         const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
         val.auto_revert_enabled = next.enabled;
         val.auto_revert_threshold_pct = next.threshold;
+        val.auto_revert_notify_only = next.notifyOnly;
         const toml = await getTransport().invoke<string>("config_value_to_toml", { value: val });
         await getTransport().invoke("write_config", { name: "hobot-fuzz", content: toml });
         toast({
-          title: next.enabled ? `Auto-revert armed (>${next.threshold}% drop)` : "Auto-revert disabled",
+          title: next.enabled
+            ? `Auto-revert armed (>${next.threshold}% drop${next.notifyOnly ? ", notify-only" : ""})`
+            : "Auto-revert disabled",
           variant: "success",
         });
       } catch (e) {
@@ -482,13 +487,19 @@ function AutoRevertPolicyCard() {
   const toggle = () => {
     const next = !enabled;
     setEnabled(next);
-    void persist({ enabled: next, threshold });
+    void persist({ enabled: next, threshold, notifyOnly });
   };
 
   const commitThreshold = () => {
     const clamped = Math.min(100, Math.max(1, Math.round(threshold)));
     setThreshold(clamped);
-    if (enabled) void persist({ enabled, threshold: clamped });
+    if (enabled) void persist({ enabled, threshold: clamped, notifyOnly });
+  };
+
+  const toggleNotifyOnly = () => {
+    const next = !notifyOnly;
+    setNotifyOnly(next);
+    if (enabled) void persist({ enabled, threshold, notifyOnly: next });
   };
 
   return (
@@ -554,10 +565,34 @@ function AutoRevertPolicyCard() {
           </button>
         </div>
       </div>
+      {enabled && (
+        <label
+          className="flex items-center gap-2 text-xs"
+          style={{ cursor: ready && !saving ? "pointer" : "default", color: "var(--text-secondary)" }}
+        >
+          <input
+            type="checkbox"
+            checked={notifyOnly}
+            disabled={!ready || saving}
+            onChange={toggleNotifyOnly}
+            aria-label="Notify only, do not restore automatically"
+          />
+          Notify-only &mdash; flag the regression but don&apos;t restore automatically (recommended for
+          scheduled campaigns)
+        </label>
+      )}
       <p className="text-xs text-text-muted" style={{ lineHeight: 1.5 }}>
         When a run&apos;s harness revision changes and its edge coverage drops by at least this much
-        versus the previous run for the same target, the previous (last-good) revision is restored and
-        recompiled automatically. The recompile still requires the usual sandbox approval.
+        versus the previous run for the same target,{" "}
+        {notifyOnly ? (
+          <>the regression is flagged in run history and the campaign log, but the harness is left as-is.</>
+        ) : (
+          <>
+            the previous (last-good) revision is restored and recompiled automatically. The recompile
+            still requires the usual sandbox approval.
+          </>
+        )}{" "}
+        Scheduled campaigns apply this same policy between refinement iterations.
       </p>
     </section>
   );
