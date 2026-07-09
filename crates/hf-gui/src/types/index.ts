@@ -36,6 +36,7 @@ export interface RunHistoryItem {
   crashes: number;
   edges: number | null;
   execs: number | null;
+  harness_rev: string | null;
 }
 
 export interface TargetCandidate {

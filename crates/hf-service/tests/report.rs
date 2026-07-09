@@ -83,6 +83,7 @@ fn populated() -> ReportData {
             edges: None,
             execs: None,
             crash_count: None,
+            harness_rev: None,
         }),
         crashes: vec![sample_crash()],
         coverage: Some(CoverageSummary {
