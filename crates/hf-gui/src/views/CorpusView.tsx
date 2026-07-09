@@ -171,8 +171,8 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
       )}
 
       {entries.length > 0 && (
-        <div className="surface-card overflow-hidden" style={{ animation: "slideInUp 0.2s ease" }}>
-          <table className="w-full text-sm">
+        <div className="surface-card overflow-x-auto" style={{ animation: "slideInUp 0.2s ease" }}>
+          <table className="w-full text-sm" style={{ minWidth: 480 }}>
             <thead>
               <tr className="border-b border-border">
                 <th className="text-left text-xs text-text-muted uppercase px-3 py-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
