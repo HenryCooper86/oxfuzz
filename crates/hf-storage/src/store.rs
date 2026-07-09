@@ -623,7 +623,16 @@ impl Store {
     /// Returns an error on a SQL failure.
     pub async fn clear_knowledge(&self) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
-        for table in ["crashes", "corpus_entries", "harnesses", "runs", "targets"] {
+        // `auto_revert_events` is campaign history, so it is cleared too;
+        // `project_settings` is configuration and is intentionally left intact.
+        for table in [
+            "crashes",
+            "corpus_entries",
+            "harnesses",
+            "runs",
+            "targets",
+            "auto_revert_events",
+        ] {
             sqlx::query(&format!("DELETE FROM {table}"))
                 .execute(&mut *tx)
                 .await?;
@@ -674,6 +683,17 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM targets WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        // Per-project settings and the audit trail are keyed by project_root
+        // directly, so drop them here rather than leaving orphans that would
+        // resurface if the same path is re-added.
+        sqlx::query("DELETE FROM project_settings WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM auto_revert_events WHERE project_root = ?1")
             .bind(project_root)
             .execute(&mut *tx)
             .await?;
