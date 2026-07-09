@@ -3,7 +3,7 @@ import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
-import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart } from "lucide-react";
+import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 
 function fmtDuration(secs: number | null): string {
@@ -103,6 +103,13 @@ export function RunsView() {
     (r, i) => i > 0 && r.harness_rev != null && r.harness_rev !== trend[i - 1].harness_rev,
   );
   const anyRevChange = changeAt.some(Boolean);
+  // A regression: the harness changed AND coverage dropped vs the previous run,
+  // so the new revision is worse -- flag it so bad harness changes stand out.
+  const regressAt = trend.map(
+    (r, i) => changeAt[i] && (r.edges ?? 0) < (trend[i - 1].edges ?? 0),
+  );
+  const regressedIds = new Set(trend.filter((_, i) => regressAt[i]).map((r) => r.id));
+  const regressCount = regressAt.filter(Boolean).length;
 
   // Open the harness diff between a run and the one before it, from a marker.
   async function openRevDiff(i: number) {
@@ -150,6 +157,7 @@ export function RunsView() {
               value={(r) => r.edges ?? 0}
               color="var(--success)"
               marks={changeAt}
+              warn={regressAt}
               onMark={(i) => void openRevDiff(i)}
             />
             <MiniTrend
@@ -167,10 +175,22 @@ export function RunsView() {
               color="var(--error)"
             />
           </div>
+          {regressCount > 0 && (
+            <div
+              className="rounded-md flex items-start gap-2 text-xs"
+              style={{ padding: "var(--space-sm) var(--space-md)", background: "var(--error-subtle)", border: "1px solid var(--error)" }}
+            >
+              <AlertTriangle size={14} style={{ color: "var(--error)", flexShrink: 0, marginTop: 1 }} />
+              <span style={{ color: "var(--error)" }}>
+                {regressCount} harness revision{regressCount === 1 ? "" : "s"} reduced coverage. Click a{" "}
+                <span style={{ fontWeight: 600 }}>red ▲</span> to see the change that regressed it.
+              </span>
+            </div>
+          )}
           {anyRevChange && (
             <p className="text-xs text-text-muted flex items-center gap-1">
               <span style={{ color: "var(--accent)" }}>▲</span>
-              marks a run where the harness revision changed — click it to see exactly what changed in the harness.
+              marks a run where the harness revision changed{regressCount > 0 ? " (red = coverage dropped)" : ""} — click it to see exactly what changed in the harness.
             </p>
           )}
         </section>
@@ -240,6 +260,15 @@ export function RunsView() {
                         title={`Harness revision ${r.harness_rev}`}
                       >
                         {revLabel(r.harness_rev)}
+                      </span>
+                    )}
+                    {regressedIds.has(r.id) && (
+                      <span
+                        className="text-xs shrink-0 px-1.5 py-0.5 rounded-sm inline-flex items-center gap-1"
+                        style={{ background: "var(--error-subtle)", color: "var(--error)" }}
+                        title="Coverage dropped after this harness revision"
+                      >
+                        <AlertTriangle size={10} /> regressed
                       </span>
                     )}
                     <span className="flex-1" />
@@ -341,6 +370,7 @@ function MiniTrend({
   value,
   color,
   marks,
+  warn,
   onMark,
 }: {
   title: string;
@@ -350,6 +380,8 @@ function MiniTrend({
   color: string;
   /** Per-bar flag: a harness revision change occurred at this run. */
   marks?: boolean[];
+  /** Per-bar flag: this run regressed coverage (drop after a harness change). */
+  warn?: boolean[];
   /** Clicking a change marker opens the harness diff for that run. */
   onMark?: (index: number) => void;
 }) {
@@ -376,28 +408,37 @@ function MiniTrend({
       <div className="flex items-end gap-0.5 mt-2" style={{ height: 40 }}>
         {values.map((v, i) => {
           const changed = marks?.[i];
+          const regressed = warn?.[i];
+          const markColor = regressed ? "var(--error)" : "var(--accent)";
+          const barColor = regressed
+            ? "var(--error)"
+            : changed
+              ? "var(--accent)"
+              : i === values.length - 1
+                ? color
+                : "var(--border)";
           return (
             <div key={i} className="flex flex-col items-center justify-end" style={{ flex: 1, minWidth: 2, height: "100%" }}>
               {changed && onMark ? (
                 <button
                   onClick={() => onMark(i)}
-                  title="View the harness diff that caused this"
+                  title={regressed ? "Coverage dropped here — view the harness diff" : "View the harness diff that caused this"}
                   aria-label="View harness diff"
-                  style={{ height: 8, lineHeight: "8px", fontSize: 8, color: "var(--accent)", background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
+                  style={{ height: 8, lineHeight: "8px", fontSize: 8, color: markColor, background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
                 >
                   ▲
                 </button>
               ) : (
-                <span style={{ height: 8, lineHeight: "8px", fontSize: 8, color: "var(--accent)" }}>
+                <span style={{ height: 8, lineHeight: "8px", fontSize: 8, color: markColor }}>
                   {changed ? "▲" : ""}
                 </span>
               )}
               <div
-                title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${changed ? " (harness changed)" : ""}`}
+                title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${regressed ? " (coverage regressed after harness change)" : changed ? " (harness changed)" : ""}`}
                 style={{
                   width: "100%",
                   height: `${Math.max(3, (v / max) * 100)}%`,
-                  background: changed ? "var(--accent)" : i === values.length - 1 ? color : "var(--border)",
+                  background: barColor,
                   borderRadius: 1,
                 }}
               />
