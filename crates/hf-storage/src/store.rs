@@ -59,6 +59,18 @@ pub enum RunStatus {
     Cancelled,
 }
 
+/// A project's stored auto-revert policy override (a full policy for one
+/// project; absence means the project inherits the global policy).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectAutoRevert {
+    /// Whether the policy is armed for this project.
+    pub enabled: bool,
+    /// The edge-coverage drop (percent) at or above which a revert fires.
+    pub threshold_pct: f64,
+    /// Report the regression without restoring the harness.
+    pub notify_only: bool,
+}
+
 /// A persisted fuzz-run record.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -309,6 +321,68 @@ impl Store {
                 .ok()
                 .flatten()
         }))
+    }
+
+    /// Upsert a project's auto-revert policy override. A stored row fully
+    /// specifies the policy for `project_root`; absence means inherit the global.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn set_project_auto_revert(
+        &self,
+        project_root: &str,
+        override_: ProjectAutoRevert,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO project_settings \
+                 (project_root, auto_revert_enabled, auto_revert_threshold_pct, auto_revert_notify_only) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(project_root) DO UPDATE SET \
+                 auto_revert_enabled = ?2, \
+                 auto_revert_threshold_pct = ?3, \
+                 auto_revert_notify_only = ?4",
+        )
+        .bind(project_root)
+        .bind(i64::from(override_.enabled))
+        .bind(override_.threshold_pct)
+        .bind(i64::from(override_.notify_only))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A project's auto-revert override, or `None` when it inherits the global.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn project_auto_revert(
+        &self,
+        project_root: &str,
+    ) -> Result<Option<ProjectAutoRevert>, StorageError> {
+        let row = sqlx::query(
+            "SELECT auto_revert_enabled, auto_revert_threshold_pct, auto_revert_notify_only \
+             FROM project_settings WHERE project_root = ?1",
+        )
+        .bind(project_root)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| ProjectAutoRevert {
+            enabled: r.get::<i64, _>("auto_revert_enabled") != 0,
+            threshold_pct: r.get::<f64, _>("auto_revert_threshold_pct"),
+            notify_only: r.get::<i64, _>("auto_revert_notify_only") != 0,
+        }))
+    }
+
+    /// Clear a project's auto-revert override, so it inherits the global policy.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn clear_project_auto_revert(&self, project_root: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM project_settings WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Update a run's status (and optionally its end time).
