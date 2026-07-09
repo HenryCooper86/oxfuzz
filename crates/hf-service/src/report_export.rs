@@ -89,7 +89,11 @@ pub fn write_report(
                         .to_owned(),
                 )
             })?;
-            pandoc_convert(markdown, out_path, Some(engine))
+            // LaTeX-based PDF engines (xelatex/pdflatex) use fonts that lack the
+            // box-drawing / block / arrow glyphs a report can contain (sparklines,
+            // mermaid arrows), which get silently dropped. Substitute ASCII so the
+            // PDF renders cleanly. MD/HTML/DOCX keep the original glyphs.
+            pandoc_convert(&sanitize_for_latex(markdown), out_path, Some(engine))
         }
     }
 }
@@ -131,6 +135,38 @@ th{background:#f7f7f8}\
 blockquote{margin:1em 0;padding:.2em 1em;border-left:3px solid #d0d0d0;color:#555}\
 a{color:#0b6bcb}\
 @media print{main.report{max-width:none;padding:0}a{color:inherit}}";
+
+/// Replace box-drawing, block-element, shade, and arrow glyphs with ASCII so a
+/// LaTeX PDF engine (whose default fonts lack them) renders without dropping
+/// characters. Only applied to the PDF path; other formats keep the originals.
+fn sanitize_for_latex(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    for c in md.chars() {
+        match c {
+            // Shades (progress bars / sparklines).
+            '\u{2591}' => out.push('.'),
+            '\u{2592}' => out.push(':'),
+            '\u{2593}' => out.push('='),
+            // Remaining block elements (full/partial/eighth blocks).
+            '\u{2580}'..='\u{259F}' => out.push('#'),
+            // Box drawing: horizontals, verticals, everything else -> - | +.
+            '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2508}' | '\u{2509}'
+            | '\u{254C}' | '\u{254D}' => out.push('-'),
+            '\u{2502}' | '\u{2503}' | '\u{2506}' | '\u{2507}' | '\u{250A}' | '\u{250B}'
+            | '\u{254E}' | '\u{254F}' => out.push('|'),
+            '\u{2500}'..='\u{257F}' => out.push('+'),
+            // Arrows (common in mermaid / prose).
+            '\u{2190}' => out.push_str("<-"),
+            '\u{2192}' => out.push_str("->"),
+            '\u{2194}' => out.push_str("<->"),
+            '\u{21D2}' => out.push_str("=>"),
+            '\u{2191}' => out.push('^'),
+            '\u{2193}' => out.push('v'),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -242,6 +278,17 @@ mod tests {
         write_report(md, "t", ReportFormat::Html, &htmlp).unwrap();
         let html = std::fs::read_to_string(&htmlp).unwrap();
         assert!(html.contains("<h1>Hi</h1>"));
+    }
+
+    #[test]
+    fn sanitize_for_latex_maps_drawing_and_arrows_to_ascii() {
+        let s = sanitize_for_latex("bar ░▒▓█ box ─│┼ arrow A→B ⇒ C");
+        assert!(!s.chars().any(|c| ('\u{2500}'..='\u{259F}').contains(&c)));
+        assert!(!s.contains('\u{2192}') && !s.contains('\u{21D2}'));
+        assert!(s.contains("A->B"));
+        assert!(s.contains("=>"));
+        // Plain ASCII and normal text are untouched.
+        assert!(s.contains("bar ") && s.contains("box ") && s.contains(" C"));
     }
 
     #[test]
