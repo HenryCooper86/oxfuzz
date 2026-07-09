@@ -282,6 +282,35 @@ impl Store {
         }))
     }
 
+    /// Store the harness source a run used (for revision diffs).
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn set_run_harness_source(&self, id: Uuid, source: &str) -> Result<(), StorageError> {
+        sqlx::query("UPDATE runs SET harness_source = ?2 WHERE id = ?1")
+            .bind(id.to_string())
+            .bind(source)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Read back a run's stored harness source, if any.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn run_harness_source(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        let row = sqlx::query("SELECT harness_source FROM runs WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| {
+            r.try_get::<Option<String>, _>("harness_source")
+                .ok()
+                .flatten()
+        }))
+    }
+
     /// Update a run's status (and optionally its end time).
     ///
     /// # Errors
