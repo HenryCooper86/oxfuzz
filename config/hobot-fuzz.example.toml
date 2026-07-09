@@ -28,3 +28,12 @@ smoke_fuzz_duration_secs = 60
 # (regenerate the harness / add seeds). Lower proposes sooner; set it very high
 # to effectively silence the proposal. Override with HF_COVERAGE_STAGNATION_SECS.
 coverage_stagnation_secs = 120
+
+# Auto-revert policy: when a run's harness revision changed AND its edge
+# coverage dropped by at least `auto_revert_threshold_pct` percent versus the
+# previous run for the same target, automatically restore the previous
+# (last-good) harness revision and recompile it. The recompile is HITL-gated
+# like any other compile. Off by default -- opt in per project.
+# Override with HF_AUTO_REVERT (1/true) and HF_AUTO_REVERT_THRESHOLD_PCT.
+auto_revert_enabled = false
+auto_revert_threshold_pct = 20.0
