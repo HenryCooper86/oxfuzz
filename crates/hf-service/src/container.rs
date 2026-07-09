@@ -1254,6 +1254,23 @@ impl ServiceContainer {
         }
     }
 
+    /// The harness source a run used, for diffing revisions (empty if none was
+    /// recorded).
+    pub async fn run_harness_source(&self, run_id: &str) -> String {
+        let Some(store) = self.store.as_ref() else {
+            return String::new();
+        };
+        let Ok(id) = Uuid::parse_str(run_id) else {
+            return String::new();
+        };
+        store
+            .run_harness_source(id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
@@ -2426,10 +2443,11 @@ impl ServiceContainer {
             env: Vec::new(),
             extra_args,
         };
-        // A short content hash of the harness the run is about to use, so a
-        // coverage change in the run history can be attributed to the harness
-        // revision that produced it.
-        let harness_rev = read_current_harness_source(&workspace).map(|src| {
+        // The harness the run is about to use, plus a short content hash of it,
+        // so a coverage change in the run history can be attributed to -- and
+        // diffed against -- the harness revision that produced it.
+        let harness_source = read_current_harness_source(&workspace);
+        let harness_rev = harness_source.as_ref().map(|src| {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(src.as_bytes());
@@ -2452,6 +2470,11 @@ impl ServiceContainer {
         if let (Some(store), Some(rec)) = (&self.store, &run_record) {
             if let Err(e) = store.insert_run(rec).await {
                 tracing::warn!("failed to record run start: {e}");
+            }
+            if let Some(src) = &harness_source {
+                if let Err(e) = store.set_run_harness_source(rec.id, src).await {
+                    tracing::warn!("failed to persist harness source: {e}");
+                }
             }
         }
         // Journal the run as an open scope so an interrupted run (crash/quit
