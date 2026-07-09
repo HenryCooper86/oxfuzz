@@ -482,6 +482,30 @@ async fn delete_project_cascades_and_isolates_other_projects() {
     let (_gone_target, gone_run) = seed("/gone").await;
     let (kept_target, kept_run) = seed("/kept").await;
 
+    // Both projects also carry a policy override and an audit event.
+    let over = ProjectAutoRevert {
+        enabled: true,
+        threshold_pct: 20.0,
+        notify_only: false,
+    };
+    store.set_project_auto_revert("/gone", over).await.unwrap();
+    store.set_project_auto_revert("/kept", over).await.unwrap();
+    let ev = |project: &str| AutoRevertEvent {
+        id: Uuid::new_v4().to_string(),
+        ts: "2026-07-09T10:00:00Z".to_owned(),
+        project_root: project.to_owned(),
+        target: "parse".to_owned(),
+        run_id: "run".to_owned(),
+        from_rev: "aaaaaaaaaaaa".to_owned(),
+        to_rev: "bbbbbbbbbbbb".to_owned(),
+        previous_edges: 1000,
+        regressed_edges: 700,
+        drop_pct: 30.0,
+        reverted: true,
+    };
+    store.record_auto_revert_event(&ev("/gone")).await.unwrap();
+    store.record_auto_revert_event(&ev("/kept")).await.unwrap();
+
     store.delete_project("/gone").await.unwrap();
 
     // The deleted project is gone across every table.
@@ -489,6 +513,13 @@ async fn delete_project_cascades_and_isolates_other_projects() {
     assert!(store.list_runs(Some("/gone")).await.unwrap().is_empty());
     assert!(store
         .list_crashes_by_run(gone_run)
+        .await
+        .unwrap()
+        .is_empty());
+    // Its policy override and audit events are cascaded too.
+    assert_eq!(store.project_auto_revert("/gone").await.unwrap(), None);
+    assert!(store
+        .list_auto_revert_events(Some("/gone"), 50)
         .await
         .unwrap()
         .is_empty());
@@ -502,6 +533,18 @@ async fn delete_project_cascades_and_isolates_other_projects() {
         1
     );
     assert_eq!(store.list_crashes_by_run(kept_run).await.unwrap().len(), 1);
+    assert_eq!(
+        store.project_auto_revert("/kept").await.unwrap(),
+        Some(over)
+    );
+    assert_eq!(
+        store
+            .list_auto_revert_events(Some("/kept"), 50)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     // No orphaned children survive the delete.
     assert_eq!(store.list_all_harnesses().await.unwrap().len(), 1);
     assert_eq!(store.list_all_corpus_entries().await.unwrap().len(), 1);
