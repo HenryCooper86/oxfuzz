@@ -611,3 +611,16 @@ async fn set_run_stats_persists_edges_and_execs() {
     let listed = store.list_runs(Some("/proj")).await.unwrap();
     assert_eq!(listed[0].edges, Some(142));
 }
+
+#[tokio::test]
+async fn run_samples_roundtrip() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    let id = run.id;
+    store.insert_run(&run).await.unwrap();
+    assert!(store.run_samples(id).await.unwrap().is_none());
+
+    let json = r#"[{"t":0.0,"edges":3,"execs":100.0},{"t":5.0,"edges":9,"execs":250.0}]"#;
+    store.set_run_samples(id, json).await.unwrap();
+    assert_eq!(store.run_samples(id).await.unwrap().as_deref(), Some(json));
+}

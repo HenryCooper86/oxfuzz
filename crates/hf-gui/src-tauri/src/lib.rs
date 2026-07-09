@@ -23,10 +23,10 @@ use commands::{
     interrupted_runs, knowledge_index, knowledge_ingest, knowledge_search, knowledge_summary,
     list_agents, list_configs, list_models, list_report_drafts, list_skills, open_file_dialog,
     open_folder_dialog, open_path, provider_statuses, provider_test, read_config, read_skill,
-    report_formats, reveal_path, run_fuzzer, run_history, run_syzkaller, save_agent, save_report,
-    save_report_draft, save_skill, schedule_create, schedule_delete, schedule_history,
-    schedule_list, schedule_set_enabled, set_providers, show_window, system_snapshot,
-    system_status_cmd, triage, workbench_dashboard, write_config,
+    report_formats, reveal_path, run_coverage_series, run_fuzzer, run_history, run_syzkaller,
+    save_agent, save_report, save_report_draft, save_skill, schedule_create, schedule_delete,
+    schedule_history, schedule_list, schedule_set_enabled, set_providers, show_window,
+    system_snapshot, system_status_cmd, triage, workbench_dashboard, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -79,6 +79,7 @@ pub fn run() {
             reveal_path,
             open_path,
             run_history,
+            run_coverage_series,
             save_report,
             chat_send,
             chat_agent,

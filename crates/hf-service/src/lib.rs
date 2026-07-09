@@ -32,8 +32,9 @@ pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, project_workspace_dir,
     provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,
     workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot, ArtifactSummary, CompileOutcome,
-    MemorySnapshot, MinimizeOutcome, ProviderSnapshot, RegressionResult, RunHistoryItem,
-    RunSummary, SeedEntry, ServiceContainer, SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+    CoverageSample, MemorySnapshot, MinimizeOutcome, ProviderSnapshot, RegressionResult,
+    RunHistoryItem, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot, SyzkallerRunOpts,
+    SyzkallerSummary,
 };
 pub use init::{init_at, init_workspace, InitReport};
 pub use report_store::ReportDraft;

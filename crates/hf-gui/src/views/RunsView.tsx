@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
-import type { RunHistoryItem } from "../types";
+import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
-import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp } from "lucide-react";
+import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart } from "lucide-react";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -31,6 +31,21 @@ export function RunsView() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  // Per-run coverage curve cache: undefined = not fetched, "loading", or samples.
+  const [series, setSeries] = useState<Record<string, CoverageSample[] | "loading">>({});
+
+  const toggleCurve = useCallback(async (id: string) => {
+    setExpanded((cur) => (cur === id ? null : id));
+    if (series[id] !== undefined) return;
+    setSeries((s) => ({ ...s, [id]: "loading" }));
+    try {
+      const samples = await getTransport().invoke<CoverageSample[]>("run_coverage_series", { run_id: id });
+      setSeries((s) => ({ ...s, [id]: samples }));
+    } catch {
+      setSeries((s) => ({ ...s, [id]: [] }));
+    }
+  }, [series]);
 
   const load = useCallback(async () => {
     setError(null);
@@ -157,36 +172,64 @@ export function RunsView() {
           )}
           {shownRuns.map((r) => {
             const isSel = selected.includes(r.id);
+            const isOpen = expanded === r.id;
+            const data = series[r.id];
             return (
-              <button
-                key={r.id}
-                onClick={() => toggle(r.id)}
-                className="surface-card flex items-center gap-3 text-left transition-colors"
-                style={{ padding: "var(--space-sm) var(--space-md)", borderColor: isSel ? "var(--accent)" : undefined }}
-                title="Select to compare (up to 2)"
-              >
-                <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-                <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
-                <span className="text-xs shrink-0" style={{ color: STATUS_COLOR[r.status] ?? "var(--text-muted)" }}>{r.status}</span>
-                <span className="flex-1" />
-                <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak edge coverage">
-                  <Activity size={12} />
-                  {r.edges != null ? r.edges.toLocaleString() : "—"}
-                </span>
-                <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak execs/sec">
-                  <Zap size={12} />
-                  {r.execs != null ? Math.round(r.execs).toLocaleString() : "—"}
-                </span>
-                <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Crashes">
-                  <Bug size={12} style={{ color: r.crashes > 0 ? "var(--error)" : "var(--text-muted)" }} />
-                  {r.crashes}
-                </span>
-                <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Duration">
-                  <Clock size={12} />
-                  {fmtDuration(r.duration_secs)}
-                </span>
-                <span className="text-xs text-text-muted shrink-0 hidden sm:inline">{new Date(r.started_at).toLocaleString()}</span>
-              </button>
+              <div key={r.id} className="flex flex-col">
+                <div
+                  className="surface-card flex items-center gap-3 transition-colors"
+                  style={{ padding: "var(--space-sm) var(--space-md)", borderColor: isSel || isOpen ? "var(--accent)" : undefined }}
+                >
+                  <button
+                    onClick={() => toggle(r.id)}
+                    className="flex items-center gap-3 flex-1 min-w-0 text-left bg-transparent"
+                    style={{ border: "none", cursor: "pointer" }}
+                    title="Select to compare (up to 2)"
+                  >
+                    <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+                    <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
+                    <span className="text-xs shrink-0" style={{ color: STATUS_COLOR[r.status] ?? "var(--text-muted)" }}>{r.status}</span>
+                    <span className="flex-1" />
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak edge coverage">
+                      <Activity size={12} />
+                      {r.edges != null ? r.edges.toLocaleString() : "—"}
+                    </span>
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak execs/sec">
+                      <Zap size={12} />
+                      {r.execs != null ? Math.round(r.execs).toLocaleString() : "—"}
+                    </span>
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Crashes">
+                      <Bug size={12} style={{ color: r.crashes > 0 ? "var(--error)" : "var(--text-muted)" }} />
+                      {r.crashes}
+                    </span>
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Duration">
+                      <Clock size={12} />
+                      {fmtDuration(r.duration_secs)}
+                    </span>
+                    <span className="text-xs text-text-muted shrink-0 hidden sm:inline">{new Date(r.started_at).toLocaleString()}</span>
+                  </button>
+                  <button
+                    onClick={() => void toggleCurve(r.id)}
+                    className="shrink-0 inline-flex items-center justify-center rounded p-1 transition-colors"
+                    style={{ color: isOpen ? "var(--accent)" : "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
+                    title="Coverage-over-time curve"
+                    aria-label="Toggle coverage curve"
+                  >
+                    <LineChart size={14} />
+                  </button>
+                </div>
+                {isOpen && (
+                  <div className="surface-card mt-1" style={{ padding: "var(--space-md)" }}>
+                    {data === "loading" || data === undefined ? (
+                      <p className="text-xs text-text-muted">Loading coverage curve…</p>
+                    ) : data.length < 2 ? (
+                      <p className="text-xs text-text-muted">No coverage samples were recorded for this run (older runs, very short runs, or engines that don't stream coverage).</p>
+                    ) : (
+                      <CoverageCurve samples={data} />
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
@@ -251,6 +294,44 @@ function MiniTrend({
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+// The intra-run coverage curve: edges over elapsed time, drawn as an area chart.
+function CoverageCurve({ samples }: { samples: CoverageSample[] }) {
+  const W = 600;
+  const H = 150;
+  const padL = 6;
+  const padR = 6;
+  const padT = 10;
+  const padB = 16;
+  const tMax = Math.max(1, ...samples.map((s) => s.t));
+  const eMax = Math.max(1, ...samples.map((s) => s.edges));
+  const x = (t: number) => padL + (t / tMax) * (W - padL - padR);
+  const y = (e: number) => H - padB - (e / eMax) * (H - padT - padB);
+  const pts = samples.map((s) => `${x(s.t).toFixed(1)},${y(s.edges).toFixed(1)}`);
+  const line = `M${pts.join(" L")}`;
+  const area = `M${x(samples[0].t).toFixed(1)},${H - padB} L${pts.join(" L")} L${x(
+    samples[samples.length - 1].t,
+  ).toFixed(1)},${H - padB} Z`;
+  const peakEdges = Math.max(...samples.map((s) => s.edges));
+  const duration = samples[samples.length - 1].t;
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center justify-between text-xs text-text-muted mb-2 gap-2">
+        <span className="flex items-center gap-1">
+          <Activity size={12} /> Coverage over time
+        </span>
+        <span className="truncate">
+          peak {peakEdges.toLocaleString()} edges · {Math.round(duration)}s · {samples.length} samples
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" style={{ display: "block" }}>
+        <path d={area} fill="var(--success)" opacity={0.14} />
+        <path d={line} fill="none" stroke="var(--success)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+        <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="var(--border)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+      </svg>
     </div>
   );
 }

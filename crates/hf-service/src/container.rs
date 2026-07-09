@@ -1238,6 +1238,21 @@ impl ServiceContainer {
         items
     }
 
+    /// The intra-run coverage/throughput curve for a run (empty if none was
+    /// recorded, e.g. runs from before this was captured).
+    pub async fn run_coverage_series(&self, run_id: &str) -> Vec<CoverageSample> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(id) = Uuid::parse_str(run_id) else {
+            return Vec::new();
+        };
+        match store.run_samples(id).await {
+            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
@@ -2452,9 +2467,30 @@ impl ServiceContainer {
         // Wrap `on_progress` so every event still flows to the caller unchanged.
         let feedback =
             CoverageFeedback::new(crate::config::coverage_stagnation_secs(), on_progress);
+        // Accumulate an intra-run coverage/throughput time series live, so the
+        // run's coverage curve can be charted later. Each fuzzer stats line emits
+        // an EdgesCovered then an ExecsPerSec event; pair them and stamp the
+        // elapsed time.
+        let series: std::sync::Arc<std::sync::Mutex<Vec<(f64, u64, f64)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let last_edges = std::sync::atomic::AtomicU64::new(0);
+        let run_started = std::time::Instant::now();
+        let series_w = std::sync::Arc::clone(&series);
         let watched = |p: FuzzProgress| {
-            if let FuzzProgress::EdgesCovered(v) = &p {
-                feedback.on_edges(*v);
+            use std::sync::atomic::Ordering::Relaxed;
+            match &p {
+                FuzzProgress::EdgesCovered(v) => {
+                    feedback.on_edges(*v);
+                    last_edges.store(*v, Relaxed);
+                }
+                FuzzProgress::ExecsPerSec(v) => {
+                    let t = run_started.elapsed().as_secs_f64();
+                    let e = last_edges.load(Relaxed);
+                    if let Ok(mut s) = series_w.lock() {
+                        s.push((t, e, *v));
+                    }
+                }
+                _ => {}
             }
             on_progress(p);
         };
@@ -2511,6 +2547,23 @@ impl ServiceContainer {
                 .await
             {
                 tracing::warn!("failed to persist run stats: {e}");
+            }
+            // Persist the (downsampled) intra-run coverage curve.
+            let raw = series.lock().map(|s| s.clone()).unwrap_or_default();
+            let samples: Vec<CoverageSample> = downsample(&raw, 150)
+                .into_iter()
+                .map(|(t, e, x)| CoverageSample {
+                    t,
+                    edges: e,
+                    execs: x,
+                })
+                .collect();
+            if !samples.is_empty() {
+                if let Ok(json) = serde_json::to_string(&samples) {
+                    if let Err(e) = store.set_run_samples(rec.id, &json).await {
+                        tracing::warn!("failed to persist run samples: {e}");
+                    }
+                }
             }
         }
         Ok(RunSummary {
@@ -4018,6 +4071,33 @@ pub struct ArtifactSummary {
     pub crash_count: usize,
 }
 
+/// One point on a run's intra-run coverage/throughput curve.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CoverageSample {
+    /// Seconds elapsed since the run started.
+    pub t: f64,
+    /// Edge coverage at that moment.
+    pub edges: u64,
+    /// Executions/second at that moment.
+    pub execs: f64,
+}
+
+/// Reduce a time series to at most `cap` points by uniform stride, always
+/// keeping the last sample so the curve reaches its true end.
+fn downsample(series: &[(f64, u64, f64)], cap: usize) -> Vec<(f64, u64, f64)> {
+    if series.len() <= cap || cap == 0 {
+        return series.to_vec();
+    }
+    let stride = series.len().div_ceil(cap);
+    let mut out: Vec<(f64, u64, f64)> = series.iter().step_by(stride).copied().collect();
+    if let Some(last) = series.last() {
+        if out.last() != Some(last) {
+            out.push(*last);
+        }
+    }
+    out
+}
+
 /// One run in the persisted run history (see [`ServiceContainer::run_history`]).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunHistoryItem {
@@ -4753,6 +4833,25 @@ mod rust_staging_tests {
         assert!(workspace.path().join("parse.c").is_file());
         assert!(!workspace.path().join("Cargo.toml").exists());
         assert!(!workspace.path().join("src").exists());
+    }
+}
+
+#[cfg(test)]
+mod downsample_tests {
+    use super::downsample;
+
+    #[test]
+    fn keeps_short_series_intact() {
+        let s = vec![(0.0, 1, 10.0), (1.0, 2, 20.0)];
+        assert_eq!(downsample(&s, 10).len(), 2);
+    }
+
+    #[test]
+    fn caps_and_keeps_last() {
+        let s: Vec<(f64, u64, f64)> = (0..100).map(|i| (i as f64, i as u64, 0.0)).collect();
+        let out = downsample(&s, 10);
+        assert!(out.len() <= 11, "capped near the target, got {}", out.len());
+        assert_eq!(out.last().unwrap().1, 99, "always keeps the final sample");
     }
 }
 
