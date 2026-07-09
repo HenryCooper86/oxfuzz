@@ -326,20 +326,33 @@ export function RunView({
           className="surface-card flex items-center gap-3"
           style={{
             padding: "var(--space-md)",
-            borderLeft: "3px solid var(--accent)",
+            borderLeft: `3px solid ${summary.autoRevert.reverted ? "var(--accent)" : "var(--warning, var(--accent))"}`,
             animation: "slideInUp 0.2s ease",
           }}
         >
-          <RotateCcw size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          {summary.autoRevert.reverted ? (
+            <RotateCcw size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          ) : (
+            <AlertTriangle size={18} style={{ color: "var(--warning, var(--accent))", flexShrink: 0 }} />
+          )}
           <div className="flex-1">
             <div className="text-sm" style={{ fontWeight: 600 }}>
-              Auto-reverted the harness
+              {summary.autoRevert.reverted ? "Auto-reverted the harness" : "Coverage regression detected"}
             </div>
             <div className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
               This revision dropped coverage {summary.autoRevert.drop_pct.toFixed(1)}% (
-              {summary.autoRevert.regressed_edges} &lt; {summary.autoRevert.previous_edges} edges), so
-              the previous revision <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was restored
-              and recompiled.
+              {summary.autoRevert.regressed_edges} &lt; {summary.autoRevert.previous_edges} edges).{" "}
+              {summary.autoRevert.reverted ? (
+                <>
+                  The previous revision <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was restored
+                  and recompiled.
+                </>
+              ) : (
+                <>
+                  Notify-only mode is on, so the last-good revision{" "}
+                  <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was <strong>not</strong> restored.
+                </>
+              )}
             </div>
           </div>
         </div>

@@ -25,6 +25,9 @@ export interface AutoRevert {
   previous_edges: number;
   regressed_edges: number;
   drop_pct: number;
+  /** True when the harness was restored; false in notify-only mode (detected
+   *  but not applied). */
+  reverted: boolean;
 }
 interface Summary {
   edges: number;
@@ -241,8 +244,11 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         }));
         if (result.auto_revert) {
           const ar = result.auto_revert;
+          const tail = ar.reverted
+            ? `restored ${ar.to_rev.slice(0, 8)} and recompiled.`
+            : `notify-only: last-good ${ar.to_rev.slice(0, 8)} was NOT restored.`;
           appendLog(
-            `[${now()}] Auto-revert: coverage dropped ${ar.drop_pct.toFixed(1)}% (${ar.regressed_edges} < ${ar.previous_edges} edges) after harness ${ar.from_rev.slice(0, 8)} -- restored ${ar.to_rev.slice(0, 8)} and recompiled.`,
+            `[${now()}] Auto-revert: coverage dropped ${ar.drop_pct.toFixed(1)}% (${ar.regressed_edges} < ${ar.previous_edges} edges) after harness ${ar.from_rev.slice(0, 8)} -- ${tail}`,
           );
         }
         appendLog(`[${now()}] Run complete (exit ${result.exit_code ?? "?"})`);

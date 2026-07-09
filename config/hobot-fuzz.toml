@@ -32,3 +32,10 @@ smoke_fuzz_duration_secs = 60
 # Override with HF_AUTO_REVERT (1/true) and HF_AUTO_REVERT_THRESHOLD_PCT.
 auto_revert_enabled = false
 auto_revert_threshold_pct = 20.0
+
+# Notify-only mode: when true, a detected regression is reported (logged to the
+# run journal and surfaced in the UI / campaign history) but the harness is NOT
+# restored automatically. Recommended for scheduled/headless campaigns, which run
+# with permissive guardrails and would otherwise mutate the harness unattended.
+# Override with HF_AUTO_REVERT_NOTIFY_ONLY.
+auto_revert_notify_only = false

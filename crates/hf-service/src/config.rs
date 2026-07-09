@@ -106,14 +106,19 @@ pub struct AutoRevertPolicy {
     /// The edge-coverage drop (percent, vs the previous run's harness) at or
     /// above which the revert fires.
     pub threshold_pct: f64,
+    /// When set, a detected regression is only reported (journaled + surfaced),
+    /// never applied. Intended for headless/scheduled campaigns, which run with
+    /// permissive guardrails and would otherwise mutate the harness with no
+    /// human in the loop.
+    pub notify_only: bool,
 }
 
 /// The resolved auto-revert policy.
 ///
-/// Resolution order: the `HF_AUTO_REVERT` / `HF_AUTO_REVERT_THRESHOLD_PCT` env
-/// overrides, then `auto_revert_enabled` / `auto_revert_threshold_pct` in
-/// `hobot-fuzz.toml`, then off with a [`DEFAULT_AUTO_REVERT_THRESHOLD_PCT`]
-/// threshold.
+/// Resolution order: the `HF_AUTO_REVERT` / `HF_AUTO_REVERT_THRESHOLD_PCT` /
+/// `HF_AUTO_REVERT_NOTIFY_ONLY` env overrides, then `auto_revert_enabled` /
+/// `auto_revert_threshold_pct` / `auto_revert_notify_only` in `hobot-fuzz.toml`,
+/// then off with a [`DEFAULT_AUTO_REVERT_THRESHOLD_PCT`] threshold.
 #[must_use]
 pub fn auto_revert_policy() -> AutoRevertPolicy {
     resolve_auto_revert_policy(
@@ -121,6 +126,7 @@ pub fn auto_revert_policy() -> AutoRevertPolicy {
         std::env::var("HF_AUTO_REVERT_THRESHOLD_PCT")
             .ok()
             .as_deref(),
+        std::env::var("HF_AUTO_REVERT_NOTIFY_ONLY").ok().as_deref(),
         read_config("hobot-fuzz").ok().as_deref(),
     )
 }
@@ -141,12 +147,14 @@ fn parse_flag(s: Option<&str>) -> Option<bool> {
 fn resolve_auto_revert_policy(
     env_enabled: Option<&str>,
     env_threshold: Option<&str>,
+    env_notify_only: Option<&str>,
     hobot_toml: Option<&str>,
 ) -> AutoRevertPolicy {
     #[derive(Deserialize)]
     struct HobotConfig {
         auto_revert_enabled: Option<bool>,
         auto_revert_threshold_pct: Option<f64>,
+        auto_revert_notify_only: Option<bool>,
     }
     let parsed = hobot_toml.and_then(|raw| toml::from_str::<HobotConfig>(raw).ok());
     let enabled = parse_flag(env_enabled)
@@ -158,9 +166,13 @@ fn resolve_auto_revert_policy(
         .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_threshold_pct))
         .filter(|v| *v > 0.0)
         .unwrap_or(DEFAULT_AUTO_REVERT_THRESHOLD_PCT);
+    let notify_only = parse_flag(env_notify_only)
+        .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_notify_only))
+        .unwrap_or(false);
     AutoRevertPolicy {
         enabled,
         threshold_pct,
+        notify_only,
     }
 }
 
@@ -545,30 +557,35 @@ mod tests {
 
     #[test]
     fn auto_revert_policy_precedence_env_then_toml_then_default() {
-        // Default: off, with the default threshold.
-        let p = resolve_auto_revert_policy(None, None, None);
+        // Default: off, with the default threshold, applying (not notify-only).
+        let p = resolve_auto_revert_policy(None, None, None, None);
         assert!(!p.enabled);
+        assert!(!p.notify_only);
         assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
 
-        // TOML supplies both values when no env is set.
-        let toml = "auto_revert_enabled = true\nauto_revert_threshold_pct = 35.0\n";
-        let p = resolve_auto_revert_policy(None, None, Some(toml));
+        // TOML supplies all values when no env is set.
+        let toml =
+            "auto_revert_enabled = true\nauto_revert_threshold_pct = 35.0\nauto_revert_notify_only = true\n";
+        let p = resolve_auto_revert_policy(None, None, None, Some(toml));
         assert!(p.enabled);
+        assert!(p.notify_only);
         assert!((p.threshold_pct - 35.0).abs() < f64::EPSILON);
 
-        // Env overrides the TOML for both the flag and the threshold.
-        let toml = "auto_revert_enabled = false\nauto_revert_threshold_pct = 35.0\n";
-        let p = resolve_auto_revert_policy(Some("1"), Some("50"), Some(toml));
+        // Env overrides the TOML for every field.
+        let toml =
+            "auto_revert_enabled = false\nauto_revert_threshold_pct = 35.0\nauto_revert_notify_only = true\n";
+        let p = resolve_auto_revert_policy(Some("1"), Some("50"), Some("false"), Some(toml));
         assert!(p.enabled);
+        assert!(!p.notify_only);
         assert!((p.threshold_pct - 50.0).abs() < f64::EPSILON);
 
         // A non-positive or non-numeric threshold falls through to the default.
-        let p = resolve_auto_revert_policy(Some("yes"), Some("-5"), None);
+        let p = resolve_auto_revert_policy(Some("yes"), Some("-5"), None, None);
         assert!(p.enabled);
         assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
 
         // An unrecognized flag value leaves the policy off.
-        assert!(!resolve_auto_revert_policy(Some("maybe"), None, None).enabled);
+        assert!(!resolve_auto_revert_policy(Some("maybe"), None, None, None).enabled);
     }
 
     #[test]

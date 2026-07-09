@@ -262,8 +262,16 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             Ok(outcome) => Ok(DispatchResult {
                 success: true,
                 summary: format!(
-                    "{} crash(es), {} edges over {} iteration(s) on {}",
-                    outcome.crashes, outcome.edges, outcome.iterations, outcome.target
+                    "{} crash(es), {} edges over {} iteration(s) on {}{}",
+                    outcome.crashes,
+                    outcome.edges,
+                    outcome.iterations,
+                    outcome.target,
+                    if outcome.auto_reverts > 0 {
+                        format!(", {} auto-revert(s)", outcome.auto_reverts)
+                    } else {
+                        String::new()
+                    },
                 ),
                 output: serde_json::json!({
                     "target": outcome.target,
@@ -271,6 +279,7 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                     "edges": outcome.edges,
                     "iterations": outcome.iterations,
                     "repairs_used": outcome.repairs_used,
+                    "auto_reverts": outcome.auto_reverts,
                 }),
                 duration_ms,
                 error: None,
