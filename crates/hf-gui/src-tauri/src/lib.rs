@@ -11,9 +11,9 @@ use state::AppState;
 use tauri::Manager;
 
 use commands::{
-    agent_info, agent_tools, all_corpus, all_crashes, app_paths, artifact_summary, cancel_run,
-    chat_agent, chat_answer_permission, chat_branch, chat_branches, chat_checkpoints, chat_history,
-    chat_rollback, chat_rollback_to, chat_send, clear_knowledge,
+    agent_info, agent_tools, all_corpus, all_crashes, app_paths, artifact_summary,
+    auto_revert_events, cancel_run, chat_agent, chat_answer_permission, chat_branch, chat_branches,
+    chat_checkpoints, chat_history, chat_rollback, chat_rollback_to, chat_send, clear_knowledge,
     clear_project_auto_revert_override, clear_workspace, config_toml_to_value,
     config_value_to_toml, corpus_grow, corpus_list, corpus_prune, corpus_seed, coverage_functions,
     create_session, delete_agent, delete_project, delete_report_draft, delete_session,
@@ -88,6 +88,7 @@ pub fn run() {
             project_auto_revert_override,
             project_auto_revert_overrides,
             effective_auto_revert_policy,
+            auto_revert_events,
             set_project_auto_revert_override,
             clear_project_auto_revert_override,
             save_report,

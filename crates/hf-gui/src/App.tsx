@@ -25,6 +25,7 @@ import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
 import { RunsView } from "./views/RunsView";
+import { AuditView } from "./views/AuditView";
 import { CommandPalette } from "./components/CommandPalette";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
 import { ProjectProvider, useProject } from "./providers/ProjectContext";
@@ -36,7 +37,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard } from "lucide-react";
+import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -186,6 +187,11 @@ function AppInner() {
                     <RunsView />
                   </div>
                 )}
+                {activeView === "audit" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <AuditView />
+                  </div>
+                )}
                 {activeView === "agents" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
                     <AgentsView />
@@ -298,6 +304,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   artifacts: <Boxes size={18} />,
   reports: <FileText size={18} />,
   runs: <History size={18} />,
+  audit: <ScrollText size={18} />,
   agents: <Bot size={18} />,
   skills: <Puzzle size={18} />,
   knowledge: <BookOpen size={18} />,

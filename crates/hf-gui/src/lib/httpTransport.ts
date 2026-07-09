@@ -19,6 +19,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },
   project_auto_revert_overrides: { method: "GET", path: "/projects/auto-revert/all" },
   effective_auto_revert_policy: { method: "POST", path: "/projects/auto-revert/effective" },
+  auto_revert_events: { method: "POST", path: "/audit/auto-revert" },
   set_project_auto_revert_override: { method: "POST", path: "/projects/auto-revert/set" },
   clear_project_auto_revert_override: { method: "POST", path: "/projects/auto-revert/clear" },
   generate_seeds: { method: "POST", path: "/seeds/generate" },

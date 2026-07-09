@@ -71,6 +71,33 @@ pub struct ProjectAutoRevert {
     pub notify_only: bool,
 }
 
+/// One auto-revert policy firing, for the durable audit trail.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AutoRevertEvent {
+    /// Unique event id.
+    pub id: String,
+    /// When the policy fired (RFC3339).
+    pub ts: String,
+    /// Project the regressed run belonged to.
+    pub project_root: String,
+    /// Target symbol.
+    pub target: String,
+    /// The regressed run's id.
+    pub run_id: String,
+    /// The regressed harness revision.
+    pub from_rev: String,
+    /// The last-good revision that was (or would be) restored.
+    pub to_rev: String,
+    /// Peak edge coverage of the restored (previous) run.
+    pub previous_edges: u64,
+    /// Peak edge coverage of the regressed run.
+    pub regressed_edges: u64,
+    /// The percent coverage drop that triggered the policy.
+    pub drop_pct: f64,
+    /// `true` if the harness was restored; `false` for a notify-only flag.
+    pub reverted: bool,
+}
+
 /// A persisted fuzz-run record.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -410,6 +437,84 @@ impl Store {
                         notify_only: r.get::<i64, _>("auto_revert_notify_only") != 0,
                     },
                 )
+            })
+            .collect())
+    }
+
+    /// Append an auto-revert policy event to the durable audit trail.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn record_auto_revert_event(&self, ev: &AutoRevertEvent) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO auto_revert_events \
+                 (id, ts, project_root, target, run_id, from_rev, to_rev, \
+                  previous_edges, regressed_edges, drop_pct, reverted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(&ev.id)
+        .bind(&ev.ts)
+        .bind(&ev.project_root)
+        .bind(&ev.target)
+        .bind(&ev.run_id)
+        .bind(&ev.from_rev)
+        .bind(&ev.to_rev)
+        .bind(i64::try_from(ev.previous_edges).unwrap_or(i64::MAX))
+        .bind(i64::try_from(ev.regressed_edges).unwrap_or(i64::MAX))
+        .bind(ev.drop_pct)
+        .bind(i64::from(ev.reverted))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The auto-revert audit trail, newest first. Scoped to `project` when given,
+    /// otherwise across all projects. `limit` caps the rows returned.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn list_auto_revert_events(
+        &self,
+        project: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AutoRevertEvent>, StorageError> {
+        let rows = match project {
+            Some(p) => {
+                sqlx::query(
+                    "SELECT id, ts, project_root, target, run_id, from_rev, to_rev, \
+                            previous_edges, regressed_edges, drop_pct, reverted \
+                     FROM auto_revert_events WHERE project_root = ?1 ORDER BY ts DESC LIMIT ?2",
+                )
+                .bind(p)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, ts, project_root, target, run_id, from_rev, to_rev, \
+                            previous_edges, regressed_edges, drop_pct, reverted \
+                     FROM auto_revert_events ORDER BY ts DESC LIMIT ?1",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        Ok(rows
+            .iter()
+            .map(|r| AutoRevertEvent {
+                id: r.get::<String, _>("id"),
+                ts: r.get::<String, _>("ts"),
+                project_root: r.get::<String, _>("project_root"),
+                target: r.get::<String, _>("target"),
+                run_id: r.get::<String, _>("run_id"),
+                from_rev: r.get::<String, _>("from_rev"),
+                to_rev: r.get::<String, _>("to_rev"),
+                previous_edges: u64::try_from(r.get::<i64, _>("previous_edges")).unwrap_or(0),
+                regressed_edges: u64::try_from(r.get::<i64, _>("regressed_edges")).unwrap_or(0),
+                drop_pct: r.get::<f64, _>("drop_pct"),
+                reverted: r.get::<i64, _>("reverted") != 0,
             })
             .collect())
     }
