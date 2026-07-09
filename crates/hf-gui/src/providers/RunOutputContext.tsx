@@ -15,6 +15,17 @@ interface Stats {
   edges: number;
   crashes: number;
 }
+/** The auto-revert policy outcome, present when a run's harness revision
+ *  regressed coverage past the threshold and the previous revision was
+ *  automatically restored. */
+export interface AutoRevert {
+  reverted_to_run: string;
+  from_rev: string;
+  to_rev: string;
+  previous_edges: number;
+  regressed_edges: number;
+  drop_pct: number;
+}
 interface Summary {
   edges: number;
   crashes: number;
@@ -22,6 +33,8 @@ interface Summary {
   /** Coverage-stagnation proposal from the backend (e.g. "new_harness"), or
    *  null when coverage kept progressing. Drives the Run view's iterate hint. */
   stagnation?: string | null;
+  /** Set when the auto-revert policy fired this run; null otherwise. */
+  autoRevert?: AutoRevert | null;
 }
 type RunResult = {
   edges: number;
@@ -29,6 +42,7 @@ type RunResult = {
   execs: number;
   exit_code: number | null;
   stagnation?: string | null;
+  auto_revert?: AutoRevert | null;
 };
 
 interface RunData {
@@ -222,8 +236,15 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
             crashes: result.crashes,
             execs: Math.round(result.execs),
             stagnation: result.stagnation ?? null,
+            autoRevert: result.auto_revert ?? null,
           },
         }));
+        if (result.auto_revert) {
+          const ar = result.auto_revert;
+          appendLog(
+            `[${now()}] Auto-revert: coverage dropped ${ar.drop_pct.toFixed(1)}% (${ar.regressed_edges} < ${ar.previous_edges} edges) after harness ${ar.from_rev.slice(0, 8)} -- restored ${ar.to_rev.slice(0, 8)} and recompiled.`,
+          );
+        }
         appendLog(`[${now()}] Run complete (exit ${result.exit_code ?? "?"})`);
         return result.crashes;
       } catch (e) {
