@@ -10,6 +10,8 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   harness_draft: { method: "POST", path: "/harness/draft" },
   harness_compile: { method: "POST", path: "/harness/compile" },
   report_formats: { method: "GET", path: "/report/formats" },
+  all_crashes: { method: "GET", path: "/crashes/all" },
+  all_corpus: { method: "GET", path: "/corpus/all" },
   generate_seeds: { method: "POST", path: "/seeds/generate" },
   generate_seeds_llm: { method: "POST", path: "/seeds/generate-llm" },
   corpus_list: { method: "POST", path: "/corpus/list" },
