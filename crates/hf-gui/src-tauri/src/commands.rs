@@ -1498,6 +1498,77 @@ pub async fn save_report(
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
+/// Reveal a file or directory in the OS file manager (Finder / Explorer).
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
+/// Open a file or directory with the OS default handler (e.g. `$EDITOR`).
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Persisted run history for a project (crash counts + durations), newest first.
+#[tauri::command]
+pub async fn run_history(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: Option<String>,
+) -> Result<Vec<hf_service::RunHistoryItem>, String> {
+    let path = project
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::Path::new);
+    Ok(state.container.run_history(path).await)
+}
+
+/// Export a project's fuzzing data (targets, runs, harnesses, crashes, corpus)
+/// as a JSON bundle via a native save dialog. Returns the saved path or `None`.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn export_project_data(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    project: Option<String>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = project
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::Path::new);
+    let bundle = state.container.export_project_data(path).await;
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    let name = path
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("all");
+    let default_name = format!("hobot_fuzz_export_{}.json", sanitize_filename(name));
+    let Some(dest) = app
+        .dialog()
+        .file()
+        .set_title("Export fuzzing data")
+        .set_file_name(&default_name)
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let dest = dest
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&dest, json).map_err(|e| format!("write export: {e}"))?;
+    Ok(Some(dest.to_string_lossy().to_string()))
+}
+
 /// Report export formats available on this host (always includes md + html;
 /// docx/pdf when pandoc and a PDF engine are installed).
 #[tauri::command]
