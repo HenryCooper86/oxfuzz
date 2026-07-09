@@ -187,6 +187,8 @@ export function RunsView() {
         </div>
       )}
 
+      <AutoRevertPolicyCard />
+
       {trend.length >= 2 && (
         <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
           <div className="flex items-center gap-2">
@@ -419,6 +421,145 @@ export function RunsView() {
         </div>
       )}
     </div>
+  );
+}
+
+// The auto-revert policy control: arms the backend to automatically restore the
+// previous (last-good) harness when a revision regresses coverage past the
+// threshold. Backed by `hobot-fuzz.toml` via the config round-trip commands, so
+// the setting is the same one the CLI/service read.
+function AutoRevertPolicyCard() {
+  const { toast } = useToast();
+  const [enabled, setEnabled] = useState(false);
+  const [threshold, setThreshold] = useState(20);
+  const [ready, setReady] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
+        const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
+        if (cancelled) return;
+        if (typeof val.auto_revert_enabled === "boolean") setEnabled(val.auto_revert_enabled);
+        if (typeof val.auto_revert_threshold_pct === "number") setThreshold(val.auto_revert_threshold_pct);
+      } catch {
+        // Keep the safe defaults (off, 20%) if the config cannot be read.
+      } finally {
+        if (!cancelled) setReady(true);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persist = useCallback(
+    async (next: { enabled: boolean; threshold: number }) => {
+      setSaving(true);
+      try {
+        const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
+        const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
+        val.auto_revert_enabled = next.enabled;
+        val.auto_revert_threshold_pct = next.threshold;
+        const toml = await getTransport().invoke<string>("config_value_to_toml", { value: val });
+        await getTransport().invoke("write_config", { name: "hobot-fuzz", content: toml });
+        toast({
+          title: next.enabled ? `Auto-revert armed (>${next.threshold}% drop)` : "Auto-revert disabled",
+          variant: "success",
+        });
+      } catch (e) {
+        toast({ title: "Could not save the auto-revert policy", description: String(e), variant: "error" });
+      } finally {
+        setSaving(false);
+      }
+    },
+    [toast],
+  );
+
+  const toggle = () => {
+    const next = !enabled;
+    setEnabled(next);
+    void persist({ enabled: next, threshold });
+  };
+
+  const commitThreshold = () => {
+    const clamped = Math.min(100, Math.max(1, Math.round(threshold)));
+    setThreshold(clamped);
+    if (enabled) void persist({ enabled, threshold: clamped });
+  };
+
+  return (
+    <section className="surface-card flex flex-col gap-2 min-w-0" style={{ padding: "var(--space-md)" }}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 min-w-0">
+          <RotateCcw size={15} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <span className="text-sm font-semibold">Auto-revert policy</span>
+          <span
+            className="text-xs rounded-full"
+            style={{
+              padding: "1px 8px",
+              background: enabled ? "var(--success-subtle, var(--surface-secondary))" : "var(--surface-secondary)",
+              color: enabled ? "var(--success)" : "var(--text-muted)",
+              fontWeight: 600,
+            }}
+          >
+            {enabled ? "On" : "Off"}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-text-muted">
+            drop &gt;
+            <Input
+              type="number"
+              min={1}
+              max={100}
+              value={String(threshold)}
+              disabled={!ready || saving}
+              onChange={(e) => setThreshold(Number(e.target.value))}
+              onBlur={commitThreshold}
+              style={{ width: 68 }}
+              aria-label="Coverage-drop threshold percent"
+            />
+            %
+          </label>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Enable auto-revert"
+            disabled={!ready || saving}
+            onClick={toggle}
+            className="relative rounded-full transition-colors"
+            style={{
+              width: 40,
+              height: 22,
+              background: enabled ? "var(--accent)" : "var(--surface-secondary)",
+              border: "1px solid var(--border)",
+              cursor: ready && !saving ? "pointer" : "default",
+            }}
+          >
+            <span
+              className="absolute rounded-full transition-all"
+              style={{
+                width: 16,
+                height: 16,
+                top: 2,
+                left: enabled ? 20 : 2,
+                background: enabled ? "#fff" : "var(--text-muted)",
+              }}
+            />
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-text-muted" style={{ lineHeight: 1.5 }}>
+        When a run&apos;s harness revision changes and its edge coverage drops by at least this much
+        versus the previous run for the same target, the previous (last-good) revision is restored and
+        recompiled automatically. The recompile still requires the usual sandbox approval.
+      </p>
+    </section>
   );
 }
 

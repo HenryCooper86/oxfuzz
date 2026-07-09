@@ -1425,6 +1425,10 @@ pub async fn run_fuzzer(
             // plateaued, so the UI can offer an iterate-next affordance; null
             // when coverage kept progressing.
             "stagnation": summary.stagnation,
+            // Set when the auto-revert policy restored an earlier harness because
+            // this run's revision regressed coverage past the threshold; null
+            // otherwise. Lets the UI surface the automatic action.
+            "auto_revert": summary.auto_revert,
             "exit_code": 0,
         })),
         Err(e) => Err(e.to_string()),
