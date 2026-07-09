@@ -521,8 +521,9 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
             : `Auto-revert disabled for ${where}`,
           variant: "success",
         });
-        // Refresh dependent views (e.g. the Projects overview badges).
-        if (toScope === "project") emitDataChanged();
+        // Refresh dependent views (Projects overview + Workbench badges). A
+        // global change matters too: projects that inherit it show it.
+        emitDataChanged();
       } catch (e) {
         toast({ title: "Could not save the auto-revert policy", description: String(e), variant: "error" });
       } finally {

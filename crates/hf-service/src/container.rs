@@ -1357,6 +1357,20 @@ impl ServiceContainer {
         store.project_auto_revert(&key).await.ok().flatten()
     }
 
+    /// The effective auto-revert policy for a project (its override merged over
+    /// the global default) plus whether an override is in effect -- for a badge
+    /// that shows the active project's resolved policy.
+    pub async fn effective_auto_revert_view(&self, project: &Path) -> EffectiveAutoRevert {
+        let overridden = self.project_auto_revert_override(project).await.is_some();
+        let p = self.effective_auto_revert_policy(project).await;
+        EffectiveAutoRevert {
+            enabled: p.enabled,
+            threshold_pct: p.threshold_pct,
+            notify_only: p.notify_only,
+            overridden,
+        }
+    }
+
     /// Every project's auto-revert override, keyed by project root -- so a
     /// projects overview can badge which ones diverge from the global policy.
     /// Empty when no store is configured or no project overrides.
@@ -4507,6 +4521,20 @@ pub struct AutoRevertOutcome {
     /// `true` when the harness was actually restored and recompiled; `false`
     /// when the policy is in notify-only mode and only reported the regression.
     pub reverted: bool,
+}
+
+/// The resolved auto-revert policy for a project, plus whether a per-project
+/// override is in effect (vs inheriting the global default).
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct EffectiveAutoRevert {
+    /// Whether the policy is armed for this project.
+    pub enabled: bool,
+    /// The coverage-drop threshold (percent) that triggers a revert.
+    pub threshold_pct: f64,
+    /// Report the regression without restoring the harness.
+    pub notify_only: bool,
+    /// `true` when a per-project override applies; `false` when inheriting global.
+    pub overridden: bool,
 }
 
 /// Inputs for a syzkaller kernel-fuzzing campaign.
