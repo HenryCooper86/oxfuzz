@@ -34,6 +34,7 @@ export function StatusBar() {
   // loaded -> treated as all-enabled to avoid a flash of dimmed dots.
   const [enabledEngines, setEnabledEngines] = useState<Record<string, boolean>>({});
   const [dockerMsg, setDockerMsg] = useState<string | null>(null);
+  const [cost, setCost] = useState<{ cost_usd: number; calls: number; input_tokens: number; output_tokens: number } | null>(null);
   const [time, setTime] = useState(new Date().toLocaleTimeString());
 
   useEffect(() => {
@@ -81,9 +82,19 @@ export function StatusBar() {
 
     // Keep the indicators fresh (the daemon can stop/start under us; engine
     // enable/disable can change in Settings).
+    // LLM spend accrues invisibly during agent turns / report+harness gen;
+    // surface a running total so cost is never a surprise.
+    const refreshCost = () => {
+      t.invoke<{ cost_usd: number; calls: number; input_tokens: number; output_tokens: number }>("diagnostics_cost_summary")
+        .then(setCost)
+        .catch(() => {});
+    };
+    refreshCost();
+
     const poll = setInterval(() => {
       t.invoke<SystemStatus>("system_status_cmd").then(setStatus).catch(() => {});
       refreshEnabled();
+      refreshCost();
     }, 5000);
 
     return () => {
@@ -142,6 +153,13 @@ export function StatusBar() {
               }}
             />
             Fuzzing: {ENGINES.find((e) => e.runId === activeEngine)?.label ?? activeEngine}
+          </span>
+        )}
+        {cost && cost.cost_usd > 0 && (
+          <span
+            title={`LLM spend this session: $${cost.cost_usd.toFixed(4)} · ${cost.calls} calls · ${(cost.input_tokens + cost.output_tokens).toLocaleString()} tokens`}
+          >
+            ${cost.cost_usd.toFixed(2)}
           </span>
         )}
         <span>{time}</span>

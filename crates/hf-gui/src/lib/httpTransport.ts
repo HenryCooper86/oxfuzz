@@ -12,6 +12,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   report_formats: { method: "GET", path: "/report/formats" },
   all_crashes: { method: "GET", path: "/crashes/all" },
   all_corpus: { method: "GET", path: "/corpus/all" },
+  run_history: { method: "POST", path: "/runs/history" },
   generate_seeds: { method: "POST", path: "/seeds/generate" },
   generate_seeds_llm: { method: "POST", path: "/seeds/generate-llm" },
   corpus_list: { method: "POST", path: "/corpus/list" },

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
+import { useConfirm } from "../providers/ConfirmContext";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type { CorpusEntry } from "../types";
@@ -8,6 +9,7 @@ import { Database, Plus, Scissors, Sprout, Sparkles } from "lucide-react";
 
 export function CorpusView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject } = useProject();
+  const confirm = useConfirm();
   // The corpus belongs to a specific target's workspace -- the one seeded during
   // Harness and grown during Run -- so it must scan that target, not "".
   const { target, lang } = useTarget();
@@ -30,7 +32,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
   const action = useCallback(
     async (op: string) => {
       if (op === "corpus_prune") {
-        if (!window.confirm("Prune removes redundant-coverage entries from the corpus. Continue?")) {
+        if (!(await confirm({ title: "Prune corpus", message: "Prune removes redundant-coverage entries from the corpus. Continue?", confirmLabel: "Prune" }))) {
           return;
         }
       }
@@ -51,7 +53,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
         setLoading(null);
       }
     },
-    [activeProject, target, refreshList],
+    [activeProject, target, refreshList, confirm],
   );
 
   // AI seed generation: the LLM (or heuristic fallback) synthesizes valid inputs

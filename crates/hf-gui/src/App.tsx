@@ -5,6 +5,7 @@ import { Header } from "./components/Header";
 import { StatusBar } from "./components/StatusBar";
 import { RecoveryBanner } from "./components/RecoveryBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ConfirmProvider } from "./providers/ConfirmContext";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { ToastProvider } from "./components/ui/Toast";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
@@ -23,6 +24,8 @@ import { CorpusView } from "./views/CorpusView";
 import { ProjectsView } from "./views/ProjectsView";
 import { ArtifactsView } from "./views/ArtifactsView";
 import { ReportsView } from "./views/ReportsView";
+import { RunsView } from "./views/RunsView";
+import { CommandPalette } from "./components/CommandPalette";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
 import { ProjectProvider, useProject } from "./providers/ProjectContext";
 import { PipelineProvider } from "./providers/PipelineContext";
@@ -33,7 +36,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, FileText, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard } from "lucide-react";
+import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -178,6 +181,11 @@ function AppInner() {
                     <ReportsView />
                   </div>
                 )}
+                {activeView === "runs" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <RunsView />
+                  </div>
+                )}
                 {activeView === "agents" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
                     <AgentsView />
@@ -213,6 +221,7 @@ function AppInner() {
           </div>
           </>
         )}
+        <CommandPalette onNavigate={setActiveView} />
         </div>
       </ToastProvider>
     </TooltipProvider>
@@ -228,7 +237,9 @@ export default function App() {
             <PipelineProvider>
               <RunStatusProvider>
                 <RunOutputProvider>
-                  <AppInner />
+                  <ConfirmProvider>
+                    <AppInner />
+                  </ConfirmProvider>
                 </RunOutputProvider>
               </RunStatusProvider>
             </PipelineProvider>
@@ -286,6 +297,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   projects: <FolderOpen size={18} />,
   artifacts: <Boxes size={18} />,
   reports: <FileText size={18} />,
+  runs: <History size={18} />,
   agents: <Bot size={18} />,
   skills: <Puzzle size={18} />,
   knowledge: <BookOpen size={18} />,

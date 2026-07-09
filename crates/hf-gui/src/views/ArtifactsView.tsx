@@ -1,17 +1,24 @@
-import { useState } from "react";
-import { getTransport } from "../lib";
+import { useCallback, useEffect, useState } from "react";
+import { getTransport, isTauriEnvironment } from "../lib";
+import { useProject } from "../providers/ProjectContext";
+import { useToast } from "../components/ui/Toast";
 import type { Crash, CorpusEntry } from "../types";
-import { Button, ViewHeader } from "../components/ui";
-import { Bug, Database, RefreshCw, FileWarning } from "lucide-react";
+import { Button, Input, ViewHeader } from "../components/ui";
+import { Bug, Database, RefreshCw, FileWarning, Download, Search } from "lucide-react";
+import { PathActions } from "../components/PathActions";
 
 export function ArtifactsView() {
+  const { activeProject } = useProject();
+  const { toast } = useToast();
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [corpus, setCorpus] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const [exporting, setExporting] = useState(false);
 
-  async function scan() {
+  const scan = useCallback(async () => {
     setLoading(true);
     setError(null);
     const t = getTransport();
@@ -33,19 +40,61 @@ export function ArtifactsView() {
       setScanned(true);
       setLoading(false);
     }
+  }, []);
+
+  // Auto-scan on mount so the view isn't a dead "Scan" prompt.
+  useEffect(() => {
+    queueMicrotask(() => void scan());
+  }, [scan]);
+
+  async function exportData() {
+    setExporting(true);
+    try {
+      const saved = await getTransport().invoke<string | null>("export_project_data", {
+        project: activeProject || undefined,
+      });
+      if (saved) toast({ title: "Exported", description: `Saved to ${saved}`, variant: "success" });
+    } catch (e) {
+      toast({ title: "Export failed", description: String(e), variant: "error" });
+    } finally {
+      setExporting(false);
+    }
   }
+
+  const q = filter.trim().toLowerCase();
+  const shownCrashes = q
+    ? crashes.filter((c) => `${c.input_path} ${c.kind}`.toLowerCase().includes(q))
+    : crashes;
+  const shownCorpus = q
+    ? corpus.filter((e) => `${e.path} ${e.source}`.toLowerCase().includes(q))
+    : corpus;
 
   const empty = scanned && !error && crashes.length === 0 && corpus.length === 0;
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <ViewHeader title="Artifacts" description="Crash reproducers and corpus inputs from your fuzz runs." />
-        <Button variant="primary" onClick={scan} loading={loading}>
-          {!loading && <RefreshCw size={14} />}
-          {loading ? "Scanning..." : "Scan"}
-        </Button>
+        <div className="flex items-center gap-2">
+          {isTauriEnvironment() && (
+            <Button variant="outline" onClick={() => void exportData()} loading={exporting} title="Export this project's data as JSON">
+              {!exporting && <Download size={14} />}
+              Export
+            </Button>
+          )}
+          <Button variant="primary" onClick={() => void scan()} loading={loading}>
+            {!loading && <RefreshCw size={14} />}
+            {loading ? "Scanning..." : "Rescan"}
+          </Button>
+        </div>
       </div>
+
+      {(crashes.length > 0 || corpus.length > 0) && (
+        <div className="flex items-center gap-2">
+          <Search size={14} className="text-text-muted shrink-0" />
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by filename, kind, or source..." className="flex-1" />
+        </div>
+      )}
 
       {!scanned && !loading && (
         <div
@@ -81,9 +130,9 @@ export function ArtifactsView() {
         </div>
       )}
 
-      {crashes.length > 0 && (
-        <Section icon={<Bug size={15} style={{ color: "var(--error)" }} />} title="Crashes" count={crashes.length}>
-          {crashes.map((c) => (
+      {shownCrashes.length > 0 && (
+        <Section icon={<Bug size={15} style={{ color: "var(--error)" }} />} title="Crashes" count={shownCrashes.length}>
+          {shownCrashes.map((c) => (
             <div
               key={c.id}
               className="surface-card flex items-center gap-3"
@@ -91,34 +140,36 @@ export function ArtifactsView() {
             >
               <Bug size={14} style={{ color: "var(--error)", flexShrink: 0 }} />
               <span
-                className="text-xs px-2 py-0.5 rounded-sm font-medium"
+                className="text-xs px-2 py-0.5 rounded-sm font-medium shrink-0"
                 style={{ background: "var(--error-subtle)", color: "var(--error)" }}
               >
                 {c.kind || "crash"}
               </span>
-              <span className="text-xs font-mono text-text-secondary truncate flex-1">
+              <span className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0" title={c.input_path}>
                 {c.input_path.split("/").pop()}
               </span>
-              {c.minimized && <span className="text-xs text-text-muted">minimized</span>}
+              {c.minimized && <span className="text-xs text-text-muted shrink-0">minimized</span>}
+              <PathActions path={c.input_path} />
             </div>
           ))}
         </Section>
       )}
 
-      {corpus.length > 0 && (
-        <Section icon={<Database size={15} style={{ color: "var(--accent)" }} />} title="Corpus" count={corpus.length}>
-          {corpus.map((e) => (
+      {shownCorpus.length > 0 && (
+        <Section icon={<Database size={15} style={{ color: "var(--accent)" }} />} title="Corpus" count={shownCorpus.length}>
+          {shownCorpus.map((e) => (
             <div
               key={e.sha256}
               className="surface-card flex items-center gap-3"
               style={{ padding: "var(--space-sm) var(--space-md)" }}
             >
               <Database size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-              <span className="text-xs font-mono text-text-secondary truncate flex-1">
+              <span className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0" title={e.path}>
                 {e.path.split("/").pop()}
               </span>
-              <span className="text-xs text-text-muted">{e.size} B</span>
-              <span className="text-xs text-text-muted">{e.source}</span>
+              <span className="text-xs text-text-muted shrink-0">{e.size} B</span>
+              <span className="text-xs text-text-muted shrink-0">{e.source}</span>
+              <PathActions path={e.path} />
             </div>
           ))}
         </Section>
