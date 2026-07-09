@@ -1398,10 +1398,33 @@ impl ServiceContainer {
             policy.threshold_pct,
         )?;
 
+        let prev_id = prev.id.to_string();
+        let outcome = |reverted: bool| AutoRevertOutcome {
+            reverted_to_run: prev_id.clone(),
+            from_rev: this_rev.to_owned(),
+            to_rev: prev_rev.clone(),
+            previous_edges: prev_edges,
+            regressed_edges: this_edges,
+            drop_pct,
+            reverted,
+        };
+
+        // Notify-only: report the regression (journal + surfaced outcome) but do
+        // not touch the harness. This is the safe default for headless/scheduled
+        // campaigns, which run permissively and would otherwise mutate unattended.
+        if policy.notify_only {
+            let detail = format!(
+                "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev}; last-good {prev_rev} is run {prev_id} (notify-only, not restored)"
+            );
+            tracing::warn!("auto-revert (notify-only): {detail}");
+            self.run_journal
+                .note(this_run_id, "auto-revert-notify", &detail);
+            return Some(outcome(false));
+        }
+
         // Regression confirmed: restore the previous run's harness. The recompile
         // is HITL-gated inside `harness_compile`; if approval is denied the
         // revert errors and we leave everything as-is.
-        let prev_id = prev.id.to_string();
         match self.revert_harness_from_run(&prev_id).await {
             Ok(_) => {
                 let detail = format!(
@@ -1409,14 +1432,7 @@ impl ServiceContainer {
                 );
                 tracing::warn!("auto-revert: {detail}");
                 self.run_journal.note(this_run_id, "auto-revert", &detail);
-                Some(AutoRevertOutcome {
-                    reverted_to_run: prev_id,
-                    from_rev: this_rev.to_owned(),
-                    to_rev: prev_rev,
-                    previous_edges: prev_edges,
-                    regressed_edges: this_edges,
-                    drop_pct,
-                })
+                Some(outcome(true))
             }
             Err(e) => {
                 tracing::warn!("auto-revert declined or failed: {e}");
@@ -2311,6 +2327,7 @@ impl ServiceContainer {
         let mut edges = 0u64;
         let mut crashes = 0usize;
         let mut iterations = 0usize;
+        let mut auto_reverts = 0usize;
         let cap = max_iterations.max(1);
         while iterations < cap {
             iterations += 1;
@@ -2318,6 +2335,12 @@ impl ServiceContainer {
                 .run_fuzzer(project, &target, engine, duration_secs, &noop)
                 .await?;
             edges = edges.max(summary.edges);
+            // A refine step between iterations can regress coverage; the policy
+            // (armed via config) then restores the last-good harness, or, in
+            // notify-only mode, flags it. Count either so history shows it.
+            if summary.auto_revert.is_some() {
+                auto_reverts += 1;
+            }
 
             let triaged = self.triage(project, &target).await.unwrap_or_default();
             crashes = triaged.len();
@@ -2344,6 +2367,7 @@ impl ServiceContainer {
             crashes,
             edges,
             iterations,
+            auto_reverts,
         })
     }
 
@@ -4189,6 +4213,10 @@ pub struct CampaignOutcome {
     pub edges: u64,
     /// How many run -> triage iterations the campaign performed.
     pub iterations: usize,
+    /// How many iterations triggered the auto-revert policy (a harness revision
+    /// regressed coverage past the threshold). Counts both applied reverts and
+    /// notify-only detections, so headless history surfaces self-healing.
+    pub auto_reverts: usize,
 }
 
 /// Outcome of replaying one stored crash input against the current harness.
@@ -4368,7 +4396,7 @@ pub struct RunSummary {
 /// run's (last-good) harness was restored and recompiled.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AutoRevertOutcome {
-    /// The id of the earlier run whose harness was restored.
+    /// The id of the earlier run whose harness was (or would be) restored.
     pub reverted_to_run: String,
     /// The regressed run's harness revision (the one that was replaced).
     pub from_rev: String,
@@ -4380,6 +4408,9 @@ pub struct AutoRevertOutcome {
     pub regressed_edges: u64,
     /// The percent coverage drop that triggered the revert.
     pub drop_pct: f64,
+    /// `true` when the harness was actually restored and recompiled; `false`
+    /// when the policy is in notify-only mode and only reported the regression.
+    pub reverted: bool,
 }
 
 /// Inputs for a syzkaller kernel-fuzzing campaign.
