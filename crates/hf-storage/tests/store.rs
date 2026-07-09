@@ -590,3 +590,24 @@ async fn reopening_a_store_self_heals_orphaned_children() {
     let remaining = store.list_all_harnesses().await.unwrap();
     assert_eq!(remaining.len(), 1);
 }
+
+#[tokio::test]
+async fn set_run_stats_persists_edges_and_execs() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    let id = run.id;
+    store.insert_run(&run).await.unwrap();
+
+    // Fresh run has no stats yet.
+    assert!(store.get_run(id).await.unwrap().unwrap().edges.is_none());
+
+    store.set_run_stats(id, 142, 3800.0, 5).await.unwrap();
+
+    let got = store.get_run(id).await.unwrap().unwrap();
+    assert_eq!(got.edges, Some(142));
+    assert_eq!(got.execs, Some(3800.0));
+    assert_eq!(got.crash_count, Some(5));
+    // Round-trips through list_runs too.
+    let listed = store.list_runs(Some("/proj")).await.unwrap();
+    assert_eq!(listed[0].edges, Some(142));
+}
