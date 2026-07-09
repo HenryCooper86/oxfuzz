@@ -7,7 +7,7 @@ import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
-import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw } from "lucide-react";
+import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { ViewType } from "../types";
 
 export function RunView({
@@ -318,6 +318,30 @@ export function RunView({
               <RotateCw size={14} /> Regenerate harness
             </Button>
           )}
+        </div>
+      )}
+
+      {summary && !running && summary.autoRevert && (
+        <div
+          className="surface-card flex items-center gap-3"
+          style={{
+            padding: "var(--space-md)",
+            borderLeft: "3px solid var(--accent)",
+            animation: "slideInUp 0.2s ease",
+          }}
+        >
+          <RotateCcw size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <div className="flex-1">
+            <div className="text-sm" style={{ fontWeight: 600 }}>
+              Auto-reverted the harness
+            </div>
+            <div className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
+              This revision dropped coverage {summary.autoRevert.drop_pct.toFixed(1)}% (
+              {summary.autoRevert.regressed_edges} &lt; {summary.autoRevert.previous_edges} edges), so
+              the previous revision <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was restored
+              and recompiled.
+            </div>
+          </div>
         </div>
       )}
 
