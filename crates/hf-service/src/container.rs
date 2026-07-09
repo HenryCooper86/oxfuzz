@@ -1231,6 +1231,7 @@ impl ServiceContainer {
                     ),
                     edges: r.edges,
                     execs: r.execs,
+                    harness_rev: r.harness_rev,
                 }
             })
             .collect();
@@ -2425,8 +2426,17 @@ impl ServiceContainer {
             env: Vec::new(),
             extra_args,
         };
+        // A short content hash of the harness the run is about to use, so a
+        // coverage change in the run history can be attributed to the harness
+        // revision that produced it.
+        let harness_rev = read_current_harness_source(&workspace).map(|src| {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(src.as_bytes());
+            format!("{:x}", h.finalize())[..12].to_owned()
+        });
         // Record the run so campaigns survive restarts (best-effort).
-        let run_record = self.store.as_ref().map(|_| {
+        let mut run_record = self.store.as_ref().map(|_| {
             let mut rec = RunRecord::new(
                 project.to_string_lossy().to_string(),
                 engine,
@@ -2436,6 +2446,9 @@ impl ServiceContainer {
             rec.status = RunStatus::Running;
             rec
         });
+        if let Some(rec) = run_record.as_mut() {
+            rec.harness_rev = harness_rev;
+        }
         if let (Some(store), Some(rec)) = (&self.store, &run_record) {
             if let Err(e) = store.insert_run(rec).await {
                 tracing::warn!("failed to record run start: {e}");
@@ -4113,6 +4126,8 @@ pub struct RunHistoryItem {
     pub edges: Option<u64>,
     /// Peak executions/second, once the run finished.
     pub execs: Option<f64>,
+    /// Short hash of the harness revision the run used.
+    pub harness_rev: Option<String>,
 }
 
 /// A fuzz run summary.
