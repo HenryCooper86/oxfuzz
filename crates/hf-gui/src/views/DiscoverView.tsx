@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
+import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory, TargetCandidate } from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
@@ -9,11 +10,13 @@ import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } fro
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject, setActiveProject } = useProject();
   const { markDone } = usePipeline();
+  // Language lives in the shared TargetContext so the C/C++ choice made here
+  // flows through to Harness generation (which reads it from the same context).
+  const { lang, setLang } = useTarget();
   // When embedded in the unified workflow, the project is fixed by the
   // workflow's project gate; standalone, this view has its own picker.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
-  const [lang, setLang] = useState("c");
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);

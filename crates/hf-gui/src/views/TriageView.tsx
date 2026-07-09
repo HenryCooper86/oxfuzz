@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
-import { getTransport } from "../lib";
+import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
 import { Button, ViewHeader } from "../components/ui";
-import { Bug, ChevronRight, FileDown, FileText } from "lucide-react";
+import { Bug, ChevronRight, FileText } from "lucide-react";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
 // when the user opens a report, keeping it out of the initial bundle.
@@ -39,7 +39,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const { markDone, markSkipped } = usePipeline();
   // The target + crash count from the most recent run, so triage scans the
   // right workspace and we know whether there is anything to triage.
-  const { lastTarget, summary } = useRunOutput();
+  const { lastTarget, lastEngine, summary } = useRunOutput();
+  // Kernel (syzkaller) crashes live in the syzkaller workdir, not a per-target
+  // workspace, so per-target triage does not apply to them.
+  const isKernelRun = lastEngine === "syzkaller";
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
@@ -47,11 +50,21 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [reportMsg, setReportMsg] = useState<string | null>(null);
   const [reportMd, setReportMd] = useState<string | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
+  // Export formats this host supports (md/html always; pdf/docx need pandoc).
+  const [formats, setFormats] = useState<string[]>(["md", "html"]);
+
+  useEffect(() => {
+    if (!isTauriEnvironment()) return; // web export is client-side md only
+    getTransport()
+      .invoke<string[]>("report_formats")
+      .then(setFormats)
+      .catch(() => setFormats(["md", "html"]));
+  }, []);
 
   // Whether the last run produced crashes (null = no run yet this session).
   const ranWithCrashes = summary ? summary.crashes > 0 : null;
 
-  const triage = useCallback(async () => {
+  const triage = useCallback(async (): Promise<Crash[]> => {
     setLoading(true);
     setTriageError(null);
     try {
@@ -62,33 +75,16 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       setCrashes(result);
       if (result.length > 0) markDone("triage");
       else markSkipped("triage");
+      return result;
     } catch (e) {
       // A failed scan previously looked identical to "no crashes found".
       setCrashes([]);
       setTriageError(String(e));
+      return [];
     } finally {
       setLoading(false);
     }
   }, [activeProject, lastTarget, markDone, markSkipped]);
-
-  // Save the composed report into the Workbench "Composed Reports" list so it is
-  // not lost between the Triage and Dashboard surfaces.
-  const saveToWorkbench = useCallback(async () => {
-    if (!reportMd) return;
-    setReportMsg(null);
-    try {
-      await getTransport().invoke("save_report_draft", {
-        title: `Triage report — ${lastTarget || "target"}`,
-        project: activeProject || ".",
-        target: lastTarget || undefined,
-        status: "draft",
-        content: reportMd,
-      });
-      setReportMsg("Saved to Workbench reports.");
-    } catch (e) {
-      setReportMsg(`Save to Workbench failed: ${e}`);
-    }
-  }, [reportMd, lastTarget, activeProject]);
 
   const reportArgs = useCallback(
     () => ({ project: activeProject || ".", target: lastTarget }),
@@ -109,60 +105,79 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     [lastTarget],
   );
 
-  // Compose the report (AI-authored when a provider is configured) and open the
-  // preview pane with the rendered Markdown + graphs.
-  const previewReport = useCallback(async () => {
+  // Compose the report (AI-authored when a provider is configured), open the
+  // preview, and persist it to the Workbench "Composed Reports" list so it is
+  // never lost between the Triage and Dashboard surfaces. `announce` controls
+  // whether a status message is shown (suppressed for silent auto-compose so it
+  // doesn't stomp the triage summary message).
+  const composeAndSaveReport = useCallback(async () => {
     setReporting(true);
     setReportMsg(null);
     try {
       const md = await getTransport().invoke<string>("generate_report", reportArgs());
-      if (md) {
-        setReportMd(md);
-      } else {
+      if (!md) {
         setReportMsg("Report generation is only available in the desktop app.");
+        return;
       }
+      setReportMd(md);
+      await getTransport().invoke("save_report_draft", {
+        title: `Triage report — ${lastTarget || "target"}`,
+        project: activeProject || ".",
+        target: lastTarget || undefined,
+        status: "Draft",
+        content: md,
+      });
+      emitDataChanged();
+      setReportMsg("AI report composed and saved to Workbench reports.");
     } catch (e) {
       setReportMsg(`Report failed: ${e}`);
     } finally {
       setReporting(false);
     }
-  }, [reportArgs]);
+  }, [reportArgs, lastTarget, activeProject]);
 
-  // Save the report to disk: native dialog in the desktop app, blob download in
-  // web mode. Uses the already-composed Markdown when previewing.
-  const saveReport = useCallback(async () => {
-    setReportMsg(null);
-    try {
-      const saved = await getTransport().invoke<string | null>("save_report", reportArgs());
-      if (saved) {
-        setReportMsg(`Saved to ${saved}`);
-      } else if (reportMd) {
-        // save_report unavailable (web) or cancelled: fall back to a download of
-        // the report we already have.
-        browserDownload(reportMd);
-        setReportMsg("Report downloaded.");
-      } else {
-        const md = await getTransport().invoke<string>("generate_report", reportArgs());
-        if (md) {
-          browserDownload(md);
+  // Export the composed report in a chosen format. Desktop opens a native save
+  // dialog (md/html/pdf/docx); web falls back to a Markdown blob download.
+  const exportReport = useCallback(
+    async (format: string) => {
+      setReportMsg(null);
+      try {
+        if (isTauriEnvironment()) {
+          const saved = await getTransport().invoke<string | null>("export_report", {
+            project: activeProject || ".",
+            target: lastTarget,
+            format,
+          });
+          if (saved) setReportMsg(`Saved ${format.toUpperCase()} to ${saved}`);
+        } else if (format === "md" && reportMd) {
+          browserDownload(reportMd);
           setReportMsg("Report downloaded.");
+        } else {
+          setReportMsg(`${format.toUpperCase()} export is only available in the desktop app.`);
         }
+      } catch (e) {
+        setReportMsg(`Export failed: ${e}`);
       }
-    } catch (e) {
-      setReportMsg(`Report failed: ${e}`);
-    }
-  }, [reportArgs, reportMd, browserDownload]);
+    },
+    [activeProject, lastTarget, reportMd, browserDownload],
+  );
 
-  // Auto-triage: once a run completes with crashes, ingest + dedup them
-  // automatically (once per run) so the user doesn't have to click Scan. The
-  // button remains for manual re-scans.
+  // Auto-triage + auto-report: once a run completes with crashes, ingest + dedup
+  // them and (per the workflow) compose an AI report and save it to the
+  // dashboard automatically -- once per run. Buttons remain for manual re-runs.
   const autoTriagedRef = useRef<typeof summary>(null);
   useEffect(() => {
+    // Skip kernel runs: their crashes are not in a per-target workspace, so an
+    // auto per-target scan would find nothing and read as "no crashes".
+    if (isKernelRun) return;
     if (summary && summary.crashes > 0 && autoTriagedRef.current !== summary) {
       autoTriagedRef.current = summary;
-      void triage();
+      void (async () => {
+        const list = await triage();
+        if (list.length > 0) await composeAndSaveReport();
+      })();
     }
-  }, [summary, triage]);
+  }, [summary, triage, composeAndSaveReport, isKernelRun]);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -176,46 +191,32 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           />
         )}
         <div className="flex items-center gap-2">
-          {/* Compose a full report of the campaign (AI-authored when a provider
-              is configured) and open it in a preview pane with rendered graphs.
-              Enabled once a run has happened (a target is known). */}
+          {/* Compose a full report (AI-authored when a provider is configured),
+              save it to the Workbench, and open the preview (with export
+              options). Enabled once a run has happened (a target is known). */}
           <Button
             variant="outline"
             size="sm"
-            onClick={() => void previewReport()}
+            onClick={() => void composeAndSaveReport()}
             disabled={reporting || !lastTarget}
             loading={reporting}
-            title="Compose a detailed report and preview it"
+            title="Compose an AI report, save it to the Workbench, and preview it"
           >
             {!reporting && <FileText size={14} />}
-            {reporting ? "Composing..." : "View Report"}
+            {reporting ? "Composing..." : "Compose Report"}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void saveReport()}
-            disabled={reporting || !lastTarget}
-            title="Compose and download the report as Markdown"
-            aria-label="Compose and download the report as Markdown"
-          >
-            <FileDown size={14} />
-          </Button>
-          {reportMd && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void saveToWorkbench()}
-              title="Save this report to the Workbench Composed Reports list"
-            >
-              <FileText size={14} />
-              Save to Workbench
-            </Button>
-          )}
           <Button
             variant="primary"
             onClick={triage}
-            disabled={loading}
+            disabled={loading || !lastTarget || isKernelRun}
             loading={loading}
+            title={
+              isKernelRun
+                ? "Kernel crashes are collected by syzkaller, not per-target triage"
+                : lastTarget
+                  ? "Scan the last run's output for crashes"
+                  : "Run a fuzz campaign first"
+            }
           >
             {!loading && <Bug size={14} />}
             {loading ? "Scanning..." : "Scan for Crashes"}
@@ -238,8 +239,22 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
+      {/* Kernel campaigns collect crashes in the syzkaller workdir, outside the
+          per-target triage path -- explain rather than scan into an empty result. */}
+      {isKernelRun && summary && (
+        <div
+          className="surface-card text-sm"
+          style={{ padding: "var(--space-md)", borderLeft: `3px solid ${summary.crashes > 0 ? "var(--error)" : "var(--success)"}` }}
+        >
+          Kernel (syzkaller) campaign reported <strong>{summary.crashes}</strong> crash
+          {summary.crashes === 1 ? "" : "es"}. Kernel crashes are collected in the syzkaller
+          workspace (reproducers + logs under the run&apos;s workdir), not the per-target triage
+          path, so per-target scanning does not apply here.
+        </div>
+      )}
+
       {/* Context from the last run, so the user knows what to expect. */}
-      {summary && crashes.length === 0 && (
+      {!isKernelRun && summary && crashes.length === 0 && (
         <div
           className="surface-card text-sm"
           style={{ padding: "var(--space-md)", borderLeft: `3px solid ${ranWithCrashes ? "var(--error)" : "var(--success)"}` }}
@@ -259,7 +274,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
-      {crashes.length === 0 && !loading && (
+      {crashes.length === 0 && !loading && !isKernelRun && (
         <div
           className="surface-card flex flex-col items-center justify-center"
           style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
@@ -310,7 +325,8 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           <ReportPreview
             markdown={reportMd}
             onClose={() => setReportMd(null)}
-            onDownload={() => void saveReport()}
+            onExport={(format) => void exportReport(format)}
+            formats={formats}
           />
         </Suspense>
       )}

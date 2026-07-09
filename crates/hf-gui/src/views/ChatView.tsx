@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks } from "lucide-react";
+import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2 } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { Button } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
@@ -31,6 +31,31 @@ interface CallableAgent {
 
 const ACTIVE_AGENT_KEY = "hf_active_agent";
 const CHAT_MODE_KEY = "hf_chat_mode";
+// Maps a project path (or "" for no active project) to its persistent chat
+// session id, so the AI Assistant keeps a separate, resumable history per
+// project instead of mixing them into one session.
+const PROJECT_SESSIONS_KEY = "hf_project_sessions_v1";
+
+function loadProjectSessions(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PROJECT_SESSIONS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : {};
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function setProjectSession(projectKey: string, sessionId: string | null) {
+  const map = loadProjectSessions();
+  if (sessionId) map[projectKey] = sessionId;
+  else delete map[projectKey];
+  try {
+    localStorage.setItem(PROJECT_SESSIONS_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore quota / private-mode errors */
+  }
+}
 
 // A pending guardrail approval request (mirrors the backend payload).
 interface PermissionRequest {
@@ -118,22 +143,78 @@ export function ChatView() {
     await getTransport().invoke("chat_answer_permission", { id: req.id, approved });
   }
 
-  // Create a persistent conversation session once (server-side memory). Falls
+  // Resolve the per-project chat session and load its history. Keyed on the
+  // active project so switching projects swaps to that project's own
+  // conversation (created on first use) instead of blending histories. Falls
   // back to frontend-replayed history when no database is configured.
   useEffect(() => {
     let cancelled = false;
-    getTransport()
-      .invoke<string | null>("create_session")
-      .then((id) => {
-        if (!cancelled) setSessionId(id);
-      })
-      .catch(() => {
+    const projectKey = activeProject || "";
+    (async () => {
+      const existing = loadProjectSessions()[projectKey];
+      const T = getTransport();
+      let id: string | null = existing ?? null;
+      try {
+        if (!id) {
+          id = await T.invoke<string | null>("create_session");
+          if (id) setProjectSession(projectKey, id);
+        }
+      } catch {
         /* no DB configured; chat still works via replayed history */
-      });
+      }
+      if (cancelled) return;
+      setSessionId(id);
+      // Hydrate the transcript for this project's session (empty for a fresh one).
+      if (id && existing) {
+        try {
+          const hist = await T.invoke<{ role: string; content: string }[]>("chat_history", {
+            sessionId: id,
+          });
+          if (cancelled) return;
+          setMessages(
+            hist.map((turn) => {
+              const role = normalizeChatRole(turn.role);
+              return {
+                role,
+                content: role === "assistant" ? normalizeAssistantContent(turn.content) : turn.content,
+                timestamp: new Date().toISOString(),
+              };
+            }),
+          );
+        } catch {
+          if (!cancelled) setMessages([]);
+        }
+      } else {
+        setMessages([]);
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeProject]);
+
+  // Clear the current project's conversation: delete the session server-side,
+  // forget the mapping, mint a fresh session, and empty the thread.
+  const clearHistory = useCallback(async () => {
+    if (busy) return;
+    if (!window.confirm("Clear this project's chat history? This cannot be undone.")) return;
+    const projectKey = activeProject || "";
+    const T = getTransport();
+    try {
+      if (sessionId) await T.invoke("delete_session", { sessionId });
+    } catch {
+      /* best-effort; still reset locally */
+    }
+    setProjectSession(projectKey, null);
+    setMessages([]);
+    try {
+      const id = await T.invoke<string | null>("create_session");
+      setSessionId(id);
+      if (id) setProjectSession(projectKey, id);
+    } catch {
+      setSessionId(null);
+    }
+  }, [busy, activeProject, sessionId]);
 
   // Populate the model selector from the actually-configured provider pool
   // (config/providers.toml). The chat uses that config, so the dropdown must
@@ -641,6 +722,13 @@ export function ChatView() {
                   icon={<RotateCcw size={16} />}
                   title="Undo last turn (rollback)"
                   onClick={rollbackLast}
+                />
+              )}
+              {messages.length > 0 && !busy && (
+                <ToolbarIconButton
+                  icon={<Trash2 size={16} />}
+                  title="Clear this project's chat history"
+                  onClick={() => void clearHistory()}
                 />
               )}
               {sessionId && messages.length >= 2 && !busy && (
