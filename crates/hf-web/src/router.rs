@@ -174,6 +174,10 @@ pub fn build_with_state(state: AppState) -> Router {
             get(project_auto_revert_overrides),
         )
         .route(
+            "/projects/auto-revert/effective",
+            post(effective_auto_revert_policy),
+        )
+        .route(
             "/projects/auto-revert/set",
             post(set_project_auto_revert_override),
         )
@@ -465,6 +469,19 @@ async fn project_auto_revert_override(
         .await;
     Ok(Json(
         serde_json::to_value(over).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+async fn effective_auto_revert_policy(
+    State(state): State<AppState>,
+    Json(req): Json<ProjectRequest>,
+) -> ApiResult<serde_json::Value> {
+    let view = state
+        .container
+        .effective_auto_revert_view(std::path::Path::new(&req.project))
+        .await;
+    Ok(Json(
+        serde_json::to_value(view).unwrap_or(serde_json::Value::Null),
     ))
 }
 
