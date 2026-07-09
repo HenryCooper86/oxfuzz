@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile, emitDataChanged } from "../lib";
+import { useConfirm } from "../providers/ConfirmContext";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 
@@ -185,6 +186,7 @@ function draftFrom(a: AgentDefinition, opts: { duplicate?: boolean } = {}): Agen
 }
 
 export function AgentsView() {
+  const confirm = useConfirm();
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [tools, setTools] = useState<{ name: string; description: string }[]>([]);
@@ -295,7 +297,7 @@ export function AgentsView() {
     const prompt = builtIn
       ? `Reset built-in agent "${a.name}" to its shipped version?`
       : `Delete agent "${a.name}"?`;
-    if (!window.confirm(prompt)) return;
+    if (!(await confirm({ title: builtIn ? "Reset to shipped version" : "Delete", message: prompt, danger: !builtIn, confirmLabel: builtIn ? "Reset" : "Delete" }))) return;
     try {
       await getTransport().invoke("delete_agent", { id: a.id });
       reload();
@@ -597,6 +599,7 @@ function skillDraftFrom(s: SkillDefinition, opts: { duplicate?: boolean } = {}):
 }
 
 export function SkillsView() {
+  const confirm = useConfirm();
   const [skills, setSkills] = useState<SkillDefinition[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState<SkillDraft | null>(null);
@@ -675,7 +678,7 @@ export function SkillsView() {
     const prompt = builtIn
       ? `Reset built-in skill "${s.name}" to its shipped version?`
       : `Delete skill "${s.name}"?`;
-    if (!window.confirm(prompt)) return;
+    if (!(await confirm({ title: builtIn ? "Reset to shipped version" : "Delete", message: prompt, danger: !builtIn, confirmLabel: builtIn ? "Reset" : "Delete" }))) return;
     try {
       await getTransport().invoke("delete_skill", { name: s.name });
       reload();
@@ -965,6 +968,7 @@ function KnowledgeBaseSearch() {
 }
 
 export function KnowledgeView() {
+  const confirm = useConfirm();
   const [data, setData] = useState<KnowledgeSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState(false);
@@ -982,9 +986,12 @@ export function KnowledgeView() {
     const total =
       (data?.targets.length ?? 0) + (data?.runs.length ?? 0) + (data?.crashes.length ?? 0);
     if (
-      !window.confirm(
-        `Clear all learned knowledge (${total} entries: discovered targets, runs, and crashes) across every project?\n\nThis also removes generated harnesses and corpus entries. Configuration is not affected. This cannot be undone.`,
-      )
+      !(await confirm({
+        title: "Clear all learned knowledge",
+        message: `${total} entries (targets, runs, crashes) across every project, plus generated harnesses and corpus. Configuration is not affected. This cannot be undone.`,
+        danger: true,
+        confirmLabel: "Clear",
+      }))
     ) {
       return;
     }
@@ -1151,6 +1158,7 @@ const EXEC_STATUS_COLOR: Record<string, string> = {
 };
 
 export function AutomationView() {
+  const confirm = useConfirm();
   const { activeProject } = useProject();
   const { target, engine } = useTarget();
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
@@ -1227,7 +1235,7 @@ export function AutomationView() {
     }
   }
   async function remove(id: string) {
-    if (!window.confirm("Delete this scheduled campaign? This cannot be undone.")) return;
+    if (!(await confirm({ title: "Delete campaign", message: "Delete this scheduled campaign? This cannot be undone.", danger: true, confirmLabel: "Delete" }))) return;
     setError(null);
     try {
       setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_delete", { id }));
