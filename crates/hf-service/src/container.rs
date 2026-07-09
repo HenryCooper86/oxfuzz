@@ -1222,7 +1222,15 @@ impl ServiceContainer {
                     started_at: r.started_at.to_rfc3339(),
                     ended_at: r.ended_at.map(|t| t.to_rfc3339()),
                     duration_secs,
-                    crashes: crashes_by_run.get(&r.id).copied().unwrap_or(0),
+                    // Prefer the fuzzer's recorded crash count (available even
+                    // without triage); fall back to the deduped crashes table
+                    // for runs recorded before stats were persisted.
+                    crashes: r.crash_count.map_or_else(
+                        || crashes_by_run.get(&r.id).copied().unwrap_or(0),
+                        |c| usize::try_from(c).unwrap_or(0),
+                    ),
+                    edges: r.edges,
+                    execs: r.execs,
                 }
             })
             .collect();
@@ -2493,6 +2501,16 @@ impl ServiceContainer {
                 FuzzProgress::ExecsPerSec(v) => execs = execs.max(*v),
                 FuzzProgress::CrashesFound(n) => crashes += n,
                 FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
+            }
+        }
+        // Persist the run's peak coverage + throughput so run history can chart
+        // real trends over time (not just live in the frontend's memory).
+        if let (Some(store), Some(rec)) = (&self.store, &run_record) {
+            if let Err(e) = store
+                .set_run_stats(rec.id, edges, execs, u64::from(crashes))
+                .await
+            {
+                tracing::warn!("failed to persist run stats: {e}");
             }
         }
         Ok(RunSummary {
@@ -4011,6 +4029,10 @@ pub struct RunHistoryItem {
     pub ended_at: Option<String>,
     pub duration_secs: Option<i64>,
     pub crashes: usize,
+    /// Peak edge coverage, once the run finished (None for older/pending runs).
+    pub edges: Option<u64>,
+    /// Peak executions/second, once the run finished.
+    pub execs: Option<f64>,
 }
 
 /// A fuzz run summary.

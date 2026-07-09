@@ -80,6 +80,9 @@ fn populated() -> ReportData {
             started_at: "2026-06-28T00:00:00Z".parse().unwrap(),
             ended_at: Some("2026-06-28T00:10:00Z".parse().unwrap()),
             config: None,
+            edges: None,
+            execs: None,
+            crash_count: None,
         }),
         crashes: vec![sample_crash()],
         coverage: Some(CoverageSummary {
