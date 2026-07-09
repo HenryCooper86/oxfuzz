@@ -1,12 +1,16 @@
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { pickFolder } from "../lib";
+import { useConfirm } from "../providers/ConfirmContext";
+import { useToast } from "../components/ui/Toast";
 import { Button, EmptyState, ViewHeader } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2 } from "lucide-react";
 
 export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => void }) {
   const { activeProject, recentProjects, setActiveProject, removeRecent, deleteProjectData } =
     useProject();
+  const confirm = useConfirm();
+  const { toast } = useToast();
 
   async function addProject() {
     const path = await pickFolder();
@@ -19,16 +23,21 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
   async function deleteData(path: string) {
     const name = path.split("/").pop() || path;
     if (
-      !window.confirm(
-        `Permanently delete all fuzzing data for "${name}"?\n\nThis removes its targets, harnesses, corpus, crashes, and runs from the database and deletes its on-disk workspace. This cannot be undone.`,
-      )
+      !(await confirm({
+        title: `Delete all data for "${name}"?`,
+        message:
+          "This removes its targets, harnesses, corpus, crashes, and runs from the database and deletes its on-disk workspace. This cannot be undone.",
+        danger: true,
+        confirmLabel: "Delete data",
+      }))
     ) {
       return;
     }
     try {
       await deleteProjectData(path);
+      toast({ title: "Project data deleted", description: name, variant: "success" });
     } catch (e) {
-      window.alert(`Failed to delete project data: ${String(e)}`);
+      toast({ title: "Failed to delete project data", description: String(e), variant: "error" });
     }
   }
 
