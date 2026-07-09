@@ -19,7 +19,7 @@ use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
 use hf_guardrails::{Action, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
-use hf_storage::{RunRecord, RunStatus, Store};
+use hf_storage::{ProjectAutoRevert, RunRecord, RunStatus, Store};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -1330,6 +1330,85 @@ impl ServiceContainer {
         Some(harness.target_id)
     }
 
+    /// The effective auto-revert policy for a project: its stored per-project
+    /// override when one is set, otherwise the global policy from config.
+    async fn effective_auto_revert_policy(
+        &self,
+        project: &Path,
+    ) -> crate::config::AutoRevertPolicy {
+        if let Some(store) = self.store.as_ref() {
+            let key = project.to_string_lossy().to_string();
+            if let Ok(Some(o)) = store.project_auto_revert(&key).await {
+                return crate::config::AutoRevertPolicy {
+                    enabled: o.enabled,
+                    threshold_pct: o.threshold_pct,
+                    notify_only: o.notify_only,
+                };
+            }
+        }
+        crate::config::auto_revert_policy()
+    }
+
+    /// A project's auto-revert override, or `None` when it inherits the global
+    /// policy. For the settings UI to show whether an override is in effect.
+    pub async fn project_auto_revert_override(&self, project: &Path) -> Option<ProjectAutoRevert> {
+        let store = self.store.as_ref()?;
+        let key = project.to_string_lossy().to_string();
+        store.project_auto_revert(&key).await.ok().flatten()
+    }
+
+    /// Set (or replace) a project's auto-revert override.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when no store is configured or the write fails.
+    pub async fn set_project_auto_revert_override(
+        &self,
+        project: &Path,
+        enabled: bool,
+        threshold_pct: f64,
+        notify_only: bool,
+    ) -> Result<(), ClassifiedError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let key = project.to_string_lossy().to_string();
+        // Guard the threshold like the global resolver does (must be positive).
+        let threshold_pct = if threshold_pct > 0.0 {
+            threshold_pct
+        } else {
+            crate::config::DEFAULT_AUTO_REVERT_THRESHOLD_PCT
+        };
+        store
+            .set_project_auto_revert(
+                &key,
+                ProjectAutoRevert {
+                    enabled,
+                    threshold_pct,
+                    notify_only,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Clear a project's auto-revert override, so it inherits the global policy.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when no store is configured or the delete fails.
+    pub async fn clear_project_auto_revert_override(
+        &self,
+        project: &Path,
+    ) -> Result<(), ClassifiedError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let key = project.to_string_lossy().to_string();
+        store.clear_project_auto_revert(&key).await?;
+        Ok(())
+    }
+
     /// Evaluate the auto-revert policy for a just-finished run and, if it
     /// triggered, restore the previous (last-good) harness revision.
     ///
@@ -1348,7 +1427,7 @@ impl ServiceContainer {
         this_edges: u64,
         this_rev: Option<&str>,
     ) -> Option<AutoRevertOutcome> {
-        let policy = crate::config::auto_revert_policy();
+        let policy = self.effective_auto_revert_policy(project).await;
         if !policy.enabled {
             return None;
         }

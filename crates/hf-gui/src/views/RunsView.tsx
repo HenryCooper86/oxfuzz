@@ -187,7 +187,7 @@ export function RunsView() {
         </div>
       )}
 
-      <AutoRevertPolicyCard />
+      <AutoRevertPolicyCard project={activeProject} />
 
       {trend.length >= 2 && (
         <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
@@ -424,30 +424,62 @@ export function RunsView() {
   );
 }
 
-// The auto-revert policy control: arms the backend to automatically restore the
-// previous (last-good) harness when a revision regresses coverage past the
-// threshold. Backed by `hobot-fuzz.toml` via the config round-trip commands, so
-// the setting is the same one the CLI/service read.
-function AutoRevertPolicyCard() {
+interface ProjectAutoRevert {
+  enabled: boolean;
+  threshold_pct: number;
+  notify_only: boolean;
+}
+
+// The auto-revert policy control. Edits either the GLOBAL default (backed by
+// hobot-fuzz.toml, shared with the CLI/service) or a PER-PROJECT override
+// (persisted in the store, keyed by project root). A project with an override
+// ignores the global policy; clearing it falls back to global.
+function AutoRevertPolicyCard({ project }: { project: string }) {
   const { toast } = useToast();
   const [enabled, setEnabled] = useState(false);
   const [threshold, setThreshold] = useState(20);
   const [notifyOnly, setNotifyOnly] = useState(false);
+  const [scope, setScope] = useState<"global" | "project">("global");
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const hasProject = project.trim() !== "";
+  const projectName = hasProject ? project.split("/").filter(Boolean).pop() || project : "";
+
+  const loadGlobal = useCallback(async () => {
+    const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
+    const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
+    return {
+      enabled: typeof val.auto_revert_enabled === "boolean" ? val.auto_revert_enabled : false,
+      threshold: typeof val.auto_revert_threshold_pct === "number" ? val.auto_revert_threshold_pct : 20,
+      notifyOnly: typeof val.auto_revert_notify_only === "boolean" ? val.auto_revert_notify_only : false,
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
+      setReady(false);
       try {
-        const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
-        const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
+        const g = await loadGlobal();
+        let over: ProjectAutoRevert | null = null;
+        if (hasProject) {
+          over = await getTransport().invoke<ProjectAutoRevert | null>("project_auto_revert_override", { project });
+        }
         if (cancelled) return;
-        if (typeof val.auto_revert_enabled === "boolean") setEnabled(val.auto_revert_enabled);
-        if (typeof val.auto_revert_threshold_pct === "number") setThreshold(val.auto_revert_threshold_pct);
-        if (typeof val.auto_revert_notify_only === "boolean") setNotifyOnly(val.auto_revert_notify_only);
+        if (over) {
+          setScope("project");
+          setEnabled(over.enabled);
+          setThreshold(over.threshold_pct);
+          setNotifyOnly(over.notify_only);
+        } else {
+          setScope("global");
+          setEnabled(g.enabled);
+          setThreshold(g.threshold);
+          setNotifyOnly(g.notifyOnly);
+        }
       } catch {
-        // Keep the safe defaults (off, 20%, apply) if the config cannot be read.
+        // Keep the safe defaults (off, 20%, apply) if nothing can be read.
       } finally {
         if (!cancelled) setReady(true);
       }
@@ -456,23 +488,37 @@ function AutoRevertPolicyCard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [project, hasProject, loadGlobal]);
 
+  // Persist the current values to whichever scope is active.
   const persist = useCallback(
-    async (next: { enabled: boolean; threshold: number; notifyOnly: boolean }) => {
+    async (
+      next: { enabled: boolean; threshold: number; notifyOnly: boolean },
+      toScope: "global" | "project",
+    ) => {
       setSaving(true);
       try {
-        const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
-        const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
-        val.auto_revert_enabled = next.enabled;
-        val.auto_revert_threshold_pct = next.threshold;
-        val.auto_revert_notify_only = next.notifyOnly;
-        const toml = await getTransport().invoke<string>("config_value_to_toml", { value: val });
-        await getTransport().invoke("write_config", { name: "hobot-fuzz", content: toml });
+        if (toScope === "project") {
+          await getTransport().invoke("set_project_auto_revert_override", {
+            project,
+            enabled: next.enabled,
+            threshold_pct: next.threshold,
+            notify_only: next.notifyOnly,
+          });
+        } else {
+          const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
+          const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
+          val.auto_revert_enabled = next.enabled;
+          val.auto_revert_threshold_pct = next.threshold;
+          val.auto_revert_notify_only = next.notifyOnly;
+          const toml = await getTransport().invoke<string>("config_value_to_toml", { value: val });
+          await getTransport().invoke("write_config", { name: "hobot-fuzz", content: toml });
+        }
+        const where = toScope === "project" ? projectName : "global default";
         toast({
           title: next.enabled
-            ? `Auto-revert armed (>${next.threshold}% drop${next.notifyOnly ? ", notify-only" : ""})`
-            : "Auto-revert disabled",
+            ? `Auto-revert armed for ${where} (>${next.threshold}% drop${next.notifyOnly ? ", notify-only" : ""})`
+            : `Auto-revert disabled for ${where}`,
           variant: "success",
         });
       } catch (e) {
@@ -481,26 +527,53 @@ function AutoRevertPolicyCard() {
         setSaving(false);
       }
     },
-    [toast],
+    [project, projectName, toast],
   );
 
   const toggle = () => {
     const next = !enabled;
     setEnabled(next);
-    void persist({ enabled: next, threshold, notifyOnly });
+    void persist({ enabled: next, threshold, notifyOnly }, scope);
   };
 
   const commitThreshold = () => {
     const clamped = Math.min(100, Math.max(1, Math.round(threshold)));
     setThreshold(clamped);
-    if (enabled) void persist({ enabled, threshold: clamped, notifyOnly });
+    if (enabled) void persist({ enabled, threshold: clamped, notifyOnly }, scope);
   };
 
   const toggleNotifyOnly = () => {
     const next = !notifyOnly;
     setNotifyOnly(next);
-    if (enabled) void persist({ enabled, threshold, notifyOnly: next });
+    if (enabled) void persist({ enabled, threshold, notifyOnly: next }, scope);
   };
+
+  // Start overriding for this project, seeding the override from the values on
+  // screen (the current global policy).
+  const startOverride = () => {
+    setScope("project");
+    void persist({ enabled, threshold, notifyOnly }, "project");
+  };
+
+  // Drop the override and fall back to the global default.
+  const revertToGlobalDefault = async () => {
+    setSaving(true);
+    try {
+      await getTransport().invoke("clear_project_auto_revert_override", { project });
+      const g = await loadGlobal();
+      setScope("global");
+      setEnabled(g.enabled);
+      setThreshold(g.threshold);
+      setNotifyOnly(g.notifyOnly);
+      toast({ title: `${projectName} now inherits the global policy`, variant: "success" });
+    } catch (e) {
+      toast({ title: "Could not clear the override", description: String(e), variant: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const perProject = scope === "project";
 
   return (
     <section className="surface-card flex flex-col gap-2 min-w-0" style={{ padding: "var(--space-md)" }}>
@@ -508,6 +581,18 @@ function AutoRevertPolicyCard() {
         <div className="flex items-center gap-2 min-w-0">
           <RotateCcw size={15} style={{ color: "var(--accent)", flexShrink: 0 }} />
           <span className="text-sm font-semibold">Auto-revert policy</span>
+          <span
+            className="text-xs rounded-full"
+            style={{
+              padding: "1px 8px",
+              background: perProject ? "var(--accent-subtle, var(--surface-secondary))" : "var(--surface-secondary)",
+              color: perProject ? "var(--accent)" : "var(--text-muted)",
+              fontWeight: 600,
+            }}
+            title={perProject ? `Overriding the global default for ${projectName}` : "The global default (all projects)"}
+          >
+            {perProject ? `Project: ${projectName}` : "Global default"}
+          </span>
           <span
             className="text-xs rounded-full"
             style={{
@@ -581,19 +666,32 @@ function AutoRevertPolicyCard() {
           scheduled campaigns)
         </label>
       )}
-      <p className="text-xs text-text-muted" style={{ lineHeight: 1.5 }}>
-        When a run&apos;s harness revision changes and its edge coverage drops by at least this much
-        versus the previous run for the same target,{" "}
-        {notifyOnly ? (
-          <>the regression is flagged in run history and the campaign log, but the harness is left as-is.</>
-        ) : (
-          <>
-            the previous (last-good) revision is restored and recompiled automatically. The recompile
-            still requires the usual sandbox approval.
-          </>
-        )}{" "}
-        Scheduled campaigns apply this same policy between refinement iterations.
-      </p>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-xs text-text-muted min-w-0" style={{ lineHeight: 1.5 }}>
+          {perProject ? (
+            <>These settings apply only to <strong>{projectName}</strong>, overriding the global default. </>
+          ) : (
+            <>These settings are the default for every project. </>
+          )}
+          When a harness revision drops coverage by at least this much versus the previous run,{" "}
+          {notifyOnly ? (
+            <>the regression is flagged in run history and the campaign log, but the harness is left as-is.</>
+          ) : (
+            <>the previous (last-good) revision is restored and recompiled (sandbox approval still applies).</>
+          )}{" "}
+          Scheduled campaigns apply the same policy between refinement iterations.
+        </p>
+        {hasProject &&
+          (perProject ? (
+            <Button variant="outline" size="sm" disabled={!ready || saving} onClick={() => void revertToGlobalDefault()}>
+              Use global default
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" disabled={!ready || saving} onClick={startOverride}>
+              Override for {projectName}
+            </Button>
+          ))}
+      </div>
     </section>
   );
 }

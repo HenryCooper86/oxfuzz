@@ -165,6 +165,18 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/runs/coverage", post(run_coverage_series))
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
+        .route(
+            "/projects/auto-revert",
+            post(project_auto_revert_override),
+        )
+        .route(
+            "/projects/auto-revert/set",
+            post(set_project_auto_revert_override),
+        )
+        .route(
+            "/projects/auto-revert/clear",
+            post(clear_project_auto_revert_override),
+        )
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
@@ -429,6 +441,56 @@ async fn revert_harness_from_run(
         "status": format!("{:?}", out.status),
         "message": "Reverted and recompiled the harness in the sandbox.",
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetProjectAutoRevertRequest {
+    project: String,
+    enabled: bool,
+    threshold_pct: f64,
+    notify_only: bool,
+}
+
+async fn project_auto_revert_override(
+    State(state): State<AppState>,
+    Json(req): Json<ProjectRequest>,
+) -> ApiResult<serde_json::Value> {
+    let over = state
+        .container
+        .project_auto_revert_override(std::path::Path::new(&req.project))
+        .await;
+    Ok(Json(
+        serde_json::to_value(over).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+async fn set_project_auto_revert_override(
+    State(state): State<AppState>,
+    Json(req): Json<SetProjectAutoRevertRequest>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .container
+        .set_project_auto_revert_override(
+            std::path::Path::new(&req.project),
+            req.enabled,
+            req.threshold_pct,
+            req.notify_only,
+        )
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn clear_project_auto_revert_override(
+    State(state): State<AppState>,
+    Json(req): Json<ProjectRequest>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .container
+        .clear_project_auto_revert_override(std::path::Path::new(&req.project))
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

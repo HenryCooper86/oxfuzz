@@ -36,6 +36,7 @@ pub use container::{
     RunHistoryItem, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot, SyzkallerRunOpts,
     SyzkallerSummary,
 };
+pub use hf_storage::ProjectAutoRevert;
 pub use init::{init_at, init_workspace, InitReport};
 pub use report_store::ReportDraft;
 pub use system::{system_status, SystemStatus};

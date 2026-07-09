@@ -10,7 +10,7 @@ use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
-use hf_storage::{RunRecord, RunStatus, Store};
+use hf_storage::{ProjectAutoRevert, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
 async fn temp_store() -> (Store, tempfile::TempDir) {
@@ -41,6 +41,55 @@ fn sample_target(project: &str) -> TargetCandidate {
         reachable_functions: Vec::new(),
         accumulated_complexity: 0,
     }
+}
+
+#[tokio::test]
+async fn project_auto_revert_override_upserts_and_clears() {
+    let (store, _dir) = temp_store().await;
+    let project = "/home/user/proj-a";
+
+    // No override initially -> None (inherit global).
+    assert_eq!(store.project_auto_revert(project).await.unwrap(), None);
+
+    // Set an override and read it back verbatim.
+    let over = ProjectAutoRevert {
+        enabled: true,
+        threshold_pct: 42.5,
+        notify_only: true,
+    };
+    store.set_project_auto_revert(project, over).await.unwrap();
+    assert_eq!(
+        store.project_auto_revert(project).await.unwrap(),
+        Some(over)
+    );
+
+    // Upsert replaces the row rather than duplicating it.
+    let updated = ProjectAutoRevert {
+        enabled: false,
+        threshold_pct: 10.0,
+        notify_only: false,
+    };
+    store
+        .set_project_auto_revert(project, updated)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.project_auto_revert(project).await.unwrap(),
+        Some(updated)
+    );
+
+    // A different project is independent.
+    assert_eq!(
+        store
+            .project_auto_revert("/home/user/proj-b")
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Clearing removes the override (back to inherit).
+    store.clear_project_auto_revert(project).await.unwrap();
+    assert_eq!(store.project_auto_revert(project).await.unwrap(), None);
 }
 
 #[tokio::test]
