@@ -521,6 +521,8 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
             : `Auto-revert disabled for ${where}`,
           variant: "success",
         });
+        // Refresh dependent views (e.g. the Projects overview badges).
+        if (toScope === "project") emitDataChanged();
       } catch (e) {
         toast({ title: "Could not save the auto-revert policy", description: String(e), variant: "error" });
       } finally {
@@ -566,6 +568,7 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
       setThreshold(g.threshold);
       setNotifyOnly(g.notifyOnly);
       toast({ title: `${projectName} now inherits the global policy`, variant: "success" });
+      emitDataChanged();
     } catch (e) {
       toast({ title: "Could not clear the override", description: String(e), variant: "error" });
     } finally {

@@ -1,16 +1,42 @@
+import { useCallback, useEffect, useState } from "react";
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
-import { pickFolder } from "../lib";
+import { getTransport, onDataChanged, pickFolder } from "../lib";
 import { useConfirm } from "../providers/ConfirmContext";
 import { useToast } from "../components/ui/Toast";
 import { Button, EmptyState, ViewHeader } from "../components/ui";
-import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2 } from "lucide-react";
+import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2, RotateCcw } from "lucide-react";
+
+interface ProjectAutoRevert {
+  enabled: boolean;
+  threshold_pct: number;
+  notify_only: boolean;
+}
 
 export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => void }) {
   const { activeProject, recentProjects, setActiveProject, removeRecent, deleteProjectData } =
     useProject();
   const confirm = useConfirm();
   const { toast } = useToast();
+  // Per-project auto-revert overrides, keyed by project root. Absence = the
+  // project inherits the global policy (no badge).
+  const [overrides, setOverrides] = useState<Record<string, ProjectAutoRevert>>({});
+
+  const loadOverrides = useCallback(async () => {
+    try {
+      const map = await getTransport().invoke<Record<string, ProjectAutoRevert>>(
+        "project_auto_revert_overrides",
+      );
+      setOverrides(map ?? {});
+    } catch {
+      setOverrides({});
+    }
+  }, []);
+
+  useEffect(() => {
+    queueMicrotask(() => void loadOverrides());
+    return onDataChanged(() => void loadOverrides());
+  }, [loadOverrides]);
 
   async function addProject() {
     const path = await pickFolder();
@@ -89,6 +115,7 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
                     {path}
                   </span>
                 </div>
+                <AutoRevertBadge override={overrides[path]} />
                 <button
                   onClick={() => open(path, "discover")}
                   className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
@@ -148,5 +175,35 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
         </div>
       )}
     </div>
+  );
+}
+
+// A compact badge shown only for projects that override the global auto-revert
+// policy, so the overview shows at a glance which projects diverge.
+function AutoRevertBadge({ override }: { override?: ProjectAutoRevert }) {
+  if (!override) return null;
+  const { enabled, threshold_pct, notify_only } = override;
+  const label = !enabled
+    ? "Auto-revert off"
+    : notify_only
+      ? `Auto-revert notify >${threshold_pct}%`
+      : `Auto-revert >${threshold_pct}%`;
+  const color = enabled ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-xs rounded-full whitespace-nowrap"
+      style={{
+        padding: "2px 8px",
+        border: `1px solid ${color}`,
+        color,
+        background: "var(--surface-secondary)",
+      }}
+      title={`This project overrides the global auto-revert policy: ${label.toLowerCase()}${
+        enabled && notify_only ? " (detect only, no restore)" : ""
+      }`}
+    >
+      <RotateCcw size={11} />
+      {label}
+    </span>
   );
 }

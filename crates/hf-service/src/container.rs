@@ -1357,6 +1357,23 @@ impl ServiceContainer {
         store.project_auto_revert(&key).await.ok().flatten()
     }
 
+    /// Every project's auto-revert override, keyed by project root -- so a
+    /// projects overview can badge which ones diverge from the global policy.
+    /// Empty when no store is configured or no project overrides.
+    pub async fn project_auto_revert_overrides(
+        &self,
+    ) -> std::collections::HashMap<String, ProjectAutoRevert> {
+        let Some(store) = self.store.as_ref() else {
+            return std::collections::HashMap::new();
+        };
+        store
+            .all_project_auto_reverts()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
     /// Set (or replace) a project's auto-revert override.
     ///
     /// # Errors

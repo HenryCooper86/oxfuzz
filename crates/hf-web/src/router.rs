@@ -170,6 +170,10 @@ pub fn build_with_state(state: AppState) -> Router {
             post(project_auto_revert_override),
         )
         .route(
+            "/projects/auto-revert/all",
+            get(project_auto_revert_overrides),
+        )
+        .route(
             "/projects/auto-revert/set",
             post(set_project_auto_revert_override),
         )
@@ -461,6 +465,15 @@ async fn project_auto_revert_override(
         .await;
     Ok(Json(
         serde_json::to_value(over).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+async fn project_auto_revert_overrides(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(
+        serde_json::to_value(state.container.project_auto_revert_overrides().await)
+            .unwrap_or(serde_json::Value::Null),
     ))
 }
 
