@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, lazy, Suspense } from "react";
 import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
+import { useConfirm } from "../providers/ConfirmContext";
 import type { ReportDraft } from "../types";
 import { ViewHeader, EmptyState } from "../components/ui";
 import { FileText, Trash2, Eye } from "lucide-react";
@@ -13,6 +14,7 @@ const ReportPreview = lazy(() =>
 // Reports are produced by Triage (auto-composed on crashes) and the Workbench
 // Reports tab; this view lists, previews, exports, and deletes them.
 export function ReportsView() {
+  const confirm = useConfirm();
   const [reports, setReports] = useState<ReportDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<ReportDraft | null>(null);
@@ -47,7 +49,7 @@ export function ReportsView() {
 
   const remove = useCallback(
     async (r: ReportDraft) => {
-      if (!window.confirm(`Delete report "${r.title}"? This cannot be undone.`)) return;
+      if (!(await confirm({ title: "Delete report", message: `Delete "${r.title}"? This cannot be undone.`, danger: true, confirmLabel: "Delete" }))) return;
       try {
         await getTransport().invoke("delete_report_draft", { id: r.id });
         if (open?.id === r.id) setOpen(null);
@@ -56,7 +58,7 @@ export function ReportsView() {
         setNotice(`Delete failed: ${String(e)}`);
       }
     },
-    [open, load],
+    [open, load, confirm],
   );
 
   // Export the *saved* content (not a recompose) in the chosen format.

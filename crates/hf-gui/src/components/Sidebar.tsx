@@ -2,7 +2,7 @@ import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import { useI18n } from "../i18n";
-import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, Settings, Target, Workflow, X, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, Settings, Target, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -34,6 +34,7 @@ const LIBRARY_ITEMS: NavItem[] = [
   { view: "projects", label: "Projects", icon: FolderOpen },
   { view: "artifacts", label: "Artifacts", icon: Boxes },
   { view: "reports", label: "Reports", icon: FileText },
+  { view: "runs", label: "Run History", icon: History },
   { view: "agents", label: "Agents", icon: Bot },
   { view: "skills", label: "Skills", icon: Puzzle },
   { view: "knowledge", label: "Knowledge", icon: BookOpen },
