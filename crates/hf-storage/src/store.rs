@@ -385,6 +385,35 @@ impl Store {
         Ok(())
     }
 
+    /// Every project's auto-revert override, keyed by project root. For an
+    /// at-a-glance view of which projects override the global policy.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn all_project_auto_reverts(
+        &self,
+    ) -> Result<Vec<(String, ProjectAutoRevert)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT project_root, auto_revert_enabled, auto_revert_threshold_pct, auto_revert_notify_only \
+             FROM project_settings",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("project_root"),
+                    ProjectAutoRevert {
+                        enabled: r.get::<i64, _>("auto_revert_enabled") != 0,
+                        threshold_pct: r.get::<f64, _>("auto_revert_threshold_pct"),
+                        notify_only: r.get::<i64, _>("auto_revert_notify_only") != 0,
+                    },
+                )
+            })
+            .collect())
+    }
+
     /// Update a run's status (and optionally its end time).
     ///
     /// # Errors

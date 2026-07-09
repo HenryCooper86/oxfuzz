@@ -93,6 +93,41 @@ async fn project_auto_revert_override_upserts_and_clears() {
 }
 
 #[tokio::test]
+async fn all_project_auto_reverts_lists_only_overridden_projects() {
+    let (store, _dir) = temp_store().await;
+    assert!(store.all_project_auto_reverts().await.unwrap().is_empty());
+
+    let a = ProjectAutoRevert {
+        enabled: true,
+        threshold_pct: 25.0,
+        notify_only: false,
+    };
+    let b = ProjectAutoRevert {
+        enabled: false,
+        threshold_pct: 15.0,
+        notify_only: true,
+    };
+    store.set_project_auto_revert("/p/a", a).await.unwrap();
+    store.set_project_auto_revert("/p/b", b).await.unwrap();
+
+    let all: std::collections::HashMap<String, ProjectAutoRevert> = store
+        .all_project_auto_reverts()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all.get("/p/a"), Some(&a));
+    assert_eq!(all.get("/p/b"), Some(&b));
+
+    // Cleared projects drop out of the listing.
+    store.clear_project_auto_revert("/p/a").await.unwrap();
+    let all = store.all_project_auto_reverts().await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].0, "/p/b");
+}
+
+#[tokio::test]
 async fn append_message_assigns_monotonic_seq_and_orders_history() {
     let (store, _dir) = temp_store().await;
     let session = store.create_session(None, Utc::now()).await.unwrap();

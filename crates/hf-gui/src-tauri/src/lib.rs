@@ -23,12 +23,12 @@ use commands::{
     harness_draft, harness_review_queue, host_arch, interrupted_runs, knowledge_index,
     knowledge_ingest, knowledge_search, knowledge_summary, list_agents, list_configs, list_models,
     list_report_drafts, list_skills, open_file_dialog, open_folder_dialog, open_path,
-    project_auto_revert_override, provider_statuses, provider_test, read_config, read_skill,
-    report_formats, reveal_path, revert_harness_from_run, run_coverage_series, run_fuzzer,
-    run_harness_source, run_history, run_syzkaller, save_agent, save_report, save_report_draft,
-    save_skill, schedule_create, schedule_delete, schedule_history, schedule_list,
-    schedule_set_enabled, set_project_auto_revert_override, set_providers, show_window,
-    system_snapshot, system_status_cmd, triage, workbench_dashboard, write_config,
+    project_auto_revert_override, project_auto_revert_overrides, provider_statuses, provider_test,
+    read_config, read_skill, report_formats, reveal_path, revert_harness_from_run,
+    run_coverage_series, run_fuzzer, run_harness_source, run_history, run_syzkaller, save_agent,
+    save_report, save_report_draft, save_skill, schedule_create, schedule_delete, schedule_history,
+    schedule_list, schedule_set_enabled, set_project_auto_revert_override, set_providers,
+    show_window, system_snapshot, system_status_cmd, triage, workbench_dashboard, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -85,6 +85,7 @@ pub fn run() {
             run_harness_source,
             revert_harness_from_run,
             project_auto_revert_override,
+            project_auto_revert_overrides,
             set_project_auto_revert_override,
             clear_project_auto_revert_override,
             save_report,
