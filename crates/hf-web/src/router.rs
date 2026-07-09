@@ -162,6 +162,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/crashes/all", get(all_crashes))
         .route("/corpus/all", get(all_corpus))
         .route("/runs/history", post(run_history))
+        .route("/runs/coverage", post(run_coverage_series))
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
@@ -387,6 +388,21 @@ async fn run_history(
     let path = opt_project_path(req.project.as_ref());
     Ok(Json(
         serde_json::to_value(state.container.run_history(path).await)
+            .unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RunIdRequest {
+    run_id: String,
+}
+
+async fn run_coverage_series(
+    State(state): State<AppState>,
+    Json(req): Json<RunIdRequest>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(
+        serde_json::to_value(state.container.run_coverage_series(&req.run_id).await)
             .unwrap_or(serde_json::Value::Null),
     ))
 }
