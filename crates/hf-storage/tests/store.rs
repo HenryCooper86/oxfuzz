@@ -635,3 +635,20 @@ async fn run_harness_rev_roundtrips() {
     let got = store.get_run(id).await.unwrap().unwrap();
     assert_eq!(got.harness_rev.as_deref(), Some("abc123def456"));
 }
+
+#[tokio::test]
+async fn run_harness_source_roundtrips() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    let id = run.id;
+    store.insert_run(&run).await.unwrap();
+    assert!(store.run_harness_source(id).await.unwrap().is_none());
+    store
+        .set_run_harness_source(id, "int LLVMFuzzerTestOneInput(){return 0;}")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.run_harness_source(id).await.unwrap().as_deref(),
+        Some("int LLVMFuzzerTestOneInput(){return 0;}")
+    );
+}

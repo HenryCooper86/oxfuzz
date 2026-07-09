@@ -1541,6 +1541,15 @@ pub async fn run_coverage_series(
     Ok(state.container.run_coverage_series(&run_id).await)
 }
 
+/// The harness source a run used, for diffing between harness revisions.
+#[tauri::command]
+pub async fn run_harness_source(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<String, String> {
+    Ok(state.container.run_harness_source(&run_id).await)
+}
+
 /// Export a project's fuzzing data (targets, runs, harnesses, crashes, corpus)
 /// as a JSON bundle via a native save dialog. Returns the saved path or `None`.
 #[tauri::command]
