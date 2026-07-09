@@ -248,6 +248,35 @@ impl Store {
         Ok(())
     }
 
+    /// Store a run's intra-run coverage/throughput time series as a JSON blob.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn set_run_samples(&self, id: Uuid, samples_json: &str) -> Result<(), StorageError> {
+        sqlx::query("UPDATE runs SET samples_json = ?2 WHERE id = ?1")
+            .bind(id.to_string())
+            .bind(samples_json)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Read back a run's stored coverage/throughput time series JSON, if any.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn run_samples(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        let row = sqlx::query("SELECT samples_json FROM runs WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| {
+            r.try_get::<Option<String>, _>("samples_json")
+                .ok()
+                .flatten()
+        }))
+    }
+
     /// Update a run's status (and optionally its end time).
     ///
     /// # Errors

@@ -19,6 +19,12 @@ export type ViewType =
   | "knowledge"
   | "automation";
 
+export interface CoverageSample {
+  t: number;
+  edges: number;
+  execs: number;
+}
+
 export interface RunHistoryItem {
   id: string;
   project_root: string;
