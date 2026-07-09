@@ -13,10 +13,22 @@ export type ViewType =
   | "projects"
   | "artifacts"
   | "reports"
+  | "runs"
   | "agents"
   | "skills"
   | "knowledge"
   | "automation";
+
+export interface RunHistoryItem {
+  id: string;
+  project_root: string;
+  engine: string;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_secs: number | null;
+  crashes: number;
+}
 
 export interface TargetCandidate {
   id: string;

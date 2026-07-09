@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { useConfirm } from "../providers/ConfirmContext";
 import { getTransport, onDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -123,6 +124,7 @@ export function DashboardView() {
   const { activeProject } = useProject();
   const { target } = useTarget();
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
   const [reports, setReports] = useState<ReportDraft[]>([]);
@@ -273,7 +275,7 @@ export function DashboardView() {
   }
 
   async function deleteDraft(report: ReportDraft) {
-    if (!window.confirm(`Delete report "${report.title}"?`)) return;
+    if (!(await confirm({ title: "Delete report", message: `Delete "${report.title}"?`, danger: true, confirmLabel: "Delete" }))) return;
     setNotice(null);
     setError(null);
     try {

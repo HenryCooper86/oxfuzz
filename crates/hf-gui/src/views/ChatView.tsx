@@ -3,6 +3,7 @@ import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, 
 import { getTransport, pickFolder } from "../lib";
 import { Button } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { useConfirm } from "../providers/ConfirmContext";
 import { useListboxNav } from "../hooks/useListboxNav";
 import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
@@ -91,6 +92,7 @@ type AgentEvent =
 export function ChatView() {
   const { activeProject, recentProjects, setActiveProject } = useProject();
   const { toast } = useToast();
+  const confirm = useConfirm();
   const { sendOnEnter } = usePrefs();
   const { t } = useI18n();
   // In-flight fuzz runs surface as the composer's task count.
@@ -197,7 +199,7 @@ export function ChatView() {
   // forget the mapping, mint a fresh session, and empty the thread.
   const clearHistory = useCallback(async () => {
     if (busy) return;
-    if (!window.confirm("Clear this project's chat history? This cannot be undone.")) return;
+    if (!(await confirm({ title: "Clear chat history", message: "Clear this project's chat history? This cannot be undone.", danger: true, confirmLabel: "Clear" }))) return;
     const projectKey = activeProject || "";
     const T = getTransport();
     try {
@@ -214,7 +216,7 @@ export function ChatView() {
     } catch {
       setSessionId(null);
     }
-  }, [busy, activeProject, sessionId]);
+  }, [busy, activeProject, sessionId, confirm]);
 
   // Populate the model selector from the actually-configured provider pool
   // (config/providers.toml). The chat uses that config, so the dropdown must

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState, lazy, Suspense } from "react";
 import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
+import { useConfirm } from "../providers/ConfirmContext";
 import type { ReportDraft } from "../types";
-import { ViewHeader, EmptyState } from "../components/ui";
-import { FileText, Trash2, Eye } from "lucide-react";
+import { ViewHeader, EmptyState, Input } from "../components/ui";
+import { FileText, Trash2, Eye, Search } from "lucide-react";
 
 // Heavy (react-markdown + mermaid); load only when a report is opened.
 const ReportPreview = lazy(() =>
@@ -13,11 +14,13 @@ const ReportPreview = lazy(() =>
 // Reports are produced by Triage (auto-composed on crashes) and the Workbench
 // Reports tab; this view lists, previews, exports, and deletes them.
 export function ReportsView() {
+  const confirm = useConfirm();
   const [reports, setReports] = useState<ReportDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<ReportDraft | null>(null);
   const [formats, setFormats] = useState<string[]>(["md", "html"]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -47,7 +50,7 @@ export function ReportsView() {
 
   const remove = useCallback(
     async (r: ReportDraft) => {
-      if (!window.confirm(`Delete report "${r.title}"? This cannot be undone.`)) return;
+      if (!(await confirm({ title: "Delete report", message: `Delete "${r.title}"? This cannot be undone.`, danger: true, confirmLabel: "Delete" }))) return;
       try {
         await getTransport().invoke("delete_report_draft", { id: r.id });
         if (open?.id === r.id) setOpen(null);
@@ -56,7 +59,7 @@ export function ReportsView() {
         setNotice(`Delete failed: ${String(e)}`);
       }
     },
-    [open, load],
+    [open, load, confirm],
   );
 
   // Export the *saved* content (not a recompose) in the chosen format.
@@ -89,6 +92,11 @@ export function ReportsView() {
     [],
   );
 
+  const q = filter.trim().toLowerCase();
+  const shown = q
+    ? reports.filter((r) => `${r.title} ${r.target ?? ""} ${r.status}`.toLowerCase().includes(q))
+    : reports;
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
@@ -97,6 +105,13 @@ export function ReportsView() {
       />
 
       {notice && <p className="text-xs text-text-muted">{notice}</p>}
+
+      {!loading && reports.length > 0 && (
+        <div className="flex items-center gap-2">
+          <Search size={14} className="text-text-muted shrink-0" />
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by title, target, or status..." className="flex-1" />
+        </div>
+      )}
 
       {loading ? (
         <p className="text-sm text-text-muted">Loading reports…</p>
@@ -108,7 +123,7 @@ export function ReportsView() {
         />
       ) : (
         <div className="flex flex-col gap-1.5">
-          {reports.map((r) => (
+          {shown.map((r) => (
             <div
               key={r.id}
               className="surface-card flex items-center gap-3"

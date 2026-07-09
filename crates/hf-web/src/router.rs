@@ -161,6 +161,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/report/formats", get(report_formats))
         .route("/crashes/all", get(all_crashes))
         .route("/corpus/all", get(all_corpus))
+        .route("/runs/history", post(run_history))
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
@@ -377,6 +378,17 @@ struct GenerateSeedsRequest {
 
 async fn report_formats(State(state): State<AppState>) -> ApiResult<Vec<String>> {
     Ok(Json(state.container.report_formats()))
+}
+
+async fn run_history(
+    State(state): State<AppState>,
+    Json(req): Json<WorkbenchRequest>,
+) -> ApiResult<serde_json::Value> {
+    let path = opt_project_path(req.project.as_ref());
+    Ok(Json(
+        serde_json::to_value(state.container.run_history(path).await)
+            .unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

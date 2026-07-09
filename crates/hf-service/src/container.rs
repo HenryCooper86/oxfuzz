@@ -1194,6 +1194,92 @@ impl ServiceContainer {
         }
     }
 
+    /// Run history for a project (or all projects when `None`), newest first,
+    /// enriched with the crash count per run. Powers the Runs history view.
+    pub async fn run_history(&self, project: Option<&Path>) -> Vec<RunHistoryItem> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let key = project.map(|p| p.to_string_lossy().to_string());
+        let runs = store.list_runs(key.as_deref()).await.unwrap_or_default();
+        let crashes = store.list_all_crashes().await.unwrap_or_default();
+        let mut crashes_by_run: std::collections::HashMap<Uuid, usize> =
+            std::collections::HashMap::new();
+        for c in &crashes {
+            *crashes_by_run.entry(c.run_id).or_insert(0) += 1;
+        }
+        let mut items: Vec<RunHistoryItem> = runs
+            .into_iter()
+            .map(|r| {
+                let duration_secs = r
+                    .ended_at
+                    .map(|end| (end - r.started_at).num_seconds().max(0));
+                RunHistoryItem {
+                    id: r.id.to_string(),
+                    project_root: r.project_root,
+                    engine: format!("{:?}", r.engine),
+                    status: format!("{:?}", r.status),
+                    started_at: r.started_at.to_rfc3339(),
+                    ended_at: r.ended_at.map(|t| t.to_rfc3339()),
+                    duration_secs,
+                    crashes: crashes_by_run.get(&r.id).copied().unwrap_or(0),
+                }
+            })
+            .collect();
+        items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        items
+    }
+
+    /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
+    /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
+    /// project; pass `None` to export everything.
+    pub async fn export_project_data(&self, project: Option<&Path>) -> serde_json::Value {
+        let Some(store) = self.store.as_ref() else {
+            return serde_json::json!({ "error": "no database configured" });
+        };
+        let key = project.map(|p| p.to_string_lossy().to_string());
+        let targets = store.list_all_targets().await.unwrap_or_default();
+        let scoped_targets: Vec<_> = match &key {
+            Some(k) => targets
+                .into_iter()
+                .filter(|t| t.project_root.to_string_lossy() == *k)
+                .collect(),
+            None => targets,
+        };
+        let target_ids: std::collections::HashSet<Uuid> =
+            scoped_targets.iter().map(|t| t.id).collect();
+        let harnesses: Vec<_> = store
+            .list_all_harnesses()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|h| key.is_none() || target_ids.contains(&h.target_id))
+            .collect();
+        let crashes: Vec<_> = store
+            .list_all_crashes()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| key.is_none() || target_ids.contains(&c.target_id))
+            .collect();
+        let corpus: Vec<_> = store
+            .list_all_corpus_entries()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let runs = self.run_history(project).await;
+        serde_json::json!({
+            "schema": "hobot_fuzz.export.v1",
+            "project": key,
+            "targets": scoped_targets,
+            "harnesses": harnesses,
+            "crashes": crashes,
+            "corpus": corpus,
+            "runs": runs,
+        })
+    }
+
     /// Every corpus entry persisted to the store, across all targets.
     ///
     /// The browse-all counterpart to [`Self::corpus_list`] (which is scoped to a
@@ -3912,6 +3998,19 @@ pub struct ArtifactSummary {
     pub corpus_count: usize,
     /// Number of crash inputs staged in the run output directory.
     pub crash_count: usize,
+}
+
+/// One run in the persisted run history (see [`ServiceContainer::run_history`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunHistoryItem {
+    pub id: String,
+    pub project_root: String,
+    pub engine: String,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_secs: Option<i64>,
+    pub crashes: usize,
 }
 
 /// A fuzz run summary.
