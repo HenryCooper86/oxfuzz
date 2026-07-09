@@ -82,6 +82,9 @@ pub struct RunRecord {
     pub execs: Option<f64>,
     /// Crashes the fuzzer reported during the run (raw, pre-triage-dedup).
     pub crash_count: Option<u64>,
+    /// Short content hash of the harness source the run used, so a coverage
+    /// change can be attributed to a harness revision.
+    pub harness_rev: Option<String>,
 }
 
 impl RunRecord {
@@ -104,6 +107,7 @@ impl RunRecord {
             edges: None,
             execs: None,
             crash_count: None,
+            harness_rev: None,
         }
     }
 }
@@ -208,8 +212,8 @@ impl Store {
             None => None,
         };
         sqlx::query(
-            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(run.id.to_string())
         .bind(&run.project_root)
@@ -221,6 +225,7 @@ impl Store {
         .bind(run.edges.map(|e| i64::try_from(e).unwrap_or(i64::MAX)))
         .bind(run.execs)
         .bind(run.crash_count.map(|c| i64::try_from(c).unwrap_or(i64::MAX)))
+        .bind(run.harness_rev.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -872,6 +877,7 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
     let edges: Option<i64> = row.try_get("edges")?;
     let execs: Option<f64> = row.try_get("execs")?;
     let crash_count: Option<i64> = row.try_get("crash_count")?;
+    let harness_rev: Option<String> = row.try_get("harness_rev")?;
     Ok(RunRecord {
         id: Uuid::parse_str(&id_str)
             .map_err(|e| StorageError::Timestamp(format!("bad uuid: {e}")))?,
@@ -884,6 +890,7 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
         edges: edges.map(|e| u64::try_from(e).unwrap_or(0)),
         execs,
         crash_count: crash_count.map(|c| u64::try_from(c).unwrap_or(0)),
+        harness_rev,
     })
 }
 

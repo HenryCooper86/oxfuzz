@@ -624,3 +624,14 @@ async fn run_samples_roundtrip() {
     store.set_run_samples(id, json).await.unwrap();
     assert_eq!(store.run_samples(id).await.unwrap().as_deref(), Some(json));
 }
+
+#[tokio::test]
+async fn run_harness_rev_roundtrips() {
+    let (store, _dir) = temp_store().await;
+    let mut run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    run.harness_rev = Some("abc123def456".to_owned());
+    let id = run.id;
+    store.insert_run(&run).await.unwrap();
+    let got = store.get_run(id).await.unwrap().unwrap();
+    assert_eq!(got.harness_rev.as_deref(), Some("abc123def456"));
+}
