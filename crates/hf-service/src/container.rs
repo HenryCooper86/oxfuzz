@@ -1271,6 +1271,57 @@ impl ServiceContainer {
             .unwrap_or_default()
     }
 
+    /// Restore the harness a run used and recompile it, so it becomes the
+    /// current harness for that target -- a one-click revert to an earlier (e.g.
+    /// last-good) revision. Everything (source, engine, target, language) is
+    /// resolved from the persisted run + harness records.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the run/harness/source cannot be resolved or
+    /// the recompile fails.
+    pub async fn revert_harness_from_run(
+        &self,
+        run_id: &str,
+    ) -> Result<CompileOutcome, ClassifiedError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let id = Uuid::parse_str(run_id)
+            .map_err(|e| ClassifiedError::Validation(format!("bad run id: {e}")))?;
+        let source = store
+            .run_harness_source(id)
+            .await?
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "no harness source was recorded for this run".to_owned(),
+                )
+            })?;
+        let run = store
+            .get_run(id)
+            .await?
+            .ok_or_else(|| ClassifiedError::Validation("run not found".to_owned()))?;
+        let harness_id = run.config.as_ref().map(|c| c.harness_id).ok_or_else(|| {
+            ClassifiedError::Validation("run has no harness reference".to_owned())
+        })?;
+        let harness = store.get_harness(harness_id).await?.ok_or_else(|| {
+            ClassifiedError::Validation("the harness for this run no longer exists".to_owned())
+        })?;
+        let symbol = store
+            .list_all_targets()
+            .await?
+            .into_iter()
+            .find(|t| t.id == harness.target_id)
+            .map(|t| t.symbol)
+            .ok_or_else(|| {
+                ClassifiedError::Validation("the target for this run no longer exists".to_owned())
+            })?;
+        let project = std::path::PathBuf::from(&run.project_root);
+        self.harness_compile(source, &project, harness.engine, &symbol, harness.language)
+            .await
+    }
+
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
