@@ -19,7 +19,7 @@ use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
 use hf_guardrails::{Action, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
-use hf_storage::{ProjectAutoRevert, RunRecord, RunStatus, Store};
+use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, Store};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -1529,7 +1529,10 @@ impl ServiceContainer {
             tracing::warn!("auto-revert (notify-only): {detail}");
             self.run_journal
                 .note(this_run_id, "auto-revert-notify", &detail);
-            return Some(outcome(false));
+            let out = outcome(false);
+            self.persist_auto_revert_event(project, target, this_run_id, &out)
+                .await;
+            return Some(out);
         }
 
         // Regression confirmed: restore the previous run's harness. The recompile
@@ -1542,13 +1545,62 @@ impl ServiceContainer {
                 );
                 tracing::warn!("auto-revert: {detail}");
                 self.run_journal.note(this_run_id, "auto-revert", &detail);
-                Some(outcome(true))
+                let out = outcome(true);
+                self.persist_auto_revert_event(project, target, this_run_id, &out)
+                    .await;
+                Some(out)
             }
             Err(e) => {
                 tracing::warn!("auto-revert declined or failed: {e}");
                 None
             }
         }
+    }
+
+    /// Persist an auto-revert firing to the durable audit trail (best-effort).
+    async fn persist_auto_revert_event(
+        &self,
+        project: &Path,
+        target: &str,
+        this_run_id: Uuid,
+        out: &AutoRevertOutcome,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let ev = AutoRevertEvent {
+            id: Uuid::new_v4().to_string(),
+            ts: Utc::now().to_rfc3339(),
+            project_root: project.to_string_lossy().to_string(),
+            target: target.to_owned(),
+            run_id: this_run_id.to_string(),
+            from_rev: out.from_rev.clone(),
+            to_rev: out.to_rev.clone(),
+            previous_edges: out.previous_edges,
+            regressed_edges: out.regressed_edges,
+            drop_pct: out.drop_pct,
+            reverted: out.reverted,
+        };
+        if let Err(e) = store.record_auto_revert_event(&ev).await {
+            tracing::warn!("failed to record auto-revert event: {e}");
+        }
+    }
+
+    /// The auto-revert audit trail (newest first), scoped to `project` when given
+    /// or across all projects otherwise. Empty without a store.
+    pub async fn auto_revert_events(
+        &self,
+        project: Option<&Path>,
+        limit: usize,
+    ) -> Vec<AutoRevertEvent> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let key = project.map(|p| p.to_string_lossy().to_string());
+        store
+            .list_auto_revert_events(key.as_deref(), i64::try_from(limit).unwrap_or(200))
+            .await
+            .unwrap_or_default()
     }
 
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,

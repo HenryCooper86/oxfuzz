@@ -14,6 +14,7 @@ export type ViewType =
   | "artifacts"
   | "reports"
   | "runs"
+  | "audit"
   | "agents"
   | "skills"
   | "knowledge"
