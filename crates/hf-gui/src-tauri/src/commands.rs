@@ -1759,6 +1759,8 @@ pub fn defectdojo_embed(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    state.dd_embed_wanted.store(true, Ordering::SeqCst);
     let position = tauri::LogicalPosition::new(x, y);
     let size = tauri::LogicalSize::new(width.max(1.0), height.max(1.0));
     // Reposition/resize an existing embed instead of stacking duplicates.
@@ -1774,20 +1776,38 @@ pub fn defectdojo_embed(
     let main = app
         .get_window("main")
         .ok_or_else(|| "main window not available".to_owned())?;
-    main.add_child(
-        tauri::webview::WebviewBuilder::new("dd-embed", tauri::WebviewUrl::External(parsed)),
-        position,
-        size,
-    )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    let view = main
+        .add_child(
+            tauri::webview::WebviewBuilder::new("dd-embed", tauri::WebviewUrl::External(parsed)),
+            position,
+            size,
+        )
+        .map_err(|e| e.to_string())?;
+    // The view may have unmounted while we were creating the webview (a close
+    // raced ahead and found nothing to close). Honor that and tear it down now,
+    // so the embed never strands itself over another view.
+    if !state.dd_embed_wanted.load(Ordering::SeqCst) {
+        let _ = view.close();
+    }
+    Ok(())
 }
 
 /// Remove the embedded `DefectDojo` webview (when leaving the in-app view).
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn defectdojo_embed_close(app: tauri::AppHandle) -> Result<(), String> {
+pub fn defectdojo_embed_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    // Mark "not wanted" first so an in-flight create (see `defectdojo_embed`)
+    // that completes after this closes itself instead of leaking.
+    state.dd_embed_wanted.store(false, Ordering::SeqCst);
     if let Some(view) = app.get_webview("dd-embed") {
+        // Move it fully off-screen before closing: `close()` removes it from the
+        // manager, but parking it out of view first guarantees it is never left
+        // painted over another view even if teardown is delayed for any reason.
+        let _ = view.set_position(tauri::LogicalPosition::new(-100_000.0, -100_000.0));
         view.close().map_err(|e| e.to_string())?;
     }
     Ok(())
