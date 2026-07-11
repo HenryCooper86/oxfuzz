@@ -46,6 +46,11 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
           await getTransport().invoke(op, { project, target });
         }
         await refreshList(project);
+        // Confirm the mutation happened (previously seed/grow/prune refreshed
+        // silently, leaving the user unsure whether anything changed).
+        if (op === "corpus_seed") setNotice("Corpus seeded.");
+        else if (op === "corpus_grow") setNotice("Corpus grown from the latest run.");
+        else if (op === "corpus_prune") setNotice("Corpus pruned of redundant entries.");
       } catch (e) {
         // Surface the failure instead of blanking the table (which reads as
         // "empty corpus" and hides the real error).
