@@ -180,10 +180,13 @@ html[data-host="tauri"][data-platform="macos"] .app-root {
   background: transparent;
 }
 
-/* The sidebar reads as the frosted "sidebar" material: a translucent dark
-   veil over the native vibrancy gives subtle depth at the window edge. */
+/* The sidebar sits on the design-system `surface-secondary` with only a whisper
+   of the native vibrancy left translucent at the window edge. Keeping it nearly
+   opaque stops the frosted "sidebar" material (and the desktop wallpaper behind
+   it) from washing the tone out -- which read as an off, muddy color over bright
+   wallpapers in both themes. */
 html[data-host="tauri"][data-platform="macos"] .app-root nav {
-  background: color-mix(in srgb, var(--surface-secondary) 72%, transparent);
+  background: color-mix(in srgb, var(--surface-secondary) 92%, transparent);
 }
 
 /* Main content column stays crisp and opaque so text rendering is sharp. */
