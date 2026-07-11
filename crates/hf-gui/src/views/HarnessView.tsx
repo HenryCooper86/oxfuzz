@@ -5,6 +5,7 @@ import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
+import { SandboxBanner } from "../components/SandboxBanner";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare,
@@ -303,6 +304,7 @@ export function HarnessView({
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
+      <SandboxBanner />
       {!embedded && (
         <>
           <ViewHeader

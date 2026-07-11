@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { useToast } from "../components/ui/Toast";
 import { useConfirm } from "../providers/ConfirmContext";
 import type { RunHistoryItem, CoverageSample } from "../types";
-import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
+import { ViewHeader, EmptyState, Button, IconButton, Input } from "../components/ui";
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
@@ -243,9 +243,9 @@ export function RunsView() {
           <div className="flex items-center gap-2">
             <GitCompare size={15} style={{ color: "var(--accent)" }} />
             <span className="text-sm font-semibold">Compare</span>
-            <button className="ml-auto text-text-muted hover:text-text-primary" onClick={() => setSelected([])} title="Clear comparison" aria-label="Clear comparison">
+            <IconButton size={24} className="ml-auto" onClick={() => setSelected([])} title="Clear comparison" aria-label="Clear comparison">
               <X size={14} />
-            </button>
+            </IconButton>
           </div>
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))" }}>
             {compareRuns.map((r) => (
@@ -333,15 +333,16 @@ export function RunsView() {
                     </span>
                     <span className="text-xs text-text-muted shrink-0 hidden sm:inline">{new Date(r.started_at).toLocaleString()}</span>
                   </button>
-                  <button
+                  <IconButton
+                    size={26}
+                    className="shrink-0"
+                    style={isOpen ? { color: "var(--accent)" } : undefined}
                     onClick={() => void toggleCurve(r.id)}
-                    className="shrink-0 inline-flex items-center justify-center rounded p-1 transition-colors"
-                    style={{ color: isOpen ? "var(--accent)" : "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
                     title="Coverage-over-time curve"
                     aria-label="Toggle coverage curve"
                   >
                     <LineChart size={14} />
-                  </button>
+                  </IconButton>
                 </div>
                 {isOpen && (
                   <div className="surface-card mt-1" style={{ padding: "var(--space-md)" }}>

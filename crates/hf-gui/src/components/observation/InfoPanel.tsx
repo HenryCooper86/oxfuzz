@@ -6,7 +6,7 @@
 // progress, the selected target/engine, and the live RunOutput context.
 
 import { useEffect, useState } from "react";
-import { FileCode, ListChecks, Repeat, Target as TargetIcon } from "lucide-react";
+import { FileCode, ListChecks, Repeat, Crosshair as TargetIcon } from "lucide-react";
 import { getTransport } from "../../lib";
 import { usePipeline } from "../../providers/PipelineContext";
 import { useProject } from "../../providers/ProjectContext";

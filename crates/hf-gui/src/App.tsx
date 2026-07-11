@@ -37,7 +37,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Target, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText } from "lucide-react";
+import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -304,7 +304,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   dashboard: <LayoutDashboard size={18} />,
   workflow: <ListChecks size={18} />,
   chat: <MessageSquare size={18} />,
-  discover: <Target size={18} />,
+  discover: <Crosshair size={18} />,
   harness: <FileCode size={18} />,
   run: <Play size={18} />,
   triage: <Bug size={18} />,

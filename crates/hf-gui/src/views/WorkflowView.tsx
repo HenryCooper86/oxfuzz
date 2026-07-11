@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Minus, Target, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Minus, Crosshair, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
 import { pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
@@ -38,7 +38,7 @@ interface CoreStage {
 }
 
 const CORE_STAGES: CoreStage[] = [
-  { id: "discover", n: 1, label: "Discover Targets", hint: "Scan the project for fuzzable functions", icon: Target, Component: DiscoverView },
+  { id: "discover", n: 1, label: "Discover Targets", hint: "Scan the project for fuzzable functions", icon: Crosshair, Component: DiscoverView },
   { id: "harness", n: 2, label: "Generate Harness", hint: "Draft, compile, and seed a harness", icon: FileCode, Component: HarnessView },
   { id: "run", n: 3, label: "Run Fuzzer", hint: "Drive the engine and watch live progress", icon: Play, Component: RunView },
   { id: "triage", n: 4, label: "Triage Crashes", hint: "Reproduce, classify, and dedup crashes", icon: Bug, Component: TriageView },

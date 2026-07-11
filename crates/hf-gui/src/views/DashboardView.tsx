@@ -17,7 +17,7 @@ import {
   Save,
   Server,
   ShieldCheck,
-  Target,
+  Crosshair,
   Trash2,
   Users,
   Wrench,
@@ -967,7 +967,7 @@ function MetricGrid({ dashboard }: { dashboard: WorkbenchDashboard }) {
   const t = dashboard.totals;
   return (
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))" }}>
-      <Metric icon={<Target size={16} />} label="Targets" value={t.targets} />
+      <Metric icon={<Crosshair size={16} />} label="Targets" value={t.targets} />
       <Metric icon={<FileCode size={16} />} label="Harnesses" value={t.harnesses} accent={t.harnesses_needing_review > 0} detail={`${t.harnesses_needing_review} review`} />
       <Metric icon={<Play size={16} />} label="Runs" value={t.runs} detail={`${t.active_runs} active`} />
       <Metric icon={<Bug size={16} />} label="Crashes" value={t.crashes} accent={t.crashes > 0} />
@@ -1068,9 +1068,9 @@ function RecentRuns({ runs, onOpen }: { runs: WorkbenchRun[]; onOpen?: () => voi
 function TopTargets({ targets, onOpen }: { targets: WorkbenchTarget[]; onOpen?: () => void }) {
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Target size={15} />} title="Top Targets" count={targets.length} action={<ViewAllLink onClick={onOpen} />} />
+      <SectionHeader icon={<Crosshair size={15} />} title="Top Targets" count={targets.length} action={<ViewAllLink onClick={onOpen} />} />
       {targets.length === 0 ? (
-        <EmptyState icon={<Target size={18} />} hint="No ranked targets persisted yet." />
+        <EmptyState icon={<Crosshair size={18} />} hint="No ranked targets persisted yet." />
       ) : (
         <div className="flex flex-col gap-2 mt-3">
           {targets.slice(0, 6).map((target) => (

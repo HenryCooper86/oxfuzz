@@ -6,6 +6,7 @@ import { usePrefs } from "../providers/PrefsContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
+import { SandboxBanner } from "../components/SandboxBanner";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
 
@@ -30,6 +31,28 @@ export function RunView({
   const [engine, setEngine] = useState(sharedEngine || "libfuzzer");
   const [duration, setDuration] = useState("60");
   const logRef = useRef<HTMLDivElement>(null);
+
+  // Suggest the project's harnessed targets so the standalone Run view isn't a
+  // blank free-text field (you can only fuzz a target that has a harness).
+  const [targetSuggestions, setTargetSuggestions] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    // Resolve to [] when there's no project instead of setting state
+    // synchronously in the effect body (which would cascade renders).
+    const load = project
+      ? getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", { project })
+      : Promise.resolve<HarnessReviewItem[]>([]);
+    load
+      .then((items) => {
+        if (!cancelled) setTargetSuggestions([...new Set(items.map((i) => i.target_symbol))].sort());
+      })
+      .catch(() => {
+        if (!cancelled) setTargetSuggestions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project]);
 
   // syzkaller (kernel fuzzing) campaign artifacts.
   const [kernelImage, setKernelImage] = useState("");
@@ -135,6 +158,8 @@ export function RunView({
         />
       )}
 
+      {!isSyz && <SandboxBanner />}
+
       <div className="grid grid-cols-2 gap-3">
         {!embedded && (
           <div className="flex flex-col gap-1">
@@ -174,10 +199,16 @@ export function RunView({
             <Input
               mono
               type="text"
-              placeholder="parse_value"
+              list="run-target-suggestions"
+              placeholder={targetSuggestions[0] ?? "parse_value"}
               value={target}
               onChange={(e) => setTarget(e.target.value)}
             />
+            <datalist id="run-target-suggestions">
+              {targetSuggestions.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
           </div>
         )}
         <div className="flex flex-col gap-1">
