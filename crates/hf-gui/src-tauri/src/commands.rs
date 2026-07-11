@@ -893,6 +893,67 @@ pub async fn delete_project(
         .map_err(|e| e.to_string())
 }
 
+/// Delete a single crash reproducer by id.
+#[tauri::command]
+pub async fn delete_crash(
+    state: tauri::State<'_, crate::state::AppState>,
+    crash_id: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_crash(&crash_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a single corpus entry by its content hash.
+#[tauri::command]
+pub async fn delete_corpus_entry(
+    state: tauri::State<'_, crate::state::AppState>,
+    sha256: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_corpus_entry(&sha256)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Clear every persisted crash and corpus entry.
+#[tauri::command]
+pub async fn clear_all_artifacts(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
+    state
+        .container
+        .clear_all_artifacts()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a single run and the crashes it produced.
+#[tauri::command]
+pub async fn delete_run(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_run(&run_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Clear every persisted run and the crashes it produced.
+#[tauri::command]
+pub async fn clear_all_runs(state: tauri::State<'_, crate::state::AppState>) -> Result<(), String> {
+    state
+        .container
+        .clear_all_runs()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
 /// reproducers), reclaiming disk space. Persistent DB records are untouched.
 #[tauri::command]
