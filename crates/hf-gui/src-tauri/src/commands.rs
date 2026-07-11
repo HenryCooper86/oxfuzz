@@ -1720,10 +1720,16 @@ pub fn open_defectdojo(
             .open_url(url, None::<&str>)
             .map_err(|e| e.to_string());
     }
-    // In-app window: focus an existing one rather than spawning duplicates.
+    // Reuse a healthy existing window rather than spawning duplicates. If a stale
+    // handle lingers after the window was closed (focusing it fails), tear it down
+    // so the label is free to recreate -- otherwise a close-then-reopen could no-op
+    // on a dead handle and open nothing.
     if let Some(win) = app.get_webview_window("defectdojo") {
         let _ = win.unminimize();
-        return win.set_focus().map_err(|e| e.to_string());
+        if win.set_focus().is_ok() {
+            return Ok(());
+        }
+        let _ = win.destroy();
     }
     let parsed = tauri::Url::parse(&url).map_err(|e| format!("invalid DefectDojo URL: {e}"))?;
     tauri::WebviewWindowBuilder::new(&app, "defectdojo", tauri::WebviewUrl::External(parsed))
@@ -1731,6 +1737,7 @@ pub fn open_defectdojo(
         .inner_size(1280.0, 840.0)
         .min_inner_size(720.0, 500.0)
         .decorations(true)
+        .focused(true)
         .center()
         .build()
         .map(|_| ())
