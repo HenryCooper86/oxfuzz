@@ -3966,6 +3966,16 @@ impl ServiceContainer {
         crate::defectdojo::is_configured()
     }
 
+    /// The configured `DefectDojo` base URL (no trailing slash), or `None` when it
+    /// is unconfigured / still the placeholder. Lets presentation layers open the
+    /// web UI without hard-coding or re-reading the config themselves.
+    #[must_use]
+    pub fn defectdojo_url(&self) -> Option<String> {
+        crate::defectdojo::load_config()
+            .ok()
+            .map(|c| c.url.trim_end_matches('/').to_owned())
+    }
+
     /// Verify the configured `DefectDojo` URL + token by calling its API.
     ///
     /// # Errors
