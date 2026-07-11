@@ -3,8 +3,7 @@ import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import { useI18n } from "../i18n";
 import { useDefectDojo } from "../lib";
-import { useToast } from "./ui/Toast";
-import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, ExternalLink, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -88,20 +87,23 @@ function NavButton({
   );
 }
 
-/** Library row that opens the DefectDojo web UI (external target -- not a view). */
-function DefectDojoButton({ onOpen }: { onOpen: () => void }) {
+/** Library row that opens the embedded in-app DefectDojo view. */
+function DefectDojoButton({ active, onOpen }: { active: boolean; onOpen: () => void }) {
   return (
     <button
       onClick={onOpen}
-      title="Open the DefectDojo web UI in a window"
-      className="flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
+      title="Open DefectDojo in the app"
+      className={`flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none ${
+        active
+          ? "bg-surface-active text-text-primary border border-border"
+          : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
+      }`}
       style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, marginBottom: "2px" }}
     >
-      <span style={{ display: "flex" }}>
+      <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex" }}>
         <ShieldCheck size={18} />
       </span>
       <span>DefectDojo</span>
-      <ExternalLink size={12} style={{ marginLeft: "auto", opacity: 0.5 }} />
     </button>
   );
 }
@@ -174,19 +176,9 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { activeProject, recentProjects, removeRecent } = useProject();
   const { target } = useTarget();
   const { t } = useI18n();
-  const { toast } = useToast();
-
   // Surface DefectDojo in the Library only once it is actually configured, so the
   // sidebar stays clean for users who do not use it.
-  const { configured: defectDojoOn, open: openDefectDojoWindow } = useDefectDojo();
-
-  async function openDefectDojo() {
-    try {
-      await openDefectDojoWindow();
-    } catch (e) {
-      toast({ title: "Could not open DefectDojo", description: String(e), variant: "error" });
-    }
-  }
+  const { configured: defectDojoOn } = useDefectDojo();
 
   return (
     <nav
@@ -230,7 +222,9 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
         {LIBRARY_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
-        {defectDojoOn && <DefectDojoButton onOpen={() => void openDefectDojo()} />}
+        {defectDojoOn && (
+          <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
+        )}
       </div>
 
       {/* Footer: Settings pinned at the bottom (Apple-style nav), then version */}

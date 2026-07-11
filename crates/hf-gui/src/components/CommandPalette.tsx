@@ -21,6 +21,7 @@ const VIEWS: ViewType[] = [
   "skills",
   "knowledge",
   "automation",
+  "defectdojo",
   "settings",
 ];
 

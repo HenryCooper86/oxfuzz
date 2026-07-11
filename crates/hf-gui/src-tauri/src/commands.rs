@@ -1744,6 +1744,65 @@ pub fn open_defectdojo(
         .map_err(|e| e.to_string())
 }
 
+/// Embed (or reposition) the `DefectDojo` web UI as a child webview inside the
+/// main window, filling the logical rectangle the in-app view reports for its
+/// content region. `DefectDojo` sends `X-Frame-Options: DENY`, so a native child
+/// webview is the only way to render it in-app; it overlays the region below the
+/// view's toolbar and tracks it on resize.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn defectdojo_embed(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let position = tauri::LogicalPosition::new(x, y);
+    let size = tauri::LogicalSize::new(width.max(1.0), height.max(1.0));
+    // Reposition/resize an existing embed instead of stacking duplicates.
+    if let Some(view) = app.get_webview("dd-embed") {
+        view.set_position(position).map_err(|e| e.to_string())?;
+        view.set_size(size).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let url = state.container.defectdojo_url().ok_or_else(|| {
+        "DefectDojo is not configured -- set the URL in Settings first".to_owned()
+    })?;
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("invalid DefectDojo URL: {e}"))?;
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "main window not available".to_owned())?;
+    main.add_child(
+        tauri::webview::WebviewBuilder::new("dd-embed", tauri::WebviewUrl::External(parsed)),
+        position,
+        size,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Remove the embedded `DefectDojo` webview (when leaving the in-app view).
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn defectdojo_embed_close(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(view) = app.get_webview("dd-embed") {
+        view.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Reload the embedded `DefectDojo` webview.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn defectdojo_embed_reload(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(view) = app.get_webview("dd-embed") {
+        view.reload().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Persisted run history for a project (crash counts + durations), newest first.
 #[tauri::command]
 pub async fn run_history(
