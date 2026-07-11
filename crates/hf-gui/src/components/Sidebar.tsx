@@ -1,8 +1,11 @@
+import { useEffect, useState } from "react";
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import { useI18n } from "../i18n";
-import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, Workflow, X, Zap } from "lucide-react";
+import { getTransport, isTauriEnvironment } from "../lib";
+import { useToast } from "./ui/Toast";
+import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, ExternalLink, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -86,6 +89,24 @@ function NavButton({
   );
 }
 
+/** Library row that opens the DefectDojo web UI (external target -- not a view). */
+function DefectDojoButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <button
+      onClick={onOpen}
+      title="Open the DefectDojo web UI in a window"
+      className="flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
+      style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, marginBottom: "2px" }}
+    >
+      <span style={{ display: "flex" }}>
+        <ShieldCheck size={18} />
+      </span>
+      <span>DefectDojo</span>
+      <ExternalLink size={12} style={{ marginLeft: "auto", opacity: 0.5 }} />
+    </button>
+  );
+}
+
 /** Prominent row that opens a folder picker to begin a new fuzzing target. */
 function NewTargetButton({ onNewTarget }: { onNewTarget: () => void }) {
   const { t } = useI18n();
@@ -154,6 +175,32 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { activeProject, recentProjects, removeRecent } = useProject();
   const { target } = useTarget();
   const { t } = useI18n();
+  const { toast } = useToast();
+
+  // Surface DefectDojo in the Library only once it is actually configured, so the
+  // sidebar stays clean for users who do not use it.
+  const [defectDojoOn, setDefectDojoOn] = useState(false);
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+    let alive = true;
+    getTransport()
+      .invoke<boolean>("defectdojo_configured")
+      .then((v) => {
+        if (alive) setDefectDojoOn(v);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function openDefectDojo() {
+    try {
+      await getTransport().invoke("open_defectdojo", { inBrowser: false });
+    } catch (e) {
+      toast({ title: "Could not open DefectDojo", description: String(e), variant: "error" });
+    }
+  }
 
   return (
     <nav
@@ -197,6 +244,7 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
         {LIBRARY_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
+        {defectDojoOn && <DefectDojoButton onOpen={() => void openDefectDojo()} />}
       </div>
 
       {/* Footer: Settings pinned at the bottom (Apple-style nav), then version */}
