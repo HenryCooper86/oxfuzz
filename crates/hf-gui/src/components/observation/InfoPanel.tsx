@@ -8,7 +8,7 @@
 import { useEffect, useState } from "react";
 import { FileCode, ListChecks, Repeat, Target as TargetIcon } from "lucide-react";
 import { getTransport } from "../../lib";
-import { PIPELINE_STAGES, usePipeline } from "../../providers/PipelineContext";
+import { usePipeline } from "../../providers/PipelineContext";
 import { useProject } from "../../providers/ProjectContext";
 import { useTarget } from "../../providers/TargetContext";
 import { useRunOutput } from "../../providers/RunOutputContext";
@@ -20,21 +20,19 @@ interface ArtifactSummary {
 }
 
 export function InfoPanel() {
-  const { isDone, isSkipped, currentStage } = usePipeline();
+  const { coreStages } = usePipeline();
   const { activeProject } = useProject();
   const { target, engine } = useTarget();
   const { running, lastTarget, lastEngine } = useRunOutput();
   const [artifacts, setArtifacts] = useState<ArtifactSummary | null>(null);
 
-  const planSteps = PIPELINE_STAGES.map((s) => ({
+  const planSteps = coreStages.map((s) => ({
     label: s.label,
-    done: isDone(s.id),
-    skipped: isSkipped(s.id),
+    done: s.done,
+    skipped: s.skipped,
   }));
 
-  const currentLabel = currentStage
-    ? PIPELINE_STAGES.find((s) => s.id === currentStage)?.label ?? "—"
-    : "All stages complete";
+  const currentLabel = coreStages.find((s) => s.current)?.label ?? "All stages complete";
   const activeTarget = lastTarget || target;
   const activeEngine = lastEngine || engine;
 
