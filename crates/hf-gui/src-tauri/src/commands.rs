@@ -1697,17 +1697,22 @@ pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Open the `DefectDojo` web UI. With `in_browser`, hands the URL to the OS
-/// default browser (a full, separate browser session). Otherwise opens it in a
-/// dedicated in-app window (reusing/focusing the existing one if already open),
-/// so the user can log in and browse findings without leaving `hobot_fuzz`.
+/// Open the `DefectDojo` web UI at the configured URL. With `in_browser`, hands it
+/// to the OS default browser (a full, separate browser session). Otherwise opens
+/// it in a dedicated, natively-decorated in-app window (title bar + close button;
+/// reused/focused if already open), so the user can log in and browse findings
+/// without leaving `hobot_fuzz`. The URL comes from the saved config, so callers
+/// (sidebar, dashboard, settings) never pass it.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn open_defectdojo(app: tauri::AppHandle, url: String, in_browser: bool) -> Result<(), String> {
-    let url = url.trim();
-    if url.is_empty() {
-        return Err("DefectDojo URL is not set -- configure it in Settings first".to_owned());
-    }
+pub fn open_defectdojo(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    in_browser: bool,
+) -> Result<(), String> {
+    let url = state.container.defectdojo_url().ok_or_else(|| {
+        "DefectDojo is not configured -- set the URL in Settings first".to_owned()
+    })?;
     if in_browser {
         use tauri_plugin_opener::OpenerExt;
         return app
@@ -1717,12 +1722,16 @@ pub fn open_defectdojo(app: tauri::AppHandle, url: String, in_browser: bool) -> 
     }
     // In-app window: focus an existing one rather than spawning duplicates.
     if let Some(win) = app.get_webview_window("defectdojo") {
+        let _ = win.unminimize();
         return win.set_focus().map_err(|e| e.to_string());
     }
-    let parsed = tauri::Url::parse(url).map_err(|e| format!("invalid DefectDojo URL: {e}"))?;
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("invalid DefectDojo URL: {e}"))?;
     tauri::WebviewWindowBuilder::new(&app, "defectdojo", tauri::WebviewUrl::External(parsed))
         .title("DefectDojo")
         .inner_size(1280.0, 840.0)
+        .min_inner_size(720.0, 500.0)
+        .decorations(true)
+        .center()
         .build()
         .map(|_| ())
         .map_err(|e| e.to_string())
