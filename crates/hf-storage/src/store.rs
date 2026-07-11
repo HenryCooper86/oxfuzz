@@ -727,6 +727,74 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a single run and the crashes it produced.
+    ///
+    /// # Errors
+    /// Returns a storage error on a database failure.
+    pub async fn delete_run(&self, run_id: &str) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM crashes WHERE run_id = ?1")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM runs WHERE id = ?1")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Delete a single crash reproducer by id.
+    ///
+    /// # Errors
+    /// Returns a storage error on a database failure.
+    pub async fn delete_crash(&self, crash_id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM crashes WHERE id = ?1")
+            .bind(crash_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a single corpus entry by its content hash.
+    ///
+    /// # Errors
+    /// Returns a storage error on a database failure.
+    pub async fn delete_corpus_entry(&self, sha256: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM corpus_entries WHERE sha256 = ?1")
+            .bind(sha256)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear every persisted crash and corpus entry (the Artifacts browser).
+    ///
+    /// # Errors
+    /// Returns a storage error on a database failure.
+    pub async fn clear_all_artifacts(&self) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM crashes").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM corpus_entries")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Clear every persisted run and the crashes it produced (Run History).
+    ///
+    /// # Errors
+    /// Returns a storage error on a database failure.
+    pub async fn clear_all_runs(&self) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM crashes").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM runs").execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Remove child rows whose parent target no longer exists: harnesses,
     /// corpus entries, and crashes pointing at a `target_id` absent from
     /// `targets`. Repairs data orphaned by older partial clears (which is why
