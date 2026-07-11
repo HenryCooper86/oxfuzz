@@ -106,6 +106,13 @@ function AppInner() {
     return <SetupWizard onComplete={() => setSetupDone(true)} />;
   }
 
+  // The embedded DefectDojo webview is a full external app; give it the whole
+  // content width by hiding the app sidebar and the observation panels while it
+  // is active, so DefectDojo's own responsive layout does not collapse into the
+  // cramped, overlapping mode. Back out via the DefectDojo toolbar's Back button.
+  const defectDojoActive = activeView === "defectdojo";
+  const sidebarVisible = sidebarOpen && !defectDojoActive;
+
   return (
     <TooltipProvider>
       <ToastProvider>
@@ -120,14 +127,14 @@ function AppInner() {
           />
         ) : (
           <>
-          {sidebarOpen && <Sidebar activeView={activeView} onNavigate={navigate} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
+          {sidebarVisible && <Sidebar activeView={activeView} onNavigate={navigate} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
           <div className="app-main flex flex-1 flex-col min-w-0">
             <Header
               title={t(`title.${activeView}`)}
               icon={viewIcons[activeView]}
               theme={theme}
               onToggleSidebar={() => setSidebarOpen((o) => !o)}
-              reserveLeftInset={!sidebarOpen && platform === "macos"}
+              reserveLeftInset={!sidebarVisible && platform === "macos"}
               onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
               actions={
                 <div className="flex items-center gap-1">
@@ -227,13 +234,14 @@ function AppInner() {
                 </ErrorBoundary>
               </main>
 
-              {/* Observation panels */}
-              {showDiag && <PanelShell title="Diagnostics"><DiagnosticsPanel /></PanelShell>}
-              {showObs && <PanelShell title="Observability"><ObservabilityPanel /></PanelShell>}
-              {showInfo && <PanelShell title="Info"><InfoPanel /></PanelShell>}
+              {/* Observation panels -- hidden while DefectDojo is embedded so it
+                  gets the full content width. */}
+              {!defectDojoActive && showDiag && <PanelShell title="Diagnostics"><DiagnosticsPanel /></PanelShell>}
+              {!defectDojoActive && showObs && <PanelShell title="Observability"><ObservabilityPanel /></PanelShell>}
+              {!defectDojoActive && showInfo && <PanelShell title="Info"><InfoPanel /></PanelShell>}
 
               {/* Progress sidebar (rightmost) */}
-              {showProgress && <ProgressPanel />}
+              {!defectDojoActive && showProgress && <ProgressPanel />}
             </div>
             <StatusBar />
           </div>
