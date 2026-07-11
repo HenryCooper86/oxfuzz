@@ -134,13 +134,21 @@ export function HarnessView({
           setCompiled(promoted);
           if (promoted) setPromotionStatus("done");
           if (match?.smoke_passed) setSmokeStatus("done");
+          // Reflect an already-qualified harness (built in a prior session) in
+          // the pipeline so the Progress panel / Workflow don't show it as unfinished.
+          if (match?.smoke_passed) {
+            markDone("harness");
+            markDone("compile");
+            markDone("smoke");
+          }
+          if (promoted) markDone("approve");
         }
       } catch {
         if (!cancelled) setExisting(null);
       }
     })();
     return () => { cancelled = true; };
-  }, [project, selectedTarget, harness, setCompiled]);
+  }, [project, selectedTarget, harness, setCompiled, markDone]);
 
   async function generateHarness(target: string): Promise<HarnessResult | null> {
     const prior = harness?.source ?? null;
@@ -210,6 +218,9 @@ export function HarnessView({
         project, target: selectedTarget, engine, lang,
       });
       setSmokeResult(result);
+      // The smoke step is complete once it has run, whether it passed or
+      // surfaced crashes (the latter is handled at the approval step).
+      markDone("smoke");
       setSmokeStatus(result.status === "SmokePassed" ? "done" : "error");
       return result.passed;
     } catch (error) {
@@ -229,6 +240,7 @@ export function HarnessView({
       });
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
+      if (promoted) markDone("approve");
       setPromotionStatus(promoted ? "done" : "error");
       setCompiled(promoted);
       return promoted;
@@ -248,6 +260,7 @@ export function HarnessView({
       });
       setPromotionResult(result);
       const promoted = result.status === "Promoted";
+      if (promoted) markDone("approve");
       setPromotionStatus(promoted ? "done" : "error");
       setCompiled(promoted);
       return promoted;
