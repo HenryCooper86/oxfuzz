@@ -3,8 +3,8 @@ import { getTransport, isTauriEnvironment } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useToast } from "../components/ui/Toast";
 import type { Crash, CorpusEntry } from "../types";
-import { Button, Input, ViewHeader } from "../components/ui";
-import { Bug, Database, RefreshCw, FileWarning, Download, Search } from "lucide-react";
+import { Button, Input, ViewHeader, EmptyState, ErrorState, Badge } from "../components/ui";
+import { Bug, Database, RotateCw, FileWarning, Download, Search } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 
 export function ArtifactsView() {
@@ -83,7 +83,7 @@ export function ArtifactsView() {
             </Button>
           )}
           <Button variant="primary" onClick={() => void scan()} loading={loading}>
-            {!loading && <RefreshCw size={14} />}
+            {!loading && <RotateCw size={14} />}
             {loading ? "Scanning..." : "Rescan"}
           </Button>
         </div>
@@ -97,37 +97,31 @@ export function ArtifactsView() {
       )}
 
       {!scanned && !loading && (
-        <div
-          className="surface-card flex flex-col items-center justify-center"
-          style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
-        >
-          <FileWarning size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">Scan to collect crash and corpus artifacts.</p>
-        </div>
+        <EmptyState
+          icon={<FileWarning size={20} />}
+          hint="Scan to collect crash and corpus artifacts."
+        />
       )}
 
       {error && (
-        <div
-          className="surface-card flex items-start gap-2"
-          style={{ padding: "var(--space-md)", borderColor: "var(--error)" }}
-        >
-          <FileWarning size={16} style={{ color: "var(--error)", flexShrink: 0, marginTop: 2 }} />
-          <div>
-            <p className="text-sm font-medium" style={{ color: "var(--error)" }}>Failed to load artifacts</p>
-            <p className="text-xs text-text-muted mt-1 font-mono">{error}</p>
-          </div>
-        </div>
+        <ErrorState
+          title="Failed to load artifacts"
+          message={error}
+          action={
+            <Button variant="outline" size="sm" onClick={() => void scan()}>
+              <RotateCw size={13} />
+              Retry
+            </Button>
+          }
+        />
       )}
 
       {empty && (
-        <div
-          className="surface-card flex flex-col items-center justify-center"
-          style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
-        >
-          <FileWarning size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">No artifacts found.</p>
-          <p className="text-xs text-text-muted mt-1">Run a fuzz campaign first, then scan.</p>
-        </div>
+        <EmptyState
+          icon={<FileWarning size={20} />}
+          title="No artifacts found"
+          hint="Run a fuzz campaign first, then rescan to collect crash reproducers and corpus inputs."
+        />
       )}
 
       {shownCrashes.length > 0 && (
@@ -139,12 +133,7 @@ export function ArtifactsView() {
               style={{ padding: "var(--space-sm) var(--space-md)" }}
             >
               <Bug size={14} style={{ color: "var(--error)", flexShrink: 0 }} />
-              <span
-                className="text-xs px-2 py-0.5 rounded-sm font-medium shrink-0"
-                style={{ background: "var(--error-subtle)", color: "var(--error)" }}
-              >
-                {c.kind || "crash"}
-              </span>
+              <Badge variant="error">{c.kind || "crash"}</Badge>
               <span className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0" title={c.input_path}>
                 {c.input_path.split("/").pop()}
               </span>

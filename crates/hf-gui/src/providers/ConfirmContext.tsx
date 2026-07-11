@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { Button } from "../components/ui/Button";
 
 interface ConfirmOptions {
   title: string;
@@ -61,24 +62,17 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
               </p>
             )}
             <div className="flex items-center justify-end gap-2 mt-1">
-              <button
-                onClick={() => settle(false)}
-                className="px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary"
-              >
+              <Button variant="outline" size="sm" onClick={() => settle(false)}>
                 {opts.cancelLabel ?? "Cancel"}
-              </button>
-              <button
+              </Button>
+              <Button
                 autoFocus
+                variant={opts.danger ? "danger" : "primary"}
+                size="sm"
                 onClick={() => settle(true)}
-                className="px-3 py-1.5 text-xs font-medium rounded-md"
-                style={
-                  opts.danger
-                    ? { background: "var(--error)", color: "#fff", border: "none" }
-                    : { background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }
-                }
               >
                 {opts.confirmLabel ?? "Confirm"}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
