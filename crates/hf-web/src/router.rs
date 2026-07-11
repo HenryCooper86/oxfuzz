@@ -192,6 +192,11 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
+        .route("/crashes/delete", post(delete_crash))
+        .route("/corpus/delete-entry", post(delete_corpus_entry))
+        .route("/artifacts/clear", post(clear_all_artifacts))
+        .route("/runs/delete", post(delete_run))
+        .route("/runs/clear", post(clear_all_runs))
         .route("/projects/export", post(export_project_data))
         .route("/providers/status", get(provider_statuses))
         .route("/system/snapshot", get(system_snapshot))
@@ -961,6 +966,70 @@ async fn delete_project(
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CrashIdRequest {
+    crash_id: String,
+}
+
+async fn delete_crash(
+    State(state): State<AppState>,
+    Json(req): Json<CrashIdRequest>,
+) -> ApiResult<bool> {
+    state
+        .container
+        .delete_crash(&req.crash_id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(true))
+}
+
+#[derive(Debug, Deserialize)]
+struct CorpusEntryRequest {
+    sha256: String,
+}
+
+async fn delete_corpus_entry(
+    State(state): State<AppState>,
+    Json(req): Json<CorpusEntryRequest>,
+) -> ApiResult<bool> {
+    state
+        .container
+        .delete_corpus_entry(&req.sha256)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(true))
+}
+
+async fn clear_all_artifacts(State(state): State<AppState>) -> ApiResult<bool> {
+    state
+        .container
+        .clear_all_artifacts()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(true))
+}
+
+async fn delete_run(
+    State(state): State<AppState>,
+    Json(req): Json<RunIdRequest>,
+) -> ApiResult<bool> {
+    state
+        .container
+        .delete_run(&req.run_id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(true))
+}
+
+async fn clear_all_runs(State(state): State<AppState>) -> ApiResult<bool> {
+    state
+        .container
+        .clear_all_runs()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(true))
 }
 
 async fn sarif(State(state): State<AppState>, Json(req): Json<TriageRequest>) -> ApiResult<String> {
