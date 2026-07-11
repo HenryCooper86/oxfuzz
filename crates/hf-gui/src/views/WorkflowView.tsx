@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Check, Minus, Target, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
 import { pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
-import { usePipeline, type StageId } from "../providers/PipelineContext";
+import { usePipeline } from "../providers/PipelineContext";
 import type { ViewType } from "../types";
 import { DiscoverView } from "./DiscoverView";
 import { HarnessView } from "./HarnessView";
@@ -44,30 +44,21 @@ const CORE_STAGES: CoreStage[] = [
   { id: "triage", n: 4, label: "Triage Crashes", hint: "Reproduce, classify, and dedup crashes", icon: Bug, Component: TriageView },
 ];
 
-/** Map the granular pipeline stage to the user-facing core stage. */
-function viewForStage(stage: StageId | null): CoreStageId | null {
-  switch (stage) {
-    case "discover":
-      return "discover";
-    case "harness":
-    case "compile":
-    case "seeds":
-      return "harness";
-    case "run":
-      return "run";
-    case "triage":
-      return "triage";
-    default:
-      return null;
-  }
-}
-
 type SectionId = CoreStageId | "corpus";
 
 export function WorkflowView() {
   const { activeProject, recentProjects, setActiveProject } = useProject();
-  const { isDone, isSkipped, currentStage } = usePipeline();
-  const activeStage: CoreStageId = viewForStage(currentStage) ?? "triage";
+  // Single source of truth for stage state: the pipeline's rolled-up core
+  // stages, so the Workflow and the Progress panel always agree.
+  const { coreStages } = usePipeline();
+  const coreById = useMemo(
+    () => Object.fromEntries(coreStages.map((c) => [c.id, c])),
+    [coreStages],
+  );
+  const allComplete = coreStages.every((c) => c.done);
+  // The active stage is the first not-done core stage; when everything is done
+  // nothing is highlighted (a finished campaign shouldn't mark Triage "current").
+  const activeStage: CoreStageId = (coreStages.find((c) => c.current)?.id ?? "triage") as CoreStageId;
   const [expanded, setExpanded] = useState<SectionId | null>(activeStage);
   const sectionRefs = useRef<Partial<Record<SectionId, HTMLElement | null>>>({});
   const gated = !activeProject;
@@ -90,18 +81,7 @@ export function WorkflowView() {
     if (path) setActiveProject(path);
   }
 
-  const stageDone = (id: CoreStageId): boolean => {
-    switch (id) {
-      case "discover":
-        return isDone("discover");
-      case "harness":
-        return isDone("seeds") || isDone("compile");
-      case "run":
-        return isDone("run");
-      case "triage":
-        return isDone("triage");
-    }
-  };
+  const stageDone = (id: CoreStageId): boolean => coreById[id]?.done ?? false;
 
   const projectName = activeProject ? activeProject.split("/").filter(Boolean).pop() : null;
 
@@ -154,8 +134,8 @@ export function WorkflowView() {
       {/* Core linear stages */}
       {CORE_STAGES.map(({ id, n, label, hint, icon: Icon, Component }) => {
         const done = stageDone(id);
-        const skipped = id === "triage" && isSkipped("triage");
-        const current = !gated && activeStage === id;
+        const skipped = coreById[id]?.skipped ?? false;
+        const current = !gated && !allComplete && (coreById[id]?.current ?? false);
         const open = !gated && expanded === id;
         return (
           <section

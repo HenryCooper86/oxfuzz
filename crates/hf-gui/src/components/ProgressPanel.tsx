@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Minus, RotateCcw } from "lucide-react";
-import { usePipeline, PIPELINE_STAGES, type StageId } from "../providers/PipelineContext";
+import { usePipeline } from "../providers/PipelineContext";
 import { useI18n } from "../i18n";
 
 export function ProgressPanel() {
-  const { isDone, isSkipped, currentStage, completed, reset } = usePipeline();
+  const { coreStages, reset } = usePipeline();
   const { t } = useI18n();
   const [open, setOpen] = useState(true);
-  const total = PIPELINE_STAGES.length;
-  const doneCount = completed.length;
+  const total = coreStages.length;
+  const doneCount = coreStages.filter((c) => c.done).length;
   const pct = Math.round((doneCount / total) * 100);
 
   return (
@@ -56,17 +56,23 @@ export function ProgressPanel() {
             </div>
           </div>
 
-          {/* Steps */}
+          {/* Steps -- the 4 core stages, matching the Fuzzing Workflow. */}
           {open && (
             <div style={{ padding: "0 6px 8px" }}>
-              {PIPELINE_STAGES.map((stage, i) => (
+              {coreStages.map((stage, i) => (
                 <StepRow
                   key={stage.id}
                   index={i + 1}
                   label={t(`stage.${stage.id}`)}
-                  done={isDone(stage.id as StageId)}
-                  skipped={isSkipped(stage.id as StageId)}
-                  current={currentStage === stage.id}
+                  done={stage.done}
+                  skipped={stage.skipped}
+                  current={stage.current}
+                  // Show sub-progress for a multi-step stage that's underway.
+                  subProgress={
+                    stage.totalSteps > 1 && !stage.done
+                      ? `${stage.doneSteps}/${stage.totalSteps}`
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -96,12 +102,14 @@ function StepRow({
   done,
   skipped,
   current,
+  subProgress,
 }: {
   index: number;
   label: string;
   done: boolean;
   skipped: boolean;
   current: boolean;
+  subProgress?: string;
 }) {
   // A skipped stage counts as done but renders as a muted dash, not a check.
   const marker = skipped ? <Minus size={12} /> : done ? <Check size={12} /> : index;
@@ -137,6 +145,9 @@ function StepRow({
       >
         {label}
         {skipped && <span className="text-xs text-text-muted"> (skipped)</span>}
+        {subProgress && !skipped && (
+          <span className="text-xs text-text-muted"> · {subProgress}</span>
+        )}
       </span>
     </div>
   );
