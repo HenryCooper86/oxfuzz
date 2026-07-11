@@ -34,10 +34,12 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
       <div className="text-text-secondary" style={{ fontSize: "13px", lineHeight: 1.6 }}>
         <p>
           Push triaged crashes to <strong>DefectDojo</strong> as findings. Set the instance{" "}
-          <code>url</code> and <code>api_token_env</code> (the NAME of an environment variable that
-          holds your DefectDojo API v2 token), then export that variable. hobot_fuzz never stores the
-          token itself. Repeat pushes use reimport-scan, so re-found crashes update in place instead
-          of duplicating.
+          <code>url</code>, then provide the API v2 token one of two ways: paste it into{" "}
+          <code>api_token</code> (stored with your desktop settings, like a provider key), or set{" "}
+          <code>api_token_env</code> to the NAME of an environment variable that holds it and export
+          that variable (preferred for CLI/CI so the secret stays out of the config file). A direct{" "}
+          <code>api_token</code> takes priority. Repeat pushes use reimport-scan, so re-found crashes
+          update in place instead of duplicating.
         </p>
       </div>
 
