@@ -17,6 +17,7 @@ fn manifest_does_not_depend_on_domain_or_runtime_crates() {
         "hf-discovery",
         "hf-corpus",
         "hf-crash",
+        "hf-agent",
     ];
 
     for crate_name in forbidden {

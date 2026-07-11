@@ -150,6 +150,9 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/discover", post(discover))
         .route("/harness/draft", post(harness_draft))
         .route("/harness/compile", post(harness_compile))
+        .route("/harness/smoke", post(harness_smoke))
+        .route("/harness/promote", post(harness_promote))
+        .route("/artifacts/summary", post(artifact_summary))
         .route("/seeds/generate", post(generate_seeds))
         .route("/seeds/generate-llm", post(generate_seeds_llm))
         .route("/corpus/{op}", post(corpus))
@@ -189,6 +192,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/sarif", post(sarif))
         .route("/knowledge/clear", post(clear_knowledge))
         .route("/projects/delete", post(delete_project))
+        .route("/projects/export", post(export_project_data))
         .route("/providers/status", get(provider_statuses))
         .route("/system/snapshot", get(system_snapshot))
         .route("/system/status", get(system_status))
@@ -395,6 +399,54 @@ async fn harness_compile(
 }
 
 #[derive(Debug, Deserialize)]
+struct HarnessQualificationRequest {
+    project: PathBuf,
+    target: String,
+    engine: String,
+    lang: Option<String>,
+}
+
+async fn harness_smoke(
+    State(state): State<AppState>,
+    Json(req): Json<HarnessQualificationRequest>,
+) -> ApiResult<serde_json::Value> {
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let lang = match req.lang.as_deref() {
+        Some(value) => parse_lang(value).map_err(map_err(StatusCode::BAD_REQUEST))?,
+        None => TargetLanguage::C,
+    };
+    let smoke = state
+        .container
+        .harness_smoke(&req.project, &req.target, engine, lang)
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(serde_json::json!({
+        "status": "SmokePassed",
+        "duration_secs": smoke.duration_secs,
+        "execs_per_sec": smoke.execs_per_sec,
+        "crashes": smoke.crashes,
+        "passed": smoke.passed,
+    })))
+}
+
+async fn harness_promote(
+    State(state): State<AppState>,
+    Json(req): Json<HarnessQualificationRequest>,
+) -> ApiResult<serde_json::Value> {
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let harness = state
+        .container
+        .harness_promote(&req.project, &req.target, engine)
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(serde_json::json!({
+        "status": format!("{:?}", harness.status),
+        "harness_id": harness.id,
+        "message": "Harness approved for full campaigns.",
+    })))
+}
+
+#[derive(Debug, Deserialize)]
 struct GenerateSeedsRequest {
     project: String,
     target: String,
@@ -563,6 +615,27 @@ async fn all_corpus(State(state): State<AppState>) -> ApiResult<serde_json::Valu
     ))
 }
 
+async fn export_project_data(
+    State(state): State<AppState>,
+    Json(req): Json<ExportProjectRequest>,
+) -> ApiResult<serde_json::Value> {
+    let project = req
+        .project
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    Ok(Json(
+        state
+            .container
+            .export_project_data(project.as_deref())
+            .await,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportProjectRequest {
+    project: Option<String>,
+}
+
 async fn generate_seeds(
     State(state): State<AppState>,
     Json(req): Json<GenerateSeedsRequest>,
@@ -723,6 +796,22 @@ async fn harness_review_queue(
             )
             .await,
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactSummaryRequest {
+    project: String,
+    target: String,
+}
+
+async fn artifact_summary(
+    State(state): State<AppState>,
+    Json(req): Json<ArtifactSummaryRequest>,
+) -> ApiResult<hf_service::ArtifactSummary> {
+    Ok(Json(state.container.artifact_summary(
+        std::path::Path::new(&req.project),
+        &req.target,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -896,8 +985,7 @@ struct ChatHistoryTurn {
     content: String,
 }
 
-/// Drive one autonomous agent turn over the project, the same loop the GUI and
-/// CLI use (via `hf_agent::run_chat_turn`). Returns the final assistant answer.
+/// Drive one autonomous agent turn over the project through the service facade.
 /// Tool-call progress is not streamed here; this is a request/response endpoint.
 async fn chat_agent(
     State(state): State<AppState>,
@@ -910,18 +998,20 @@ async fn chat_agent(
         .into_iter()
         .map(|t| Message::new(parse_role(&t.role), t.content))
         .collect();
-    let answer = hf_agent::run_chat_turn(
-        state.container.clone(),
-        project,
-        req.agent_id.as_deref(),
-        agents_dir(),
-        session,
-        history_fallback,
-        &req.message,
-        &hf_agent::NullSink,
-    )
-    .await
-    .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let answer = state
+        .container
+        .run_chat_turn(
+            hf_service::AgentTurnRequest {
+                project,
+                agent_id: req.agent_id,
+                session,
+                history_fallback,
+                message: req.message,
+            },
+            &hf_service::NullSink,
+        )
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(answer))
 }
 
@@ -933,12 +1023,6 @@ fn parse_role(role: &str) -> Role {
         "system" => Role::System,
         _ => Role::User,
     }
-}
-
-/// Resolve the user agent-definitions directory: `<repo>/agents`, else
-/// `./agents` (mirrors how `hf-agent` resolves skills).
-fn agents_dir() -> PathBuf {
-    hf_service::repo_root().map_or_else(|| PathBuf::from("agents"), |r| r.join("agents"))
 }
 
 // -- Session management ----------------------------------------------------

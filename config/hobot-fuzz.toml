@@ -26,9 +26,11 @@ smoke_fuzz_duration_secs = 60
 
 # Auto-revert policy: when a run's harness revision changed AND its edge
 # coverage dropped by at least `auto_revert_threshold_pct` percent versus the
-# previous run for the same target, automatically restore the previous
-# (last-good) harness revision and recompile it. The recompile is HITL-gated
-# like any other compile. Off by default -- opt in per project.
+# latest comparable run for the same target, automatically restore that
+# last-good harness revision and recompile it. Comparable means the engine,
+# duration, resources, sanitizer, corpus location, environment, and engine
+# arguments match. The recompile is HITL-gated like any other compile. Off by
+# default -- opt in per project. Threshold must be in (0, 100].
 # Override with HF_AUTO_REVERT (1/true) and HF_AUTO_REVERT_THRESHOLD_PCT.
 auto_revert_enabled = false
 auto_revert_threshold_pct = 20.0

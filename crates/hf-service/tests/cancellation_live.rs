@@ -4,7 +4,7 @@
 //! campaign through `EngineRunner` + `DockerRuntime`, cancelled mid-run via
 //! `cancel_all_runs` (what the `cancel_run` Tauri command calls). Ignored by
 //! default because it needs a running Docker daemon and the
-//! `hobot/fuzz-sandbox` image (the `IMAGE` constant); run explicitly with:
+//! `hobot/fuzz-sandbox` image; run explicitly with:
 //!
 //! ```text
 //! cargo test -p hf-service --test cancellation_live -- --ignored --nocapture
@@ -15,8 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hf_service::ServiceContainer;
-
-const IMAGE: &str = "hobot/fuzz-sandbox:latest";
 
 /// Keep the (now persistent) fuzz workspace out of the real per-user data dir
 /// by redirecting it to a temp dir for this test.
@@ -37,44 +35,50 @@ async fn stop_button_cancels_a_real_fuzz_run() {
     let project = std::env::temp_dir().join("hf_cancel_live_proj");
     std::fs::create_dir_all(&project).unwrap();
     let target = "demo";
+    std::fs::write(
+        project.join("demo.c"),
+        "#include <stddef.h>\nint demo(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
 
     // Lay down a workspace with a trivial-but-real libFuzzer harness and a seed.
     let workspace = hf_service::workspace_dir(&project, target);
     let corpus = workspace.join("corpus");
     std::fs::create_dir_all(&corpus).unwrap();
     std::fs::write(corpus.join("seed"), b"hello").unwrap();
-    std::fs::write(
-        workspace.join("harness.c"),
-        b"#include <stdint.h>\n#include <stddef.h>\n\
-          int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){ (void)d; (void)n; return 0; }\n",
-    )
-    .unwrap();
-
-    // Compile the harness into `fuzz_<target>` inside the sandbox, just like the
-    // real compile step would, so run_fuzzer finds a binary to drive.
-    let bin = format!("fuzz_{target}");
-    let compile = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &format!("{}:/work", workspace.display()),
-            IMAGE,
-            "sh",
-            "-c",
-            &format!("clang -g -O1 -fsanitize=fuzzer,address /work/harness.c -o /work/{bin}"),
-        ])
-        .output()
-        .expect("docker run (compile) should spawn");
-    assert!(
-        compile.status.success() && workspace.join(&bin).exists(),
-        "harness compile failed: {}",
-        String::from_utf8_lossy(&compile.stderr)
+    let store = Arc::new(
+        hf_storage::Store::connect(project.join("cancel-live.db"))
+            .await
+            .unwrap(),
     );
-
-    // Real Docker-backed container (new() = permissive guardrails, so the
-    // RunFuzzer action auto-approves headlessly).
-    let container = Arc::new(ServiceContainer::new(hf_service::runtime_from_env(), None));
+    let container =
+        Arc::new(ServiceContainer::new(hf_service::runtime_from_env(), None).with_store(store));
+    let source = "#include <stdint.h>\n#include <stddef.h>\n\
+        int demo(const unsigned char *data, size_t size);\n\
+        int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { return demo(data, size); }\n";
+    container
+        .harness_compile(
+            source.to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("sandbox compile");
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("sandbox smoke");
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .expect("explicit test approval");
 
     // Start a 600s campaign; without cancellation it would run for ten minutes.
     let runner = {
@@ -142,7 +146,4 @@ async fn stop_button_cancels_a_real_fuzz_run() {
     );
 
     let _ = std::fs::remove_dir_all(&workspace);
-    let _ = Command::new("docker")
-        .args(["image", "inspect", IMAGE])
-        .output();
 }

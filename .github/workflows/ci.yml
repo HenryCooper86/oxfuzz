@@ -17,7 +17,7 @@ jobs:
       - name: Install AFL++ and honggfuzz
         run: |
           sudo apt-get update
-          sudo apt-get install -y afl++ honggfuzz
+          sudo apt-get install -y afl++ honggfuzz libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
@@ -25,7 +25,39 @@ jobs:
       - name: cargo check
         run: cargo check --workspace
       - name: cargo test
-        run: cargo test --workspace
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps
+
+  sandbox-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Verify runtime isolation and qualification contracts
+        run: |
+          set -o pipefail
+          cargo test -p hf-runtime 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+          cargo test -p hf-service --test harness_qualification 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+
+  gui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/hf-gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/hf-gui/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run lint
 
   supply-chain:
     runs-on: ubuntu-latest

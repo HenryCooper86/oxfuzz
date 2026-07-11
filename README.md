@@ -90,7 +90,8 @@ input surface, complexity, and reachability from entry points.
 
 **2. Generate and validate a harness.** Pick a target and the agent writes a
 harness for it, compiles it in the sandbox, and runs a 60-second smoke fuzz to
-prove it actually exercises the target before promoting it.
+prove it exercises the target. You then review and explicitly approve that
+exact revision before any full campaign can start.
 
 ![Harness -- generate, compile, and seed](docs/screenshots/harness.png)
 
@@ -200,7 +201,7 @@ api_key_env = "OPENAI_API_KEY"
 hobot-fuzz discover /path/to/project --lang c --rank
 
 # Generate a harness for a specific target
-hobot-fuzz harness /path/to/project --target parse_value --engine afl++
+hobot-fuzz harness /path/to/project --target parse_value --engine afl++ --promote
 
 # Run the fuzzer
 hobot-fuzz run /path/to/project --target parse_value --engine afl++ --duration 60m
@@ -217,12 +218,13 @@ hobot-fuzz triage /path/to/project --target parse_value
 | --- | --- |
 | `init` | Scaffold config from templates and create/migrate the database. |
 | `discover <project> --lang c [--rank]` | Scan a project and produce a ranked Target Inventory. |
-| `harness <project> --target <sym> --engine <e> [--draft-only]` | Write, compile, and smoke-fuzz a harness. |
-| `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed fuzz campaign (Ctrl-C cancels cooperatively). |
+| `harness <project> --target <sym> --engine <e> [--draft-only] [--promote]` | Write, compile, and smoke-qualify a harness; `--promote` is the explicit approval step. |
+| `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
 | `corpus <project> --target <sym> --op seed\|grow\|prune\|minimize\|absorb\|list` | Manage the corpus. |
 | `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
 | `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
+| `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
 | `serve --port 8081` | Start the REST + SSE API (`hf-web`). |
 | `tui <project>` | Terminal UI. |
 
@@ -255,8 +257,10 @@ Defense in depth, non-negotiable:
 2. **Middleware interception** -- `hf-guardrails` scores each action, enforces a
    permission policy, and detects agent loops.
 3. **Human-approved execution** -- generated harnesses are reviewed by an LLM
-   triage step *and* a human before running. Crash artifacts are parsed in the
-   sandbox and never touch the host outside the workspace.
+   triage step *and* a human before running. Smoke evidence and approval are
+   persisted against the exact active revision; regenerating invalidates the
+   approval. Crash artifacts are parsed in the sandbox and never touch the host
+   outside the workspace.
 
 **Generated harnesses are never run on the host without explicit approval.**
 
@@ -272,10 +276,10 @@ layers over the same `ServiceContainer`.
 Presentation:  hf-cli (CLI+TUI)  .  hf-web (REST+SSE)  .  hf-gui (Tauri desktop)
                                   |
 Service:                      hf-service          <- ALL business logic
-                                  |
-Fuzzing domain:  hf-discovery . hf-harness . hf-engine . hf-crash . hf-corpus . hf-coverage
-                                  |
-Agent layer:        hf-agent . hf-skills . hf-tools
+                         /                 \
+Agent loop:       hf-agent . hf-skills      Fuzzing: hf-discovery . hf-harness . hf-engine
+                  . hf-tools                . hf-crash . hf-corpus . hf-coverage
+                         \                 /
                                   |
 Infrastructure: hf-provider . hf-session . hf-context . hf-storage . hf-knowledge . hf-runtime
                                   |
@@ -311,7 +315,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-corpus` | Corpus management: seed, grow, prune, merge. |
 | `hf-coverage` | Coverage delta tracking, stagnation detection. |
 | `hf-service` | Business logic orchestrating all of the above (`ServiceContainer`). |
-| `hf-agent` | Agent reason/act loop, delegation, sub-agent pools. |
+| `hf-agent` | Service-agnostic reason/act loop and delegation behind the `AgentBackend` port. |
 | `hf-bot` | Chat adapters (scaffold). |
 | `hf-web` | REST API + SSE streaming. |
 | `hf-cli` | CLI + TUI. |

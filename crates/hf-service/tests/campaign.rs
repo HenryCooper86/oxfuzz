@@ -18,7 +18,7 @@ fn isolate_workspace() {
 }
 
 /// A runtime that writes files for real (so the harness source lands on disk)
-/// and reports every command as a clean success with no output.
+/// and reports every command as a clean success with smoke activity.
 struct WritingRuntime;
 
 #[async_trait::async_trait]
@@ -31,7 +31,7 @@ impl hf_core::runtime::RuntimeAdapter for WritingRuntime {
     ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
         Ok(hf_core::runtime::CommandResult {
             exit_code: 0,
-            stdout: String::new(),
+            stdout: "DONE exec/s: 64".to_owned(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
         })
@@ -115,7 +115,36 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("fuzz_parse_entry"), b"#!/bin/true").unwrap();
 
-    let container = ServiceContainer::new(Arc::new(WritingRuntime), Some(Arc::new(CodeBlockPool)));
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("campaign.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(Arc::new(WritingRuntime), Some(Arc::new(CodeBlockPool)))
+        .with_store(store);
+    container
+        .harness_generate(
+            &project,
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+            1,
+        )
+        .await
+        .expect("prepare harness");
+    container
+        .harness_smoke(
+            &project,
+            "parse_entry",
+            EngineKind::LibFuzzer,
+            TargetLanguage::C,
+        )
+        .await
+        .expect("smoke harness");
+    container
+        .harness_promote(&project, "parse_entry", EngineKind::LibFuzzer)
+        .await
+        .expect("operator promotes harness");
     let outcome = container
         .run_campaign(
             &project,
@@ -132,7 +161,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
     assert_eq!(outcome.target, "parse_entry", "should auto-pick the target");
     assert_eq!(
         outcome.harness_status,
-        hf_core::harness::HarnessStatus::Compiled
+        hf_core::harness::HarnessStatus::Promoted
     );
     assert!(outcome.iterations >= 1, "should run at least one iteration");
     // Clean fake runtime => no crashes.

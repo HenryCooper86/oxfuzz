@@ -36,19 +36,8 @@ uuid = { workspace = true }
 # Hashing
 sha2 = { workspace = true }
 
-# Internal crates
-hf-core = { workspace = true }
-hf-discovery = { workspace = true }
-hf-harness = { workspace = true }
-hf-engine = { workspace = true }
-hf-crash = { workspace = true }
-hf-corpus = { workspace = true }
-hf-runtime = { workspace = true }
+# Internal service facade
 hf-service = { workspace = true }
-hf-provider = { workspace = true }
-hf-agent = { workspace = true }
-hf-skills = { workspace = true }
-hf-guardrails = { workspace = true }
 
 [lints]
 workspace = true

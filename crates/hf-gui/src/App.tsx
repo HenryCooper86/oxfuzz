@@ -54,8 +54,18 @@ function AppInner() {
   const { t } = useI18n();
   const { setActiveProject } = useProject();
   const [activeView, setActiveView] = useState<ViewType>("dashboard");
+  const [settingsReturnView, setSettingsReturnView] = useState<ViewType>("dashboard");
   // Bumping this key remounts ChatView, clearing the conversation for a new target.
   const [chatResetKey, setChatResetKey] = useState(0);
+
+  // Settings is a full-window editor. Preserve the originating workspace so
+  // closing it never unexpectedly drops an operator into the chat surface.
+  const navigate = (view: ViewType) => {
+    if (view === "settings") {
+      setSettingsReturnView(activeView === "settings" ? settingsReturnView : activeView);
+    }
+    setActiveView(view);
+  };
 
   // "New fuzzing target": pick a project folder, make it active, and land on
   // Discover. Per-target pipeline/target state is retained, so an existing
@@ -101,7 +111,7 @@ function AppInner() {
         <div className="app-root flex h-full w-full bg-surface-primary text-text-primary">
         {activeView === "settings" ? (
           <SettingsView
-            onBack={() => setActiveView("chat")}
+            onBack={() => setActiveView(settingsReturnView)}
             onRunWizard={() => {
               localStorage.removeItem("hf_setup_completed");
               setSetupDone(false);
@@ -109,7 +119,7 @@ function AppInner() {
           />
         ) : (
           <>
-          {sidebarOpen && <Sidebar activeView={activeView} onNavigate={setActiveView} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
+          {sidebarOpen && <Sidebar activeView={activeView} onNavigate={navigate} onNewTarget={startNewTarget} onSelectTarget={selectTarget} />}
           <div className="app-main flex flex-1 flex-col min-w-0">
             <Header
               title={t(`title.${activeView}`)}
@@ -227,7 +237,7 @@ function AppInner() {
           </div>
           </>
         )}
-        <CommandPalette onNavigate={setActiveView} />
+        <CommandPalette onNavigate={navigate} />
         </div>
       </ToastProvider>
     </TooltipProvider>

@@ -4,13 +4,26 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hf_agent::{run_chat_turn, Agent, AgentEvent, CollectingSink};
+use hf_agent::{Agent, AgentBackend, AgentEvent, CollectingSink};
 use hf_core::provider::{
     ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderPool,
     RouteRequest,
 };
-use hf_service::ServiceContainer;
 use tokio::sync::Mutex;
+
+#[test]
+fn agent_core_does_not_depend_on_the_service_facade() {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .unwrap();
+    assert!(
+        !manifest
+            .lines()
+            .any(|line| line.trim_start().starts_with("hf-service =")),
+        "hf-agent must depend on an inward backend port, not hf-service"
+    );
+}
 
 /// A provider pool that returns pre-scripted replies in order.
 struct ScriptedPool {
@@ -80,44 +93,103 @@ impl ProviderPool for ScriptedPool {
     }
 }
 
+struct TestBackend {
+    pool: Option<Arc<dyn ProviderPool>>,
+    approve: bool,
+    usage: Mutex<Vec<hf_core::types::TokenUsage>>,
+}
+
+impl TestBackend {
+    fn new(pool: Option<Arc<dyn ProviderPool>>) -> Arc<Self> {
+        Arc::new(Self {
+            pool,
+            approve: true,
+            usage: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn denying(pool: Arc<dyn ProviderPool>) -> Arc<Self> {
+        Arc::new(Self {
+            pool: Some(pool),
+            approve: false,
+            usage: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl AgentBackend for TestBackend {
+    fn provider_pool(&self) -> Option<Arc<dyn ProviderPool>> {
+        self.pool.clone()
+    }
+
+    async fn record_usage(
+        &self,
+        _operation: &str,
+        _model: &str,
+        usage: &hf_core::types::TokenUsage,
+    ) {
+        self.usage.lock().await.push(usage.clone());
+    }
+
+    async fn approve_tool(&self, _tool: &str, _agent: &str) -> bool {
+        self.approve
+    }
+
+    async fn dispatch_tool(
+        &self,
+        _project: &std::path::Path,
+        name: &str,
+        _args: &serde_json::Value,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Err(hf_core::error::ClassifiedError::Validation(format!(
+            "unknown tool: {name}"
+        )))
+    }
+
+    async fn knowledge_search(
+        &self,
+        _project: &std::path::Path,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+        Ok(serde_json::json!([]))
+    }
+
+    fn skills_dir(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from("skills")
+    }
+}
+
 fn agent_with(replies: Vec<&str>, project: Option<std::path::PathBuf>) -> Agent {
-    let runtime = Arc::new(hf_runtime::StubRuntime);
-    let pool = Arc::new(ScriptedPool::new(replies));
-    let container = ServiceContainer::new(runtime, Some(pool));
-    Agent::new(container, project)
+    let pool: Arc<dyn ProviderPool> = Arc::new(ScriptedPool::new(replies));
+    Agent::new(TestBackend::new(Some(pool)), project)
 }
 
 #[tokio::test]
 async fn agent_turn_records_diagnostics_cost() {
     // An interactive agent turn must show up in the cost summary, like
     // rank/harness/triage -- otherwise interactive-agent spend is invisible.
-    let runtime = Arc::new(hf_runtime::StubRuntime);
-    let pool = Arc::new(ScriptedPool::new(vec![
+    let pool: Arc<dyn ProviderPool> = Arc::new(ScriptedPool::new(vec![
         r#"{"thought":"easy","final":"done"}"#,
     ]));
-    let container = ServiceContainer::new(runtime, Some(pool));
-    let agent = Agent::new(container.clone(), None);
+    let backend = TestBackend::new(Some(pool));
+    let agent = Agent::new(backend.clone(), None);
     let sink = CollectingSink::new();
 
-    let before = container.cost_summary().await.calls;
     agent.run_turn(vec![], "hi", &sink).await.unwrap();
-    let after = container.cost_summary().await;
-
-    assert_eq!(
-        after.calls,
-        before + 1,
-        "the turn's LLM call must be recorded"
-    );
-    assert_eq!(after.input_tokens, 12);
-    assert_eq!(after.output_tokens, 8);
+    let usage = backend.usage.lock().await;
+    assert_eq!(usage.len(), 1, "the turn's LLM call must be recorded");
+    assert_eq!(usage[0].input_tokens, 12);
+    assert_eq!(usage[0].output_tokens, 8);
 }
 
 #[tokio::test]
 async fn agent_applies_configured_temperature() {
-    let runtime = Arc::new(hf_runtime::StubRuntime);
     let pool = Arc::new(ScriptedPool::new(vec![r#"{"final":"ok"}"#]));
     let captured = Arc::clone(&pool);
-    let container = ServiceContainer::new(runtime, Some(pool));
+    let provider: Arc<dyn ProviderPool> = pool;
+    let backend = TestBackend::new(Some(provider));
 
     let def = hf_agent::AgentDefinition::from_toml(
         "id = \"tempy\"\n\
@@ -128,7 +200,7 @@ async fn agent_applies_configured_temperature() {
          temperature = 0.25\n",
     )
     .expect("valid definition toml");
-    let agent = Agent::with_definition(container, None, def);
+    let agent = Agent::with_definition(backend, None, def);
     let sink = CollectingSink::new();
     agent.run_turn(vec![], "hi", &sink).await.unwrap();
 
@@ -142,13 +214,8 @@ async fn agent_applies_configured_temperature() {
 /// Build an agent from an inline definition TOML, with a container whose
 /// guardrail gate denies every approval request.
 fn agent_with_deny_gate(autonomy: &str, replies: Vec<&str>) -> Agent {
-    let runtime = Arc::new(hf_runtime::StubRuntime);
-    let pool = Arc::new(ScriptedPool::new(replies));
-    let container =
-        ServiceContainer::new(runtime, Some(pool)).with_guardrails(hf_guardrails::Guardrails::new(
-            hf_guardrails::GuardrailPolicy::permissive(),
-            Arc::new(hf_guardrails::DenyAll),
-        ));
+    let pool: Arc<dyn ProviderPool> = Arc::new(ScriptedPool::new(replies));
+    let backend = TestBackend::denying(pool);
     let def = hf_agent::AgentDefinition::from_toml(&format!(
         "id = \"m\"\n\
          name = \"Tester\"\n\
@@ -159,7 +226,7 @@ fn agent_with_deny_gate(autonomy: &str, replies: Vec<&str>) -> Agent {
          allowed_tools = [\"FileRead\"]\n"
     ))
     .expect("valid definition toml");
-    Agent::with_definition(container, Some(std::env::temp_dir()), def)
+    Agent::with_definition(backend, Some(std::env::temp_dir()), def)
 }
 
 fn last_tool_summary(events: &[AgentEvent]) -> String {
@@ -334,9 +401,7 @@ async fn tolerates_trailing_junk_in_tool_call() {
 
 #[tokio::test]
 async fn missing_provider_errors() {
-    let runtime = Arc::new(hf_runtime::StubRuntime);
-    let container = ServiceContainer::new(runtime, None);
-    let agent = Agent::new(container, None);
+    let agent = Agent::new(TestBackend::new(None), None);
     let sink = CollectingSink::new();
     assert!(agent.run_turn(vec![], "hi", &sink).await.is_err());
 }
@@ -365,37 +430,6 @@ async fn loop_guard_aborts_redundant_tool_calls() {
             .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("runaway"))),
         "expected an Error event for the detected loop"
     );
-}
-
-#[tokio::test]
-async fn run_chat_turn_drives_default_agent_without_session() {
-    // The shared presentation-layer entry point: with no session it uses the
-    // supplied fallback history and the default (orchestrator) agent.
-    let runtime = Arc::new(hf_runtime::StubRuntime);
-    let pool = Arc::new(ScriptedPool::new(vec![
-        r#"{"thought":"easy","final":"shared path works"}"#,
-    ]));
-    let container = ServiceContainer::new(runtime, Some(pool));
-    let sink = CollectingSink::new();
-
-    let out = run_chat_turn(
-        container,
-        None,
-        None,                 // default agent
-        std::env::temp_dir(), // no user agent defs -> builtin default
-        None,                 // no persistent session
-        Vec::new(),           // empty fallback history
-        "hello",
-        &sink,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(out, "shared path works");
-    let events = sink.events().await;
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::Complete { content } if content == "shared path works")));
 }
 
 #[tokio::test]

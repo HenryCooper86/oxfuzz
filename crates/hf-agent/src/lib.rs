@@ -1,10 +1,10 @@
 //! hf-agent: the autonomous agent loop.
 //!
-//! A ReAct-style loop drives the fuzzing tools (`hf-service`) on the model's
+//! A ReAct-style loop drives a service-owned [`AgentBackend`] on the model's
 //! behalf: each step the model either calls a tool or returns a final answer.
-//! Tool calls flow through the [`ServiceContainer`], so every privileged action
-//! is still guardrail-gated (AGENTS.md 2.12). Progress is streamed to an
-//! [`EventSink`] so presentation layers can render it live.
+//! This crate owns loop mechanics but has no dependency on `hf-service`, which
+//! keeps orchestration dependencies pointing inward. Progress is streamed to
+//! an [`EventSink`] so presentation layers can render it live.
 
 mod agent_tools;
 mod definition;
@@ -17,9 +17,8 @@ use std::sync::Arc;
 
 use hf_core::error::ClassifiedError;
 use hf_core::provider::{ChatRequest, RouteRequest};
-use hf_core::types::{Message, Role, SessionId};
+use hf_core::types::{Message, Role, TokenUsage};
 use hf_guardrails::{LoopGuard, StepRecord};
-use hf_service::ServiceContainer;
 use hf_tools::registry::ToolRegistryImpl;
 use serde::Deserialize;
 use serde_json::Value;
@@ -29,6 +28,40 @@ pub use definition::{AgentDefinition, AgentRole, Autonomy, TrustTier};
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
 pub use registry::{AgentRegistry, RegistryError, DEFAULT_AGENT_ID};
 pub use tools::{catalog_for, TOOL_CATALOG, TOOL_SPECS};
+
+/// Service capabilities consumed by the agent loop. `hf-service` implements
+/// this port and remains the sole owner of fuzzing orchestration, persistence,
+/// diagnostics, and guardrail decisions.
+#[async_trait::async_trait]
+pub trait AgentBackend: Send + Sync {
+    /// Active model-provider pool, when configured.
+    fn provider_pool(&self) -> Option<Arc<dyn hf_core::provider::ProviderPool>>;
+
+    /// Record one model call in the service diagnostics ledger.
+    async fn record_usage(&self, operation: &str, model: &str, usage: &TokenUsage);
+
+    /// Ask the service guardrails whether a manual-autonomy tool may run.
+    async fn approve_tool(&self, tool: &str, agent: &str) -> bool;
+
+    /// Dispatch a fuzzing-domain tool through the service facade.
+    async fn dispatch_tool(
+        &self,
+        project: &std::path::Path,
+        name: &str,
+        args: &Value,
+    ) -> Result<String, ClassifiedError>;
+
+    /// Search the service-owned project knowledge index.
+    async fn knowledge_search(
+        &self,
+        project: &std::path::Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<Value, ClassifiedError>;
+
+    /// Root containing user-editable skill definitions.
+    fn skills_dir(&self) -> PathBuf;
+}
 
 /// Default routing tags when an agent specifies none.
 const ROUTE_TAGS: &[&str] = &["general", "reasoning", "code"];
@@ -50,7 +83,7 @@ struct Step {
 /// model routing, and iteration budget -- is fully determined by its
 /// [`AgentDefinition`].
 pub struct Agent {
-    container: ServiceContainer,
+    backend: Arc<dyn AgentBackend>,
     project: Option<PathBuf>,
     definition: AgentDefinition,
     max_iterations: usize,
@@ -95,23 +128,23 @@ impl hf_context::CompactionLlm for PoolCompactionLlm {
 }
 
 impl Agent {
-    /// Create an agent bound to a service container and an optional project
+    /// Create an agent bound to a service backend and an optional project
     /// root, driven by the default (orchestrator) agent definition.
     #[must_use]
-    pub fn new(container: ServiceContainer, project: Option<PathBuf>) -> Self {
-        Self::with_definition(container, project, AgentRegistry::builtin().default_agent())
+    pub fn new(backend: Arc<dyn AgentBackend>, project: Option<PathBuf>) -> Self {
+        Self::with_definition(backend, project, AgentRegistry::builtin().default_agent())
     }
 
     /// Create an agent driven by a specific [`AgentDefinition`].
     #[must_use]
     pub fn with_definition(
-        container: ServiceContainer,
+        backend: Arc<dyn AgentBackend>,
         project: Option<PathBuf>,
         definition: AgentDefinition,
     ) -> Self {
         let max_iterations = definition.max_iterations.max(1);
         Self {
-            container,
+            backend,
             project,
             definition,
             max_iterations,
@@ -151,7 +184,7 @@ impl Agent {
         let skills_block = if self.definition.skills.is_empty() {
             String::new()
         } else {
-            let registry = hf_skills::SkillRegistry::with_user_dir(skills_dir());
+            let registry = hf_skills::SkillRegistry::with_user_dir(self.backend.skills_dir());
             registry
                 .render(&self.definition.skills)
                 .map(|s| format!("{s}\n\n"))
@@ -184,7 +217,7 @@ you receive its result and continue until you can give a final answer.",
     ) -> Result<String, ClassifiedError> {
         sink.emit(AgentEvent::Started).await;
 
-        let pool = self.container.provider_pool().ok_or_else(|| {
+        let pool = self.backend.provider_pool().ok_or_else(|| {
             let msg = "no LLM provider configured (set HF_PROVIDER_API_KEY)".to_owned();
             ClassifiedError::Provider(msg)
         })?;
@@ -226,9 +259,8 @@ you receive its result and continue until you can give a final answer.",
             // Record the turn's token usage/cost as a diagnostic so interactive
             // agent spend shows up in the cost summary, like rank/harness/triage
             // (which route through LlmProviderBridge::with_diagnostics).
-            self.container
-                .diagnostics()
-                .record("agent_chat", &resp.model, &resp.usage)
+            self.backend
+                .record_usage("agent_chat", &resp.model, &resp.usage)
                 .await;
             let content = resp.text().trim().to_owned();
 
@@ -280,8 +312,8 @@ you receive its result and continue until you can give a final answer.",
             // bypassing the human gate.
             let result = if self.definition.autonomy == Autonomy::Manual
                 && !self
-                    .container
-                    .approve_agent_tool(&tool, &self.definition.name)
+                    .backend
+                    .approve_tool(&tool, &self.definition.name)
                     .await
             {
                 agent_tools::error_json(format!(
@@ -308,9 +340,10 @@ you receive its result and continue until you can give a final answer.",
                 // (a prompt-injection surface). Refuse rather than allow that.
                 match self.project.as_deref().and_then(|p| p.to_str()) {
                     Some(wd) => {
+                        let backend = Arc::clone(&self.backend);
                         let registry = self
                             .registry
-                            .get_or_init(agent_tools::build_inspection_registry)
+                            .get_or_init(|| agent_tools::build_inspection_registry(backend))
                             .await;
                         agent_tools::dispatch_inspection(registry, &tool, &args, Some(wd)).await
                     }
@@ -324,10 +357,16 @@ you receive its result and continue until you can give a final answer.",
                     self.definition.name
                 ))
             } else {
-                match tools::dispatch(&self.container, self.project.as_deref(), &tool, &args).await
-                {
-                    Ok(r) => r,
-                    Err(e) => agent_tools::error_json(e),
+                match self.project.as_deref() {
+                    Some(project) => {
+                        match self.backend.dispatch_tool(project, &tool, &args).await {
+                            Ok(response) => response,
+                            Err(error) => agent_tools::error_json(error),
+                        }
+                    }
+                    None => agent_tools::error_json(
+                        "no project selected; choose a project folder first",
+                    ),
                 }
             };
             sink.emit(AgentEvent::ToolResult {
@@ -398,8 +437,9 @@ you receive its result and continue until you can give a final answer.",
         if definition.id == self.definition.id {
             return agent_tools::error_json("cannot delegate to self");
         }
-        let sub = Agent::with_definition(self.container.clone(), self.project.clone(), definition)
-            .at_delegation_depth(self.delegation_depth + 1);
+        let sub =
+            Agent::with_definition(Arc::clone(&self.backend), self.project.clone(), definition)
+                .at_delegation_depth(self.delegation_depth + 1);
         // Box the recursive turn: an async fn that awaits itself needs indirection.
         let run = Box::pin(sub.run_turn(Vec::new(), task, &NullSink));
         match run.await {
@@ -422,7 +462,7 @@ you receive its result and continue until you can give a final answer.",
         if messages.len() <= COMPACTION_RETAIN + 2 {
             return;
         }
-        let Some(pool) = self.container.provider_pool() else {
+        let Some(pool) = self.backend.provider_pool() else {
             return;
         };
 
@@ -458,91 +498,6 @@ you receive its result and continue until you can give a final answer.",
         rebuilt.extend_from_slice(&messages[tail_start..]);
         *messages = rebuilt;
     }
-}
-
-/// Resolve the skills directory: `<repo>/skills`, else `./skills`. User skills
-/// live here; built-in skills are embedded and always available.
-fn skills_dir() -> PathBuf {
-    hf_service::repo_root().map_or_else(|| PathBuf::from("skills"), |r| r.join("skills"))
-}
-
-/// Run one chat turn through the agent loop, the single code path shared by
-/// every presentation layer (GUI/web/CLI) so they all drive the agent
-/// identically (AGENTS.md 2.9 -- orchestration lives here, not in the
-/// presentation crates).
-///
-/// History is resolved from the persistent session transcript when `session`
-/// names one and a database is configured; otherwise `history_fallback` is
-/// used. After a successful turn, when a session is active the pre-turn state is
-/// checkpointed and the user+assistant messages are appended so the turn can be
-/// rolled back. The `container` must already carry the desired guardrail policy
-/// (e.g. an interactive approval gate for the GUI).
-///
-/// # Errors
-/// Returns `ClassifiedError` if the session transcript cannot be read, no
-/// provider is configured, or an LLM call fails.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_chat_turn(
-    container: ServiceContainer,
-    project: Option<PathBuf>,
-    agent_id: Option<&str>,
-    agents_dir: PathBuf,
-    session: Option<SessionId>,
-    history_fallback: Vec<Message>,
-    message: &str,
-    sink: &dyn EventSink,
-) -> Result<String, ClassifiedError> {
-    // Resolve the conversation history: prefer the persisted transcript.
-    let has_session = session.is_some() && container.session_manager().is_some();
-
-    // Serialize turns on the same session for the whole read-modify-write below:
-    // reading the history, running the turn, then appending user+assistant and
-    // checkpointing. Two concurrent turns on one session would otherwise read the
-    // same pre-turn length, mint duplicate checkpoint turn numbers, and interleave
-    // their four appends. The guard is held until this function returns; distinct
-    // sessions take distinct locks and still run concurrently.
-    let _turn_guard = match &session {
-        Some(id) if has_session => Some(container.session_turn_lock(id).lock_owned().await),
-        _ => None,
-    };
-
-    let history = if let (Some(id), Some(manager)) = (&session, container.session_manager()) {
-        manager
-            .read_transcript(id)
-            .await
-            .map_err(|e| ClassifiedError::Internal(format!("read transcript: {e}")))?
-    } else {
-        history_fallback
-    };
-    // Transcript length before this turn -- a rollback restores to here.
-    let message_count_before = u32::try_from(history.len()).unwrap_or(u32::MAX);
-
-    // Select the agent definition (default: orchestrator) and run the turn.
-    let registry = AgentRegistry::with_user_dir(agents_dir);
-    let definition = agent_id
-        .filter(|s| !s.is_empty())
-        .and_then(|id| registry.get(id).cloned())
-        .unwrap_or_else(|| registry.default_agent());
-    let agent = Agent::with_definition(container.clone(), project, definition);
-    let answer = agent.run_turn(history, message, sink).await?;
-
-    // Persist the turn (checkpoint + user/assistant messages) when a session is
-    // active, so the conversation survives and can be rolled back.
-    if has_session {
-        if let Some(id) = &session {
-            container
-                .chat_create_checkpoint(id, message_count_before)
-                .await;
-            if let Some(manager) = container.session_manager() {
-                let _ = manager.append_message(id, &Message::user(message)).await;
-                let _ = manager
-                    .append_message(id, &Message::assistant(answer.clone()))
-                    .await;
-            }
-        }
-    }
-
-    Ok(answer)
 }
 
 /// Parse a model reply into a [`Step`], tolerating code fences, surrounding

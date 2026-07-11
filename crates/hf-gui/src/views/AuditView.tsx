@@ -64,7 +64,7 @@ export function AuditView() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <ViewHeader
           title="Policy Audit"
-          description="Every time the auto-revert policy fired: a harness revision regressed coverage, so the last-good revision was restored or flagged."
+          description="Every time the auto-revert policy fired under comparable run conditions: the last-good revision was restored or flagged."
         />
         {activeProject && (
           <div className="flex items-center gap-1 text-xs">
@@ -145,7 +145,7 @@ export function AuditView() {
                   </div>
                   <span className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
                     Coverage dropped {e.drop_pct.toFixed(1)}% ({e.regressed_edges} &lt; {e.previous_edges} edges).{" "}
-                    Harness <code>{e.from_rev.slice(0, 8)}</code> {e.reverted ? "→ restored" : "→ last-good"}{" "}
+                    Harness <code>{e.from_rev.slice(0, 8)}</code> {e.reverted ? "→ restored comparable baseline" : "→ comparable last-good"}{" "}
                     <code>{e.to_rev.slice(0, 8)}</code>.
                   </span>
                 </div>

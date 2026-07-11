@@ -7,10 +7,6 @@ description = "REST API + SSE streaming"
 
 [dependencies]
 hf-service = { workspace = true }
-# The agent loop lives in hf-agent; presentation layers call its shared
-# `run_chat_turn` entry point (hf-service cannot host it -- hf-agent depends on
-# hf-service, which would be a cycle).
-hf-agent = { workspace = true }
 async-trait = { workspace = true }
 async-stream = { workspace = true }
 futures = { workspace = true }

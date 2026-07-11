@@ -22,6 +22,93 @@ pub enum EngineKind {
     Syzkaller,
 }
 
+/// Static capability description for an engine/language combination. Keeping
+/// this in `hf-core` lets CLI, REST, desktop, and service validation agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineCapabilities {
+    pub telemetry: EngineTelemetry,
+    pub artifacts: EngineArtifacts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineTelemetry {
+    pub supports_live_stats: bool,
+    pub supports_coverage: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineArtifacts {
+    pub supports_crash_minimization: bool,
+    pub requires_corpus_directory: bool,
+}
+
+impl EngineKind {
+    /// Return the engine's operational capabilities.
+    #[must_use]
+    pub const fn capabilities(self) -> EngineCapabilities {
+        match self {
+            Self::AflPlusPlus => EngineCapabilities {
+                telemetry: EngineTelemetry {
+                    supports_live_stats: true,
+                    supports_coverage: true,
+                },
+                artifacts: EngineArtifacts {
+                    supports_crash_minimization: true,
+                    requires_corpus_directory: true,
+                },
+            },
+            Self::Honggfuzz => EngineCapabilities {
+                telemetry: EngineTelemetry {
+                    supports_live_stats: true,
+                    supports_coverage: false,
+                },
+                artifacts: EngineArtifacts {
+                    supports_crash_minimization: true,
+                    requires_corpus_directory: true,
+                },
+            },
+            Self::LibFuzzer | Self::ClusterFuzzLite => EngineCapabilities {
+                telemetry: EngineTelemetry {
+                    supports_live_stats: true,
+                    supports_coverage: true,
+                },
+                artifacts: EngineArtifacts {
+                    supports_crash_minimization: true,
+                    requires_corpus_directory: false,
+                },
+            },
+            Self::Syzkaller => EngineCapabilities {
+                telemetry: EngineTelemetry {
+                    supports_live_stats: true,
+                    supports_coverage: true,
+                },
+                artifacts: EngineArtifacts {
+                    supports_crash_minimization: false,
+                    requires_corpus_directory: false,
+                },
+            },
+        }
+    }
+
+    /// Whether this engine can build the requested harness language.
+    #[must_use]
+    pub const fn supports_language(self, language: crate::target::TargetLanguage) -> bool {
+        match self {
+            Self::AflPlusPlus | Self::Honggfuzz => matches!(
+                language,
+                crate::target::TargetLanguage::C | crate::target::TargetLanguage::Cpp
+            ),
+            Self::LibFuzzer | Self::ClusterFuzzLite => matches!(
+                language,
+                crate::target::TargetLanguage::C
+                    | crate::target::TargetLanguage::Cpp
+                    | crate::target::TargetLanguage::Rust
+            ),
+            Self::Syzkaller => false,
+        }
+    }
+}
+
 impl std::str::FromStr for EngineKind {
     type Err = String;
 
@@ -65,4 +152,47 @@ pub enum FuzzProgress {
     CrashesFound(u32),
     LogLine(String),
     Done,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EngineKind;
+    use crate::target::TargetLanguage;
+
+    #[test]
+    fn capabilities_reject_unsupported_language_pairs() {
+        assert!(EngineKind::LibFuzzer.supports_language(TargetLanguage::Rust));
+        assert!(EngineKind::AflPlusPlus.supports_language(TargetLanguage::Cpp));
+        assert!(!EngineKind::AflPlusPlus.supports_language(TargetLanguage::Rust));
+        assert!(!EngineKind::LibFuzzer.supports_language(TargetLanguage::Python));
+        assert!(!EngineKind::Syzkaller.supports_language(TargetLanguage::C));
+    }
+
+    #[test]
+    fn capabilities_describe_corpus_and_coverage_behavior() {
+        assert!(
+            EngineKind::AflPlusPlus
+                .capabilities()
+                .artifacts
+                .requires_corpus_directory
+        );
+        assert!(
+            !EngineKind::Honggfuzz
+                .capabilities()
+                .telemetry
+                .supports_coverage
+        );
+        assert!(
+            EngineKind::LibFuzzer
+                .capabilities()
+                .artifacts
+                .supports_crash_minimization
+        );
+        assert!(
+            !EngineKind::Syzkaller
+                .capabilities()
+                .artifacts
+                .supports_crash_minimization
+        );
+    }
 }

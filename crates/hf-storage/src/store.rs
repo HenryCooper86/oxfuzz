@@ -35,6 +35,9 @@ pub enum StorageError {
     /// A stored timestamp could not be parsed.
     #[error("invalid timestamp: {0}")]
     Timestamp(String),
+    /// A stored identifier or model field is malformed.
+    #[error("invalid stored data: {0}")]
+    InvalidData(String),
 }
 
 impl From<StorageError> for ClassifiedError {
@@ -587,28 +590,51 @@ impl Store {
         discovered_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let project = t.project_root.to_string_lossy().to_string();
-        // Identity is (project, symbol), not the row id: the scanner assigns a
-        // fresh UUID to a candidate on every discovery pass, so keying only on
-        // id would let the same symbol accumulate duplicate rows. Drop any prior
-        // row for this symbol before inserting the latest.
-        sqlx::query("DELETE FROM targets WHERE project_root = ?1 AND symbol = ?2")
+        // Identity is (project, symbol), not the scanner's fresh UUID. Preserve
+        // the first persisted id so rediscovery cannot orphan harness, corpus,
+        // and crash rows that reference the target.
+        let stable_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM targets WHERE project_root = ?1 AND symbol = ?2 LIMIT 1",
+        )
+        .bind(&project)
+        .bind(&t.symbol)
+        .fetch_optional(&self.pool)
+        .await?;
+        let mut persisted = t.clone();
+        if let Some(id) = stable_id {
+            persisted.id = Uuid::parse_str(&id).map_err(|e| {
+                StorageError::InvalidData(format!("invalid persisted target id '{id}': {e}"))
+            })?;
+        }
+        // Collapse any legacy duplicates without deleting the stable parent row
+        // referenced by harness/corpus/crash records.
+        sqlx::query("DELETE FROM targets WHERE project_root = ?1 AND symbol = ?2 AND id <> ?3")
             .bind(&project)
-            .bind(&t.symbol)
+            .bind(&persisted.symbol)
+            .bind(persisted.id.to_string())
             .execute(&self.pool)
             .await?;
         sqlx::query(
-            "INSERT OR REPLACE INTO targets
+            "INSERT INTO targets
                 (id, project_root, symbol, language, fit_score, rationale, discovered_at, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                project_root = excluded.project_root,
+                symbol = excluded.symbol,
+                language = excluded.language,
+                fit_score = excluded.fit_score,
+                rationale = excluded.rationale,
+                discovered_at = excluded.discovered_at,
+                data_json = excluded.data_json",
         )
-        .bind(t.id.to_string())
+        .bind(persisted.id.to_string())
         .bind(&project)
-        .bind(&t.symbol)
-        .bind(enum_str(&t.language))
-        .bind(t.fit_score)
-        .bind(&t.rationale)
+        .bind(&persisted.symbol)
+        .bind(enum_str(&persisted.language))
+        .bind(persisted.fit_score)
+        .bind(&persisted.rationale)
         .bind(discovered_at.to_rfc3339())
-        .bind(serde_json::to_string(t)?)
+        .bind(serde_json::to_string(&persisted)?)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1013,6 +1039,22 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(|r| json_col(r, "data_json")).collect()
+    }
+
+    /// List every corpus entry together with its owning target id.
+    pub async fn list_all_corpus_entries_with_targets(
+        &self,
+    ) -> Result<Vec<(Uuid, CorpusEntry)>, StorageError> {
+        let rows = sqlx::query("SELECT target_id, data_json FROM corpus_entries")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let target_id = Uuid::parse_str(&row.get::<String, _>("target_id"))
+                    .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+                Ok((target_id, json_col::<CorpusEntry>(row, "data_json")?))
+            })
+            .collect()
     }
 
     // -- sessions -----------------------------------------------------------

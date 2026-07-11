@@ -6,8 +6,10 @@
 
 use std::path::PathBuf;
 
-use hf_core::engine::{EngineKind, FuzzProgress};
-use hf_core::target::TargetLanguage;
+use hf_service::{
+    Action, ApprovalGate, EngineKind, FuzzProgress, GuardrailPolicy, Guardrails, Message, Role,
+    SessionId, SkillDefinition, SkillRegistry, TargetLanguage, TrustTier,
+};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -68,10 +70,10 @@ pub(crate) async fn ensure_docker_ready(
 
     let platform = arch
         .as_deref()
-        .map_or_else(hf_runtime::host_platform, hf_runtime::norm_platform);
-    let want_short = hf_runtime::platform_short(&platform).to_string();
+        .map_or_else(hf_service::host_platform, hf_service::norm_platform);
+    let want_short = hf_service::platform_short(&platform).to_string();
 
-    if !hf_runtime::docker_cli_present() {
+    if !hf_service::docker_cli_present() {
         #[cfg(target_os = "linux")]
         emit("Docker CLI not found -- install Docker (e.g. your distro's docker.io / docker-ce).");
         #[cfg(not(target_os = "linux"))]
@@ -79,19 +81,19 @@ pub(crate) async fn ensure_docker_ready(
         return system_status();
     }
 
-    if !hf_runtime::docker_daemon_ready() {
+    if !hf_service::docker_daemon_ready() {
         emit("Starting Docker daemon...");
         start_docker_daemon();
         // Poll up to ~90s for the daemon to come up.
         for _ in 0..45 {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if hf_runtime::docker_daemon_ready() {
+            if hf_service::docker_daemon_ready() {
                 break;
             }
         }
     }
 
-    if !hf_runtime::docker_daemon_ready() {
+    if !hf_service::docker_daemon_ready() {
         #[cfg(target_os = "linux")]
         emit(
             "Docker daemon did not start -- start it manually (e.g. sudo systemctl start docker).",
@@ -102,10 +104,10 @@ pub(crate) async fn ensure_docker_ready(
     }
     emit("Docker daemon ready.");
 
-    let arch_ok = hf_runtime::sandbox_image_arch().is_some_and(|a| a == want_short);
-    if hf_runtime::sandbox_image_present() && arch_ok {
+    let arch_ok = hf_service::sandbox_image_arch().is_some_and(|a| a == want_short);
+    if hf_service::sandbox_image_present() && arch_ok {
         emit(&format!("Sandbox image ready ({platform})."));
-    } else if !hf_runtime::can_run_platform(&platform) {
+    } else if !hf_service::can_run_platform(&platform) {
         // A non-native sandbox arch on a host without qemu-user/binfmt would
         // fail the build with an opaque "exec format error" -- say so plainly.
         emit(&format!(
@@ -114,7 +116,7 @@ pub(crate) async fn ensure_docker_ready(
              (or install qemu-user-static), or pick the native arch in Settings."
         ));
     } else if let Some(root) = hf_service::repo_root() {
-        if hf_runtime::sandbox_image_present() {
+        if hf_service::sandbox_image_present() {
             emit(&format!("Rebuilding sandbox image for {platform}..."));
         } else {
             emit(&format!(
@@ -250,7 +252,7 @@ pub async fn harness_compile(
         Some(l) => parse_lang(l)?,
         None => TargetLanguage::C,
     };
-    if !hf_runtime::docker_daemon_ready() {
+    if !hf_service::docker_daemon_ready() {
         return Ok(serde_json::json!({
             "status": "Draft",
             "message": "Docker daemon not running -- harness source ready but not compiled.",
@@ -270,6 +272,79 @@ pub async fn harness_compile(
             "message": format!("Compile failed: {}", e),
         })),
     }
+}
+
+/// Smoke-qualify the exact active harness revision and persist the evidence.
+#[tauri::command]
+pub async fn harness_smoke(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    target: String,
+    engine: String,
+    lang: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let engine_kind = parse_engine(&engine)?;
+    let language = match lang.as_deref() {
+        Some(value) => parse_lang(value)?,
+        None => TargetLanguage::C,
+    };
+    // The explicit Smoke Test click is the human approval for this bounded,
+    // sandboxed harness execution. Do not route workflow actions through the
+    // chat-only approval listener: that would deny them when ChatView is not
+    // mounted, even though the operator just clicked the action button.
+    let container = state.container.clone().with_guardrails(Guardrails::new(
+        GuardrailPolicy::default(),
+        std::sync::Arc::new(AutoApproveGate),
+    ));
+    let smoke = container
+        .harness_smoke(&project, &target, engine_kind, language)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "status": "SmokePassed",
+        "duration_secs": smoke.duration_secs,
+        "execs_per_sec": smoke.execs_per_sec,
+        "crashes": smoke.crashes,
+        "passed": smoke.passed,
+    }))
+}
+
+/// Explicitly approve a clean smoke-qualified harness for full campaigns.
+#[tauri::command]
+pub async fn harness_promote(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    target: String,
+    engine: String,
+) -> Result<serde_json::Value, String> {
+    let engine_kind = parse_engine(&engine)?;
+    let harness = state
+        .container
+        .harness_promote(&project, &target, engine_kind)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "status": format!("{:?}", harness.status),
+        "harness_id": harness.id,
+        "message": "Harness approved for full campaigns.",
+    }))
+}
+
+/// Explicitly approve a harness while retaining known smoke findings.
+#[tauri::command]
+pub async fn harness_promote_with_findings(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    target: String,
+    engine: String,
+) -> Result<serde_json::Value, String> {
+    let engine_kind = parse_engine(&engine)?;
+    let promoted = state
+        .container
+        .harness_promote_with_findings(&project, &target, engine_kind)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"status": format!("{:?}", promoted.status), "known_findings": true}))
 }
 
 /// Generate seed corpus inputs for a target.
@@ -388,8 +463,14 @@ pub async fn triage(
     project: String,
     target: String,
 ) -> Result<serde_json::Value, String> {
-    let deduped = state
-        .container
+    // Clicking Scan for Crashes is the operator's approval for this bounded
+    // sandboxed triage action; use the workflow gate rather than the Chat-only
+    // interactive approval listener.
+    let container = state.container.clone().with_guardrails(Guardrails::new(
+        GuardrailPolicy::default(),
+        std::sync::Arc::new(AutoApproveGate),
+    ));
+    let deduped = container
         .triage(std::path::Path::new(&project), &target)
         .await
         .map_err(|e| e.to_string())?;
@@ -423,7 +504,7 @@ pub fn show_window(app: tauri::AppHandle) {
 #[tauri::command]
 #[must_use]
 pub fn host_arch() -> String {
-    hf_runtime::host_platform()
+    hf_service::host_platform()
 }
 
 // ---------------------------------------------------------------------------
@@ -453,30 +534,30 @@ pub struct ChatTurn {
     pub content: String,
 }
 
-fn parse_role(role: &str) -> hf_core::types::Role {
+fn parse_role(role: &str) -> Role {
     match role.to_ascii_lowercase().as_str() {
-        "system" => hf_core::types::Role::System,
-        "assistant" => hf_core::types::Role::Assistant,
-        "tool" => hf_core::types::Role::Tool,
-        _ => hf_core::types::Role::User,
+        "system" => Role::System,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        _ => Role::User,
     }
 }
 
-/// An [`EventSink`](hf_agent::EventSink) that forwards agent events to the
+/// An [`EventSink`](hf_service::EventSink) that forwards agent events to the
 /// frontend as `chat:event` Tauri events for live rendering.
 struct TauriEventSink {
     app: tauri::AppHandle,
 }
 
 #[async_trait::async_trait]
-impl hf_agent::EventSink for TauriEventSink {
-    async fn emit(&self, event: hf_agent::AgentEvent) {
+impl hf_service::EventSink for TauriEventSink {
+    async fn emit(&self, event: hf_service::AgentEvent) {
         use tauri::Emitter;
         let _ = self.app.emit("chat:event", &event);
     }
 }
 
-/// A guardrail [`ApprovalGate`](hf_guardrails::ApprovalGate) that asks the user
+/// A guardrail [`ApprovalGate`] that asks the user
 /// via the GUI: it emits `chat:permission_request` and blocks until the
 /// frontend answers through `chat_answer_permission`. A dropped channel (e.g.
 /// the window closing) denies by default.
@@ -486,8 +567,8 @@ struct GuiApprovalGate {
 }
 
 #[async_trait::async_trait]
-impl hf_guardrails::ApprovalGate for GuiApprovalGate {
-    async fn request_approval(&self, action: &hf_guardrails::Action, reason: &str) -> bool {
+impl ApprovalGate for GuiApprovalGate {
+    async fn request_approval(&self, action: &Action, reason: &str) -> bool {
         use tauri::Emitter;
         /// Deny an approval the user never answers so the agent turn cannot hang
         /// indefinitely (the only prompt listener lives in the Chat view).
@@ -513,8 +594,8 @@ impl hf_guardrails::ApprovalGate for GuiApprovalGate {
 struct AutoApproveGate;
 
 #[async_trait::async_trait]
-impl hf_guardrails::ApprovalGate for AutoApproveGate {
-    async fn request_approval(&self, _action: &hf_guardrails::Action, _reason: &str) -> bool {
+impl ApprovalGate for AutoApproveGate {
+    async fn request_approval(&self, _action: &Action, _reason: &str) -> bool {
         true
     }
 }
@@ -630,7 +711,7 @@ pub async fn system_snapshot(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<hf_service::SystemSnapshot, String> {
     let mut snapshot = state.container.system_snapshot().await;
-    let agent_count = hf_agent::AgentRegistry::with_user_dir(agents_dir())
+    let agent_count = hf_service::AgentRegistry::with_user_dir(agents_dir())
         .list()
         .len();
     snapshot.agents.available_slots = agent_count;
@@ -936,7 +1017,7 @@ pub fn agent_info() -> AgentInfo {
         Ok("permissive") => "permissive (audited)".to_owned(),
         _ => "approval required".to_owned(),
     };
-    let tools = hf_agent::TOOL_SPECS
+    let tools = hf_service::TOOL_SPECS
         .iter()
         .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
         .collect();
@@ -951,8 +1032,8 @@ pub fn agent_info() -> AgentInfo {
 /// List all skills -- built-in fuzzing skills plus any user-authored ones.
 #[tauri::command]
 #[must_use]
-pub fn list_skills() -> Vec<hf_skills::SkillDefinition> {
-    hf_skills::SkillRegistry::with_user_dir(skills_dir()).list()
+pub fn list_skills() -> Vec<SkillDefinition> {
+    SkillRegistry::with_user_dir(skills_dir()).list()
 }
 
 /// Validate a file-backed entity name: alphanumeric, dash, underscore only
@@ -982,7 +1063,7 @@ fn agents_dir() -> std::path::PathBuf {
 
 // -- Skills (registry-backed) -----------------------------------------------
 //
-// A skill is an `hf_skills::SkillDefinition`: a versioned instruction playbook
+// A skill is an `hf_service::SkillDefinition`: a versioned instruction playbook
 // (`root.md` body) plus metadata. Built-in fuzzing skills are embedded in the
 // binary; user skills (and overrides) live under `skills/<name>/`. Agents
 // reference skills by name and the runtime injects their bodies into context.
@@ -991,8 +1072,8 @@ fn agents_dir() -> std::path::PathBuf {
 #[tauri::command]
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
-pub fn read_skill(name: String) -> Option<hf_skills::SkillDefinition> {
-    hf_skills::SkillRegistry::with_user_dir(skills_dir())
+pub fn read_skill(name: String) -> Option<SkillDefinition> {
+    SkillRegistry::with_user_dir(skills_dir())
         .get(&name)
         .cloned()
 }
@@ -1014,16 +1095,16 @@ pub fn save_skill(
     } else {
         version
     };
-    let def = hf_skills::SkillDefinition {
+    let def = SkillDefinition {
         name,
         version,
         description,
         domain,
         body: content,
         max_input_tokens: 0,
-        trust_tier: hf_skills::TrustTier::UserDefined,
+        trust_tier: TrustTier::UserDefined,
     };
-    let mut reg = hf_skills::SkillRegistry::with_user_dir(skills_dir());
+    let mut reg = SkillRegistry::with_user_dir(skills_dir());
     reg.save(def).map_err(|e| e.to_string())
 }
 
@@ -1031,13 +1112,13 @@ pub fn save_skill(
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub fn delete_skill(name: String) -> Result<(), String> {
-    let mut reg = hf_skills::SkillRegistry::with_user_dir(skills_dir());
+    let mut reg = SkillRegistry::with_user_dir(skills_dir());
     reg.delete(&name).map_err(|e| e.to_string())
 }
 
 // -- Agents (registry-backed) -----------------------------------------------
 //
-// An "agent" is an `hf_agent::AgentDefinition`: a flat-TOML profile that fully
+// An "agent" is an `hf_service::AgentDefinition`: a flat-TOML profile that fully
 // determines the runtime agent's system prompt, callable tools, model routing,
 // and iteration budget. Built-in fuzzing agents are embedded in the binary;
 // user agents (and overrides) live in `config/agents/*.toml`.
@@ -1045,16 +1126,16 @@ pub fn delete_skill(name: String) -> Result<(), String> {
 /// List all agents -- built-in fuzzing agents plus any user-authored ones.
 #[tauri::command]
 #[must_use]
-pub fn list_agents() -> Vec<hf_agent::AgentDefinition> {
-    hf_agent::AgentRegistry::with_user_dir(agents_dir()).list()
+pub fn list_agents() -> Vec<hf_service::AgentDefinition> {
+    hf_service::AgentRegistry::with_user_dir(agents_dir()).list()
 }
 
 /// Fetch a single agent definition by id.
 #[tauri::command]
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
-pub fn get_agent(id: String) -> Option<hf_agent::AgentDefinition> {
-    hf_agent::AgentRegistry::with_user_dir(agents_dir())
+pub fn get_agent(id: String) -> Option<hf_service::AgentDefinition> {
+    hf_service::AgentRegistry::with_user_dir(agents_dir())
         .get(&id)
         .cloned()
 }
@@ -1063,7 +1144,7 @@ pub fn get_agent(id: String) -> Option<hf_agent::AgentDefinition> {
 #[tauri::command]
 #[must_use]
 pub fn agent_tools() -> Vec<serde_json::Value> {
-    hf_agent::TOOL_SPECS
+    hf_service::TOOL_SPECS
         .iter()
         .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
         .collect()
@@ -1073,8 +1154,8 @@ pub fn agent_tools() -> Vec<serde_json::Value> {
 /// a built-in id shadows it until deleted.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn save_agent(def: hf_agent::AgentDefinition) -> Result<(), String> {
-    let mut reg = hf_agent::AgentRegistry::with_user_dir(agents_dir());
+pub fn save_agent(def: hf_service::AgentDefinition) -> Result<(), String> {
+    let mut reg = hf_service::AgentRegistry::with_user_dir(agents_dir());
     reg.save(def).map_err(|e| e.to_string())
 }
 
@@ -1082,7 +1163,7 @@ pub fn save_agent(def: hf_agent::AgentDefinition) -> Result<(), String> {
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
 pub fn delete_agent(id: String) -> Result<(), String> {
-    let mut reg = hf_agent::AgentRegistry::with_user_dir(agents_dir());
+    let mut reg = hf_service::AgentRegistry::with_user_dir(agents_dir());
     reg.delete(&id).map_err(|e| e.to_string())
 }
 
@@ -1104,7 +1185,7 @@ pub async fn chat_rollback(
     state: tauri::State<'_, crate::state::AppState>,
     session_id: String,
 ) -> Result<usize, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state.container.chat_rollback_last(&id).await)
 }
 
@@ -1114,7 +1195,7 @@ pub async fn chat_checkpoints(
     state: tauri::State<'_, crate::state::AppState>,
     session_id: String,
 ) -> Result<Vec<hf_service::checkpoints::CheckpointView>, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state.container.chat_checkpoints(&id).await)
 }
 
@@ -1125,17 +1206,17 @@ pub async fn chat_rollback_to(
     session_id: String,
     checkpoint_id: String,
 ) -> Result<usize, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state.container.chat_rollback_to(&id, &checkpoint_id).await)
 }
 
 /// Wire string for a message role.
-fn role_to_str(role: hf_core::types::Role) -> &'static str {
+fn role_to_str(role: Role) -> &'static str {
     match role {
-        hf_core::types::Role::System => "system",
-        hf_core::types::Role::Assistant => "assistant",
-        hf_core::types::Role::Tool => "tool",
-        hf_core::types::Role::User => "user",
+        Role::System => "system",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        Role::User => "user",
     }
 }
 
@@ -1148,7 +1229,7 @@ pub async fn chat_branch(
     fork_count: u32,
     title: Option<String>,
 ) -> Result<Option<String>, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state
         .container
         .chat_branch(&id, fork_count, title.filter(|t| !t.is_empty()))
@@ -1162,7 +1243,7 @@ pub async fn delete_session(
     state: tauri::State<'_, crate::state::AppState>,
     session_id: String,
 ) -> Result<bool, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state.container.delete_chat_session(&id).await)
 }
 
@@ -1172,7 +1253,7 @@ pub async fn chat_history(
     state: tauri::State<'_, crate::state::AppState>,
     session_id: String,
 ) -> Result<Vec<ChatTurn>, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state
         .container
         .chat_history(&id)
@@ -1204,7 +1285,7 @@ pub async fn chat_branches(
     state: tauri::State<'_, crate::state::AppState>,
     session_id: String,
 ) -> Result<Vec<hf_service::checkpoints::BranchView>, String> {
-    let id = hf_core::types::SessionId(session_id);
+    let id = SessionId(session_id);
     Ok(state.container.chat_branches(&id).await)
 }
 
@@ -1228,14 +1309,12 @@ pub async fn chat_agent(
     agent_id: Option<String>,
 ) -> Result<String, String> {
     let project = project.filter(|p| !p.is_empty()).map(PathBuf::from);
-    let session = session_id
-        .filter(|s| !s.is_empty())
-        .map(hf_core::types::SessionId);
+    let session = session_id.filter(|s| !s.is_empty()).map(SessionId);
     // Frontend-supplied history, used only when no persistent session applies.
-    let history_fallback: Vec<hf_core::types::Message> = history
+    let history_fallback: Vec<Message> = history
         .unwrap_or_default()
         .into_iter()
-        .map(|t| hf_core::types::Message::new(parse_role(&t.role), t.content))
+        .map(|t| Message::new(parse_role(&t.role), t.content))
         .collect();
 
     // Run with an interactive guardrail gate: high-risk tool calls (e.g. run a
@@ -1244,8 +1323,7 @@ pub async fn chat_agent(
         app: app.clone(),
         pending: state.pending_approvals.clone(),
     });
-    let guardrails =
-        hf_guardrails::Guardrails::new(hf_guardrails::GuardrailPolicy::default(), gate);
+    let guardrails = Guardrails::new(GuardrailPolicy::default(), gate);
     let container = state.container.clone().with_guardrails(guardrails);
     let sink = TauriEventSink { app };
 
@@ -1259,18 +1337,19 @@ pub async fn chat_agent(
 
     // Drive the turn through the shared service-layer orchestration so the GUI,
     // web, and CLI all run the agent identically (AGENTS.md 2.9).
-    hf_agent::run_chat_turn(
-        container,
-        project,
-        agent_id.as_deref(),
-        agents_dir(),
-        session,
-        history_fallback,
-        &message,
-        &sink,
-    )
-    .await
-    .map_err(|e| e.to_string())
+    container
+        .run_chat_turn(
+            hf_service::AgentTurnRequest {
+                project,
+                agent_id,
+                session,
+                history_fallback,
+                message,
+            },
+            &sink,
+        )
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,7 +1424,7 @@ pub async fn run_fuzzer(
         return Ok(serde_json::json!({ "edges": 0, "crashes": 0, "execs": 0.0, "exit_code": 0 }));
     }
 
-    if !hf_runtime::docker_daemon_ready() {
+    if !hf_service::docker_daemon_ready() {
         emit(
             "LogLine",
             serde_json::json!("Docker daemon not running -- cannot run fuzzer."),
@@ -1397,13 +1476,10 @@ pub async fn run_fuzzer(
     // The explicit "Run Fuzzer" click is the human approval for this high-risk
     // action (sandboxed via hf-runtime); auto-approve so the workflow run is not
     // blocked by the agent-oriented HITL gate.
-    let container = state
-        .container
-        .clone()
-        .with_guardrails(hf_guardrails::Guardrails::new(
-            hf_guardrails::GuardrailPolicy::default(),
-            std::sync::Arc::new(AutoApproveGate),
-        ));
+    let container = state.container.clone().with_guardrails(Guardrails::new(
+        GuardrailPolicy::default(),
+        std::sync::Arc::new(AutoApproveGate),
+    ));
     let result = container
         .run_fuzzer(
             std::path::Path::new(&project),
@@ -1860,13 +1936,10 @@ pub async fn run_syzkaller(
     // The explicit launch is the human approval for this sandboxed run; auto-
     // approve so the agent-oriented HITL gate does not block it (mirrors
     // `run_fuzzer`).
-    let container = state
-        .container
-        .clone()
-        .with_guardrails(hf_guardrails::Guardrails::new(
-            hf_guardrails::GuardrailPolicy::default(),
-            std::sync::Arc::new(AutoApproveGate),
-        ));
+    let container = state.container.clone().with_guardrails(Guardrails::new(
+        GuardrailPolicy::default(),
+        std::sync::Arc::new(AutoApproveGate),
+    ));
 
     match container.run_syzkaller(&svc_opts, &on_progress).await {
         Ok(summary) => Ok(serde_json::json!({

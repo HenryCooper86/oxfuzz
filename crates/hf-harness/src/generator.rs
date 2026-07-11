@@ -433,9 +433,17 @@ pub async fn smoke_fuzz(
         .to_string();
     let binary = format!("/work/{binary_name}");
 
+    // Every engine writes crash artifacts into the canonical `out` directory
+    // so the subsequent Triage action can ingest the exact smoke findings.
+    // LibFuzzer otherwise defaults to the process working directory, which
+    // made Smoke Test report a crash while Triage appeared empty.
+    let out_dir = workspace.join("out");
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| ClassifiedError::Harness(format!("smoke fuzz: cannot create out dir: {e}")))?;
+
     // AFL++/honggfuzz drive the binary through their own fuzzer process, which
-    // needs an input and output directory on the mounted workspace. Create them
-    // (and an AFL++ seed, which the driver requires) before launching.
+    // also needs an input directory on the mounted workspace. Create it (and
+    // an AFL++ seed, which the driver requires) before launching.
     let corpus_container = "/work/corpus";
     let out_container = "/work/out";
     if matches!(
@@ -443,12 +451,8 @@ pub async fn smoke_fuzz(
         EngineKind::AflPlusPlus | EngineKind::Honggfuzz
     ) {
         let corpus_dir = workspace.join("corpus");
-        let out_dir = workspace.join("out");
         std::fs::create_dir_all(&corpus_dir).map_err(|e| {
             ClassifiedError::Harness(format!("smoke fuzz: cannot create corpus dir: {e}"))
-        })?;
-        std::fs::create_dir_all(&out_dir).map_err(|e| {
-            ClassifiedError::Harness(format!("smoke fuzz: cannot create out dir: {e}"))
         })?;
         // AFL++ refuses to start with an empty input dir; ensure one seed.
         let seed = corpus_dir.join("seed");
@@ -459,7 +463,13 @@ pub async fn smoke_fuzz(
         }
     }
 
-    let cmd = smoke_command(harness.engine, &binary, corpus_container, out_container)?;
+    let mut cmd = smoke_command(harness.engine, &binary, corpus_container, out_container)?;
+    if matches!(
+        harness.engine,
+        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
+    ) {
+        cmd.push("-artifact_prefix=/work/out/".to_owned());
+    }
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: 2048,
         max_cpus: 1,

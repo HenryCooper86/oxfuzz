@@ -8,6 +8,7 @@
 //! business logic out of presentation crates (AGENTS.md 2.9) and routing every
 //! build/run through `hf-runtime` sandboxing (AGENTS.md 2.12).
 
+pub mod agent;
 pub mod checkpoints;
 pub mod config;
 pub mod container;
@@ -23,11 +24,20 @@ pub mod scheduler;
 pub mod system;
 pub mod workbench;
 
-pub use hf_core::engine::EngineKind;
-pub use hf_core::target::TargetLanguage;
+pub use hf_agent::{
+    AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
+};
+pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
+pub use hf_core::target::{TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, Role, SessionId};
-pub use hf_runtime::host_platform;
+pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};
+pub use hf_runtime::{
+    can_run_platform, docker_cli_present, docker_daemon_ready, host_platform, norm_platform,
+    platform_short, sandbox_image_arch, sandbox_image_present,
+};
+pub use hf_skills::{SkillDefinition, SkillRegistry, TrustTier};
 
+pub use agent::AgentTurnRequest;
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, project_workspace_dir,
     provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,

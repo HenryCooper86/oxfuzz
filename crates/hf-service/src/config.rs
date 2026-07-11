@@ -95,6 +95,15 @@ pub const DEFAULT_STAGNATION_THRESHOLD_SECS: u64 = 120;
 /// restores the previous harness revision.
 pub const DEFAULT_AUTO_REVERT_THRESHOLD_PCT: f64 = 20.0;
 
+/// Whether a coverage-drop threshold is a meaningful percentage.
+///
+/// Rejecting non-finite and out-of-range values prevents a malformed config
+/// from silently making an armed rollback policy impossible to trigger.
+#[must_use]
+pub(crate) fn valid_auto_revert_threshold(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value <= 100.0
+}
+
 /// The auto-revert policy: whether a harness change that regresses coverage
 /// past [`Self::threshold_pct`] should automatically restore the previous
 /// (last-good) harness revision, and by how much coverage must drop to trigger.
@@ -103,7 +112,7 @@ pub struct AutoRevertPolicy {
     /// Whether the policy is armed. Off by default -- restoring a harness is a
     /// mutation, so a user must opt in.
     pub enabled: bool,
-    /// The edge-coverage drop (percent, vs the previous run's harness) at or
+    /// The edge-coverage drop (percent, vs a comparable run's harness) at or
     /// above which the revert fires.
     pub threshold_pct: f64,
     /// When set, a detected regression is only reported (journaled + surfaced),
@@ -164,7 +173,7 @@ fn resolve_auto_revert_policy(
         .map(str::trim)
         .and_then(|s| s.parse::<f64>().ok())
         .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_threshold_pct))
-        .filter(|v| *v > 0.0)
+        .filter(|v| valid_auto_revert_threshold(*v))
         .unwrap_or(DEFAULT_AUTO_REVERT_THRESHOLD_PCT);
     let notify_only = parse_flag(env_notify_only)
         .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_notify_only))
@@ -583,6 +592,16 @@ mod tests {
         let p = resolve_auto_revert_policy(Some("yes"), Some("-5"), None, None);
         assert!(p.enabled);
         assert!((p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON);
+
+        // Percent thresholds outside (0, 100] or non-finite values are not
+        // meaningful coverage gates and must not silently disable rollback.
+        for invalid in ["0", "100.1", "inf", "NaN"] {
+            let p = resolve_auto_revert_policy(Some("yes"), Some(invalid), None, None);
+            assert_eq!(
+                p.threshold_pct, DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
+                "invalid threshold {invalid} was accepted"
+            );
+        }
 
         // An unrecognized flag value leaves the policy off.
         assert!(!resolve_auto_revert_policy(Some("maybe"), None, None, None).enabled);
