@@ -1,6 +1,7 @@
 //! Application state managed by Tauri.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use hf_service::ServiceContainer;
@@ -68,6 +69,11 @@ pub struct AppState {
     pub pending_approvals: Arc<PendingApprovals>,
     /// Background scheduler driving recurring/one-time fuzz campaigns.
     pub scheduler: Arc<hf_service::scheduler::CampaignScheduler>,
+    /// Whether the embedded `DefectDojo` webview should currently exist. Set true
+    /// by `defectdojo_embed` and false by `defectdojo_embed_close`; lets a create
+    /// that finishes after a close (the view unmounted mid-creation) detect the
+    /// race and tear itself down, so the embed never lingers over another view.
+    pub dd_embed_wanted: AtomicBool,
 }
 
 impl AppState {
@@ -81,6 +87,7 @@ impl AppState {
             container,
             pending_approvals: Arc::new(PendingApprovals::default()),
             scheduler,
+            dd_embed_wanted: AtomicBool::new(false),
         }
     }
 }
