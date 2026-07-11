@@ -3,7 +3,7 @@ import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
 import { useConfirm } from "../providers/ConfirmContext";
 import type { ReportDraft } from "../types";
 import { ViewHeader, EmptyState, Input } from "../components/ui";
-import { FileText, Trash2, Eye, Search } from "lucide-react";
+import { FileText, Trash2, Eye, Search, Share2 } from "lucide-react";
 
 // Heavy (react-markdown + mermaid); load only when a report is opened.
 const ReportPreview = lazy(() =>
@@ -22,6 +22,28 @@ export function ReportsView() {
   const [notice, setNotice] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [pushingId, setPushingId] = useState<string | null>(null);
+
+  // Push the crashes behind a report (its project's latest triaged run) to
+  // DefectDojo as findings. Configure the instance in Settings > Integrations.
+  const pushReport = useCallback(async (r: ReportDraft) => {
+    setNotice(null);
+    setPushingId(r.id);
+    try {
+      const outcome = await getTransport().invoke<{ findings_pushed: number; reimported: boolean; url: string | null }>(
+        "push_to_defectdojo",
+        { project: r.project, target: r.target ?? undefined },
+      );
+      const where = outcome.url ? ` (${outcome.url})` : "";
+      setNotice(
+        `Pushed ${outcome.findings_pushed} finding(s) to DefectDojo${outcome.reimported ? " (reimport)" : ""}${where}.`,
+      );
+    } catch (e) {
+      setNotice(`DefectDojo push failed: ${String(e)}`);
+    } finally {
+      setPushingId(null);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -157,6 +179,15 @@ export function ReportsView() {
               >
                 <Eye size={13} />
                 Open
+              </button>
+              <button
+                onClick={() => void pushReport(r)}
+                disabled={pushingId === r.id}
+                className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary disabled:opacity-60"
+                title="Push this report's crashes to DefectDojo (configure in Settings > Integrations)"
+              >
+                <Share2 size={13} />
+                {pushingId === r.id ? "Pushing..." : "DefectDojo"}
               </button>
               <button
                 onClick={() => void remove(r)}

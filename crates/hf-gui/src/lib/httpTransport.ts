@@ -43,6 +43,9 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   workbench_dashboard: { method: "POST", path: "/workbench/dashboard" },
   harness_review_queue: { method: "POST", path: "/workbench/harnesses" },
   gitlab_issue_export: { method: "POST", path: "/gitlab/issue" },
+  push_to_defectdojo: { method: "POST", path: "/defectdojo/push" },
+  defectdojo_test_connection: { method: "GET", path: "/defectdojo/test" },
+  defectdojo_configured: { method: "GET", path: "/defectdojo/configured" },
   system_status: { method: "GET", path: "/system/status" },
   system_status_cmd: { method: "GET", path: "/system/status" },
   ensure_docker: { method: "GET", path: "/system/status" },
@@ -71,20 +74,26 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   knowledge_search: { method: "POST", path: "/knowledge/search" },
 };
 
+// Tauri (desktop) converts JS camelCase arg keys to snake_case Rust params, so
+// the whole frontend speaks camelCase. The hf-web routes deserialize snake_case
+// field names, so for web mode we mirror Tauri's conversion here. Pure-casing
+// keys convert generically (runId -> run_id); the few cases where the web field
+// name genuinely differs from a straight snake_case (not just casing) live in
+// RENAME_OVERRIDES so a generic converter can't silently mis-map them.
+const RENAME_OVERRIDES: Record<string, string> = {
+  // hf-web BranchRequest expects `fork_message_count`, not `fork_count`.
+  forkCount: "fork_message_count",
+};
+
+function camelToSnake(key: string): string {
+  return key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+}
+
 function toWebArgs(args?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!args) return undefined;
   const mapped: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
-    const webKey =
-      key === "sessionId"
-        ? "session_id"
-        : key === "agentId"
-          ? "agent_id"
-          : key === "checkpointId"
-            ? "checkpoint_id"
-            : key === "forkCount"
-              ? "fork_message_count"
-              : key;
+    const webKey = RENAME_OVERRIDES[key] ?? camelToSnake(key);
     mapped[webKey] = value;
   }
   return mapped;
