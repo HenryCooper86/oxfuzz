@@ -119,7 +119,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const { target } = useTarget();
   const { toast } = useToast();
   const confirm = useConfirm();
-  const { configured: defectDojoOn, open: openDefectDojoWindow } = useDefectDojo();
+  const { configured: defectDojoOn } = useDefectDojo();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
   const [reports, setReports] = useState<ReportDraft[]>([]);
@@ -352,16 +352,12 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
           {activeProject && autoRevert && (
             <AutoRevertBadge policy={autoRevert} overridden={autoRevert.overridden} showScope />
           )}
-          {defectDojoOn && (
+          {defectDojoOn && onNavigate && (
             <Button
               variant="outline"
               size="sm"
-              onClick={() =>
-                void openDefectDojoWindow().catch((e) =>
-                  toast({ title: "Could not open DefectDojo", description: String(e), variant: "error" }),
-                )
-              }
-              title="Open the DefectDojo web UI in a window"
+              onClick={() => onNavigate("defectdojo")}
+              title="Open DefectDojo in the app"
             >
               <ShieldCheck size={14} />
               DefectDojo

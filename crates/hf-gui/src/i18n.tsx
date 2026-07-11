@@ -39,6 +39,7 @@ const en: Dict = {
   "nav.skills": "Skills",
   "nav.knowledge": "Knowledge",
   "nav.automation": "Automation",
+  "nav.defectdojo": "DefectDojo",
   "nav.settings": "Settings",
   "sidebar.newTarget": "Open project",
   "sidebar.targets": "Recent",
@@ -66,6 +67,7 @@ const en: Dict = {
   "title.skills": "Skills",
   "title.knowledge": "Knowledge",
   "title.automation": "Automation",
+  "title.defectdojo": "DefectDojo",
 
   // Header toggles (right-side panels)
   "header.progress": "Progress",
@@ -132,6 +134,7 @@ const zh: Dict = {
   "nav.skills": "技能",
   "nav.knowledge": "知识库",
   "nav.automation": "自动化",
+  "nav.defectdojo": "DefectDojo",
   "nav.settings": "设置",
   "sidebar.newTarget": "打开项目",
   "sidebar.targets": "最近",
@@ -159,6 +162,7 @@ const zh: Dict = {
   "title.skills": "技能",
   "title.knowledge": "知识库",
   "title.automation": "自动化",
+  "title.defectdojo": "DefectDojo",
 
   // Header toggles (right-side panels)
   "header.progress": "进度",
