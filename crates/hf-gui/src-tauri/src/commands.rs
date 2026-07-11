@@ -1697,6 +1697,37 @@ pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Open the `DefectDojo` web UI. With `in_browser`, hands the URL to the OS
+/// default browser (a full, separate browser session). Otherwise opens it in a
+/// dedicated in-app window (reusing/focusing the existing one if already open),
+/// so the user can log in and browse findings without leaving `hobot_fuzz`.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn open_defectdojo(app: tauri::AppHandle, url: String, in_browser: bool) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("DefectDojo URL is not set -- configure it in Settings first".to_owned());
+    }
+    if in_browser {
+        use tauri_plugin_opener::OpenerExt;
+        return app
+            .opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| e.to_string());
+    }
+    // In-app window: focus an existing one rather than spawning duplicates.
+    if let Some(win) = app.get_webview_window("defectdojo") {
+        return win.set_focus().map_err(|e| e.to_string());
+    }
+    let parsed = tauri::Url::parse(url).map_err(|e| format!("invalid DefectDojo URL: {e}"))?;
+    tauri::WebviewWindowBuilder::new(&app, "defectdojo", tauri::WebviewUrl::External(parsed))
+        .title("DefectDojo")
+        .inner_size(1280.0, 840.0)
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Persisted run history for a project (crash counts + durations), newest first.
 #[tauri::command]
 pub async fn run_history(
