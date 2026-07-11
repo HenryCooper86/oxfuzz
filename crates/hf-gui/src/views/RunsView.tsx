@@ -7,6 +7,7 @@ import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, Input } from "../components/ui";
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw } from "lucide-react";
 import { DiffView } from "../components/DiffView";
+import { buildRunComparisons } from "../lib/runComparison";
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—";
@@ -89,7 +90,7 @@ export function RunsView() {
     .filter((r): r is RunHistoryItem => !!r);
 
   const q = filter.trim().toLowerCase();
-  const shownRuns = q ? runs.filter((r) => `${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
+  const shownRuns = q ? runs.filter((r) => `${r.target ?? ""} ${r.engine} ${r.status}`.toLowerCase().includes(q)) : runs;
 
   // Chronological (oldest->newest) finished runs with recorded coverage, for the
   // trend charts. Capped so a long history stays readable.
@@ -107,23 +108,17 @@ export function RunsView() {
   }
   const revLabel = (h: string | null): string | null =>
     h ? `rev ${revOrder.indexOf(h) + 1}` : null;
-  // Per trend bar: did the harness change vs the previous run?
-  const changeAt = trend.map(
-    (r, i) => i > 0 && r.harness_rev != null && r.harness_rev !== trend[i - 1].harness_rev,
-  );
+  // Compare each bar with the most recent service-approved comparable baseline,
+  // even when another target/engine ran in between.
+  const { baselineAt, changeAt, regressAt } = buildRunComparisons(trend);
   const anyRevChange = changeAt.some(Boolean);
-  // A regression: the harness changed AND coverage dropped vs the previous run,
-  // so the new revision is worse -- flag it so bad harness changes stand out.
-  const regressAt = trend.map(
-    (r, i) => changeAt[i] && (r.edges ?? 0) < (trend[i - 1].edges ?? 0),
-  );
   const regressedIds = new Set(trend.filter((_, i) => regressAt[i]).map((r) => r.id));
   const regressCount = regressAt.filter(Boolean).length;
 
-  // Open the harness diff between a run and the one before it, from a marker.
+  // Open the harness diff between a run and its comparable baseline.
   async function openRevDiff(i: number) {
     const cur = trend[i];
-    const prev = trend[i - 1];
+    const prev = trend[baselineAt[i]];
     if (!cur || !prev) return;
     setDiff("loading");
     try {
@@ -229,7 +224,7 @@ export function RunsView() {
             >
               <AlertTriangle size={14} style={{ color: "var(--error)", flexShrink: 0, marginTop: 1 }} />
               <span style={{ color: "var(--error)" }}>
-                {regressCount} harness revision{regressCount === 1 ? "" : "s"} reduced coverage. Click a{" "}
+                {regressCount} harness revision{regressCount === 1 ? "" : "s"} reduced coverage under comparable run conditions. Click a{" "}
                 <span style={{ fontWeight: 600 }}>red ▲</span> to see the change that regressed it.
               </span>
             </div>
@@ -237,7 +232,7 @@ export function RunsView() {
           {anyRevChange && (
             <p className="text-xs text-text-muted flex items-center gap-1">
               <span style={{ color: "var(--accent)" }}>▲</span>
-              marks a run where the harness revision changed{regressCount > 0 ? " (red = coverage dropped)" : ""} — click it to see exactly what changed in the harness.
+              marks a run where the harness revision changed versus a comparable baseline{regressCount > 0 ? " (red = coverage dropped)" : ""} — click it to see exactly what changed in the harness.
             </p>
           )}
         </section>
@@ -256,7 +251,7 @@ export function RunsView() {
             {compareRuns.map((r) => (
               <div key={r.id} className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
                 <div className="text-sm font-semibold truncate">{r.engine}</div>
-                <div className="text-xs text-text-muted mb-2">{new Date(r.started_at).toLocaleString()}</div>
+                <div className="text-xs text-text-muted mb-2">{r.target ?? "Unknown target"} · {new Date(r.started_at).toLocaleString()}</div>
                 <CompareRow label="Status" value={r.status} />
                 <CompareRow label="Harness" value={revLabel(r.harness_rev) ?? "—"} />
                 <CompareRow label="Coverage (edges)" value={r.edges != null ? r.edges.toLocaleString() : "—"} />
@@ -278,7 +273,7 @@ export function RunsView() {
           {runs.length > 4 && (
             <div className="flex items-center gap-2 mb-1">
               <Search size={14} className="text-text-muted shrink-0" />
-              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by engine or status..." className="flex-1" />
+              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by target, engine, or status..." className="flex-1" />
             </div>
           )}
           {shownRuns.map((r) => {
@@ -299,6 +294,7 @@ export function RunsView() {
                   >
                     <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
                     <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
+                    {r.target && <span className="text-xs text-text-muted truncate hidden md:inline" style={{ maxWidth: 140 }}>{r.target}</span>}
                     <span className="text-xs shrink-0" style={{ color: STATUS_COLOR[r.status] ?? "var(--text-muted)" }}>{r.status}</span>
                     {r.harness_rev && (
                       <span
@@ -677,13 +673,13 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
           ) : (
             <>These settings are the default for every project. </>
           )}
-          When a harness revision drops coverage by at least this much versus the previous run,{" "}
+          When a harness revision drops coverage by at least this much versus the latest comparable run,{" "}
           {notifyOnly ? (
             <>the regression is flagged in run history and the campaign log, but the harness is left as-is.</>
           ) : (
-            <>the previous (last-good) revision is restored and recompiled (sandbox approval still applies).</>
+            <>that last-good revision is restored and recompiled (sandbox approval still applies).</>
           )}{" "}
-          Scheduled campaigns apply the same policy between refinement iterations.
+          Comparable runs must use the same target, engine, duration, resources, sanitizer, corpus, environment, and engine arguments. Scheduled campaigns apply the same policy between refinement iterations.
         </p>
         {hasProject &&
           (perProject ? (

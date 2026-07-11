@@ -370,15 +370,34 @@ async fn rediscovering_a_symbol_does_not_accumulate_duplicates() {
     let (store, _dir) = temp_store().await;
 
     // Each discovery pass assigns a fresh id to the same symbol (as the scanner
-    // does). The store must keep one row per (project, symbol), not pile up.
+    // does). The store must keep one stable row per (project, symbol), not pile
+    // up or invalidate harness/corpus/crash foreign-key attribution.
+    let stable_id = sample_target("/proj").id;
     for _ in 0..5 {
         let mut t = sample_target("/proj");
-        t.id = Uuid::new_v4();
+        t.id = stable_id;
         store.upsert_target(&t, Utc::now()).await.unwrap();
     }
+    let harness = sample_harness(stable_id);
+    store.upsert_harness(&harness).await.unwrap();
+    let mut rediscovered = sample_target("/proj");
+    rediscovered.id = Uuid::new_v4();
+    store
+        .upsert_target(&rediscovered, Utc::now())
+        .await
+        .unwrap();
     let targets = store.list_targets("/proj").await.unwrap();
     assert_eq!(targets.len(), 1, "same symbol must collapse to one row");
     assert_eq!(targets[0].symbol, "parse_value");
+    assert_eq!(
+        targets[0].id, stable_id,
+        "target identity must remain stable"
+    );
+    assert_eq!(
+        store.list_harnesses(stable_id).await.unwrap().len(),
+        1,
+        "rediscovery must not orphan the target's harnesses"
+    );
 
     // A different symbol in the same project is kept separately.
     let mut other = sample_target("/proj");

@@ -165,6 +165,34 @@ async fn dashboard_target_filter_scopes_runs_through_harness_config() {
 }
 
 #[tokio::test]
+async fn run_history_exposes_service_owned_comparison_groups() {
+    let (container, _dir) = test_container().await;
+    let store = container.store().unwrap();
+    let target = sample_target("/proj");
+    let first_harness = sample_harness(target.id);
+    let mut second_harness = sample_harness(target.id);
+    second_harness.source = "second revision".to_owned();
+    let mut first_run = sample_run("/proj", first_harness.id);
+    first_run.status = RunStatus::Done;
+    let mut second_run = sample_run("/proj", second_harness.id);
+    second_run.status = RunStatus::Done;
+
+    store.upsert_target(&target, Utc::now()).await.unwrap();
+    store.upsert_harness(&first_harness).await.unwrap();
+    store.upsert_harness(&second_harness).await.unwrap();
+    store.insert_run(&first_run).await.unwrap();
+    store.insert_run(&second_run).await.unwrap();
+
+    let history = container.run_history(Some(Path::new("/proj"))).await;
+    assert_eq!(history.len(), 2);
+    assert!(history
+        .iter()
+        .all(|run| run.target.as_deref() == Some("parse_packet")));
+    assert!(history.iter().all(|run| run.comparison_key.is_some()));
+    assert_eq!(history[0].comparison_key, history[1].comparison_key);
+}
+
+#[tokio::test]
 async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
     let (container, _dir) = test_container().await;
     let store = container.store().unwrap();

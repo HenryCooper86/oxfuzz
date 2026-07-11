@@ -171,3 +171,62 @@ async fn harness_generate_gives_up_after_max_repairs() {
     // 1 initial + 1 repair attempt = 2 compile invocations.
     assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn failed_compile_does_not_replace_the_active_harness_revision() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("harness.source"), "last known good source").unwrap();
+
+    let runtime = Arc::new(FlakyCompileRuntime {
+        fail_first: usize::MAX,
+        calls: AtomicUsize::new(0),
+    });
+    let container = ServiceContainer::new(runtime, None);
+
+    let result = container
+        .harness_compile(
+            "regressed source".to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("harness.source")).unwrap(),
+        "last known good source"
+    );
+}
+
+#[tokio::test]
+async fn successful_compile_commits_the_active_harness_revision() {
+    isolate_workspace();
+    let project = write_sample_project();
+    let runtime = Arc::new(FlakyCompileRuntime {
+        fail_first: 0,
+        calls: AtomicUsize::new(0),
+    });
+    let container = ServiceContainer::new(runtime, None);
+
+    container
+        .harness_compile(
+            "new active source".to_owned(),
+            project.path(),
+            EngineKind::LibFuzzer,
+            "parse_entry",
+            TargetLanguage::C,
+        )
+        .await
+        .expect("compile should succeed");
+
+    let workspace = hf_service::workspace_dir(project.path(), "parse_entry");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("harness.source")).unwrap(),
+        "new active source"
+    );
+}

@@ -11,8 +11,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use hf_core::target::{TargetInventory, TargetLanguage};
-use hf_service::ServiceContainer;
+use hf_service::{ServiceContainer, TargetInventory, TargetLanguage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};

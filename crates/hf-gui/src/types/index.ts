@@ -29,6 +29,9 @@ export interface CoverageSample {
 export interface RunHistoryItem {
   id: string;
   project_root: string;
+  target: string | null;
+  /** Service-owned key for runs with comparable coverage conditions. */
+  comparison_key: string | null;
   engine: string;
   status: string;
   started_at: string;

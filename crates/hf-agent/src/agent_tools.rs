@@ -43,7 +43,9 @@ pub const INSPECTION_CATALOG: &str = "\
 - KnowledgeSearch: BM25 search the project's source for symbols/patterns. args: {\"query\":\"...\"}";
 
 /// Build the inspection-tool registry (read-only file/search tools).
-pub async fn build_inspection_registry() -> Arc<ToolRegistryImpl> {
+pub async fn build_inspection_registry(
+    backend: Arc<dyn crate::AgentBackend>,
+) -> Arc<ToolRegistryImpl> {
     let registry = ToolRegistryImpl::new(ToolRegistryConfig::default());
     let tools: Vec<(Arc<dyn Tool>, ToolDefinition)> = vec![
         (
@@ -63,7 +65,7 @@ pub async fn build_inspection_registry() -> Arc<ToolRegistryImpl> {
             tool_search::ToolSearchTool::tool_definition(),
         ),
         (
-            Arc::new(KnowledgeSearchTool::new()),
+            Arc::new(KnowledgeSearchTool::new(backend)),
             KnowledgeSearchTool::tool_definition(),
         ),
     ];
@@ -81,6 +83,7 @@ pub async fn build_inspection_registry() -> Arc<ToolRegistryImpl> {
 /// project path.
 struct KnowledgeSearchTool {
     definition: ToolDefinition,
+    backend: Arc<dyn crate::AgentBackend>,
 }
 
 impl KnowledgeSearchTool {
@@ -108,9 +111,10 @@ impl KnowledgeSearchTool {
         }
     }
 
-    fn new() -> Self {
+    fn new(backend: Arc<dyn crate::AgentBackend>) -> Self {
         Self {
             definition: Self::tool_definition(),
+            backend,
         }
     }
 }
@@ -142,17 +146,16 @@ impl Tool for KnowledgeSearchTool {
             .and_then(serde_json::Value::as_u64)
             .map_or(10, |n| n as usize);
 
-        // Lazily build the index the first time the agent searches a project.
-        // The tree walk is blocking, so it runs off the async executor.
-        if !hf_service::knowledge::is_indexed(&project) {
-            let p = project.clone();
-            let _ =
-                tokio::task::spawn_blocking(move || hf_service::knowledge::index_project(&p)).await;
-        }
-        let hits = hf_service::knowledge::search_project(&project, &query, limit);
+        let hits = self
+            .backend
+            .knowledge_search(&project, &query, limit)
+            .await
+            .map_err(|error| ToolError::Other {
+                message: error.to_string(),
+            })?;
         Ok(ToolOutput {
             success: true,
-            content: serde_json::to_value(&hits).unwrap_or(serde_json::Value::Null),
+            content: hits,
             warnings: Vec::new(),
             metadata: serde_json::Value::Null,
         })
@@ -192,6 +195,67 @@ pub async fn dispatch_inspection(
 mod tests {
     use super::*;
 
+    struct TestBackend;
+
+    #[async_trait::async_trait]
+    impl crate::AgentBackend for TestBackend {
+        fn provider_pool(&self) -> Option<Arc<dyn hf_core::provider::ProviderPool>> {
+            None
+        }
+
+        async fn record_usage(
+            &self,
+            _operation: &str,
+            _model: &str,
+            _usage: &hf_core::types::TokenUsage,
+        ) {
+        }
+
+        async fn approve_tool(&self, _tool: &str, _agent: &str) -> bool {
+            true
+        }
+
+        async fn dispatch_tool(
+            &self,
+            _project: &std::path::Path,
+            _name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, hf_core::error::ClassifiedError> {
+            Ok("{}".to_owned())
+        }
+
+        async fn knowledge_search(
+            &self,
+            project: &std::path::Path,
+            query: &str,
+            _limit: usize,
+        ) -> Result<serde_json::Value, hf_core::error::ClassifiedError> {
+            let mut hits = Vec::new();
+            for entry in std::fs::read_dir(project)
+                .map_err(|error| hf_core::error::ClassifiedError::Internal(error.to_string()))?
+                .flatten()
+            {
+                let path = entry.path();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                if content.contains(query) {
+                    hits.push(serde_json::json!({
+                        "path": path,
+                        "content": content,
+                    }));
+                }
+            }
+            Ok(serde_json::Value::Array(hits))
+        }
+
+        fn skills_dir(&self) -> std::path::PathBuf {
+            std::path::PathBuf::from("skills")
+        }
+    }
+
+    fn test_backend() -> Arc<dyn crate::AgentBackend> {
+        Arc::new(TestBackend)
+    }
+
     #[test]
     fn error_json_escapes_special_characters() {
         // A realistic compiler diagnostic: quotes, a backslash path, a newline.
@@ -209,7 +273,7 @@ mod tests {
         let path = dir.path().join("target.c");
         std::fs::write(&path, "int parse_value(const char *s) { return 0; }").unwrap();
 
-        let registry = build_inspection_registry().await;
+        let registry = build_inspection_registry(test_backend()).await;
         let args = serde_json::json!({ "path": path.to_str().unwrap() });
         let out = dispatch_inspection(&registry, "FileRead", &args, dir.path().to_str()).await;
 
@@ -221,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_registers_all_inspection_tools() {
-        let registry = build_inspection_registry().await;
+        let registry = build_inspection_registry(test_backend()).await;
         assert_eq!(registry.len().await, INSPECTION_TOOLS.len());
     }
 
@@ -234,7 +298,7 @@ mod tests {
         )
         .unwrap();
 
-        let registry = build_inspection_registry().await;
+        let registry = build_inspection_registry(test_backend()).await;
         let args = serde_json::json!({ "query": "copy_chunk" });
         // working_dir carries the project root, exactly as the agent passes it.
         let out =

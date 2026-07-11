@@ -7,9 +7,7 @@
 mod tui;
 
 use clap::{Parser, Subcommand};
-use hf_core::engine::EngineKind;
-use hf_core::target::TargetLanguage;
-use hf_service::ServiceContainer;
+use hf_service::{EngineKind, FuzzProgress, ServiceContainer, SessionId, TargetLanguage};
 use std::path::PathBuf;
 
 /// AI fuzzing agent.
@@ -59,6 +57,10 @@ enum Commands {
         /// target's still-uncovered reachable functions, then recompile.
         #[arg(long)]
         refine: bool,
+        /// Explicitly approve the revision for full campaigns after a clean
+        /// persisted smoke run.
+        #[arg(long)]
+        promote: bool,
     },
     /// Run a fuzz campaign.
     Run {
@@ -77,8 +79,8 @@ enum Commands {
         #[arg(long)]
         duration: Option<String>,
     },
-    /// Run an autonomous campaign: discover -> harness (auto-repair) -> seed ->
-    /// run -> triage -> refine, end to end.
+    /// Run an approved campaign: discover -> require promoted harness -> seed
+    /// -> run -> triage, end to end.
     Campaign {
         /// Project root path.
         project: PathBuf,
@@ -159,6 +161,14 @@ enum Commands {
         /// Write SARIF to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Export a reproducibility/evidence bundle for hand-off and CI artifacts.
+    Export {
+        /// Optional project root; omit to export all persisted projects.
+        project: Option<PathBuf>,
+        /// Output JSON bundle path.
+        #[arg(short, long, default_value = "hobot_fuzz_export.json")]
+        output: PathBuf,
     },
     /// Replay stored crashes against the current harness (regression check).
     Regress {
@@ -302,6 +312,15 @@ fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
     s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
+async fn cmd_export(project: Option<PathBuf>, output: PathBuf) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let bundle = container.export_project_data(project.as_deref()).await;
+    let json = serde_json::to_string_pretty(&bundle)?;
+    std::fs::write(&output, json)?;
+    println!("Exported evidence bundle to {}", output.display());
+    Ok(())
+}
+
 /// Parse a human duration string like "60m", "2h", "30s".
 fn parse_duration(s: &str) -> Result<u64, anyhow::Error> {
     let s = s.trim();
@@ -318,31 +337,25 @@ fn parse_duration(s: &str) -> Result<u64, anyhow::Error> {
     Ok(s.parse()?)
 }
 
-/// An [`EventSink`](hf_agent::EventSink) that renders agent progress to stderr,
+/// An [`EventSink`](hf_service::EventSink) that renders agent progress to stderr,
 /// keeping stdout reserved for the final answer (so it can be piped).
 struct CliEventSink;
 
 #[async_trait::async_trait]
-impl hf_agent::EventSink for CliEventSink {
-    async fn emit(&self, event: hf_agent::AgentEvent) {
+impl hf_service::EventSink for CliEventSink {
+    async fn emit(&self, event: hf_service::AgentEvent) {
         match event {
-            hf_agent::AgentEvent::Thinking { text } => eprintln!("[thinking] {text}"),
-            hf_agent::AgentEvent::ToolCall { name, args } => {
+            hf_service::AgentEvent::Thinking { text } => eprintln!("[thinking] {text}"),
+            hf_service::AgentEvent::ToolCall { name, args } => {
                 eprintln!("[tool] {name} {args}");
             }
-            hf_agent::AgentEvent::ToolResult { name, summary } => {
+            hf_service::AgentEvent::ToolResult { name, summary } => {
                 eprintln!("[result] {name}: {summary}");
             }
-            hf_agent::AgentEvent::Error { message } => eprintln!("[error] {message}"),
-            hf_agent::AgentEvent::Started | hf_agent::AgentEvent::Complete { .. } => {}
+            hf_service::AgentEvent::Error { message } => eprintln!("[error] {message}"),
+            hf_service::AgentEvent::Started | hf_service::AgentEvent::Complete { .. } => {}
         }
     }
-}
-
-/// Resolve the user agent-definitions directory: `<repo>/agents`, else
-/// `./agents` (mirrors how `hf-agent` resolves skills).
-fn agents_dir() -> PathBuf {
-    hf_service::repo_root().map_or_else(|| PathBuf::from("agents"), |r| r.join("agents"))
 }
 
 async fn cmd_agent(
@@ -355,17 +368,18 @@ async fn cmd_agent(
         anyhow::bail!("agent requires an LLM provider; set HF_PROVIDER_API_KEY");
     }
     let sink = CliEventSink;
-    let answer = hf_agent::run_chat_turn(
-        container,
-        project,
-        agent,
-        agents_dir(),
-        None,
-        Vec::new(),
-        message,
-        &sink,
-    )
-    .await?;
+    let answer = container
+        .run_chat_turn(
+            hf_service::AgentTurnRequest {
+                project,
+                agent_id: agent.map(str::to_owned),
+                session: None,
+                history_fallback: Vec::new(),
+                message: message.to_owned(),
+            },
+            &sink,
+        )
+        .await?;
     println!("{answer}");
     Ok(())
 }
@@ -502,25 +516,25 @@ async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
             }
         },
         SessionOp::History { id } => {
-            let sid = hf_core::types::SessionId(id);
+            let sid = SessionId(id);
             for m in container.chat_history(&sid).await {
                 println!("[{:?}] {}", m.role, m.content);
             }
         }
         SessionOp::Checkpoints { id } => {
-            let sid = hf_core::types::SessionId(id);
+            let sid = SessionId(id);
             for c in container.chat_checkpoints(&sid).await {
                 println!("{c:?}");
             }
         }
         SessionOp::Branches { id } => {
-            let sid = hf_core::types::SessionId(id);
+            let sid = SessionId(id);
             for b in container.chat_branches(&sid).await {
                 println!("{b:?}");
             }
         }
         SessionOp::Rollback { id } => {
-            let sid = hf_core::types::SessionId(id);
+            let sid = SessionId(id);
             let n = container.chat_rollback_last(&sid).await;
             println!("Rolled back {n} message(s).");
         }
@@ -553,6 +567,7 @@ async fn cmd_harness(
     draft_only: bool,
     repair: usize,
     refine: bool,
+    promote: bool,
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
@@ -569,6 +584,7 @@ async fn cmd_harness(
             "refined: status={:?} repairs_used={}",
             outcome.status, outcome.repairs_used
         );
+        qualify_harness(&container, &project, target, engine, lang, promote).await?;
         return Ok(());
     }
 
@@ -583,17 +599,7 @@ async fn cmd_harness(
             "compile: status={:?} repairs_used={}",
             outcome.status, outcome.repairs_used
         );
-        println!("\n--- Smoke fuzz ---");
-        match container
-            .harness_smoke(&project, target, engine, lang)
-            .await
-        {
-            Ok(sr) => println!(
-                "smoke: execs/sec={:.0} crashes={} passed={}",
-                sr.execs_per_sec, sr.crashes, sr.passed
-            ),
-            Err(e) => eprintln!("smoke fuzz failed: {e}"),
-        }
+        qualify_harness(&container, &project, target, engine, lang, promote).await?;
         return Ok(());
     }
 
@@ -610,16 +616,33 @@ async fn cmd_harness(
         .harness_compile(draft.source, &project, engine, target, lang)
         .await?;
     println!("compile: status={:?}", outcome.status);
-    println!("\n--- Smoke fuzz ---");
-    match container
-        .harness_smoke(&project, target, engine, lang)
-        .await
-    {
-        Ok(sr) => println!(
-            "smoke: execs/sec={:.0} crashes={} passed={}",
-            sr.execs_per_sec, sr.crashes, sr.passed
-        ),
-        Err(e) => eprintln!("smoke fuzz failed: {e}"),
+    qualify_harness(&container, &project, target, engine, lang, promote).await?;
+    Ok(())
+}
+
+async fn qualify_harness(
+    container: &ServiceContainer,
+    project: &std::path::Path,
+    target: &str,
+    engine: EngineKind,
+    lang: TargetLanguage,
+    promote: bool,
+) -> anyhow::Result<()> {
+    println!("\n--- Smoke qualification ---");
+    let smoke = container
+        .harness_smoke(project, target, engine, lang)
+        .await?;
+    println!(
+        "smoke: execs/sec={:.0} crashes={} passed={}",
+        smoke.execs_per_sec, smoke.crashes, smoke.passed
+    );
+    if promote {
+        let harness = container.harness_promote(project, target, engine).await?;
+        println!("promotion: {:?} ({})", harness.status, harness.id);
+    } else {
+        println!(
+            "promotion required: review the harness and rerun this command with --promote before a full campaign"
+        );
     }
     Ok(())
 }
@@ -628,22 +651,12 @@ async fn cmd_run(
     project: PathBuf,
     target: &str,
     engine: &str,
-    lang: &str,
+    _lang: &str,
     duration: Option<&str>,
 ) -> anyhow::Result<()> {
     let engine_kind = parse_engine(engine)?;
-    let lang = parse_lang(lang)?;
     let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
     let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
-
-    let draft = container
-        .harness_draft(&project, target, engine_kind, lang)
-        .await?;
-    println!("--- Compiling harness in sandbox ---");
-    let outcome = container
-        .harness_compile(draft.source, &project, engine_kind, target, lang)
-        .await?;
-    println!("compile: status={:?}", outcome.status);
     // Ensure a seed corpus exists before running. A failure here is not fatal
     // (the engine can still run on an empty corpus) but must not be silent.
     if let Err(e) = container.generate_seeds(&project, target) {
@@ -659,9 +672,9 @@ async fn cmd_run(
         let project = project.clone();
         let target = target.to_owned();
         tokio::spawn(async move {
-            let on_progress = |p: hf_core::engine::FuzzProgress| match p {
-                hf_core::engine::FuzzProgress::LogLine(line) => println!("  {line}"),
-                hf_core::engine::FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
+            let on_progress = |p: FuzzProgress| match p {
+                FuzzProgress::LogLine(line) => println!("  {line}"),
+                FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
                 _ => {}
             };
             container
@@ -809,7 +822,7 @@ async fn cmd_ci(
     sarif: &std::path::Path,
 ) -> anyhow::Result<()> {
     let engine_kind = parse_engine(engine)?;
-    let lang = parse_lang(lang)?;
+    let _lang = parse_lang(lang)?;
     let duration_secs = parse_duration(duration)?;
     // CI is a non-interactive, deliberately-automated run. Set permissive
     // guardrails for this process so the high-risk run/triage steps proceed
@@ -819,21 +832,14 @@ async fn cmd_ci(
     }
     let container = ServiceContainer::bootstrap().await;
 
-    println!("[ci] drafting + compiling harness for {target}...");
-    let draft = container
-        .harness_draft(&project, target, engine_kind, lang)
-        .await?;
-    let outcome = container
-        .harness_compile(draft.source, &project, engine_kind, target, lang)
-        .await?;
-    println!("[ci] compile: {:?}", outcome.status);
+    println!("[ci] requiring a previously smoke-qualified and promoted harness for {target}...");
     if let Err(e) = container.generate_seeds(&project, target) {
         eprintln!("[ci] warning: seed generation failed: {e}");
     }
 
     println!("[ci] fuzzing {target} for {duration_secs}s...");
-    let on_progress = |p: hf_core::engine::FuzzProgress| {
-        if let hf_core::engine::FuzzProgress::CrashesFound(_) = p {
+    let on_progress = |p: FuzzProgress| {
+        if let FuzzProgress::CrashesFound(_) = p {
             println!("[ci] >> crash found");
         }
     };
@@ -994,7 +1000,13 @@ async fn main() -> anyhow::Result<()> {
             draft_only,
             repair,
             refine,
-        } => cmd_harness(project, &target, &engine, &lang, draft_only, repair, refine).await?,
+            promote,
+        } => {
+            cmd_harness(
+                project, &target, &engine, &lang, draft_only, repair, refine, promote,
+            )
+            .await?;
+        }
         Commands::Run {
             project,
             target,
@@ -1046,6 +1058,7 @@ async fn main() -> anyhow::Result<()> {
             target,
             out,
         } => cmd_sarif(project, &target, out.as_deref()).await?,
+        Commands::Export { project, output } => cmd_export(project, output).await?,
         Commands::Report {
             project,
             target,

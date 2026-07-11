@@ -7,6 +7,8 @@ description = "Business logic orchestrating discovery, harness, engine, crash, c
 
 [dependencies]
 hf-core = { workspace = true }
+hf-agent = { workspace = true }
+hf-skills = { workspace = true }
 hf-discovery = { workspace = true }
 hf-harness = { workspace = true }
 hf-engine = { workspace = true }

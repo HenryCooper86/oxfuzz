@@ -37,6 +37,15 @@ Run in order before declaring a task done:
 4. `cargo check --workspace`
 5. `cargo test --workspace`
 6. `cargo doc --workspace --no-deps`
+7. `cargo deny check`
+8. `npm --prefix crates/hf-gui test`
+9. `npm --prefix crates/hf-gui run build`
+10. `npm --prefix crates/hf-gui run lint`
+
+All `cargo test` invocations use the repository error-output filter documented
+in `AGENTS.md`. GitHub Actions and GitLab CI also run an explicit sandbox and
+harness-qualification contract job; it uses mocked adapters and never executes
+a generated harness on the host.
 
 ## 6. Fuzzing-Specific Test Notes
 
@@ -46,3 +55,5 @@ Run in order before declaring a task done:
   the build command shape without invoking a real toolchain.
 - Crash parsing tests use sanitized, public-domain ASan logs in
   `tests/fixtures/crashes/`.
+- Harness lifecycle tests must prove persisted `Compiled -> SmokePassed ->
+  Promoted` transitions and the fail-closed full-run gate.

@@ -24,6 +24,21 @@ interface CompileResult {
   message: string;
 }
 
+interface SmokeResult {
+  status: string;
+  duration_secs: number;
+  execs_per_sec: number;
+  crashes: number;
+  passed: boolean;
+  error?: string;
+}
+
+interface PromotionResult {
+  status: string;
+  harness_id: string;
+  message: string;
+}
+
 interface SeedResult {
   seeds: { name: string; size: number; sha256: string }[];
 }
@@ -42,6 +57,8 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
   const [prevSource, setPrevSource] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
+  const [smokeResult, setSmokeResult] = useState<SmokeResult | null>(null);
+  const [promotionResult, setPromotionResult] = useState<PromotionResult | null>(null);
   const [seeds, setSeeds] = useState<SeedResult["seeds"] | null>(null);
   // A harness already persisted for the selected target (e.g. built in the
   // Fuzzing Workflow). Hydrated from the store so this view reflects work done
@@ -51,6 +68,8 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
 
   const [harnessStatus, setHarnessStatus] = useState<StepStatus>("idle");
   const [compileStatus, setCompileStatus] = useState<StepStatus>("idle");
+  const [smokeStatus, setSmokeStatus] = useState<StepStatus>("idle");
+  const [promotionStatus, setPromotionStatus] = useState<StepStatus>("idle");
   const [seedStatus, setSeedStatus] = useState<StepStatus>("idle");
 
   async function browse() {
@@ -97,10 +116,11 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
         if (cancelled) return;
         const match = items.find((h) => h.target_symbol === selectedTarget) ?? null;
         setExisting(match);
-        // Reflect a persisted compiled harness in the shared target state so the
-        // Run handoff and pipeline badges agree across views.
-        if (match && (match.status === "Compiled" || match.status === "SmokePassed" || match.smoke_passed)) {
-          setCompiled(true);
+        if (!harness) {
+          const promoted = match?.status === "Promoted";
+          setCompiled(promoted);
+          if (promoted) setPromotionStatus("done");
+          if (match?.smoke_passed) setSmokeStatus("done");
         }
       } catch {
         if (!cancelled) setExisting(null);
@@ -113,9 +133,13 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     const prior = harness?.source ?? null;
     setHarnessStatus("loading");
     setCompileStatus("idle");
+    setSmokeStatus("idle");
+    setPromotionStatus("idle");
     setSeedStatus("idle");
     setHarness(null);
     setCompileResult(null);
+    setSmokeResult(null);
+    setPromotionResult(null);
     setSeeds(null);
     setCompiled(false);
     setShowDiff(false);
@@ -151,12 +175,70 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
       setCompileStatus(compiled ? "done" : "error");
       if (compiled) {
         markDone("compile");
-        setCompiled(true);
+        setCompiled(false);
       }
       return compiled;
     } catch (e) {
       setCompileResult({ status: "Failed", message: String(e) });
       setCompileStatus("error");
+      return false;
+    }
+  }
+
+  async function smokeHarness(): Promise<boolean> {
+    setSmokeStatus("loading");
+    setPromotionStatus("idle");
+    setPromotionResult(null);
+    setCompiled(false);
+    try {
+      const result = await getTransport().invoke<SmokeResult>("harness_smoke", {
+        project, target: selectedTarget, engine, lang,
+      });
+      setSmokeResult(result);
+      setSmokeStatus(result.status === "SmokePassed" ? "done" : "error");
+      return result.passed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSmokeResult({ status: "Failed", duration_secs: 0, execs_per_sec: 0, crashes: 0, passed: false, error: message });
+      setCompileResult((current) => current ?? { status: "Failed", message: String(error) });
+      setSmokeStatus("error");
+      return false;
+    }
+  }
+
+  async function promoteHarness(): Promise<boolean> {
+    setPromotionStatus("loading");
+    try {
+      const result = await getTransport().invoke<PromotionResult>("harness_promote", {
+        project, target: selectedTarget, engine,
+      });
+      setPromotionResult(result);
+      const promoted = result.status === "Promoted";
+      setPromotionStatus(promoted ? "done" : "error");
+      setCompiled(promoted);
+      return promoted;
+    } catch (error) {
+      setPromotionResult({ status: "Failed", harness_id: "", message: String(error) });
+      setPromotionStatus("error");
+      setCompiled(false);
+      return false;
+    }
+  }
+
+  async function promoteWithFindings(): Promise<boolean> {
+    setPromotionStatus("loading");
+    try {
+      const result = await getTransport().invoke<PromotionResult>("harness_promote_with_findings", {
+        project, target: selectedTarget, engine,
+      });
+      setPromotionResult(result);
+      const promoted = result.status === "Promoted";
+      setPromotionStatus(promoted ? "done" : "error");
+      setCompiled(promoted);
+      return promoted;
+    } catch (error) {
+      setPromotionResult({ status: "Failed", harness_id: "", message: String(error) });
+      setPromotionStatus("error");
       return false;
     }
   }
@@ -178,9 +260,9 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
     const built = await generateHarness(selectedTarget);
     if (!built) return; // harness draft failed; don't proceed to compile/seed
     const compiled = await compileHarness(built.source);
-    // Only seed a harness that actually built, so the pipeline never shows
-    // "seeds done" for a harness that failed to compile.
-    if (compiled) await generateSeeds();
+    if (!compiled) return;
+    await smokeHarness();
+    await generateSeeds();
   }
 
   return (
@@ -189,7 +271,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
         <>
           <ViewHeader
             title="Harness Generation"
-            description="Discover targets, generate harnesses, compile in sandbox, and create matching seed corpora."
+            description="Generate, sandbox-compile, smoke-qualify, review, and explicitly approve campaign harnesses."
           />
 
           {/* Project selection */}
@@ -257,7 +339,20 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
             <Select
               mono
               value={selectedTarget}
-              onChange={(v) => { setSelectedTarget(v); setHarness(null); setCompileResult(null); setSeeds(null); }}
+              onChange={(v) => {
+                setSelectedTarget(v);
+                setHarness(null);
+                setCompileResult(null);
+                setSmokeResult(null);
+                setPromotionResult(null);
+                setHarnessStatus("idle");
+                setCompileStatus("idle");
+                setSmokeStatus("idle");
+                setPromotionStatus("idle");
+                setSeedStatus("idle");
+                setSeeds(null);
+                setCompiled(false);
+              }}
               options={inventory.candidates
                 .sort((a, b) => b.fit_score - a.fit_score)
                 .map((c) => ({ value: c.symbol, label: `${c.symbol} (fit: ${c.fit_score.toFixed(2)})` }))}
@@ -273,17 +368,23 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
                 { value: "afl++", label: "AFL++" },
                 { value: "honggfuzz", label: "honggfuzz" },
                 { value: "clusterfuzzlite", label: "ClusterFuzzLite" },
-              ]}
+              ].filter((option) => lang !== "rust" || option.value === "libfuzzer" || option.value === "clusterfuzzlite")}
             />
           </div>
           <div className="flex flex-col gap-1 w-32">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Language</label>
             <Select
               value={lang}
-              onChange={(v) => setLang(v)}
+              onChange={(v) => {
+                setLang(v);
+                if (v === "rust" && engine !== "libfuzzer" && engine !== "clusterfuzzlite") {
+                  setEngine("libfuzzer");
+                }
+              }}
               options={[
                 { value: "c", label: "C" },
                 { value: "cpp", label: "C++" },
+                { value: "rust", label: "Rust" },
               ]}
             />
           </div>
@@ -293,7 +394,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
             disabled={!selectedTarget || harnessStatus === "loading"}
           >
             <Sparkles size={14} />
-            Generate All
+            Prepare All
           </Button>
         </div>
       )}
@@ -382,9 +483,69 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
             )}
           </Step>
 
-          {/* Step 3: Generate Seeds */}
+          {/* Step 3: Smoke qualification */}
           <Step
             number={3}
+            title="Smoke Qualification"
+            icon={<Crosshair size={16} />}
+            status={smokeStatus}
+            actionLabel="Run Smoke Test"
+            actionClick={smokeHarness}
+            disabled={compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed"))}
+          >
+            {smokeResult && (
+              <div className="mt-2 flex items-center gap-2 text-xs">
+                {smokeResult.passed ? (
+                  <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
+                ) : (
+                  <XCircle size={14} style={{ color: "var(--error)" }} />
+                )}
+                <span style={{ color: smokeResult.passed ? "var(--success)" : "var(--error)" }}>
+                  {smokeResult.error
+                    ? `Smoke test failed: ${smokeResult.error}`
+                    : smokeResult.passed
+                    ? `Clean smoke run: ${Math.round(smokeResult.execs_per_sec).toLocaleString()} execs/sec.`
+                    : `Smoke found ${smokeResult.crashes} crash(es); triage before approval.`}
+                </span>
+              </div>
+            )}
+          </Step>
+
+          {/* Step 4: Human approval */}
+          <Step
+            number={4}
+            title="Review and Approve"
+            icon={<CheckCircle2 size={16} />}
+            status={promotionStatus}
+            actionLabel="Approve for Campaigns"
+            actionClick={promoteHarness}
+            disabled={!(smokeResult?.passed || (!harness && existing?.smoke_passed)) || promotionStatus === "done"}
+          >
+            <p className="mt-2 text-xs text-text-secondary">
+              Approval binds this exact source, engine, target, and smoke evidence. Regenerating or recompiling creates a new revision that must be approved again.
+            </p>
+            {smokeResult && smokeResult.crashes > 0 && promotionStatus !== "done" && (
+              <Button variant="outline" size="sm" onClick={() => void promoteWithFindings()} disabled={promotionStatus === "loading"}>
+                Approve with Known Findings
+              </Button>
+            )}
+            {promotionResult && (
+              <div className="mt-2 flex items-center gap-2 text-xs">
+                {promotionResult.status === "Promoted" ? (
+                  <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
+                ) : (
+                  <XCircle size={14} style={{ color: "var(--error)" }} />
+                )}
+                <span style={{ color: promotionResult.status === "Promoted" ? "var(--success)" : "var(--error)" }}>
+                  {promotionResult.message}
+                </span>
+              </div>
+            )}
+          </Step>
+
+          {/* Step 5: Generate Seeds */}
+          <Step
+            number={5}
             title="Generate Seed Corpus"
             icon={<Database size={16} />}
             status={seedStatus}
@@ -409,8 +570,8 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
             )}
           </Step>
 
-          {/* Step 4: Ready to fuzz */}
-          {compileStatus === "done" && seedStatus === "done" && (
+          {/* Step 6: Ready to fuzz */}
+          {promotionStatus === "done" && seedStatus === "done" && (
             <div
               className="surface-card flex items-center gap-3"
               style={{ padding: "var(--space-md)", animation: "slideInUp 0.2s ease" }}

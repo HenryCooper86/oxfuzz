@@ -8,7 +8,7 @@ import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
-import type { ViewType } from "../types";
+import type { HarnessReviewItem, ViewType } from "../types";
 
 export function RunView({
   embedded = false,
@@ -59,22 +59,35 @@ export function RunView({
   // a real on-disk check -- otherwise Run shows "(compiled)" and then dead-ends
   // with "compiled harness not found".
   const [harnessBuilt, setHarnessBuilt] = useState(compiled);
+  const [harnessApproved, setHarnessApproved] = useState(compiled);
   useEffect(() => {
     // syzkaller has no harness binary; the badge is hidden for it anyway.
     if (isSyz) return;
     let cancelled = false;
-    getTransport()
-      .invoke<{ harness_built: boolean }>("artifact_summary", { project: project ?? "", target: target ?? "" })
-      .then((s) => {
-        if (!cancelled) setHarnessBuilt(Boolean(s.harness_built));
+    Promise.all([
+      getTransport().invoke<{ harness_built: boolean }>("artifact_summary", { project: project ?? "", target: target ?? "" }),
+      getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", { project: project ?? "", target: target ?? "" }),
+    ])
+      .then(([artifacts, harnesses]) => {
+        if (!cancelled) {
+          setHarnessBuilt(Boolean(artifacts.harness_built));
+          setHarnessApproved(harnesses.some((item) =>
+            item.target_symbol === target
+            && item.status === "Promoted"
+            && normalizeEngine(item.engine) === normalizeEngine(engine),
+          ));
+        }
       })
       .catch(() => {
-        if (!cancelled) setHarnessBuilt(false);
+        if (!cancelled) {
+          setHarnessBuilt(false);
+          setHarnessApproved(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [project, target, isSyz, summary]);
+  }, [project, target, engine, isSyz, summary]);
 
   async function browse() {
     const path = await pickFolder();
@@ -154,8 +167,10 @@ export function RunView({
           <div className="flex flex-col gap-1">
             <Label>
               Target Symbol
-              {harnessBuilt ? (
-                <span style={{ color: "var(--success)", marginLeft: "8px" }}> (compiled)</span>
+              {harnessApproved && harnessBuilt ? (
+                <span style={{ color: "var(--success)", marginLeft: "8px" }}> (approved)</span>
+              ) : harnessBuilt ? (
+                <span style={{ color: "var(--warning)", marginLeft: "8px" }}> (approval required)</span>
               ) : (
                 target && <span style={{ color: "var(--text-muted)", marginLeft: "8px" }}> (not built)</span>
               )}
@@ -231,7 +246,7 @@ export function RunView({
           variant="primary"
           className="self-start"
           onClick={run}
-          disabled={running || !project || (!isSyz && !target)}
+          disabled={running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
           loading={running}
         >
           {!running && <Play size={14} />}
@@ -274,6 +289,29 @@ export function RunView({
             </>
           ) : (
             " Discover and build a harness first (Harness view)."
+          )}
+        </div>
+      )}
+
+      {!isSyz && target && project && !running && (!harnessBuilt || !harnessApproved) && (
+        <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}>
+          {!harnessBuilt
+            ? "The active harness binary is missing."
+            : "The active harness has not been explicitly approved for full campaigns."}
+          {onNavigate ? (
+            <>
+              {" "}
+              <button
+                onClick={() => onNavigate("harness")}
+                className="underline"
+                style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0 }}
+              >
+                Open harness qualification
+              </button>
+              .
+            </>
+          ) : (
+            " Open the Harness view to compile, smoke-test, review, and approve it."
           )}
         </div>
       )}
@@ -344,12 +382,12 @@ export function RunView({
               {summary.autoRevert.regressed_edges} &lt; {summary.autoRevert.previous_edges} edges).{" "}
               {summary.autoRevert.reverted ? (
                 <>
-                  The previous revision <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was restored
+                  The comparable last-good revision <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was restored
                   and recompiled.
                 </>
               ) : (
                 <>
-                  Notify-only mode is on, so the last-good revision{" "}
+                  Notify-only mode is on, so the comparable last-good revision{" "}
                   <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was <strong>not</strong> restored.
                 </>
               )}
@@ -373,6 +411,10 @@ export function RunView({
       )}
     </div>
   );
+}
+
+function normalizeEngine(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 /** User-facing guidance for a backend coverage-stagnation proposal. */

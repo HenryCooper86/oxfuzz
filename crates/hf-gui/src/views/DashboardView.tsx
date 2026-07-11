@@ -11,6 +11,7 @@ import {
   ExternalLink,
   FileCode,
   FileText,
+  FolderOpen,
   GitPullRequest,
   Play,
   RefreshCw,
@@ -376,7 +377,7 @@ export function DashboardView() {
           {activeProject && autoRevert && (
             <AutoRevertBadge policy={autoRevert} overridden={autoRevert.overridden} showScope />
           )}
-          <Button variant="outline" size="sm" onClick={() => void generateActiveReport()}>
+          <Button variant="outline" size="sm" onClick={() => void generateActiveReport()} disabled={!activeProject || !target}>
             <FileText size={14} />
             Draft report
           </Button>
@@ -386,6 +387,22 @@ export function DashboardView() {
           </Button>
         </div>
       </div>
+
+      {!activeProject && (
+        <section
+          className="surface-card flex items-start gap-3"
+          style={{ padding: "var(--space-md)", borderColor: "var(--accent)", background: "var(--accent-subtle)" }}
+          role="status"
+        >
+          <FolderOpen size={18} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-text-primary">Choose a project to begin</h2>
+            <p className="mt-1 text-sm text-text-secondary">
+              The workbench is scoped to one project at a time. Use <strong className="text-text-primary">New target</strong> in the sidebar to open a codebase and start discovery.
+            </p>
+          </div>
+        </section>
+      )}
 
       <div
         className="flex flex-wrap gap-1 border-b border-border"

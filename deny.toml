@@ -1,16 +1,14 @@
 # cargo-deny configuration
-# Run: cargo install cargo-deny && cargo deny check
+# Run: cargo install cargo-deny --locked && cargo deny check
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "workspace"
 yanked = "warn"
-notice = "warn"
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
@@ -24,8 +22,6 @@ allow = [
     "OpenSSL",
     "MPL-2.0",
 ]
-copyleft = "deny"
-
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
