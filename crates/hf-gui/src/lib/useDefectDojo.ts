@@ -1,18 +1,16 @@
 // Shared DefectDojo access for presentation surfaces (sidebar, dashboard).
 //
-// Exposes whether DefectDojo is configured and a helper to open its web UI in
-// the dedicated in-app window. Desktop-only: in the browser build `configured`
-// stays false (opening a native window is a Tauri capability), so callers hide
-// their entry points there and rely on the Settings > Integrations buttons.
+// Exposes whether DefectDojo is configured so those surfaces can show their entry
+// points only when it is usable. Opening navigates to the in-app DefectDojo view
+// (which embeds the real web UI as a native child webview), so no open helper is
+// needed here. Desktop-only: in the browser build `configured` stays false.
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { getTransport, isTauriEnvironment } from "./index";
 
 export interface DefectDojoAccess {
   /** True once a usable (non-placeholder) DefectDojo config is present. */
   configured: boolean;
-  /** Open the DefectDojo web UI in the in-app window. Rejects on failure. */
-  open: () => Promise<void>;
 }
 
 export function useDefectDojo(): DefectDojoAccess {
@@ -32,9 +30,5 @@ export function useDefectDojo(): DefectDojoAccess {
     };
   }, []);
 
-  const open = useCallback(async () => {
-    await getTransport().invoke("open_defectdojo", { inBrowser: false });
-  }, []);
-
-  return { configured, open };
+  return { configured };
 }
