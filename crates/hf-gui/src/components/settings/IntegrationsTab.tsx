@@ -6,7 +6,8 @@
 // token against the live DefectDojo API.
 
 import { useState } from "react";
-import { getTransport } from "../../lib";
+import { AppWindow, ExternalLink } from "lucide-react";
+import { getTransport, isTauriEnvironment } from "../../lib";
 import { Button } from "../ui/Button";
 import { ObjectForm } from "./ObjectForm";
 
@@ -15,6 +16,9 @@ type Cfg = Record<string, unknown>;
 export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const url = typeof value.url === "string" ? value.url.trim() : "";
+  const hasUrl = url.length > 0 && !url.includes("example.com");
 
   async function testConnection() {
     setTesting(true);
@@ -26,6 +30,22 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
       setResult({ ok: false, msg: String(e) });
     } finally {
       setTesting(false);
+    }
+  }
+
+  // Open the DefectDojo web UI to log in / browse findings. In the desktop app,
+  // inBrowser=false opens a dedicated in-app window; inBrowser=true (or web mode)
+  // hands off to the external browser.
+  async function openDojo(inBrowser: boolean) {
+    if (!hasUrl) return;
+    if (isTauriEnvironment()) {
+      try {
+        await getTransport().invoke("open_defectdojo", { url, inBrowser });
+      } catch (e) {
+        setResult({ ok: false, msg: String(e) });
+      }
+    } else {
+      window.open(url, "_blank", "noopener");
     }
   }
 
@@ -54,6 +74,26 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
           disabled={testing}
         >
           Test connection
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => void openDojo(false)}
+          disabled={!hasUrl}
+          title={hasUrl ? "Open DefectDojo in a window inside hobot_fuzz" : "Set the DefectDojo URL first"}
+        >
+          <AppWindow size={14} />
+          Open DefectDojo
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void openDojo(true)}
+          disabled={!hasUrl}
+          title="Open DefectDojo in your default web browser"
+        >
+          <ExternalLink size={14} />
+          Open in browser
         </Button>
         {result && (
           <span
