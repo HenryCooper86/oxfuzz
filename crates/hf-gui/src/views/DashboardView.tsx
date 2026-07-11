@@ -14,7 +14,6 @@ import {
   FolderOpen,
   GitPullRequest,
   Play,
-  RefreshCw,
   RotateCw,
   Save,
   Search,
@@ -377,7 +376,7 @@ export function DashboardView() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0" style={{ overflowWrap: "anywhere" }}>
           <ViewHeader
-            title="Workbench"
+            title="Dashboard"
             description={activeProject ? `${activeProject}${target ? ` / ${target}` : ""}` : "No active project selected"}
           />
         </div>
@@ -390,7 +389,7 @@ export function DashboardView() {
             Draft report
           </Button>
           <Button variant="outline" size="sm" onClick={() => void reload()} disabled={loading}>
-            <RefreshCw size={14} />
+            <RotateCw size={14} />
             Refresh
           </Button>
         </div>
@@ -406,7 +405,7 @@ export function DashboardView() {
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-text-primary">Choose a project to begin</h2>
             <p className="mt-1 text-sm text-text-secondary">
-              The workbench is scoped to one project at a time. Use <strong className="text-text-primary">New target</strong> in the sidebar to open a codebase and start discovery.
+              The dashboard is scoped to one project at a time. Use <strong className="text-text-primary">Open project</strong> in the sidebar to open a codebase and start discovery.
             </p>
           </div>
         </section>

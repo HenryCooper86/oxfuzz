@@ -1,5 +1,6 @@
 import { Moon, Sun, PanelLeft } from "lucide-react";
 import type { ReactNode } from "react";
+import { IconButton } from "./ui/IconButton";
 
 interface HeaderProps {
   title: string;
@@ -29,30 +30,9 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
     >
       <div className="flex items-center gap-2" data-tauri-drag-region>
         {onToggleSidebar && (
-          <button
-            onClick={onToggleSidebar}
-            className="flex items-center justify-center rounded-md transition-all duration-150"
-            style={{
-              width: "32px",
-              height: "32px",
-              color: "var(--text-muted)",
-              background: "transparent",
-              border: "none",
-              cursor: "pointer",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = "var(--text-primary)";
-              e.currentTarget.style.background = "var(--surface-hover)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = "var(--text-muted)";
-              e.currentTarget.style.background = "transparent";
-            }}
-            title="Toggle sidebar"
-            aria-label="Toggle sidebar"
-          >
+          <IconButton size={32} onClick={onToggleSidebar} title="Toggle sidebar" aria-label="Toggle sidebar">
             <PanelLeft size={18} />
-          </button>
+          </IconButton>
         )}
         {icon && (
           <span data-tauri-drag-region style={{ color: "var(--accent)" }}>
@@ -75,30 +55,9 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
       </div>
       <div className="flex items-center gap-1">
         {actions}
-        <button
-          onClick={onToggleTheme}
-          className="flex items-center justify-center rounded-md transition-all duration-150"
-          style={{
-            width: "32px",
-            height: "32px",
-            color: "var(--text-muted)",
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.color = "var(--text-primary)";
-            e.currentTarget.style.background = "var(--surface-hover)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.color = "var(--text-muted)";
-            e.currentTarget.style.background = "transparent";
-          }}
-          title="Toggle theme"
-          aria-label="Toggle theme"
-        >
+        <IconButton size={32} onClick={onToggleTheme} title="Toggle theme" aria-label="Toggle theme">
           {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-        </button>
+        </IconButton>
       </div>
     </header>
   );

@@ -9,7 +9,7 @@ import { HarnessView } from "./HarnessView";
 import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
 import { CorpusView } from "./CorpusView";
-import { ViewHeader } from "../components/ui";
+import { ViewHeader, Button } from "../components/ui";
 
 // A unified, connected fuzzing flow: choose a project, then Discover -> Harness
 // -> Run -> Triage as one stacked accordion (no jumping between sidebar pages).
@@ -124,14 +124,15 @@ export function WorkflowView() {
               </span>
             </div>
           </div>
-          <button
+          <Button
+            variant={activeProject ? "outline" : "primary"}
+            size="sm"
             onClick={chooseProject}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md"
-            style={{ background: activeProject ? "var(--surface-primary)" : "var(--accent)", color: activeProject ? "var(--text-secondary)" : "var(--accent-contrast)", border: activeProject ? "1px solid var(--border)" : "none" }}
+            className="shrink-0"
           >
             <FolderOpen size={13} />
             {activeProject ? "Change" : "Choose Folder…"}
-          </button>
+          </Button>
         </div>
         {gated && recentProjects.length > 0 && (
           <div className="mt-3 flex flex-col gap-1">
