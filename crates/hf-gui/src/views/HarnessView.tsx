@@ -431,14 +431,15 @@ export function HarnessView({
               <div className="mt-2">
                 {prevSource && (
                   <div className="flex items-center justify-end mb-1.5">
-                    <button
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => setShowDiff((d) => !d)}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary"
                       title="Show what regeneration changed vs the previous harness"
                     >
                       <GitCompare size={12} />
                       {showDiff ? "Hide diff" : "Diff vs previous"}
-                    </button>
+                    </Button>
                   </div>
                 )}
                 <div

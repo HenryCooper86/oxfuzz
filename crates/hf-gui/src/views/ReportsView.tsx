@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState, lazy, Suspense } from "react";
 import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
 import { useConfirm } from "../providers/ConfirmContext";
 import type { ReportDraft } from "../types";
-import { ViewHeader, EmptyState, Input } from "../components/ui";
-import { FileText, Trash2, Eye, Search, Share2 } from "lucide-react";
+import { ViewHeader, EmptyState, ErrorState, Input, Button, IconButton } from "../components/ui";
+import { FileText, Trash2, Eye, Search, Share2, RotateCw } from "lucide-react";
 
 // Heavy (react-markdown + mermaid); load only when a report is opened.
 const ReportPreview = lazy(() =>
@@ -139,15 +139,16 @@ export function ReportsView() {
       )}
 
       {loadError ? (
-        <div className="surface-card flex items-center justify-between gap-3" style={{ padding: "var(--space-md)", borderColor: "var(--error)" }}>
-          <div className="min-w-0">
-            <p className="text-sm font-medium" style={{ color: "var(--error)" }}>Failed to load reports</p>
-            <p className="text-xs text-text-muted mt-1 font-mono truncate">{loadError}</p>
-          </div>
-          <button onClick={() => void load()} className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-md" style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none", cursor: "pointer" }}>
-            Retry
-          </button>
-        </div>
+        <ErrorState
+          title="Failed to load reports"
+          message={loadError}
+          action={
+            <Button variant="outline" size="sm" onClick={() => void load()}>
+              <RotateCw size={13} />
+              Retry
+            </Button>
+          }
+        />
       ) : loading ? (
         <p className="text-sm text-text-muted">Loading reports…</p>
       ) : reports.length === 0 ? (
@@ -172,40 +173,28 @@ export function ReportsView() {
                   {r.target ? ` · ${r.target}` : ""} · {new Date(r.updated_at).toLocaleString()}
                 </span>
               </div>
-              <button
-                onClick={() => setOpen(r)}
-                className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
-                title="Preview and export"
-              >
+              <Button variant="outline" size="sm" onClick={() => setOpen(r)} title="Preview and export">
                 <Eye size={13} />
                 Open
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => void pushReport(r)}
                 disabled={pushingId === r.id}
-                className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary disabled:opacity-60"
                 title="Push this report's crashes to DefectDojo (configure in Settings > Integrations)"
               >
                 <Share2 size={13} />
                 {pushingId === r.id ? "Pushing..." : "DefectDojo"}
-              </button>
-              <button
+              </Button>
+              <IconButton
+                danger
                 onClick={() => void remove(r)}
-                className="inline-flex items-center justify-center rounded-md transition-colors duration-150"
-                style={{ width: "28px", height: "28px", color: "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
                 title="Delete report"
                 aria-label="Delete report"
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--surface-hover)";
-                  e.currentTarget.style.color = "var(--danger, #e5484d)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                }}
               >
                 <Trash2 size={14} />
-              </button>
+              </IconButton>
             </div>
           ))}
         </div>

@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { getTransport, onDataChanged, pickFolder } from "../lib";
 import { useConfirm } from "../providers/ConfirmContext";
 import { useToast } from "../components/ui/Toast";
-import { Button, EmptyState, ViewHeader } from "../components/ui";
+import { Button, IconButton, EmptyState, ViewHeader } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2 } from "lucide-react";
 import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRevertBadge";
 
@@ -113,50 +113,29 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
                   </span>
                 </div>
                 {overrides[path] && <AutoRevertBadge policy={overrides[path]} overridden />}
-                <button
-                  onClick={() => open(path, "discover")}
-                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
-                  title="Discover targets"
-                >
+                <Button variant="outline" size="sm" onClick={() => open(path, "discover")} title="Discover targets">
                   <Crosshair size={13} />
                   Discover
-                </button>
-                <button
-                  onClick={() => open(path, "run")}
-                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-primary text-text-secondary transition-all duration-150 hover:bg-surface-hover hover:text-text-primary"
-                  title="Run a fuzz campaign"
-                >
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => open(path, "run")} title="Run a fuzz campaign">
                   <Play size={13} />
                   Run
-                </button>
-                <button
+                </Button>
+                <IconButton
                   onClick={() => removeRecent(path)}
-                  className="inline-flex items-center justify-center rounded-md transition-colors duration-150"
-                  style={{ width: "28px", height: "28px", color: "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
                   title="Remove from recents (keeps data)"
                   aria-label="Remove from recents"
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                 >
                   <X size={14} />
-                </button>
-                <button
+                </IconButton>
+                <IconButton
+                  danger
                   onClick={() => deleteData(path)}
-                  className="inline-flex items-center justify-center rounded-md transition-colors duration-150"
-                  style={{ width: "28px", height: "28px", color: "var(--text-muted)", border: "none", background: "transparent", cursor: "pointer" }}
                   title="Delete all data for this project"
                   aria-label="Delete all data for this project"
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--surface-hover)";
-                    e.currentTarget.style.color = "var(--danger, #e5484d)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "transparent";
-                    e.currentTarget.style.color = "var(--text-muted)";
-                  }}
                 >
                   <Trash2 size={14} />
-                </button>
+                </IconButton>
               </div>
             );
           })}

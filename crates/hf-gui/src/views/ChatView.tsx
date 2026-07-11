@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2 } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
-import { Button } from "../components/ui";
+import { Button, IconButton } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
 import { useConfirm } from "../providers/ConfirmContext";
 import { useListboxNav } from "../hooks/useListboxNav";
@@ -634,19 +634,12 @@ export function ChatView() {
             <span className="text-text-secondary"> — {permission.reason}</span>
           </div>
           <div className="flex gap-2 shrink-0">
-            <button
-              onClick={() => answerPermission(false)}
-              className="text-xs px-3 py-1.5 rounded-md border border-border text-text-secondary hover:bg-surface-hover"
-            >
+            <Button variant="outline" size="sm" onClick={() => answerPermission(false)}>
               Deny
-            </button>
-            <button
-              onClick={() => answerPermission(true)}
-              className="text-xs px-3 py-1.5 rounded-md"
-              style={{ background: "var(--accent)", color: "var(--accent-contrast)" }}
-            >
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => answerPermission(true)}>
               Approve
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -1009,24 +1002,9 @@ function ToolbarIconButton({
   onClick: () => void;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      className="inline-flex items-center justify-center rounded-md transition-all duration-150"
-      style={{
-        width: "30px",
-        height: "30px",
-        background: "transparent",
-        color: "var(--text-secondary)",
-        border: "none",
-        cursor: "pointer",
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-hover)")}
-      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-    >
+    <IconButton size={30} onClick={onClick} title={title} aria-label={title}>
       {icon}
-    </button>
+    </IconButton>
   );
 }
 
