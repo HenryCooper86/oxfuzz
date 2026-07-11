@@ -5,7 +5,7 @@ import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import type { Crash, CasrReport } from "../types";
 import { Button, ViewHeader } from "../components/ui";
-import { Bug, ChevronRight, FileText } from "lucide-react";
+import { Bug, ChevronRight, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
@@ -48,6 +48,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
   const [reporting, setReporting] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [reportMsg, setReportMsg] = useState<string | null>(null);
   const [reportMd, setReportMd] = useState<string | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
@@ -163,6 +164,26 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     [activeProject, lastTarget, reportMd, browserDownload],
   );
 
+  // Push the triaged crashes to DefectDojo as findings (import/reimport-scan).
+  const pushToDefectDojo = useCallback(async () => {
+    setReportMsg(null);
+    setPushing(true);
+    try {
+      const outcome = await getTransport().invoke<{ findings_pushed: number; reimported: boolean; url: string | null }>(
+        "push_to_defectdojo",
+        { project: activeProject || ".", target: lastTarget || undefined },
+      );
+      const where = outcome.url ? ` (${outcome.url})` : "";
+      setReportMsg(
+        `Pushed ${outcome.findings_pushed} finding(s) to DefectDojo${outcome.reimported ? " (reimport)" : ""}${where}.`,
+      );
+    } catch (e) {
+      setReportMsg(`DefectDojo push failed: ${e}`);
+    } finally {
+      setPushing(false);
+    }
+  }, [activeProject, lastTarget]);
+
   // Auto-triage + auto-report: once a run completes with crashes, ingest + dedup
   // them and (per the workflow) compose an AI report and save it to the
   // dashboard automatically -- once per run. Buttons remain for manual re-runs.
@@ -206,6 +227,19 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             {!reporting && <FileText size={14} />}
             {reporting ? "Composing..." : "Compose Report"}
           </Button>
+          {crashes.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void pushToDefectDojo()}
+              disabled={pushing}
+              loading={pushing}
+              title="Push these triaged crashes to DefectDojo as findings (configure in Settings > Integrations)"
+            >
+              {!pushing && <Share2 size={14} />}
+              {pushing ? "Pushing..." : "Push to DefectDojo"}
+            </Button>
+          )}
           <Button
             variant="primary"
             onClick={triage}

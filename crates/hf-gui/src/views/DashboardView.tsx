@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -214,6 +214,14 @@ export function DashboardView() {
     setLoading(false);
   }, [editor.content, loadDashboard, reloadReports]);
 
+  // Keep the latest `reload` reachable from the mount effect without listing it
+  // as a dependency. `reload` closes over `editor.content`, so a new identity is
+  // produced on every keystroke in the report editor; depending on it here would
+  // re-run this effect (re-fetching the whole dashboard + reports + system, and
+  // re-subscribing onDataChanged) on each character typed.
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
   useEffect(() => {
     let cancelled = false;
     async function loadInitialDashboard() {
@@ -235,12 +243,12 @@ export function DashboardView() {
     void loadInitialDashboard();
     // Re-fetch when another view clears knowledge / workspace or deletes a
     // project, so the Workbench counts never disagree with what was just wiped.
-    const unsubscribe = onDataChanged(() => void reload());
+    const unsubscribe = onDataChanged(() => void reloadRef.current());
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [loadDashboard, reloadReports, reload]);
+  }, [loadDashboard, reloadReports]);
 
   function selectReport(report: ReportDraft) {
     setEditor(editorFromReport(report));
@@ -329,7 +337,7 @@ export function DashboardView() {
     try {
       const draft = await getTransport().invoke<GitLabIssueExport>("gitlab_issue_export", {
         project: activeProject,
-        crash_id: crash.crash_id,
+        crashId: crash.crash_id,
       });
       setIssue(draft);
       setTab("gitlab");
