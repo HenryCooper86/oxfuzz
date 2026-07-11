@@ -40,7 +40,7 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
     if (!hasUrl) return;
     if (isTauriEnvironment()) {
       try {
-        await getTransport().invoke("open_defectdojo", { url, inBrowser });
+        await getTransport().invoke("open_defectdojo", { inBrowser });
       } catch (e) {
         setResult({ ok: false, msg: String(e) });
       }
