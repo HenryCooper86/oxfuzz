@@ -4,7 +4,7 @@ import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory, HarnessReviewItem } from "../types";
-import { Button, Input, Select, ViewHeader } from "../components/ui";
+import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
   CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare,
@@ -80,6 +80,10 @@ export function HarnessView({
   const [smokeStatus, setSmokeStatus] = useState<StepStatus>("idle");
   const [promotionStatus, setPromotionStatus] = useState<StepStatus>("idle");
   const [seedStatus, setSeedStatus] = useState<StepStatus>("idle");
+  // Error text for the two steps that don't carry a result object, so a failure
+  // shows *why* instead of just a red circle.
+  const [harnessError, setHarnessError] = useState<string | null>(null);
+  const [seedError, setSeedError] = useState<string | null>(null);
 
   async function browse() {
     const path = await pickFolder();
@@ -141,6 +145,7 @@ export function HarnessView({
   async function generateHarness(target: string): Promise<HarnessResult | null> {
     const prior = harness?.source ?? null;
     setHarnessStatus("loading");
+    setHarnessError(null);
     setCompileStatus("idle");
     setSmokeStatus("idle");
     setPromotionStatus("idle");
@@ -162,7 +167,8 @@ export function HarnessView({
       setHarnessStatus("done");
       markDone("harness");
       return result;
-    } catch {
+    } catch (e) {
+      setHarnessError(e instanceof Error ? e.message : String(e));
       setHarnessStatus("error");
       return null;
     }
@@ -254,12 +260,14 @@ export function HarnessView({
 
   async function generateSeeds() {
     setSeedStatus("loading");
+    setSeedError(null);
     try {
       const result = await getTransport().invoke<SeedResult>("generate_seeds", { project, target: selectedTarget });
       setSeeds(result.seeds);
       setSeedStatus("done");
       markDone("seeds");
-    } catch {
+    } catch (e) {
+      setSeedError(e instanceof Error ? e.message : String(e));
       setSeedStatus("error");
     }
   }
@@ -407,9 +415,10 @@ export function HarnessView({
             variant="primary"
             onClick={runAll}
             disabled={!selectedTarget || harnessStatus === "loading"}
+            title="Draft, compile, smoke-test, and seed. Review & Approve stays a deliberate final step."
           >
             <Sparkles size={14} />
-            Prepare All
+            Build &amp; Smoke-Test
           </Button>
         </div>
       )}
@@ -422,6 +431,7 @@ export function HarnessView({
             number={1}
             prefix={stepPrefix}
             title="Generate Harness"
+            errorText={harnessError}
             icon={<FileCode size={16} />}
             status={harnessStatus}
             actionLabel="Generate"
@@ -576,6 +586,7 @@ export function HarnessView({
             number={5}
             prefix={stepPrefix}
             title="Generate Seed Corpus"
+            errorText={seedError}
             icon={<Database size={16} />}
             status={seedStatus}
             actionLabel="Generate Seeds"
@@ -620,20 +631,20 @@ export function HarnessView({
 
       {/* Empty state */}
       {!inventory && !project && (
-        <div className="surface-card flex flex-col items-center justify-center" style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}>
-          <Crosshair size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">Select a project folder to discover fuzzing targets.</p>
-        </div>
+        <EmptyState
+          icon={<Crosshair size={20} />}
+          hint="Select a project folder to discover fuzzing targets."
+        />
       )}
     </div>
   );
 }
 
 function Step({
-  number, prefix, title, icon, status, actionLabel, actionClick, disabled, children,
+  number, prefix, title, icon, status, actionLabel, actionClick, disabled, errorText, children,
 }: {
   number: number; prefix?: string; title: string; icon: React.ReactNode; status: StepStatus;
-  actionLabel: string; actionClick: () => void; disabled?: boolean; children?: React.ReactNode;
+  actionLabel: string; actionClick: () => void; disabled?: boolean; errorText?: string | null; children?: React.ReactNode;
 }) {
   const colors: Record<StepStatus, string> = {
     idle: "var(--text-muted)",
@@ -676,6 +687,12 @@ function Step({
           {actionLabel}
         </Button>
       </div>
+      {errorText && (
+        <div className="mt-2 flex items-start gap-2 text-xs">
+          <XCircle size={14} style={{ color: "var(--error)", flexShrink: 0, marginTop: 1 }} />
+          <span className="font-mono" style={{ color: "var(--error)", wordBreak: "break-word" }}>{errorText}</span>
+        </div>
+      )}
       {children}
     </div>
   );
