@@ -3,8 +3,8 @@ import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { useRunOutput } from "../providers/RunOutputContext";
-import type { Crash, CasrReport } from "../types";
-import { Button, ViewHeader } from "../components/ui";
+import type { Crash } from "../types";
+import { Button, ViewHeader, SeverityBadge } from "../components/ui";
 import { Bug, ChevronRight, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 
@@ -13,27 +13,6 @@ import { PathActions } from "../components/PathActions";
 const ReportPreview = lazy(() =>
   import("../components/ReportPreview").then((m) => ({ default: m.ReportPreview })),
 );
-
-// CASR exploitability badge styling, keyed by the serialized CrashSeverity.
-const SEVERITY_STYLE: Record<string, { label: string; bg: string; fg: string }> = {
-  Exploitable: { label: "EXPLOITABLE", bg: "var(--error-subtle)", fg: "var(--error)" },
-  ProbablyExploitable: { label: "PROBABLY EXPL.", bg: "rgba(217,119,6,0.16)", fg: "#d97706" },
-  NotExploitable: { label: "NOT EXPL.", bg: "var(--surface-active)", fg: "var(--text-secondary)" },
-  Undefined: { label: "UNCLASSIFIED", bg: "var(--surface-active)", fg: "var(--text-muted)" },
-};
-
-function SeverityBadge({ casr }: { casr: CasrReport }) {
-  const s = SEVERITY_STYLE[casr.severity] ?? SEVERITY_STYLE.Undefined;
-  return (
-    <span
-      className="text-xs px-1.5 py-0.5 rounded-sm font-semibold shrink-0"
-      style={{ background: s.bg, color: s.fg, letterSpacing: "0.03em" }}
-      title={casr.severity_short || casr.severity}
-    >
-      {s.label}
-    </span>
-  );
-}
 
 export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const { activeProject } = useProject();
@@ -339,7 +318,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
               >
                 <Bug size={14} className="shrink-0" style={{ color: "var(--error)" }} />
                 <span className="text-xs font-mono flex-1 truncate">{c.kind}</span>
-                {c.casr && <SeverityBadge casr={c.casr} />}
+                {c.casr && <SeverityBadge severity={c.casr.severity} title={c.casr.severity_short || c.casr.severity} />}
                 <span className="text-xs text-text-muted">{c.input_path.split("/").pop()}</span>
                 <ChevronRight size={14} className="text-text-muted" />
               </button>
@@ -379,7 +358,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
         >
           {crash.kind}
         </span>
-        {crash.casr && <SeverityBadge casr={crash.casr} />}
+        {crash.casr && <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />}
         <span className="text-xs text-text-muted font-mono truncate min-w-0 flex-1" title={crash.input_path}>{crash.input_path.split("/").pop()}</span>
         <PathActions path={crash.input_path} />
       </div>
@@ -390,7 +369,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
             CASR Analysis
           </div>
           <div className="flex flex-wrap items-center gap-2 mb-2">
-            <SeverityBadge casr={crash.casr} />
+            <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />
             {crash.casr.severity_short && (
               <span className="text-xs text-text-secondary font-mono">{crash.casr.severity_short}</span>
             )}
