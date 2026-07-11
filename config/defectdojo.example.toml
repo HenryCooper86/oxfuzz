@@ -14,10 +14,17 @@
 # Base URL of your DefectDojo instance (no trailing /api/v2 and no trailing /).
 url = "https://defectdojo.example.com"
 
-# Name of the environment variable holding your DefectDojo API v2 token.
-# Create one in DefectDojo under your profile -> "API v2 Key", then e.g.:
-#   export HF_DEFECTDOJO_TOKEN=1a2b3c...
+# API v2 token. Two ways to supply it (a direct `api_token` takes priority):
+#
+#   1. Env var (preferred for CLI/CI -- secret stays out of this file). Set
+#      `api_token_env` to the NAME of the variable and export it:
+#        export HF_DEFECTDOJO_TOKEN=1a2b3c...
+#   2. Direct (for the desktop app, which has no shell environment). Paste the
+#      token into `api_token` -- stored with your settings, like a provider key.
+#
+# Create a token in DefectDojo under your profile -> "API v2 Key".
 api_token_env = "HF_DEFECTDOJO_TOKEN"
+# api_token = "1a2b3c..."
 
 # Verify the server's TLS certificate. Set to false ONLY for a self-signed
 # certificate on a trusted on-prem instance.
@@ -28,6 +35,10 @@ verify_tls = true
 # not have to pre-provision anything. Leave product_name empty to default it to
 # the fuzzed project's name.
 product_name = "hobot_fuzz"
+# Product type the product is filed under. DefectDojo requires this to create a
+# brand-new product under auto_create; it is created on demand if it does not
+# already exist. Defaults to "hobot_fuzz" when blank.
+product_type_name = "hobot_fuzz"
 engagement_name = "Fuzzing"
 auto_create = true
 
