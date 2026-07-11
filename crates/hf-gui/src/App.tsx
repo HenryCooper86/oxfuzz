@@ -144,7 +144,7 @@ function AppInner() {
                 {activeView === "chat" && <ChatView key={chatResetKey} />}
                 {activeView === "dashboard" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
-                    <DashboardView />
+                    <DashboardView onNavigate={navigate} />
                   </div>
                 )}
                 {activeView === "workflow" && (
