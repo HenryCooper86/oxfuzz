@@ -76,11 +76,20 @@ pub fn write_report(
     out_path: &Path,
 ) -> Result<(), ClassifiedError> {
     match format {
+        // Markdown is the canonical source: keep the Mermaid diagrams so a
+        // Mermaid-aware viewer renders them.
         ReportFormat::Md => std::fs::write(out_path, markdown)
             .map_err(|e| ClassifiedError::Internal(format!("write report: {e}"))),
-        ReportFormat::Html => std::fs::write(out_path, markdown_to_html(markdown, title))
-            .map_err(|e| ClassifiedError::Internal(format!("write report: {e}"))),
-        ReportFormat::Docx => pandoc_convert(markdown, out_path, None),
+        // Every exported format below is rendered by a tool that has no Mermaid
+        // renderer, so the raw ```mermaid source would show as an ugly code
+        // block. Strip it; the same data is already in the ASCII bar charts and
+        // tables. The GUI preview keeps the original markdown and renders Mermaid.
+        ReportFormat::Html => std::fs::write(
+            out_path,
+            markdown_to_html(&strip_mermaid_blocks(markdown), title),
+        )
+        .map_err(|e| ClassifiedError::Internal(format!("write report: {e}"))),
+        ReportFormat::Docx => pandoc_convert(&strip_mermaid_blocks(markdown), out_path, None),
         ReportFormat::Pdf => {
             let engine = pdf_engine().ok_or_else(|| {
                 ClassifiedError::Validation(
@@ -92,10 +101,71 @@ pub fn write_report(
             // LaTeX-based PDF engines (xelatex/pdflatex) use fonts that lack the
             // box-drawing / block / arrow glyphs a report can contain (sparklines,
             // mermaid arrows), which get silently dropped. Substitute ASCII so the
-            // PDF renders cleanly. MD/HTML/DOCX keep the original glyphs.
-            pandoc_convert(&sanitize_for_latex(markdown), out_path, Some(engine))
+            // PDF renders cleanly. Then insert zero-width break hints so long
+            // paths wrap. MD/HTML/DOCX keep the original text.
+            let prepared = sanitize_for_latex(&insert_break_hints(&strip_mermaid_blocks(markdown)));
+            pandoc_convert(&prepared, out_path, Some(engine))
         }
     }
+}
+
+/// Insert a zero-width space (U+200B) after each path separator `/` that is not
+/// inside a fenced code block, so LaTeX can wrap long inline paths (in prose and
+/// table cells) at segment boundaries instead of running off the page. The
+/// character is invisible and pdfstring-safe (unlike a `\texttt` redefinition,
+/// which breaks hyperref bookmarks when inline code appears in a heading).
+/// Fenced code blocks are skipped -- fvextra already wraps those, and a ZWSP
+/// could show as a missing glyph in a monospace verbatim block.
+fn insert_break_hints(md: &str) -> String {
+    const ZWSP: char = '\u{200B}';
+    let mut out = String::with_capacity(md.len() + md.len() / 16);
+    let mut in_fence = false;
+    for line in md.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+        } else {
+            for c in line.chars() {
+                out.push(c);
+                if c == '/' {
+                    out.push(ZWSP);
+                }
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Remove Mermaid fenced code blocks (info string `mermaid`). Exported formats
+/// (HTML/PDF/DOCX) have no Mermaid renderer, so those blocks would otherwise
+/// dump raw diagram source (`xychart-beta ...`, `pie ...`); the report already
+/// carries the same numbers as ASCII bar charts and tables.
+fn strip_mermaid_blocks(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut in_mermaid = false;
+    for line in md.lines() {
+        let fence = line.trim_start();
+        if in_mermaid {
+            // The closing ``` ends the block (and is itself dropped).
+            if fence.starts_with("```") {
+                in_mermaid = false;
+            }
+            continue;
+        }
+        if fence.starts_with("```mermaid") {
+            in_mermaid = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Convert Markdown to a standalone, styled HTML document (pure Rust, GFM).
@@ -126,11 +196,11 @@ h1,h2,h3,h4{line-height:1.25;margin:1.6em 0 .6em;font-weight:600}\
 h1{font-size:1.9em;border-bottom:1px solid #e5e5e5;padding-bottom:.3em}\
 h2{font-size:1.45em;border-bottom:1px solid #eee;padding-bottom:.25em}\
 h3{font-size:1.2em}\
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;background:#f4f4f5;padding:.15em .35em;border-radius:4px}\
-pre{background:#f6f8fa;border:1px solid #e5e5e5;border-radius:8px;padding:14px;overflow:auto}\
-pre code{background:none;padding:0}\
-table{border-collapse:collapse;width:100%;margin:1em 0}\
-th,td{border:1px solid #e0e0e0;padding:8px 12px;text-align:left}\
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;background:#f4f4f5;padding:.15em .35em;border-radius:4px;overflow-wrap:anywhere;word-break:break-word}\
+pre{background:#f6f8fa;border:1px solid #e5e5e5;border-radius:8px;padding:14px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}\
+pre code{background:none;padding:0;overflow-wrap:anywhere}\
+table{border-collapse:collapse;width:100%;margin:1em 0;table-layout:fixed}\
+th,td{border:1px solid #e0e0e0;padding:8px 12px;text-align:left;overflow-wrap:anywhere;word-break:break-word;vertical-align:top}\
 th{background:#f7f7f8}\
 blockquote{margin:1em 0;padding:.2em 1em;border-left:3px solid #d0d0d0;color:#555}\
 a{color:#0b6bcb}\
@@ -190,6 +260,12 @@ fn pdf_engine() -> Option<&'static str> {
     .find(|e| tool_on_path(e))
 }
 
+/// Whether the PDF engine is a LaTeX toolchain (as opposed to an HTML-based one
+/// like wkhtmltopdf/weasyprint), so we only inject LaTeX preamble for those.
+fn is_latex_engine(engine: &str) -> bool {
+    matches!(engine, "xelatex" | "pdflatex" | "lualatex" | "tectonic")
+}
+
 fn tool_on_path(tool: &str) -> bool {
     Command::new(tool)
         .arg("--version")
@@ -218,6 +294,25 @@ fn pandoc_convert(
         .arg(out_path);
     if let Some(engine) = pdf_engine {
         cmd.arg(format!("--pdf-engine={engine}"));
+        if is_latex_engine(engine) {
+            // LaTeX doesn't wrap long lines in code blocks or long unbroken
+            // tokens (file paths, stack-trace frames) by default, so they run
+            // off the right margin. `--no-highlight` makes fenced code plain
+            // `verbatim` (pandoc's syntax highlighting wraps each line in a
+            // \NormalTok{} group that fvextra will not break inside); fvextra
+            // then wraps those verbatim lines. Inline paths carry zero-width
+            // break hints (insert_break_hints); tighter margins + \sloppy let
+            // prose reflow.
+            cmd.arg("--no-highlight");
+            cmd.args([
+                "--variable=geometry:margin=0.85in",
+                r"--variable=header-includes:\usepackage{fvextra}",
+                r"--variable=header-includes:\DefineVerbatimEnvironment{verbatim}{Verbatim}{breaklines,breakanywhere}",
+                r"--variable=header-includes:\fvset{breaklines=true,breakanywhere=true}",
+                r"--variable=header-includes:\sloppy",
+                r"--variable=header-includes:\emergencystretch=3em",
+            ]);
+        }
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -289,6 +384,47 @@ mod tests {
         assert!(s.contains("=>"));
         // Plain ASCII and normal text are untouched.
         assert!(s.contains("bar ") && s.contains("box ") && s.contains(" C"));
+    }
+
+    #[test]
+    fn strip_mermaid_removes_blocks_but_keeps_surrounding_content() {
+        let md = "Intro.\n\n```mermaid\nxychart-beta\n    bar [1, 2]\n```\n\nMiddle.\n\n\
+                  ```mermaid\npie showData\n    \"A\" : 1\n```\n\nOutro.\n";
+        let out = strip_mermaid_blocks(md);
+        assert!(!out.contains("xychart-beta"), "mermaid source must be gone");
+        assert!(!out.contains("pie showData"));
+        assert!(!out.contains("```mermaid"));
+        // Prose around the blocks is preserved.
+        assert!(out.contains("Intro."));
+        assert!(out.contains("Middle."));
+        assert!(out.contains("Outro."));
+    }
+
+    #[test]
+    fn strip_mermaid_leaves_non_mermaid_code_fences() {
+        let md = "```text\nstack frame\n```\n\n```mermaid\npie\n```\n";
+        let out = strip_mermaid_blocks(md);
+        assert!(out.contains("```text"), "other code fences are kept");
+        assert!(out.contains("stack frame"));
+        assert!(!out.contains("```mermaid") && !out.contains("\npie\n"));
+    }
+
+    #[test]
+    fn insert_break_hints_adds_zwsp_after_slashes_outside_fences() {
+        let out = insert_break_hints("path `/a/b/c` here\n```text\n/no/hint/in/code\n```\n");
+        // Prose/inline slashes get a zero-width space after them.
+        assert!(out.contains("/\u{200B}a/\u{200B}b/\u{200B}c"));
+        // Inside a fenced block, slashes are untouched (fvextra wraps those).
+        assert!(out.contains("/no/hint/in/code"));
+        assert!(!out.contains("/\u{200B}no"));
+    }
+
+    #[test]
+    fn is_latex_engine_classifies_engines() {
+        assert!(is_latex_engine("xelatex"));
+        assert!(is_latex_engine("pdflatex"));
+        assert!(!is_latex_engine("wkhtmltopdf"));
+        assert!(!is_latex_engine("weasyprint"));
     }
 
     #[test]
