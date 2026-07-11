@@ -53,7 +53,7 @@ export function RunsView() {
     if (series[id] !== undefined) return;
     setSeries((s) => ({ ...s, [id]: "loading" }));
     try {
-      const samples = await getTransport().invoke<CoverageSample[]>("run_coverage_series", { run_id: id });
+      const samples = await getTransport().invoke<CoverageSample[]>("run_coverage_series", { runId: id });
       setSeries((s) => ({ ...s, [id]: samples }));
     } catch {
       setSeries((s) => ({ ...s, [id]: [] }));
@@ -123,8 +123,8 @@ export function RunsView() {
     setDiff("loading");
     try {
       const [oldText, newText] = await Promise.all([
-        getTransport().invoke<string>("run_harness_source", { run_id: prev.id }),
-        getTransport().invoke<string>("run_harness_source", { run_id: cur.id }),
+        getTransport().invoke<string>("run_harness_source", { runId: prev.id }),
+        getTransport().invoke<string>("run_harness_source", { runId: cur.id }),
       ]);
       setDiff({
         from: revLabel(prev.harness_rev) ?? "previous",
@@ -152,7 +152,7 @@ export function RunsView() {
     }
     setReverting(true);
     try {
-      const res = await getTransport().invoke<{ status: string; message: string }>("revert_harness_from_run", { run_id: runId });
+      const res = await getTransport().invoke<{ status: string; message: string }>("revert_harness_from_run", { runId });
       const ok = res?.status === "Compiled";
       toast({
         title: ok ? `Reverted to ${label}` : "Revert finished with a compile issue",
@@ -498,8 +498,8 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
           await getTransport().invoke("set_project_auto_revert_override", {
             project,
             enabled: next.enabled,
-            threshold_pct: next.threshold,
-            notify_only: next.notifyOnly,
+            thresholdPct: next.threshold,
+            notifyOnly: next.notifyOnly,
           });
         } else {
           const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });

@@ -95,6 +95,15 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [ ] Remaining scaffold crates: hf-bot, hf-mcp, hf-scheduler, hf-knowledge,
   hf-skills (thin), hf-hooks, hf-journal, hf-tools (skeleton), hf-test-utils.
 
+## Integrations
+
+- [x] DefectDojo: push triaged crashes as findings via the REST API
+  (`hf-service/src/defectdojo.rs`). Generic-findings mapper reusing the SARIF
+  CWE/severity logic; reimport-scan dedup by stack signature; secret-env token;
+  config section + GUI Settings > Integrations panel with Test connection;
+  "Push to DefectDojo" in Triage and Reports; CLI `defectdojo`; web
+  `/defectdojo/{push,test,configured}`. See `docs/design/defectdojo-integration.md`.
+
 ## Cross-cutting
 
 - [~] CI: cargo fmt/clippy gates pass workspace-wide; add cargo-deny + test job.

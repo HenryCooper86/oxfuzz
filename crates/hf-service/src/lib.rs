@@ -12,6 +12,7 @@ pub mod agent;
 pub mod checkpoints;
 pub mod config;
 pub mod container;
+pub mod defectdojo;
 pub mod diagnostics;
 pub mod init;
 pub mod knowledge;
@@ -46,6 +47,7 @@ pub use container::{
     RegressionResult, RunHistoryItem, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot,
     SyzkallerRunOpts, SyzkallerSummary,
 };
+pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use hf_storage::{AutoRevertEvent, ProjectAutoRevert};
 pub use init::{init_at, init_workspace, InitReport};
 pub use report_store::ReportDraft;

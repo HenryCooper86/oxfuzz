@@ -142,7 +142,14 @@ export function ChatView() {
     const req = permission;
     if (!req) return;
     setPermission(null);
-    await getTransport().invoke("chat_answer_permission", { id: req.id, approved });
+    try {
+      await getTransport().invoke("chat_answer_permission", { id: req.id, approved });
+    } catch (e) {
+      // Web mode has no chat_answer_permission endpoint; every other chat call
+      // is guarded the same way. Surface it rather than throwing an unhandled
+      // rejection.
+      toast({ title: "Could not send permission decision", description: String(e), variant: "error" });
+    }
   }
 
   // Resolve the per-project chat session and load its history. Keyed on the

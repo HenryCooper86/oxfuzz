@@ -1,0 +1,38 @@
+# DefectDojo integration
+#
+# Push triaged crashes to a DefectDojo instance (https://www.defectdojo.org) as
+# findings via its REST API. hobot_fuzz maps each triaged crash -- its CWE, CASR
+# exploitability, stack signature, and suggested fix -- to a DefectDojo "Generic
+# Findings Import" finding and POSTs it to /api/v2/import-scan/ (or
+# /reimport-scan/ on repeat pushes, so re-found crashes update in place instead
+# of piling up as duplicates).
+#
+# The API token is NEVER stored in this file. Set `api_token_env` to the NAME of
+# an environment variable that holds the token, and export that variable in your
+# shell / .env. This mirrors how provider API keys are handled (api_key_env).
+
+# Base URL of your DefectDojo instance (no trailing /api/v2 and no trailing /).
+url = "https://defectdojo.example.com"
+
+# Name of the environment variable holding your DefectDojo API v2 token.
+# Create one in DefectDojo under your profile -> "API v2 Key", then e.g.:
+#   export HF_DEFECTDOJO_TOKEN=1a2b3c...
+api_token_env = "HF_DEFECTDOJO_TOKEN"
+
+# Verify the server's TLS certificate. Set to false ONLY for a self-signed
+# certificate on a trusted on-prem instance.
+verify_tls = true
+
+# Product / engagement the findings are filed under. When auto_create = true,
+# DefectDojo creates them on first push if they do not already exist, so you do
+# not have to pre-provision anything. Leave product_name empty to default it to
+# the fuzzed project's name.
+product_name = "hobot_fuzz"
+engagement_name = "Fuzzing"
+auto_create = true
+
+# Reimport (recommended). On repeat pushes to the same product/engagement/test,
+# DefectDojo dedups re-found crashes by their stack signature
+# (unique_id_from_tool) and closes crashes that no longer reproduce, instead of
+# accumulating duplicates. Set false to always create a fresh import.
+reimport = true

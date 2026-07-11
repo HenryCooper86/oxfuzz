@@ -162,6 +162,17 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Push the latest run's triaged crashes to `DefectDojo` as findings.
+    Defectdojo {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol (used as the `DefectDojo` test title). Optional.
+        #[arg(long)]
+        target: Option<String>,
+        /// Only verify the configured URL + token; do not push.
+        #[arg(long)]
+        test: bool,
+    },
     /// Export a reproducibility/evidence bundle for hand-off and CI artifacts.
     Export {
         /// Optional project root; omit to export all persisted projects.
@@ -886,6 +897,35 @@ async fn cmd_sarif(
     Ok(())
 }
 
+async fn cmd_defectdojo(
+    project: PathBuf,
+    target: Option<&str>,
+    test_only: bool,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    if test_only {
+        container.defectdojo_test_connection().await?;
+        println!("DefectDojo connection OK.");
+        return Ok(());
+    }
+    let outcome = container.push_to_defectdojo(&project, target).await?;
+    println!(
+        "Pushed {} finding(s) to DefectDojo{}{}.",
+        outcome.findings_pushed,
+        if outcome.reimported {
+            " (reimport)"
+        } else {
+            ""
+        },
+        outcome
+            .url
+            .as_ref()
+            .map(|u| format!(" -- {u}"))
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
 async fn cmd_ingest(project: PathBuf, file: &std::path::Path) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     let stats = container.ingest_document(&project, file).await?;
@@ -1058,6 +1098,11 @@ async fn main() -> anyhow::Result<()> {
             target,
             out,
         } => cmd_sarif(project, &target, out.as_deref()).await?,
+        Commands::Defectdojo {
+            project,
+            target,
+            test,
+        } => cmd_defectdojo(project, target.as_deref(), test).await?,
         Commands::Export { project, output } => cmd_export(project, output).await?,
         Commands::Report {
             project,

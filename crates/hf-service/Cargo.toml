@@ -31,6 +31,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 comrak = { workspace = true }
+# DefectDojo REST client (findings push). `multipart` is additive to the
+# workspace reqwest features so the file upload to /api/v2/import-scan works.
+reqwest = { workspace = true, features = ["multipart"] }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
