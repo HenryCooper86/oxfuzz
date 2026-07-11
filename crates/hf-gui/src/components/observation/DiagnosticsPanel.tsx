@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Activity, Loader2, RotateCw } from "lucide-react";
 import { getTransport } from "../../lib";
 import { Badge } from "../ui/Badge";
+import { IconButton } from "../ui/IconButton";
 
 interface ModelCost {
   model: string;
@@ -78,9 +79,9 @@ export function DiagnosticsPanel() {
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="default">{data?.calls ?? 0}</Badge>
-          <button onClick={load} className="text-text-muted hover:text-text-primary" title="Refresh" aria-label="Refresh">
+          <IconButton size={22} onClick={load} title="Refresh" aria-label="Refresh">
             {loading ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
-          </button>
+          </IconButton>
         </div>
       </div>
 

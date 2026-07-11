@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
 import { X } from "lucide-react";
+import { IconButton } from "./IconButton";
 
 interface Toast {
   id: number;
@@ -63,14 +64,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 </span>
               )}
             </div>
-            <button
+            <IconButton
+              size={22}
+              className="shrink-0"
               onClick={() => dismiss(t.id)}
-              className="shrink-0 rounded p-0.5 text-text-muted transition-colors hover:text-text-primary hover:bg-surface-hover"
               aria-label="Dismiss notification"
               title="Dismiss"
             >
               <X size={13} />
-            </button>
+            </IconButton>
           </div>
         ))}
       </div>
