@@ -274,6 +274,12 @@ export function HarnessView({
     await generateSeeds();
   }
 
+  // Approval gating: a clean smoke run (or an existing smoke-passed harness) can
+  // be approved for campaigns directly; a smoke run that surfaced crashes can
+  // only be approved WITH known findings.
+  const smokeCrashed = !!smokeResult && smokeResult.crashes > 0;
+  const cleanApprovable = Boolean(smokeResult?.passed || (!harness && existing?.smoke_passed));
+
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
@@ -523,24 +529,32 @@ export function HarnessView({
             )}
           </Step>
 
-          {/* Step 4: Human approval */}
+          {/* Step 4: Human approval. When smoke surfaced a crash the clean
+              "Approve for Campaigns" path is gated -- but the actionable path is
+              to approve WITH the known finding. Make that the primary (enabled)
+              button so the step doesn't read as "stuck" behind a disabled one. */}
           <Step
             number={4}
             prefix={stepPrefix}
             title="Review and Approve"
             icon={<CheckCircle2 size={16} />}
             status={promotionStatus}
-            actionLabel="Approve for Campaigns"
-            actionClick={promoteHarness}
-            disabled={!(smokeResult?.passed || (!harness && existing?.smoke_passed)) || promotionStatus === "done"}
+            actionLabel={smokeCrashed ? "Approve with Known Findings" : "Approve for Campaigns"}
+            actionClick={smokeCrashed ? promoteWithFindings : promoteHarness}
+            disabled={
+              promotionStatus === "done" ||
+              (smokeCrashed ? false : !cleanApprovable)
+            }
           >
             <p className="mt-2 text-xs text-text-secondary">
               Approval binds this exact source, engine, target, and smoke evidence. Regenerating or recompiling creates a new revision that must be approved again.
             </p>
-            {smokeResult && smokeResult.crashes > 0 && promotionStatus !== "done" && (
-              <Button variant="outline" size="sm" onClick={() => void promoteWithFindings()} disabled={promotionStatus === "loading"}>
-                Approve with Known Findings
-              </Button>
+            {smokeCrashed && promotionStatus !== "done" && (
+              <p className="mt-1 text-xs" style={{ color: "var(--warning)" }}>
+                Smoke surfaced {smokeResult?.crashes} crash(es). Approving here records{" "}
+                {smokeResult?.crashes === 1 ? "it" : "them"} as a known finding and promotes the
+                harness; triage the crash from the Run / Triage step afterward.
+              </p>
             )}
             {promotionResult && (
               <div className="mt-2 flex items-center gap-2 text-xs">
