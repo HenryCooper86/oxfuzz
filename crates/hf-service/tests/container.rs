@@ -33,7 +33,7 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
     ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
         Ok(hf_core::runtime::CommandResult {
             exit_code: 0,
-            stdout: String::new(),
+            stdout: "DONE exec/s: 64".to_owned(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
         })
@@ -82,6 +82,11 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
     let project = dir.path().join("cancel_proj");
     fs::create_dir_all(&project).unwrap();
     let target = "parse_entry";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
 
     // run_fuzzer requires a compiled harness binary and a corpus dir.
     let workspace = hf_service::workspace_dir(&project, target);
@@ -97,6 +102,29 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
     let container = Arc::new(
         ServiceContainer::new(Arc::new(BlockingRuntime), None).with_store(Arc::clone(&store)),
     );
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("compile harness");
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("smoke harness");
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .expect("promote harness");
 
     // Start the run; it will block in the runtime until cancelled.
     let runner = {
@@ -160,6 +188,33 @@ async fn store_wiring_is_optional() {
     );
     let with_store = ServiceContainer::new(rt, None).with_store(store);
     assert!(with_store.store().is_some());
+}
+
+#[tokio::test]
+async fn project_auto_revert_override_rejects_invalid_percentages() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("policy.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store.clone());
+    let project = dir.path().join("project");
+
+    for invalid in [0.0, 100.1, f64::INFINITY, f64::NAN] {
+        let result = container
+            .set_project_auto_revert_override(&project, true, invalid, false)
+            .await;
+        assert!(result.is_err(), "invalid threshold {invalid} was accepted");
+    }
+    assert_eq!(
+        store
+            .project_auto_revert(&project.to_string_lossy())
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 /// A no-op provider pool, just enough to occupy the container's pool cell.

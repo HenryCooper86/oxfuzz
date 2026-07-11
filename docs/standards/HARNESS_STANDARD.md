@@ -37,5 +37,12 @@ Templates live in `config/prompts/harness_<lang>_<engine>.md`. They contain:
 
 ## 5. Promotion Gate
 
-A harness moves to `Promoted` only after smoke pass. A human must approve
-before a full `FuzzRun` starts.
+A harness moves to `SmokePassed` only after its smoke evidence is persisted on
+the exact active revision. A crash during smoke is useful evidence but is not a
+clean pass and cannot be promoted. Only an explicit human action moves a clean
+`SmokePassed` revision to `Promoted`.
+
+Every full, scheduled, CI, or agent-started `FuzzRun` must resolve the active
+binary/source record and reject it unless its status is `Promoted`. Recompiling
+or regenerating creates a new active revision and requires smoke qualification
+and approval again. Agents and schedulers never promote revisions implicitly.

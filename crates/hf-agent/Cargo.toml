@@ -7,7 +7,6 @@ description = "Agent loop, delegation, sub-agent pools"
 
 [dependencies]
 hf-core = { workspace = true }
-hf-service = { workspace = true }
 hf-context = { workspace = true }
 hf-tools = { workspace = true }
 hf-guardrails = { workspace = true }
@@ -24,8 +23,6 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-hf-runtime = { workspace = true }
-async-trait = { workspace = true }
 
 [lints]
 workspace = true

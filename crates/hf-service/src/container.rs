@@ -261,6 +261,11 @@ fn gather_source_context(workspace: &Path) -> Option<String> {
 /// Read the current harness source from a target workspace, trying the known
 /// per-language harness filenames. Returns `None` when none exists yet.
 fn read_current_harness_source(workspace: &Path) -> Option<String> {
+    if let Ok(src) = std::fs::read_to_string(workspace.join("harness.source")) {
+        if !src.trim().is_empty() {
+            return Some(src);
+        }
+    }
     for name in [
         "harness.c",
         "harness.cc",
@@ -276,6 +281,58 @@ fn read_current_harness_source(workspace: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Read the persisted id of the harness revision that produced the active
+/// binary. Older workspaces predate this marker and are resolved by source.
+fn read_current_harness_id(workspace: &Path) -> Option<Uuid> {
+    std::fs::read_to_string(workspace.join("harness.active"))
+        .ok()
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
+}
+
+/// Commit the source corresponding to the active harness binary.
+///
+/// Compiler input files are attempt-local: a failed compile may overwrite one,
+/// while the previously built binary remains active. Keeping a separate
+/// canonical source and replacing it only after a successful sandbox build
+/// prevents run revision hashes and rollback decisions from describing source
+/// that the active binary does not contain.
+fn write_current_harness_source(workspace: &Path, source: &str) -> Result<(), ClassifiedError> {
+    std::fs::create_dir_all(workspace)
+        .map_err(|e| ClassifiedError::Internal(format!("mkdir harness workspace: {e}")))?;
+    let destination = workspace.join("harness.source");
+    let temporary = workspace.join(format!("harness.source.{}.tmp", Uuid::new_v4()));
+    std::fs::write(&temporary, source)
+        .map_err(|e| ClassifiedError::Internal(format!("stage harness source: {e}")))?;
+    if let Err(first) = std::fs::rename(&temporary, &destination) {
+        // Windows does not replace an existing destination with `rename`; the
+        // retry keeps the same behavior there. POSIX takes the atomic path above.
+        if destination.exists() {
+            std::fs::remove_file(&destination).map_err(|e| {
+                let _ = std::fs::remove_file(&temporary);
+                ClassifiedError::Internal(format!(
+                    "replace harness source after rename failed ({first}): {e}"
+                ))
+            })?;
+            std::fs::rename(&temporary, &destination).map_err(|e| {
+                let _ = std::fs::remove_file(&temporary);
+                ClassifiedError::Internal(format!("commit harness source: {e}"))
+            })?;
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(ClassifiedError::Internal(format!(
+                "commit harness source: {first}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Link the active binary/source pair to its persisted qualification record.
+fn write_current_harness_id(workspace: &Path, id: Uuid) -> Result<(), ClassifiedError> {
+    std::fs::write(workspace.join("harness.active"), id.to_string())
+        .map_err(|e| ClassifiedError::Internal(format!("write active harness id: {e}")))
 }
 
 /// Map a host path inside the workspace to its container path under `/work`
@@ -392,37 +449,33 @@ fn summary_cache() -> &'static SummaryCache {
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// A cheap fingerprint of the inputs that affect coverage: the corpus file count
-/// and the latest mtime across the corpus and `harness.c`. Changes when a run
-/// grows the corpus or the harness is rebuilt, invalidating the cache.
+/// A cheap fingerprint of the inputs that affect coverage: stable corpus file
+/// metadata plus the canonical active harness source. Changes when a run grows
+/// the corpus or a successful build commits a new harness, invalidating caches.
 fn coverage_signature(workspace: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
     use std::time::UNIX_EPOCH;
 
-    let mtime_secs = |meta: &std::fs::Metadata| -> u64 {
+    let modified_nanos = |meta: &std::fs::Metadata| -> u128 {
         meta.modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
+            .map_or(0, |d| d.as_nanos())
     };
 
-    let mut count = 0u64;
-    let mut max_mtime = 0u64;
+    let mut corpus_metadata = Vec::new();
     if let Ok(entries) = std::fs::read_dir(workspace.join("corpus")) {
         for entry in entries.flatten() {
             if let Ok(meta) = entry.metadata() {
-                count += 1;
-                max_mtime = max_mtime.max(mtime_secs(&meta));
+                corpus_metadata.push((entry.file_name(), meta.len(), modified_nanos(&meta)));
             }
         }
     }
-    if let Ok(meta) = std::fs::metadata(workspace.join("harness.c")) {
-        max_mtime = max_mtime.max(mtime_secs(&meta));
-    }
+    corpus_metadata.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    count.hash(&mut hasher);
-    max_mtime.hash(&mut hasher);
+    corpus_metadata.hash(&mut hasher);
+    read_current_harness_source(workspace).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1203,6 +1256,20 @@ impl ServiceContainer {
         let key = project.map(|p| p.to_string_lossy().to_string());
         let runs = store.list_runs(key.as_deref()).await.unwrap_or_default();
         let crashes = store.list_all_crashes().await.unwrap_or_default();
+        let harnesses: std::collections::HashMap<Uuid, Harness> = store
+            .list_all_harnesses()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| (h.id, h))
+            .collect();
+        let targets: std::collections::HashMap<Uuid, String> = store
+            .list_all_targets()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.id, t.symbol))
+            .collect();
         let mut crashes_by_run: std::collections::HashMap<Uuid, usize> =
             std::collections::HashMap::new();
         for c in &crashes {
@@ -1211,12 +1278,29 @@ impl ServiceContainer {
         let mut items: Vec<RunHistoryItem> = runs
             .into_iter()
             .map(|r| {
+                let target_id = r
+                    .config
+                    .as_ref()
+                    .and_then(|cfg| harnesses.get(&cfg.harness_id))
+                    .map(|h| h.target_id);
+                let target = target_id.and_then(|id| targets.get(&id).cloned());
+                // Presentation layers use this opaque key to compare a run only
+                // with an experiment that has the same target, engine, budget,
+                // sanitizer, corpus, environment, and engine arguments.
+                let comparison_key = match (r.status, target_id, r.config.as_ref()) {
+                    (RunStatus::Done, Some(id), Some(cfg)) => {
+                        Some(auto_revert_comparison_key(id, cfg))
+                    }
+                    _ => None,
+                };
                 let duration_secs = r
                     .ended_at
                     .map(|end| (end - r.started_at).num_seconds().max(0));
                 RunHistoryItem {
                     id: r.id.to_string(),
                     project_root: r.project_root,
+                    target,
+                    comparison_key,
                     engine: format!("{:?}", r.engine),
                     status: format!("{:?}", r.status),
                     started_at: r.started_at.to_rfc3339(),
@@ -1318,8 +1402,22 @@ impl ServiceContainer {
                 ClassifiedError::Validation("the target for this run no longer exists".to_owned())
             })?;
         let project = std::path::PathBuf::from(&run.project_root);
-        self.harness_compile(source, &project, harness.engine, &symbol, harness.language)
-            .await
+        let outcome = self
+            .harness_compile(source, &project, harness.engine, &symbol, harness.language)
+            .await?;
+        // A historical run can only reference a revision that passed the run
+        // gate. Reverting that exact recorded source is itself an explicit
+        // operator/configured-policy action, so preserve its qualification
+        // evidence on the newly compiled active record.
+        if harness.status == HarnessStatus::Promoted {
+            let mut restored = self
+                .active_harness(&project, &symbol, harness.engine)
+                .await?;
+            restored.status = HarnessStatus::Promoted;
+            restored.smoke_run = harness.smoke_run;
+            store.upsert_harness(&restored).await?;
+        }
+        Ok(outcome)
     }
 
     /// The target a persisted run exercised, resolved through its harness
@@ -1404,12 +1502,11 @@ impl ServiceContainer {
             .as_ref()
             .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
         let key = project.to_string_lossy().to_string();
-        // Guard the threshold like the global resolver does (must be positive).
-        let threshold_pct = if threshold_pct > 0.0 {
-            threshold_pct
-        } else {
-            crate::config::DEFAULT_AUTO_REVERT_THRESHOLD_PCT
-        };
+        if !crate::config::valid_auto_revert_threshold(threshold_pct) {
+            return Err(ClassifiedError::Validation(format!(
+                "auto-revert threshold must be a finite percentage in (0, 100], got {threshold_pct}"
+            )));
+        }
         store
             .set_project_auto_revert(
                 &key,
@@ -1441,15 +1538,16 @@ impl ServiceContainer {
     }
 
     /// Evaluate the auto-revert policy for a just-finished run and, if it
-    /// triggered, restore the previous (last-good) harness revision.
+    /// triggered, restore the most recent comparable (last-good) harness revision.
     ///
     /// The policy fires only when it is enabled and this run's harness revision
-    /// differs from the previous finished run for the same target *and* this
+    /// differs from a comparable finished run for the same target *and* this
     /// run's peak edge coverage dropped by at least the configured percentage
-    /// versus that previous run. The restore reuses
-    /// [`Self::revert_harness_from_run`], so the recompile is HITL-gated exactly
-    /// like a manual revert -- a denied approval simply leaves the harness
-    /// unchanged. Returns the outcome only when the revert actually applied.
+    /// versus a prior run with the same target, engine, budget, resources,
+    /// sanitizer, corpus location, environment, and engine arguments. The
+    /// restore reuses [`Self::revert_harness_from_run`], so the recompile is
+    /// HITL-gated exactly like a manual revert -- a denied approval simply leaves
+    /// the harness unchanged. Returns the outcome only when the revert applied.
     async fn maybe_auto_revert(
         &self,
         project: &Path,
@@ -1465,19 +1563,20 @@ impl ServiceContainer {
         let store = self.store.as_ref()?;
         // Without a recorded revision we cannot attribute a change to a harness.
         let this_rev = this_rev.filter(|r| !r.is_empty())?;
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
-
-        // The most recent finished run for this same target, before this one,
-        // that recorded edge coverage and a harness revision -- the baseline.
+        // The most recent comparable finished run for this same target, before
+        // this one, that recorded edge coverage and a harness revision.
         let key = project.to_string_lossy().to_string();
         let mut runs = store.list_runs(Some(&key)).await.unwrap_or_default();
         runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
-        let this_started = runs
-            .iter()
-            .find(|r| r.id == this_run_id)
-            .map(|r| r.started_at);
+        let this_run = runs.iter().find(|r| r.id == this_run_id).cloned()?;
+        let this_config = this_run.config.as_ref()?;
+        if this_run.status != RunStatus::Done {
+            return None;
+        }
+        // Resolve the target through the run's persisted harness rather than
+        // re-discovering it as C. This keeps C++, Rust, and future language runs
+        // eligible for the same rollback policy.
+        let target_id = self.run_target_id(store, &this_run).await?;
         let mut prev = None;
         for r in runs {
             if r.id == this_run_id
@@ -1487,10 +1586,14 @@ impl ServiceContainer {
             {
                 continue;
             }
-            if let Some(t) = this_started {
-                if r.started_at >= t {
-                    continue;
-                }
+            if r.started_at >= this_run.started_at {
+                continue;
+            }
+            let Some(previous_config) = r.config.as_ref() else {
+                continue;
+            };
+            if !auto_revert_baseline_compatible(previous_config, this_config) {
+                continue;
             }
             if self.run_target_id(store, &r).await == Some(target_id) {
                 prev = Some(r);
@@ -1524,7 +1627,7 @@ impl ServiceContainer {
         // campaigns, which run permissively and would otherwise mutate unattended.
         if policy.notify_only {
             let detail = format!(
-                "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev}; last-good {prev_rev} is run {prev_id} (notify-only, not restored)"
+                "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev}; comparable last-good {prev_rev} is run {prev_id} (notify-only, not restored)"
             );
             tracing::warn!("auto-revert (notify-only): {detail}");
             self.run_journal
@@ -1535,13 +1638,13 @@ impl ServiceContainer {
             return Some(out);
         }
 
-        // Regression confirmed: restore the previous run's harness. The recompile
-        // is HITL-gated inside `harness_compile`; if approval is denied the
-        // revert errors and we leave everything as-is.
+        // Regression confirmed: restore the comparable baseline's harness. The
+        // recompile is HITL-gated inside `harness_compile`; if approval is denied
+        // the active canonical revision and binary remain unchanged.
         match self.revert_harness_from_run(&prev_id).await {
             Ok(_) => {
                 let detail = format!(
-                    "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev} -> restored {prev_rev} from run {prev_id}"
+                    "coverage dropped {drop_pct:.1}% ({this_edges} < {prev_edges} edges) after harness {this_rev} -> restored comparable baseline {prev_rev} from run {prev_id}"
                 );
                 tracing::warn!("auto-revert: {detail}");
                 self.run_journal.note(this_run_id, "auto-revert", &detail);
@@ -1636,20 +1739,42 @@ impl ServiceContainer {
             .filter(|c| key.is_none() || target_ids.contains(&c.target_id))
             .collect();
         let corpus: Vec<_> = store
-            .list_all_corpus_entries()
+            .list_all_corpus_entries_with_targets()
             .await
             .unwrap_or_default()
             .into_iter()
+            .filter(|(target_id, _)| key.is_none() || target_ids.contains(target_id))
+            .map(|(_, entry)| entry)
             .collect();
         let runs = self.run_history(project).await;
+        let evidence: Vec<_> = scoped_targets
+            .iter()
+            .map(|target| {
+                let workspace = workspace_dir(&target.project_root, &target.symbol);
+                serde_json::json!({
+                    "target_id": target.id,
+                    "target": target.symbol,
+                    "workspace": workspace,
+                    "active_harness_id": read_current_harness_id(&workspace),
+                    "active_harness_source": read_current_harness_source(&workspace),
+                    "binary": workspace.join(format!("fuzz_{}", target.symbol)),
+                    "binary_present": workspace.join(format!("fuzz_{}", target.symbol)).is_file(),
+                    "corpus_dir": workspace.join("corpus"),
+                    "crash_dir": workspace.join("out"),
+                })
+            })
+            .collect();
         serde_json::json!({
-            "schema": "hobot_fuzz.export.v1",
+            "schema": "hobot_fuzz.export.v2",
+            "generated_at": Utc::now().to_rfc3339(),
+            "tool_version": env!("CARGO_PKG_VERSION"),
             "project": key,
             "targets": scoped_targets,
             "harnesses": harnesses,
             "crashes": crashes,
             "corpus": corpus,
             "runs": runs,
+            "evidence": evidence,
         })
     }
 
@@ -2112,6 +2237,16 @@ impl ServiceContainer {
     /// the nil UUID when discovery fails or the symbol is unknown. Shared by
     /// harness compilation and triage so persisted records key off the same id.
     async fn resolve_target_id(&self, project: &Path, target: &str, lang: TargetLanguage) -> Uuid {
+        if let Some(store) = &self.store {
+            if let Ok(targets) = store.list_targets(&project.to_string_lossy()).await {
+                if let Some(candidate) = targets
+                    .iter()
+                    .find(|candidate| candidate.symbol == target && candidate.language == lang)
+                {
+                    return candidate.id;
+                }
+            }
+        }
         self.discover(project, lang)
             .await
             .ok()
@@ -2124,26 +2259,108 @@ impl ServiceContainer {
             .unwrap_or_default()
     }
 
-    /// Resolve the persisted harness id that a run should be linked to, so the
-    /// target-scoped workbench dashboard can attribute the run to its target
-    /// (runs carry only `config.harness_id`, and the dashboard maps that id back
-    /// through the stored harness to the target). Prefers the harness compiled
-    /// for the same engine, then any harness for the target; falls back to a
-    /// fresh id only when nothing is persisted yet.
-    async fn resolve_run_harness_id(
+    /// Resolve a target without assuming that it is C. Persisted discovery is
+    /// authoritative; only missing projects are scanned across supported
+    /// languages. This prevents run, triage, and corpus records for Rust/C++
+    /// targets from being silently attached to the nil UUID.
+    async fn resolve_target_id_any_language(&self, project: &Path, target: &str) -> Uuid {
+        self.resolve_target_candidate_any_language(project, target)
+            .await
+            .map_or_else(Uuid::nil, |candidate| candidate.id)
+    }
+
+    async fn resolve_target_candidate_any_language(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Option<TargetCandidate> {
+        if let Some(store) = &self.store {
+            if let Ok(targets) = store.list_targets(&project.to_string_lossy()).await {
+                if let Some(candidate) = targets.iter().find(|candidate| candidate.symbol == target)
+                {
+                    return Some(candidate.clone());
+                }
+            }
+        }
+        for language in [
+            TargetLanguage::C,
+            TargetLanguage::Cpp,
+            TargetLanguage::Rust,
+            TargetLanguage::Go,
+            TargetLanguage::Python,
+        ] {
+            if let Ok(inventory) = self.discover(project, language).await {
+                if let Some(candidate) = inventory
+                    .candidates
+                    .into_iter()
+                    .find(|candidate| candidate.symbol == target)
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve the persisted record for the binary/source revision currently
+    /// active in a target workspace. The explicit id marker is authoritative;
+    /// source matching keeps pre-marker workspaces upgrade-compatible.
+    async fn active_harness(
         &self,
         project: &Path,
         target: &str,
         engine: EngineKind,
-    ) -> Uuid {
-        let Some(store) = &self.store else {
-            return Uuid::new_v4();
-        };
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
-        let harnesses = store.list_harnesses(target_id).await.unwrap_or_default();
-        select_run_harness(&harnesses, engine).unwrap_or_else(Uuid::new_v4)
+    ) -> Result<Harness, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "harness qualification requires the persistent service store".to_owned(),
+            )
+        })?;
+        let workspace = workspace_dir(project, target);
+        let source = read_current_harness_source(&workspace).ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "no active harness source for '{target}'; compile the harness first"
+            ))
+        })?;
+
+        if let Some(id) = read_current_harness_id(&workspace) {
+            let harness = store
+                .get_harness(id)
+                .await
+                .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+                .ok_or_else(|| {
+                    ClassifiedError::Validation(format!(
+                        "active harness record {id} is missing; compile '{target}' again"
+                    ))
+                })?;
+            if harness.engine != engine || harness.source != source {
+                return Err(ClassifiedError::Validation(format!(
+                    "active harness metadata for '{target}' does not match its binary/source; compile it again"
+                )));
+            }
+            return Ok(harness);
+        }
+
+        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let harnesses = store
+            .list_harnesses(target_id)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        harnesses
+            .into_iter()
+            .filter(|harness| harness.engine == engine && harness.source == source)
+            .max_by_key(|harness| match harness.status {
+                HarnessStatus::Promoted => 4,
+                HarnessStatus::SmokePassed => 3,
+                HarnessStatus::Compiled => 2,
+                HarnessStatus::Draft => 1,
+                HarnessStatus::Failed => 0,
+            })
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "no persisted qualification record matches the active {engine:?} harness for '{target}'; compile it again"
+                ))
+            })
     }
 
     /// Persist corpus entries for a target so the Corpus view and later runs
@@ -2169,13 +2386,15 @@ impl ServiceContainer {
         target: &str,
         lang: TargetLanguage,
     ) -> Result<CompileOutcome, ClassifiedError> {
+        if !engine.supports_language(lang) {
+            return Err(ClassifiedError::Validation(format!(
+                "{lang:?} harness compilation is not supported by {engine:?} in the current engine adapter"
+            )));
+        }
         self.guardrails.authorize(Action::CompileHarness).await?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
-        let harness_path = workspace.join("harness.c");
-        std::fs::write(&harness_path, &source)
-            .map_err(|e| ClassifiedError::Internal(format!("write harness: {e}")))?;
         copy_project_sources(project, &workspace);
 
         let build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{target}"));
@@ -2191,12 +2410,16 @@ impl ServiceContainer {
             smoke_run: None,
         };
         let compiled = hf_harness::compile(harness, self.runtime.as_ref(), &workspace).await?;
+        write_current_harness_source(&workspace, &compiled.source)?;
+        write_current_harness_id(&workspace, compiled.id)?;
         // Persist the compiled harness so it survives restarts and the
-        // Harness/list views can show it (best-effort).
+        // Harness/list views can show it. Qualification is safety-critical, so
+        // a configured store must durably accept the record.
         if let Some(store) = &self.store {
-            if let Err(e) = store.upsert_harness(&compiled).await {
-                tracing::warn!("failed to persist harness {}: {e}", compiled.id);
-            }
+            store
+                .upsert_harness(&compiled)
+                .await
+                .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
         }
         Ok(CompileOutcome {
             status: compiled.status,
@@ -2310,6 +2533,7 @@ impl ServiceContainer {
             };
             match hf_harness::try_compile(harness, self.runtime.as_ref(), workspace).await? {
                 hf_harness::CompileResult::Ok(compiled) => {
+                    write_current_harness_source(workspace, &compiled.source)?;
                     if let Some(store) = &self.store {
                         if let Err(e) = store.upsert_harness(&compiled).await {
                             tracing::warn!("failed to persist harness {}: {e}", compiled.id);
@@ -2442,10 +2666,11 @@ impl ServiceContainer {
         .await
     }
 
-    /// Run an autonomous fuzzing campaign end to end: discover (and pick the
-    /// best target when none is given) -> generate + auto-repair a harness ->
-    /// seed the corpus -> loop [run -> triage -> feed crashes back -> refine on
-    /// stagnation] until a crash is found or `max_iterations` is reached.
+    /// Run an approved fuzzing campaign end to end: discover (and pick the best
+    /// target when none is given) -> require the active harness to have passed
+    /// smoke qualification and explicit promotion -> seed the corpus -> loop
+    /// [run -> triage -> feed crashes back] until a crash is found or
+    /// `max_iterations` is reached.
     ///
     /// This is the coded orchestration the scheduler and "just fuzz this" flows
     /// use, so a scheduled campaign runs the whole pipeline rather than a single
@@ -2453,8 +2678,8 @@ impl ServiceContainer {
     ///
     /// # Errors
     /// Returns `ClassifiedError` if discovery finds no target, or harness
-    /// generation / the first run fails. Triage and refinement failures within
-    /// the loop are logged and do not abort the campaign.
+    /// qualification / the first run fails. Triage failures within the loop are
+    /// logged and do not abort the campaign.
     pub async fn run_campaign(
         &self,
         project: &Path,
@@ -2462,7 +2687,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         duration_secs: u64,
-        max_repairs: usize,
+        _max_repairs: usize,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
         // 1. Choose a target: the caller's, else the top-ranked candidate.
@@ -2478,10 +2703,15 @@ impl ServiceContainer {
                 })?,
         };
 
-        // 2. Generate a harness (with auto-repair) and seed the corpus.
-        let gen = self
-            .harness_generate(project, &target, engine, lang, max_repairs)
-            .await?;
+        // 2. Scheduled/agent campaigns may use only a revision a human already
+        // approved. Generation, smoke, and promotion are deliberately separate
+        // workbench operations.
+        let harness = self.active_harness(project, &target, engine).await?;
+        if harness.language != lang || harness.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(format!(
+                "campaign target '{target}' needs a smoke-qualified, explicitly promoted {lang:?} harness"
+            )));
+        }
         let _ = self.generate_seeds_llm(project, &target, lang, 12).await;
 
         // 3. Run -> triage loop, stopping on the first crash or the iteration cap.
@@ -2512,20 +2742,12 @@ impl ServiceContainer {
             if crashes > 0 || iterations >= cap {
                 break;
             }
-            // No crash yet and iterations remain: refine the harness toward
-            // uncovered code before the next run. Best-effort.
-            if let Err(e) = self
-                .harness_refine(project, &target, engine, lang, max_repairs)
-                .await
-            {
-                tracing::info!("campaign refine step skipped for '{target}': {e}");
-            }
         }
 
         Ok(CampaignOutcome {
             target,
-            harness_status: gen.status,
-            repairs_used: gen.repairs_used,
+            harness_status: harness.status,
+            repairs_used: 0,
             crashes,
             edges,
             iterations,
@@ -2533,8 +2755,8 @@ impl ServiceContainer {
         })
     }
 
-    /// Run a 60-second smoke fuzz on an already-compiled harness binary in the
-    /// per-target workspace.
+    /// Run a 60-second smoke fuzz on the active, persisted harness revision and
+    /// durably record its qualification evidence.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the binary is missing or the smoke run
@@ -2548,24 +2770,121 @@ impl ServiceContainer {
     ) -> Result<SmokeRunSummary, ClassifiedError> {
         self.guardrails.authorize(Action::RunHarness).await?;
         let workspace = workspace_dir(project, target);
-        let bin = format!("fuzz_{target}");
-        let mut build_cmd = hf_harness::build_command(engine, lang, &bin);
-        build_cmd.output = workspace.join(&bin);
-        let harness = Harness {
-            id: Uuid::new_v4(),
-            target_id: Uuid::nil(),
-            engine,
-            source: String::new(),
-            language: lang,
-            build_cmd,
-            sanitizer: Sanitizer::Address,
-            status: HarnessStatus::Compiled,
-            smoke_run: None,
-        };
+        let harness = self.active_harness(project, target, engine).await?;
+        if harness.language != lang {
+            return Err(ClassifiedError::Validation(format!(
+                "active harness language is {:?}, not {lang:?}",
+                harness.language
+            )));
+        }
+        if harness.status != HarnessStatus::Compiled && harness.status != HarnessStatus::SmokePassed
+        {
+            return Err(ClassifiedError::Validation(format!(
+                "only a compiled harness can be smoke-qualified; active status is {:?}",
+                harness.status
+            )));
+        }
         let smoked = hf_harness::smoke_fuzz(harness, self.runtime.as_ref(), &workspace).await?;
-        smoked
+        let summary = smoked
             .smoke_run
-            .ok_or_else(|| ClassifiedError::Harness("smoke run produced no summary".to_owned()))
+            .clone()
+            .ok_or_else(|| ClassifiedError::Harness("smoke run produced no summary".to_owned()))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "harness qualification requires the persistent service store".to_owned(),
+            )
+        })?;
+        // Smoke findings are real crash artifacts and must be triageable from
+        // the desktop workflow. Persist a completed, explicitly labelled run
+        // record so triage can associate the artifacts with this smoke pass
+        // instead of looking at an older campaign (or an empty run scope).
+        let mut smoke_record = RunRecord::new(
+            project.to_string_lossy().to_string(),
+            engine,
+            None,
+            Utc::now(),
+        );
+        smoke_record.status = RunStatus::Done;
+        smoke_record.ended_at = Some(Utc::now());
+        smoke_record.execs = Some(summary.execs_per_sec);
+        smoke_record.crash_count = Some(u64::from(summary.crashes));
+        store
+            .insert_run(&smoke_record)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        store
+            .upsert_harness(&smoked)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        Ok(summary)
+    }
+
+    /// Promote the active harness after a clean persisted smoke run. Calling
+    /// this method is the explicit human approval boundary used by every
+    /// presentation layer; agents and schedulers never call it implicitly.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the active revision has not completed a
+    /// crash-free smoke run or its qualification record cannot be persisted.
+    pub async fn harness_promote(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+    ) -> Result<Harness, ClassifiedError> {
+        let mut harness = self.active_harness(project, target, engine).await?;
+        let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "harness '{target}' has no persisted smoke evidence; run smoke qualification first"
+            ))
+        })?;
+        if harness.status != HarnessStatus::SmokePassed || !smoke.passed {
+            return Err(ClassifiedError::Validation(format!(
+                "harness '{target}' cannot be promoted until a crash-free smoke run passes"
+            )));
+        }
+        harness.status = HarnessStatus::Promoted;
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "harness promotion requires the persistent service store".to_owned(),
+            )
+        })?;
+        store
+            .upsert_harness(&harness)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        Ok(harness)
+    }
+
+    /// Promote a harness with documented smoke findings. This is intentionally
+    /// separate from clean promotion so callers cannot accidentally treat a
+    /// crash-bearing revision as crash-free.
+    pub async fn harness_promote_with_findings(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+    ) -> Result<Harness, ClassifiedError> {
+        let mut harness = self.active_harness(project, target, engine).await?;
+        let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("run smoke qualification before approving findings".into())
+        })?;
+        if smoke.crashes == 0 {
+            return Err(ClassifiedError::Validation(
+                "known-findings approval requires at least one smoke crash".into(),
+            ));
+        }
+        harness.status = HarnessStatus::Promoted;
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "harness promotion requires the persistent service store".into(),
+            )
+        })?;
+        store
+            .upsert_harness(&harness)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        Ok(harness)
     }
 
     // -- Seeds ------------------------------------------------------------
@@ -2736,6 +3055,13 @@ impl ServiceContainer {
         duration_secs: u64,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
+        let qualified = self.active_harness(project, target, engine).await?;
+        if qualified.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(format!(
+                "active harness '{target}' is {:?}; run smoke qualification and explicitly promote it before starting a full campaign",
+                qualified.status
+            )));
+        }
         self.guardrails
             .authorize(Action::RunFuzzer {
                 engine: format!("{engine:?}"),
@@ -2773,7 +3099,7 @@ impl ServiceContainer {
             // Link the run to the target's compiled harness so the target-scoped
             // workbench dashboard can attribute it. A throwaway id here would
             // leave every run unattributable (dashboard shows zero runs).
-            harness_id: self.resolve_run_harness_id(project, target, engine).await,
+            harness_id: qualified.id,
             engine,
             duration: Some(std::time::Duration::from_secs(duration_secs)),
             max_mem_mb: 2048,
@@ -2786,7 +3112,7 @@ impl ServiceContainer {
         // The harness the run is about to use, plus a short content hash of it,
         // so a coverage change in the run history can be attributed to -- and
         // diffed against -- the harness revision that produced it.
-        let harness_source = read_current_harness_source(&workspace);
+        let harness_source = Some(qualified.source.clone());
         let harness_rev = harness_source.as_ref().map(|src| {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
@@ -2943,9 +3269,9 @@ impl ServiceContainer {
             }
         }
         // Auto-revert policy: if this run's harness revision regressed coverage
-        // past the threshold versus the previous run for this target, restore
-        // that last-good revision (HITL-gated recompile). Skipped for cancelled
-        // runs, whose truncated coverage is not a fair comparison.
+        // past the threshold versus the latest comparable run for this target,
+        // restore that last-good revision (HITL-gated recompile). Skipped for
+        // cancelled runs, whose truncated coverage is not a fair comparison.
         let auto_revert = if was_cancelled {
             None
         } else {
@@ -3237,9 +3563,7 @@ impl ServiceContainer {
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
         let out_dir = workspace.join("out");
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
         // Link crashes to the run that produced them, and learn its engine to
         // pick the right CASR driver. The most recent run for this project is the
         // one whose `out` dir we are triaging; a fresh UUID would orphan every
@@ -3564,10 +3888,8 @@ impl ServiceContainer {
 
         // Resolve the target candidate (best-effort) and its id.
         let candidate = self
-            .discover(project, TargetLanguage::C)
-            .await
-            .ok()
-            .and_then(|inv| inv.candidates.into_iter().find(|c| c.symbol == target));
+            .resolve_target_candidate_any_language(project, target)
+            .await;
         let target_id = candidate.as_ref().map_or_else(Uuid::nil, |c| c.id);
 
         // Latest run + its crashes from the store, when persistence is wired.
@@ -3999,9 +4321,7 @@ impl ServiceContainer {
             (b"{}".to_vec(), "seed_empty".to_owned()),
             (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
         ];
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
         self.persist_corpus(target_id, &corpus).await;
         Ok(corpus.entries.len())
@@ -4020,9 +4340,7 @@ impl ServiceContainer {
         let corpus_dir = workspace.join("corpus");
         let out_dir = workspace.join("out");
         let mut corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
         corpus.target_id = target_id;
         self.persist_corpus(target_id, &corpus).await;
         Ok(corpus.entries.len())
@@ -4088,9 +4406,7 @@ impl ServiceContainer {
 
         let pruned = hf_corpus::prune(corpus)?;
         let after = pruned.entries.len();
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
         self.persist_corpus(target_id, &pruned).await;
         Ok(MinimizeOutcome { before, after })
     }
@@ -4128,9 +4444,7 @@ impl ServiceContainer {
         }
 
         let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
         corpus.target_id = target_id;
         self.persist_corpus(target_id, &corpus).await;
         Ok(added)
@@ -4202,9 +4516,7 @@ impl ServiceContainer {
         }
         let mut minimized = hf_corpus::minimize(&corpus_dir, &min_host)?;
         let _ = std::fs::remove_dir_all(&min_host);
-        let target_id = self
-            .resolve_target_id(project, target, TargetLanguage::C)
-            .await;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
         minimized.target_id = target_id;
         self.persist_corpus(target_id, &minimized).await;
         Ok(MinimizeOutcome {
@@ -4515,11 +4827,55 @@ fn auto_revert_decision(
     (drop_pct >= threshold_pct).then_some(drop_pct)
 }
 
+/// Whether two run configurations produce coverage measurements that are safe
+/// to compare for an automatic harness rollback.
+///
+/// The harness id is intentionally ignored because a revision change is the
+/// subject of the comparison. Engine, budget, sanitizer, corpus location,
+/// environment, and engine arguments must match; otherwise a lower edge count
+/// can be caused by the experimental setup rather than the new harness.
+fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunConfig) -> bool {
+    previous.engine == current.engine
+        && previous.duration == current.duration
+        && previous.max_mem_mb == current.max_mem_mb
+        && previous.max_cpus == current.max_cpus
+        && previous.seed_corpus == current.seed_corpus
+        && previous.sanitizer == current.sanitizer
+        && previous.env == current.env
+        && previous.extra_args == current.extra_args
+}
+
+/// Stable opaque key for grouping comparable coverage experiments in
+/// presentation layers. The harness id is excluded so revision A/B results for
+/// the same target and execution context share a key.
+fn auto_revert_comparison_key(target_id: Uuid, config: &FuzzRunConfig) -> String {
+    use sha2::{Digest, Sha256};
+
+    let context = serde_json::json!({
+        "target_id": target_id,
+        "engine": config.engine,
+        "duration": config.duration,
+        "max_mem_mb": config.max_mem_mb,
+        "max_cpus": config.max_cpus,
+        "seed_corpus": config.seed_corpus,
+        "sanitizer": config.sanitizer,
+        "env": config.env,
+        "extra_args": config.extra_args,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&context).unwrap_or_default());
+    format!("{:x}", hasher.finalize())[..16].to_owned()
+}
+
 /// One run in the persisted run history (see [`ServiceContainer::run_history`]).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunHistoryItem {
     pub id: String,
     pub project_root: String,
+    /// Target symbol resolved through the run's persisted harness.
+    pub target: Option<String>,
+    /// Opaque grouping key shared only by directly comparable successful runs.
+    pub comparison_key: Option<String>,
     pub engine: String,
     pub status: String,
     pub started_at: String,
@@ -4924,69 +5280,6 @@ fn describe_proposal(proposal: &hf_coverage::StagnationProposal) -> &'static str
     }
 }
 
-/// Pick the harness id a run should be linked to from the harnesses persisted
-/// for its target. Prefers a harness built for the same engine, then any
-/// harness; returns `None` when the target has no persisted harness yet.
-fn select_run_harness(harnesses: &[Harness], engine: EngineKind) -> Option<Uuid> {
-    harnesses
-        .iter()
-        .find(|h| h.engine == engine)
-        .or_else(|| harnesses.first())
-        .map(|h| h.id)
-}
-
-#[cfg(test)]
-mod harness_link_tests {
-    use super::{select_run_harness, EngineKind, Harness};
-    use hf_core::harness::{BuildCommand, HarnessStatus};
-    use hf_core::target::{Sanitizer, TargetLanguage};
-    use uuid::Uuid;
-
-    fn harness(engine: EngineKind) -> Harness {
-        Harness {
-            id: Uuid::new_v4(),
-            target_id: Uuid::new_v4(),
-            engine,
-            source: String::new(),
-            language: TargetLanguage::C,
-            build_cmd: BuildCommand {
-                compiler: String::new(),
-                args: Vec::new(),
-                output: std::path::PathBuf::new(),
-            },
-            sanitizer: Sanitizer::Address,
-            status: HarnessStatus::Compiled,
-            smoke_run: None,
-        }
-    }
-
-    #[test]
-    fn prefers_the_harness_for_the_running_engine() {
-        let afl = harness(EngineKind::AflPlusPlus);
-        let libfuzzer = harness(EngineKind::LibFuzzer);
-        let harnesses = vec![afl.clone(), libfuzzer.clone()];
-        assert_eq!(
-            select_run_harness(&harnesses, EngineKind::LibFuzzer),
-            Some(libfuzzer.id)
-        );
-    }
-
-    #[test]
-    fn falls_back_to_any_harness_when_engine_absent() {
-        let afl = harness(EngineKind::AflPlusPlus);
-        let harnesses = vec![afl.clone()];
-        assert_eq!(
-            select_run_harness(&harnesses, EngineKind::LibFuzzer),
-            Some(afl.id)
-        );
-    }
-
-    #[test]
-    fn returns_none_without_any_harness() {
-        assert_eq!(select_run_harness(&[], EngineKind::LibFuzzer), None);
-    }
-}
-
 #[cfg(test)]
 mod casrep_path_tests {
     use super::casrep_input_path;
@@ -5106,7 +5399,7 @@ mod coverage_tests {
 
 #[cfg(test)]
 mod workspace_tests {
-    use super::workspace_dir;
+    use super::{read_current_harness_source, workspace_dir, write_current_harness_source};
     use std::path::{Component, Path};
 
     /// The per-project workspace base every resolved path must stay within.
@@ -5208,6 +5501,18 @@ mod workspace_tests {
         assert_eq!(
             workspace_dir(project, "../.."),
             base(project).join("default")
+        );
+    }
+
+    #[test]
+    fn canonical_harness_source_wins_over_language_specific_build_inputs() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("harness.c"), "stale C source").unwrap();
+        write_current_harness_source(workspace.path(), "active Rust source").unwrap();
+
+        assert_eq!(
+            read_current_harness_source(workspace.path()).as_deref(),
+            Some("active Rust source")
         );
     }
 }
@@ -5318,7 +5623,76 @@ mod downsample_tests {
 
 #[cfg(test)]
 mod auto_revert_tests {
-    use super::auto_revert_decision;
+    use super::{
+        auto_revert_baseline_compatible, auto_revert_comparison_key, auto_revert_decision,
+    };
+    use hf_core::engine::{EngineKind, FuzzRunConfig};
+    use hf_core::target::Sanitizer;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    fn config(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
+        FuzzRunConfig {
+            harness_id: Uuid::new_v4(),
+            engine,
+            duration: Some(Duration::from_secs(duration_secs)),
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            seed_corpus: Some(PathBuf::from("/work/corpus")),
+            sanitizer: Sanitizer::Address,
+            env: vec![("MODE".to_owned(), "strict".to_owned())],
+            extra_args: vec!["-dict=/work/parser.dict".to_owned()],
+        }
+    }
+
+    #[test]
+    fn baseline_requires_matching_engine_budget_and_execution_context() {
+        let current = config(EngineKind::LibFuzzer, 60);
+        let mut baseline = current.clone();
+        baseline.harness_id = Uuid::new_v4();
+        assert!(auto_revert_baseline_compatible(&baseline, &current));
+
+        baseline.engine = EngineKind::AflPlusPlus;
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        baseline = current.clone();
+        baseline.duration = Some(Duration::from_secs(3600));
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        baseline = current.clone();
+        baseline.max_cpus = 4;
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        baseline = current.clone();
+        baseline.sanitizer = Sanitizer::Undefined;
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        baseline = current.clone();
+        baseline.env.clear();
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+        baseline = current.clone();
+        baseline.extra_args.clear();
+        assert!(!auto_revert_baseline_compatible(&baseline, &current));
+    }
+
+    #[test]
+    fn comparison_key_groups_only_the_same_target_and_run_context() {
+        let target = Uuid::new_v4();
+        let current = config(EngineKind::LibFuzzer, 60);
+        let mut other_revision = current.clone();
+        other_revision.harness_id = Uuid::new_v4();
+        assert_eq!(
+            auto_revert_comparison_key(target, &current),
+            auto_revert_comparison_key(target, &other_revision)
+        );
+
+        assert_ne!(
+            auto_revert_comparison_key(target, &current),
+            auto_revert_comparison_key(Uuid::new_v4(), &current)
+        );
+        other_revision.duration = Some(Duration::from_secs(600));
+        assert_ne!(
+            auto_revert_comparison_key(target, &current),
+            auto_revert_comparison_key(target, &other_revision)
+        );
+    }
 
     #[test]
     fn fires_when_changed_harness_drops_coverage_past_threshold() {

@@ -9,6 +9,9 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   discover: { method: "POST", path: "/discover" },
   harness_draft: { method: "POST", path: "/harness/draft" },
   harness_compile: { method: "POST", path: "/harness/compile" },
+  harness_smoke: { method: "POST", path: "/harness/smoke" },
+  harness_promote: { method: "POST", path: "/harness/promote" },
+  artifact_summary: { method: "POST", path: "/artifacts/summary" },
   report_formats: { method: "GET", path: "/report/formats" },
   all_crashes: { method: "GET", path: "/crashes/all" },
   all_corpus: { method: "GET", path: "/corpus/all" },
@@ -35,6 +38,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   delete_report_draft: { method: "POST", path: "/reports/delete" },
   clear_knowledge: { method: "POST", path: "/knowledge/clear" },
   delete_project: { method: "POST", path: "/projects/delete" },
+  export_project_data: { method: "POST", path: "/projects/export" },
   system_snapshot: { method: "GET", path: "/system/snapshot" },
   workbench_dashboard: { method: "POST", path: "/workbench/dashboard" },
   harness_review_queue: { method: "POST", path: "/workbench/harnesses" },
@@ -93,7 +97,7 @@ export function createHttpTransport(): Transport {
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report", "artifact_summary"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {
