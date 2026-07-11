@@ -1,9 +1,8 @@
-import { useEffect, useState } from "react";
 import type { ViewType } from "../types";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import { useI18n } from "../i18n";
-import { getTransport, isTauriEnvironment } from "../lib";
+import { useDefectDojo } from "../lib";
 import { useToast } from "./ui/Toast";
 import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, ExternalLink, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
@@ -179,24 +178,11 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
 
   // Surface DefectDojo in the Library only once it is actually configured, so the
   // sidebar stays clean for users who do not use it.
-  const [defectDojoOn, setDefectDojoOn] = useState(false);
-  useEffect(() => {
-    if (!isTauriEnvironment()) return;
-    let alive = true;
-    getTransport()
-      .invoke<boolean>("defectdojo_configured")
-      .then((v) => {
-        if (alive) setDefectDojoOn(v);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const { configured: defectDojoOn, open: openDefectDojoWindow } = useDefectDojo();
 
   async function openDefectDojo() {
     try {
-      await getTransport().invoke("open_defectdojo", { inBrowser: false });
+      await openDefectDojoWindow();
     } catch (e) {
       toast({ title: "Could not open DefectDojo", description: String(e), variant: "error" });
     }
