@@ -28,7 +28,13 @@ interface CoreStage {
   icon: React.ComponentType<{ size?: number }>;
   // Embedded stage views accept an optional navigate callback; in the workflow
   // it expands the target section (e.g. Run's "regenerate harness" -> Harness).
-  Component: React.ComponentType<{ embedded?: boolean; onNavigate?: (view: ViewType) => void }>;
+  // `stepPrefix` lets a stage that has its own internal steps (Harness) render
+  // them as sub-steps of this stage's number instead of a competing 1..N.
+  Component: React.ComponentType<{
+    embedded?: boolean;
+    onNavigate?: (view: ViewType) => void;
+    stepPrefix?: string;
+  }>;
 }
 
 const CORE_STAGES: CoreStage[] = [
@@ -187,6 +193,7 @@ export function WorkflowView() {
                 <div style={{ paddingTop: "14px" }}>
                   <Component
                     embedded
+                    stepPrefix={String(n)}
                     onNavigate={(view) => {
                       // Stay in the workflow: expand the requested stage's
                       // section (its ViewType id matches the section id).
