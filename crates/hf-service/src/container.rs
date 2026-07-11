@@ -82,6 +82,16 @@ pub fn project_workspace_dir(project: &Path) -> PathBuf {
     workspace_root().join(project_slug(project))
 }
 
+/// A human-readable `DefectDojo` product name for a project: its directory
+/// basename, falling back to the full path when there is no basename.
+fn defectdojo_project_name(project: &Path) -> String {
+    project
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| project.to_string_lossy().into_owned())
+}
+
 /// A per-project workspace directory name: the human-readable basename plus a
 /// short deterministic hash of the full path. The hash disambiguates projects
 /// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
@@ -3877,6 +3887,72 @@ impl ServiceContainer {
         let sarif = crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"));
         serde_json::to_string_pretty(&sarif)
             .map_err(|e| ClassifiedError::Internal(format!("serialize sarif: {e}")))
+    }
+
+    /// Whether a usable `DefectDojo` config is present (for the settings UI to show
+    /// a configured / not-configured state without attempting a push).
+    #[must_use]
+    pub fn defectdojo_configured(&self) -> bool {
+        crate::defectdojo::is_configured()
+    }
+
+    /// Verify the configured `DefectDojo` URL + token by calling its API.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if unconfigured, the token is missing, or the
+    /// server is unreachable / rejects auth.
+    pub async fn defectdojo_test_connection(&self) -> Result<(), ClassifiedError> {
+        let cfg = crate::defectdojo::load_config()?;
+        let token = crate::defectdojo::resolve_token(&cfg)?;
+        let client = crate::defectdojo::DefectDojoClient::from_config(&cfg, &token)?;
+        client.test_connection().await
+    }
+
+    /// Push the latest run's triaged crashes to `DefectDojo` as findings.
+    ///
+    /// Reuses `crashes_for_latest_run` and the shared CWE/severity
+    /// mapping so the `DefectDojo` push and the SARIF export never disagree. The
+    /// product defaults to the project's directory name and the test to the
+    /// target, so repeat pushes land in the same `DefectDojo` test and dedup.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if unconfigured, there are no crashes to push,
+    /// or the `DefectDojo` request fails.
+    pub async fn push_to_defectdojo(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+    ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
+        let cfg = crate::defectdojo::load_config()?;
+        let token = crate::defectdojo::resolve_token(&cfg)?;
+        let crashes = self.crashes_for_latest_run(project).await;
+        if crashes.is_empty() {
+            return Err(ClassifiedError::Validation(
+                "no triaged crashes to push to DefectDojo".to_owned(),
+            ));
+        }
+        let findings = crate::defectdojo::crashes_to_generic(&crashes);
+        let client = crate::defectdojo::DefectDojoClient::from_config(&cfg, &token)?;
+        let product_name = cfg
+            .product_name
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| defectdojo_project_name(project));
+        let engagement_name = cfg
+            .engagement_name
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Fuzzing".to_owned());
+        let test_title =
+            Some(target.map_or_else(|| "hobot_fuzz".to_owned(), |t| format!("hobot_fuzz: {t}")));
+        let import = crate::defectdojo::ImportTarget {
+            product_name,
+            engagement_name,
+            test_title,
+            reimport: cfg.reimport,
+            auto_create: cfg.auto_create,
+        };
+        client.import(&import, &findings).await
     }
 
     pub async fn generate_report(

@@ -199,6 +199,9 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/workbench/dashboard", post(workbench_dashboard))
         .route("/workbench/harnesses", post(harness_review_queue))
         .route("/gitlab/issue", post(gitlab_issue_export))
+        .route("/defectdojo/push", post(defectdojo_push))
+        .route("/defectdojo/test", get(defectdojo_test))
+        .route("/defectdojo/configured", get(defectdojo_configured))
         .route("/chat/send", post(chat_send))
         .route("/chat/agent", post(chat_agent))
         // Session management (parity with the desktop shell).
@@ -421,7 +424,8 @@ async fn harness_smoke(
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(serde_json::json!({
-        "status": "SmokePassed",
+        // Mirror the Tauri command: crashes during smoke mean it did not pass.
+        "status": if smoke.passed { "SmokePassed" } else { "SmokeFailed" },
         "duration_secs": smoke.duration_secs,
         "execs_per_sec": smoke.execs_per_sec,
         "crashes": smoke.crashes,
@@ -830,6 +834,38 @@ async fn gitlab_issue_export(
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(export))
+}
+
+#[derive(Debug, Deserialize)]
+struct DefectDojoPushRequest {
+    project: String,
+    #[serde(default)]
+    target: Option<String>,
+}
+
+async fn defectdojo_push(
+    State(state): State<AppState>,
+    Json(req): Json<DefectDojoPushRequest>,
+) -> ApiResult<hf_service::PushOutcome> {
+    let outcome = state
+        .container
+        .push_to_defectdojo(std::path::Path::new(&req.project), req.target.as_deref())
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(outcome))
+}
+
+async fn defectdojo_test(State(state): State<AppState>) -> ApiResult<bool> {
+    state
+        .container
+        .defectdojo_test_connection()
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(true))
+}
+
+async fn defectdojo_configured(State(state): State<AppState>) -> ApiResult<bool> {
+    Ok(Json(state.container.defectdojo_configured()))
 }
 
 async fn list_report_drafts(
