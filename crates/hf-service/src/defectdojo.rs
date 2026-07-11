@@ -6,9 +6,11 @@
 //! The CWE and severity logic is reused from [`crate::sarif`] so the SARIF export
 //! and the `DefectDojo` push always agree on a crash's classification.
 //!
-//! Secrets are handled like provider API keys: the config stores only the *name*
-//! of an environment variable (`api_token_env`); the token itself is read from
-//! the environment at call time and never persisted or logged.
+//! Secrets are handled like provider API keys: prefer `api_token_env` (the config
+//! stores only the *name* of an environment variable; the token is read from the
+//! environment at call time), or store the token directly in `api_token` for the
+//! desktop app, which has no shell environment. A direct `api_token` wins. Tokens
+//! are never logged.
 
 use std::fmt::Write as _;
 
@@ -23,7 +25,15 @@ use crate::sarif::{cwe_for, parse_location, security_severity};
 pub struct DefectDojoConfig {
     /// Base URL of the `DefectDojo` instance (no trailing `/api/v2` or `/`).
     pub url: String,
-    /// Name of the environment variable holding the API v2 token.
+    /// API v2 token stored directly (used by the desktop app, which has no shell
+    /// environment). Takes priority over [`Self::api_token_env`]; mirrors how a
+    /// provider `api_key` overrides its `api_key_env`. Prefer the env var for
+    /// CLI/CI so the secret never lands in a config file.
+    #[serde(default)]
+    pub api_token: Option<String>,
+    /// Name of the environment variable holding the API v2 token. Used when
+    /// [`Self::api_token`] is not set.
+    #[serde(default)]
     pub api_token_env: String,
     /// Verify the server TLS certificate (disable only for trusted self-signed).
     #[serde(default = "default_true")]
@@ -31,6 +41,11 @@ pub struct DefectDojoConfig {
     /// Product the findings are filed under; defaults to the project name.
     #[serde(default)]
     pub product_name: Option<String>,
+    /// Product type the product is filed under. `DefectDojo` requires this to
+    /// create a brand-new product when `auto_create` is set, so it defaults to
+    /// [`DEFAULT_PRODUCT_TYPE`] rather than being optional at the wire level.
+    #[serde(default)]
+    pub product_type_name: Option<String>,
     /// Engagement the findings are filed under.
     #[serde(default)]
     pub engagement_name: Option<String>,
@@ -46,12 +61,30 @@ const fn default_true() -> bool {
     true
 }
 
+/// Product type used when none is configured. `DefectDojo`'s auto-create path
+/// needs a product type to file a new product under; it is created on demand if
+/// it does not already exist.
+pub const DEFAULT_PRODUCT_TYPE: &str = "hobot_fuzz";
+
+impl DefectDojoConfig {
+    /// The configured product type, or [`DEFAULT_PRODUCT_TYPE`] when unset/blank.
+    #[must_use]
+    pub fn resolved_product_type(&self) -> String {
+        self.product_type_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_PRODUCT_TYPE)
+            .to_owned()
+    }
+}
+
 /// Parse a `DefectDojo` config from TOML, validating the required fields. Pure so
 /// it is testable without the filesystem.
 ///
 /// # Errors
-/// Returns [`ClassifiedError::Validation`] if the TOML is invalid or `url` /
-/// `api_token_env` are empty.
+/// Returns [`ClassifiedError::Validation`] if the TOML is invalid, `url` is
+/// empty, or neither `api_token` nor `api_token_env` is set.
 pub fn resolve_config(toml_str: &str) -> Result<DefectDojoConfig, ClassifiedError> {
     let cfg: DefectDojoConfig = toml::from_str(toml_str)
         .map_err(|e| ClassifiedError::Validation(format!("invalid defectdojo config: {e}")))?;
@@ -60,9 +93,13 @@ pub fn resolve_config(toml_str: &str) -> Result<DefectDojoConfig, ClassifiedErro
             "defectdojo `url` is empty".to_owned(),
         ));
     }
-    if cfg.api_token_env.trim().is_empty() {
+    let has_direct = cfg
+        .api_token
+        .as_deref()
+        .is_some_and(|t| !t.trim().is_empty());
+    if !has_direct && cfg.api_token_env.trim().is_empty() {
         return Err(ClassifiedError::Validation(
-            "defectdojo `api_token_env` is empty".to_owned(),
+            "defectdojo needs either `api_token` or `api_token_env`".to_owned(),
         ));
     }
     Ok(cfg)
@@ -100,12 +137,25 @@ pub fn load_config() -> Result<DefectDojoConfig, ClassifiedError> {
     Ok(cfg)
 }
 
-/// Read the API token from the env var named by the config.
+/// Resolve the API token: the directly-stored `api_token` wins (for the desktop
+/// app), otherwise the env var named by `api_token_env` (for CLI/CI).
 ///
 /// # Errors
-/// Returns [`ClassifiedError::Validation`] if the variable is unset or empty.
+/// Returns [`ClassifiedError::Validation`] if neither a direct token nor the
+/// named environment variable yields a non-empty value.
 pub fn resolve_token(cfg: &DefectDojoConfig) -> Result<String, ClassifiedError> {
+    if let Some(t) = cfg.api_token.as_deref().map(str::trim) {
+        if !t.is_empty() {
+            return Ok(t.to_owned());
+        }
+    }
     let name = cfg.api_token_env.trim();
+    if name.is_empty() {
+        return Err(ClassifiedError::Validation(
+            "DefectDojo API token not set: paste `api_token` in Settings or set `api_token_env`"
+                .to_owned(),
+        ));
+    }
     std::env::var(name)
         .ok()
         .filter(|t| !t.trim().is_empty())
@@ -237,6 +287,7 @@ pub fn crashes_to_generic(crashes: &[Crash]) -> serde_json::Value {
 #[derive(Debug, Clone)]
 pub struct ImportTarget {
     pub product_name: String,
+    pub product_type_name: String,
     pub engagement_name: String,
     pub test_title: Option<String>,
     pub reimport: bool,
@@ -379,6 +430,9 @@ impl DefectDojoClient {
             .part("file", part);
         if target.auto_create {
             form = form.text("auto_create_context", "true");
+            // DefectDojo needs a product type to create a not-yet-existing
+            // product; without it auto_create_context 400s on first push.
+            form = form.text("product_type_name", target.product_type_name.clone());
         }
         if target.reimport {
             // Close crashes that no longer reproduce so the engagement stays honest.
@@ -440,6 +494,61 @@ mod tests {
             bug_report: None,
             casr: None,
         }
+    }
+
+    fn cfg_with_product_type(pt: Option<&str>) -> DefectDojoConfig {
+        DefectDojoConfig {
+            url: "http://localhost:8081".to_owned(),
+            api_token: None,
+            api_token_env: "HF_DEFECTDOJO_TOKEN".to_owned(),
+            verify_tls: true,
+            product_name: Some("hobot_fuzz".to_owned()),
+            product_type_name: pt.map(str::to_owned),
+            engagement_name: Some("Fuzzing".to_owned()),
+            auto_create: true,
+            reimport: true,
+        }
+    }
+
+    #[test]
+    fn direct_api_token_wins_over_env() {
+        let mut cfg = cfg_with_product_type(None);
+        cfg.api_token = Some("direct-token".to_owned());
+        cfg.api_token_env = "HF_DEFECTDOJO_TOKEN_DOES_NOT_EXIST".to_owned();
+        // Direct token is returned without consulting the (unset) env var.
+        assert_eq!(resolve_token(&cfg).unwrap(), "direct-token");
+    }
+
+    #[test]
+    fn config_valid_with_only_direct_token() {
+        let toml = r#"
+            url = "http://localhost:8081"
+            api_token = "abc123"
+        "#;
+        let cfg = resolve_config(toml).expect("direct token alone is valid");
+        assert_eq!(cfg.api_token.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn config_rejects_missing_both_tokens() {
+        let toml = r#"url = "http://localhost:8081""#;
+        assert!(resolve_config(toml).is_err());
+    }
+
+    #[test]
+    fn resolved_product_type_defaults_when_unset_or_blank() {
+        assert_eq!(
+            cfg_with_product_type(None).resolved_product_type(),
+            DEFAULT_PRODUCT_TYPE
+        );
+        assert_eq!(
+            cfg_with_product_type(Some("   ")).resolved_product_type(),
+            DEFAULT_PRODUCT_TYPE
+        );
+        assert_eq!(
+            cfg_with_product_type(Some("Kernel")).resolved_product_type(),
+            "Kernel"
+        );
     }
 
     #[test]

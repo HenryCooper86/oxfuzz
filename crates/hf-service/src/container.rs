@@ -4017,6 +4017,7 @@ impl ServiceContainer {
             Some(target.map_or_else(|| "hobot_fuzz".to_owned(), |t| format!("hobot_fuzz: {t}")));
         let import = crate::defectdojo::ImportTarget {
             product_name,
+            product_type_name: cfg.resolved_product_type(),
             engagement_name,
             test_title,
             reimport: cfg.reimport,
