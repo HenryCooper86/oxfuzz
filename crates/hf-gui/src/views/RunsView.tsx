@@ -5,7 +5,7 @@ import { useToast } from "../components/ui/Toast";
 import { useConfirm } from "../providers/ConfirmContext";
 import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, IconButton, Input } from "../components/ui";
-import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw } from "lucide-react";
+import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw, Trash2 } from "lucide-react";
 import { DiffView } from "../components/DiffView";
 import { buildRunComparisons } from "../lib/runComparison";
 
@@ -74,6 +74,31 @@ export function RunsView() {
       setLoading(false);
     }
   }, [activeProject]);
+
+  async function deleteRun(r: RunHistoryItem) {
+    if (!(await confirm({ title: "Delete run", message: `Delete this ${r.engine} run and the ${r.crashes} crash(es) it produced?`, danger: true, confirmLabel: "Delete" }))) return;
+    try {
+      await getTransport().invoke("delete_run", { runId: r.id });
+      setRuns((rs) => rs.filter((x) => x.id !== r.id));
+      setSelected((s) => s.filter((id) => id !== r.id));
+      emitDataChanged();
+    } catch (e) {
+      toast({ title: "Delete failed", description: String(e), variant: "error" });
+    }
+  }
+
+  async function clearAllRuns() {
+    if (!(await confirm({ title: "Clear run history", message: "Delete every run and the crashes they produced from the database? This cannot be undone.", danger: true, confirmLabel: "Clear all" }))) return;
+    try {
+      await getTransport().invoke("clear_all_runs");
+      setRuns([]);
+      setSelected([]);
+      emitDataChanged();
+      toast({ title: "Run history cleared", variant: "success" });
+    } catch (e) {
+      toast({ title: "Clear failed", description: String(e), variant: "error" });
+    }
+  }
 
   useEffect(() => {
     queueMicrotask(() => void load());
@@ -170,10 +195,18 @@ export function RunsView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader
-        title="Run History"
-        description="Every fuzz run for this project, with crashes and duration. Select two runs to compare."
-      />
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <ViewHeader
+          title="Run History"
+          description="Every fuzz run for this project, with crashes and duration. Select two runs to compare."
+        />
+        {runs.length > 0 && (
+          <Button variant="danger" size="sm" onClick={() => void clearAllRuns()} title="Delete all runs and their crashes from the database">
+            <Trash2 size={14} />
+            Clear all
+          </Button>
+        )}
+      </div>
 
       {error && (
         <div className="surface-card flex items-center justify-between gap-3" style={{ padding: "var(--space-sm) var(--space-md)", borderColor: "var(--error)" }}>
@@ -342,6 +375,16 @@ export function RunsView() {
                     aria-label="Toggle coverage curve"
                   >
                     <LineChart size={14} />
+                  </IconButton>
+                  <IconButton
+                    size={26}
+                    danger
+                    className="shrink-0"
+                    onClick={() => void deleteRun(r)}
+                    title="Delete this run and its crashes"
+                    aria-label="Delete run"
+                  >
+                    <Trash2 size={14} />
                   </IconButton>
                 </div>
                 {isOpen && (

@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { getTransport, isTauriEnvironment } from "../lib";
+import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useToast } from "../components/ui/Toast";
+import { useConfirm } from "../providers/ConfirmContext";
 import type { Crash, CorpusEntry } from "../types";
-import { Button, Input, ViewHeader, EmptyState, ErrorState, Badge } from "../components/ui";
-import { Bug, Database, RotateCw, FileWarning, Download, Search } from "lucide-react";
+import { Button, IconButton, Input, ViewHeader, EmptyState, ErrorState, Badge } from "../components/ui";
+import { Bug, Database, RotateCw, FileWarning, Download, Search, Trash2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 
 export function ArtifactsView() {
   const { activeProject } = useProject();
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [corpus, setCorpus] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -61,6 +63,41 @@ export function ArtifactsView() {
     }
   }
 
+  async function deleteCrash(c: Crash) {
+    if (!(await confirm({ title: "Delete crash", message: `Delete the crash reproducer "${c.input_path.split("/").pop()}"? The record is removed from the database.`, danger: true, confirmLabel: "Delete" }))) return;
+    try {
+      await getTransport().invoke("delete_crash", { crashId: c.id });
+      setCrashes((cs) => cs.filter((x) => x.id !== c.id));
+      emitDataChanged();
+    } catch (e) {
+      toast({ title: "Delete failed", description: String(e), variant: "error" });
+    }
+  }
+
+  async function deleteCorpus(e: CorpusEntry) {
+    if (!(await confirm({ title: "Delete corpus entry", message: `Delete the corpus input "${e.path.split("/").pop()}"?`, danger: true, confirmLabel: "Delete" }))) return;
+    try {
+      await getTransport().invoke("delete_corpus_entry", { sha256: e.sha256 });
+      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256));
+      emitDataChanged();
+    } catch (err) {
+      toast({ title: "Delete failed", description: String(err), variant: "error" });
+    }
+  }
+
+  async function clearAll() {
+    if (!(await confirm({ title: "Clear all artifacts", message: "Delete every crash reproducer and corpus entry across all projects from the database? This cannot be undone.", danger: true, confirmLabel: "Clear all" }))) return;
+    try {
+      await getTransport().invoke("clear_all_artifacts");
+      setCrashes([]);
+      setCorpus([]);
+      emitDataChanged();
+      toast({ title: "Artifacts cleared", variant: "success" });
+    } catch (e) {
+      toast({ title: "Clear failed", description: String(e), variant: "error" });
+    }
+  }
+
   const q = filter.trim().toLowerCase();
   const shownCrashes = q
     ? crashes.filter((c) => `${c.input_path} ${c.kind}`.toLowerCase().includes(q))
@@ -80,6 +117,12 @@ export function ArtifactsView() {
             <Button variant="outline" onClick={() => void exportData()} loading={exporting} title="Export this project's data as JSON">
               {!exporting && <Download size={14} />}
               Export
+            </Button>
+          )}
+          {(crashes.length > 0 || corpus.length > 0) && (
+            <Button variant="danger" onClick={() => void clearAll()} title="Delete every crash reproducer and corpus entry from the database">
+              <Trash2 size={14} />
+              Clear all
             </Button>
           )}
           <Button variant="primary" onClick={() => void scan()} loading={loading}>
@@ -139,6 +182,9 @@ export function ArtifactsView() {
               </span>
               {c.minimized && <span className="text-xs text-text-muted shrink-0">minimized</span>}
               <PathActions path={c.input_path} />
+              <IconButton danger onClick={() => void deleteCrash(c)} title="Delete this crash" aria-label="Delete crash">
+                <Trash2 size={14} />
+              </IconButton>
             </div>
           ))}
         </Section>
@@ -159,6 +205,9 @@ export function ArtifactsView() {
               <span className="text-xs text-text-muted shrink-0">{e.size} B</span>
               <span className="text-xs text-text-muted shrink-0">{e.source}</span>
               <PathActions path={e.path} />
+              <IconButton danger onClick={() => void deleteCorpus(e)} title="Delete this corpus entry" aria-label="Delete corpus entry">
+                <Trash2 size={14} />
+              </IconButton>
             </div>
           ))}
         </Section>
