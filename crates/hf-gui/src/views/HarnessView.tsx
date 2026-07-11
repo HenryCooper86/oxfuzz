@@ -45,7 +45,16 @@ interface SeedResult {
 
 type StepStatus = "idle" | "loading" | "done" | "error";
 
-export function HarnessView({ embedded = false }: { embedded?: boolean }) {
+export function HarnessView({
+  embedded = false,
+  stepPrefix,
+}: {
+  embedded?: boolean;
+  // When embedded in the Fuzzing Workflow, the outer stage owns the top-level
+  // numbering (harness is step 2), so these internal steps render as sub-steps
+  // ("2.1"..."2.5") instead of a competing 1-5 that collides with the outer 3/4.
+  stepPrefix?: string;
+}) {
   const { activeProject } = useProject();
   const { markDone } = usePipeline();
   const { target: selectedTarget, setTarget: setSelectedTarget, engine, setEngine, lang, setLang, setCompiled } = useTarget();
@@ -405,6 +414,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
           {/* Step 1: Harness source */}
           <Step
             number={1}
+            prefix={stepPrefix}
             title="Generate Harness"
             icon={<FileCode size={16} />}
             status={harnessStatus}
@@ -462,6 +472,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
           {/* Step 2: Compile */}
           <Step
             number={2}
+            prefix={stepPrefix}
             title="Compile in Sandbox"
             icon={<Terminal size={16} />}
             status={compileStatus}
@@ -486,6 +497,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
           {/* Step 3: Smoke qualification */}
           <Step
             number={3}
+            prefix={stepPrefix}
             title="Smoke Qualification"
             icon={<Crosshair size={16} />}
             status={smokeStatus}
@@ -514,6 +526,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
           {/* Step 4: Human approval */}
           <Step
             number={4}
+            prefix={stepPrefix}
             title="Review and Approve"
             icon={<CheckCircle2 size={16} />}
             status={promotionStatus}
@@ -546,6 +559,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
           {/* Step 5: Generate Seeds */}
           <Step
             number={5}
+            prefix={stepPrefix}
             title="Generate Seed Corpus"
             icon={<Database size={16} />}
             status={seedStatus}
@@ -601,9 +615,9 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
 }
 
 function Step({
-  number, title, icon, status, actionLabel, actionClick, disabled, children,
+  number, prefix, title, icon, status, actionLabel, actionClick, disabled, children,
 }: {
-  number: number; title: string; icon: React.ReactNode; status: StepStatus;
+  number: number; prefix?: string; title: string; icon: React.ReactNode; status: StepStatus;
   actionLabel: string; actionClick: () => void; disabled?: boolean; children?: React.ReactNode;
 }) {
   const colors: Record<StepStatus, string> = {
@@ -631,7 +645,7 @@ function Step({
           {status === "loading" ? <Loader2 size={14} className="animate-spin" /> :
            status === "done" ? <CheckCircle2 size={14} /> :
            status === "error" ? <XCircle size={14} /> :
-           number}
+           prefix ? `${prefix}.${number}` : number}
         </div>
         <span className="flex items-center gap-2 text-sm font-medium text-text-primary flex-1">
           {icon}
