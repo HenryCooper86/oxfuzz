@@ -118,7 +118,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             {inventory.candidates.length} candidates found
           </div>
           <div className="flex flex-col gap-1">
-            {inventory.candidates
+            {[...inventory.candidates]
               .sort((a, b) => b.fit_score - a.fit_score)
               .map((c) => (
                 <CandidateCard key={c.id} candidate={c} callGraph={inventory.call_graph ?? {}} project={project} />

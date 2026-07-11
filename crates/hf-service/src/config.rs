@@ -22,6 +22,7 @@ pub const CONFIG_SECTIONS: &[&str] = &[
     "storage",
     "session",
     "tools",
+    "defectdojo",
 ];
 
 /// One editable config section.
@@ -279,6 +280,7 @@ fn bundled_example(section: &str) -> &'static str {
         "storage" => include_str!("../../../config/storage.example.toml"),
         "session" => include_str!("../../../config/session.example.toml"),
         "tools" => include_str!("../../../config/tools.example.toml"),
+        "defectdojo" => include_str!("../../../config/defectdojo.example.toml"),
         _ => "",
     }
 }

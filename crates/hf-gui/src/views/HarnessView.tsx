@@ -87,7 +87,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
         setDiscoverError(null);
         setInventory(inv);
         if (inv.candidates.length > 0) {
-          setSelectedTarget(inv.candidates.sort((a, b) => b.fit_score - a.fit_score)[0].symbol);
+          setSelectedTarget([...inv.candidates].sort((a, b) => b.fit_score - a.fit_score)[0].symbol);
         }
       })
       .catch((e) => {
@@ -353,7 +353,7 @@ export function HarnessView({ embedded = false }: { embedded?: boolean }) {
                 setSeeds(null);
                 setCompiled(false);
               }}
-              options={inventory.candidates
+              options={[...inventory.candidates]
                 .sort((a, b) => b.fit_score - a.fit_score)
                 .map((c) => ({ value: c.symbol, label: `${c.symbol} (fit: ${c.fit_score.toFixed(2)})` }))}
             />

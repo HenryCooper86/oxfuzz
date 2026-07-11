@@ -3,7 +3,6 @@ import { pickFolder, pickFile, getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
 import { usePrefs } from "../providers/PrefsContext";
-import { useRunStatus } from "../providers/RunStatusContext";
 import { useRunOutput } from "../providers/RunOutputContext";
 import { useTarget } from "../providers/TargetContext";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
@@ -20,7 +19,6 @@ export function RunView({
   const { activeProject, setActiveProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { sandboxArch } = usePrefs();
-  const { setActiveEngine } = useRunStatus();
   const { target: sharedTarget, engine: sharedEngine, compiled } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
@@ -102,7 +100,6 @@ export function RunView({
     // Non-kernel engines require a target symbol.
     if (!isSyz && !target) return;
     setActiveProject(project);
-    setActiveEngine(engine);
     try {
       const crashes = isSyz
         ? await runSyzkaller({
@@ -115,14 +112,13 @@ export function RunView({
             manager_cfg: managerCfg || null,
             vm_count: Number(vmCount) || 2,
           })
-        : await runFuzzer({ project, target, engine, duration: Math.max(1, Math.floor(Number(duration) || 60)), arch: sandboxArch });
+        : await runFuzzer({ project, target, engine, duration: Math.max(1, Math.floor(Number(duration) || 60)) });
       markDone("run");
       // If the run found no crashes, there is nothing to triage.
       if (crashes === 0) markSkipped("triage");
     } catch {
       // The error is already surfaced in the run output log.
-    } finally {
-      setActiveEngine(null);
+      // `activeEngine` is cleared centrally in RunOutputContext's run paths.
     }
   }
 

@@ -99,7 +99,7 @@ fn sarif_level(score: f64) -> &'static str {
 }
 
 /// Parse a CASR crashline (`file:line:col` or `file:line`) into a (uri, line).
-fn parse_location(crashline: &str) -> Option<(String, u32)> {
+pub(crate) fn parse_location(crashline: &str) -> Option<(String, u32)> {
     if crashline.is_empty() {
         return None;
     }

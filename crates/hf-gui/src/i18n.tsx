@@ -95,6 +95,7 @@ const en: Dict = {
   "settings.tab.tools": "Tools",
   "settings.tab.guardrails": "Guardrails",
   "settings.tab.storage": "Storage",
+  "settings.tab.integrations": "Integrations",
   "settings.tab.about": "About",
 
   // AI Assistant welcome screen
@@ -187,6 +188,7 @@ const zh: Dict = {
   "settings.tab.tools": "工具",
   "settings.tab.guardrails": "安全护栏",
   "settings.tab.storage": "存储",
+  "settings.tab.integrations": "集成",
   "settings.tab.about": "关于",
 
   // AI Assistant welcome screen
