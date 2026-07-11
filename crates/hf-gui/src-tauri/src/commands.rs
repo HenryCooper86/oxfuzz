@@ -301,7 +301,10 @@ pub async fn harness_smoke(
         .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
-        "status": "SmokePassed",
+        // A smoke run that surfaced crashes is a failure, not a pass: report it
+        // as such so the UI (which keys its done/error state on this string)
+        // does not render a crashing harness as qualified.
+        "status": if smoke.passed { "SmokePassed" } else { "SmokeFailed" },
         "duration_secs": smoke.duration_secs,
         "execs_per_sec": smoke.execs_per_sec,
         "crashes": smoke.crashes,
@@ -765,6 +768,41 @@ pub async fn gitlab_issue_export(
     state
         .container
         .gitlab_issue_export(std::path::Path::new(&project), &crash_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Whether a usable `DefectDojo` config is present (drives the settings UI state).
+#[tauri::command]
+pub async fn defectdojo_configured(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<bool, String> {
+    Ok(state.container.defectdojo_configured())
+}
+
+/// Verify the configured `DefectDojo` URL + token without pushing.
+#[tauri::command]
+pub async fn defectdojo_test_connection(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<bool, String> {
+    state
+        .container
+        .defectdojo_test_connection()
+        .await
+        .map(|()| true)
+        .map_err(|e| e.to_string())
+}
+
+/// Push the latest run's triaged crashes to `DefectDojo` as findings.
+#[tauri::command]
+pub async fn push_to_defectdojo(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: Option<String>,
+) -> Result<hf_service::PushOutcome, String> {
+    state
+        .container
+        .push_to_defectdojo(std::path::Path::new(&project), target.as_deref())
         .await
         .map_err(|e| e.to_string())
 }

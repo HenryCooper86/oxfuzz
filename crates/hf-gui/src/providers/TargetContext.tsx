@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useProject } from "./ProjectContext";
+import { pruneToKeys } from "../lib/projectState";
 
 // Carries the selected target + engine + language across views so the
 // Harness -> Run handoff works. Kept per fuzzing target (project path) so
@@ -46,18 +47,21 @@ function loadSelection(): Record<string, TargetState> {
 }
 
 export function TargetProvider({ children }: { children: React.ReactNode }) {
-  const { activeProject } = useProject();
+  const { activeProject, recentProjects } = useProject();
   const key = activeProject || "__none__";
   const [byProject, setByProject] = useState<Record<string, TargetState>>(loadSelection);
   const cur = byProject[key] ?? DEFAULTS;
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(byProject));
+      // Prune selections for removed projects (mirrors Pipeline/RunOutput
+      // contexts) so a deleted project's target/engine/lang does not linger in
+      // localStorage and reappear if the folder is re-added later.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(pruneToKeys(byProject, recentProjects)));
     } catch {
       // Best-effort: localStorage may be unavailable or full.
     }
-  }, [byProject]);
+  }, [byProject, recentProjects]);
 
   const patch = useCallback(
     (p: Partial<TargetState>) => {

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getTransport } from "../lib";
 import { useProject } from "./ProjectContext";
+import { useRunStatus } from "./RunStatusContext";
 import { pruneToKeys } from "../lib/projectState";
 
 // Owns the output of a fuzz run -- the live log, rolling stats, final summary --
@@ -66,13 +67,15 @@ interface RunOutputValue {
   /** Target + engine of the most recent run, for the Run -> Triage handoff. */
   lastTarget: string;
   lastEngine: string;
-  /** Run a libFuzzer/AFL++/honggfuzz/CFL campaign; resolves to the crash count. */
+  /** Run a libFuzzer/AFL++/honggfuzz/CFL campaign; resolves to the crash count.
+   *  No `arch` here: standard runs use the already-built sandbox image, whose
+   *  architecture is fixed at image-build time (see `ensure_docker`). Only
+   *  syzkaller (a VM campaign) selects an arch per run. */
   runFuzzer: (p: {
     project: string;
     target: string;
     engine: string;
     duration: number;
-    arch: string;
   }) => Promise<number>;
   /** Run a syzkaller campaign; resolves to the crash count. */
   runSyzkaller: (opts: Record<string, unknown>) => Promise<number>;
@@ -116,6 +119,10 @@ function loadSummaries(): Record<string, RunData> {
 
 export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   const { activeProject, recentProjects } = useProject();
+  // The status bar's "active engine" indicator is owned here (where every run
+  // path lives) rather than in a single view, so runs launched from the agent,
+  // automation, or syzkaller flows light it up too -- not just the Run button.
+  const { setActiveEngine } = useRunStatus();
   const key = activeProject || "__none__";
   // The always-mounted progress listener writes to whichever target is active.
   const keyRef = useRef(key);
@@ -219,13 +226,13 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         log: [`[${now()}] Starting ${p.engine} on ${p.target} for ${p.duration}s`],
       }));
       setRunning(true);
+      setActiveEngine(p.engine);
       try {
         const result = await getTransport().invoke<RunResult>("run_fuzzer", {
           project: p.project,
           target: p.target,
           engine: p.engine,
           duration: p.duration,
-          arch: p.arch,
         });
         // Web mode has no run_fuzzer endpoint and resolves to undefined.
         if (!result) {
@@ -259,10 +266,11 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       } finally {
         setRunning(false);
         setCancelling(false);
+        setActiveEngine(null);
         activeRunKeyRef.current = null;
       }
     },
-    [appendLog, patch],
+    [appendLog, patch, setActiveEngine],
   );
 
   // Cooperatively cancel the active fuzz run. The backend kills the sandboxed
@@ -288,6 +296,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       activeRunKeyRef.current = k;
       patch(k, () => ({ ...EMPTY, lastTarget: "kernel", lastEngine: "syzkaller", log: [`[${now()}] Starting syzkaller campaign`] }));
       setRunning(true);
+      setActiveEngine("syzkaller");
       try {
         const result = await getTransport().invoke<RunResult>("run_syzkaller", { opts });
         // Web mode has no run_syzkaller endpoint and resolves to undefined.
@@ -307,10 +316,11 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
       } finally {
         setRunning(false);
         setCancelling(false);
+        setActiveEngine(null);
         activeRunKeyRef.current = null;
       }
     },
-    [appendLog, patch],
+    [appendLog, patch, setActiveEngine],
   );
 
   const value = useMemo(
