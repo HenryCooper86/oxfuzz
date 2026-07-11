@@ -1257,6 +1257,76 @@ impl ServiceContainer {
         }
     }
 
+    /// Delete a single crash reproducer by id.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on a storage failure.
+    pub async fn delete_crash(&self, crash_id: &str) -> Result<(), ClassifiedError> {
+        if let Some(store) = self.store.as_ref() {
+            store
+                .delete_crash(crash_id)
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("delete crash: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Delete a single corpus entry by its content hash.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on a storage failure.
+    pub async fn delete_corpus_entry(&self, sha256: &str) -> Result<(), ClassifiedError> {
+        if let Some(store) = self.store.as_ref() {
+            store
+                .delete_corpus_entry(sha256)
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("delete corpus entry: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Clear every persisted crash and corpus entry (the Artifacts browser).
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on a storage failure.
+    pub async fn clear_all_artifacts(&self) -> Result<(), ClassifiedError> {
+        if let Some(store) = self.store.as_ref() {
+            store
+                .clear_all_artifacts()
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("clear artifacts: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Delete a single run and the crashes it produced.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on a storage failure.
+    pub async fn delete_run(&self, run_id: &str) -> Result<(), ClassifiedError> {
+        if let Some(store) = self.store.as_ref() {
+            store
+                .delete_run(run_id)
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("delete run: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Clear every persisted run and the crashes it produced (Run History).
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` on a storage failure.
+    pub async fn clear_all_runs(&self) -> Result<(), ClassifiedError> {
+        if let Some(store) = self.store.as_ref() {
+            store
+                .clear_all_runs()
+                .await
+                .map_err(|e| ClassifiedError::Internal(format!("clear runs: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Run history for a project (or all projects when `None`), newest first,
     /// enriched with the crash count per run. Powers the Runs history view.
     pub async fn run_history(&self, project: Option<&Path>) -> Vec<RunHistoryItem> {
