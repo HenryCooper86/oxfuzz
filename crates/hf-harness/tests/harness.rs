@@ -165,7 +165,8 @@ async fn compile_transitions_status_on_success() {
         status: HarnessStatus::Draft,
         smoke_run: None,
     };
-    let compiled = compile(harness, &rt, &PathBuf::from("/work"))
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let compiled = compile(harness, &rt, workspace.path())
         .await
         .expect("compile should succeed");
     assert_eq!(compiled.status, HarnessStatus::Compiled);
@@ -192,7 +193,8 @@ async fn compile_returns_error_on_failure() {
         status: HarnessStatus::Draft,
         smoke_run: None,
     };
-    let result = compile(harness, &rt, &PathBuf::from("/work")).await;
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let result = compile(harness, &rt, workspace.path()).await;
     assert!(result.is_err(), "compile should fail on exit code 1");
 }
 
@@ -217,13 +219,21 @@ async fn smoke_fuzz_passes_with_positive_execs() {
         status: HarnessStatus::Compiled,
         smoke_run: None,
     };
-    let smoked = smoke_fuzz(harness, &rt, &PathBuf::from("/work"))
+    // A real host directory: `smoke_fuzz` creates the `out/` dir the fuzzer
+    // writes crashes into. `/work` is where the *sandbox* mounts the workspace,
+    // not a path that exists on the host.
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let smoked = smoke_fuzz(harness, &rt, workspace.path())
         .await
         .expect("smoke should succeed");
     assert_eq!(smoked.status, HarnessStatus::SmokePassed);
     let sr = smoked.smoke_run.expect("smoke run summary should be set");
     assert!(sr.passed);
     assert!(sr.execs_per_sec > 0.0);
+    assert!(
+        workspace.path().join("out").is_dir(),
+        "smoke fuzz must create the out/ dir the fuzzer writes crashes into"
+    );
 }
 
 #[tokio::test]
@@ -247,8 +257,17 @@ async fn smoke_fuzz_fails_on_zero_execs() {
         status: HarnessStatus::Compiled,
         smoke_run: None,
     };
-    let result = smoke_fuzz(harness, &rt, &PathBuf::from("/work")).await;
-    assert!(result.is_err(), "smoke should fail with 0 execs/sec");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let err = smoke_fuzz(harness, &rt, workspace.path())
+        .await
+        .expect_err("smoke should fail when the fuzzer never ran");
+    // Assert *why* it failed. Passing a container path as the host workspace made
+    // this test pass on a filesystem error instead of the check it names, so it
+    // would have kept passing with the zero-activity logic deleted.
+    assert!(
+        err.to_string().contains("no fuzzer activity"),
+        "expected the no-activity rejection, got: {err}"
+    );
 }
 
 #[test]
