@@ -38,11 +38,15 @@ pub struct SystemStatus {
     pub clusterfuzzlite: StatusFlag,
     /// syzkaller tooling is present in the sandbox image.
     pub syzkaller: StatusFlag,
+    /// The configured `DefectDojo` instance is answering. False when it is not
+    /// configured at all -- [`crate::defectdojo_lifecycle::status`] tells the two
+    /// apart for a panel that needs to explain itself.
+    pub defectdojo: StatusFlag,
 }
 
-/// Compute the current system status by probing Docker and the sandbox image.
-#[must_use]
-pub fn system_status() -> SystemStatus {
+/// Compute the current system status by probing Docker, the sandbox image, and
+/// the configured `DefectDojo`.
+pub async fn system_status() -> SystemStatus {
     let docker = hf_runtime::docker_daemon_ready();
     let sandbox_image = docker && hf_runtime::sandbox_image_present();
     let engines = if sandbox_image {
@@ -58,5 +62,6 @@ pub fn system_status() -> SystemStatus {
         honggfuzz: engines.honggfuzz.into(),
         clusterfuzzlite: engines.clusterfuzzlite.into(),
         syzkaller: engines.syzkaller.into(),
+        defectdojo: crate::defectdojo_lifecycle::reachable().await.into(),
     }
 }

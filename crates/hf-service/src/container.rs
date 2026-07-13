@@ -2339,6 +2339,50 @@ impl ServiceContainer {
             .unwrap_or_default()
     }
 
+    /// Targets in `project` that a scheduled campaign can legally run: those a
+    /// human has smoke-qualified and promoted a harness for. `run_campaign`
+    /// refuses everything else, so this is exactly the set the Automation view
+    /// should offer -- and it carries the engine and language off the harness,
+    /// so a schedule cannot be created for a combination that will fail at 3am.
+    ///
+    /// One entry per (target, engine) pair: a target promoted for two engines is
+    /// schedulable under either.
+    ///
+    /// # Errors
+    /// Returns [`ClassifiedError::Validation`] when persistence is not configured.
+    pub async fn schedulable_targets(
+        &self,
+        project: &Path,
+    ) -> Result<Vec<SchedulableTarget>, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "scheduling campaigns requires the persistent service store".to_owned(),
+            )
+        })?;
+        let targets = store
+            .list_targets(&project.to_string_lossy())
+            .await
+            .map_err(|e| ClassifiedError::Internal(format!("list targets: {e}")))?;
+
+        let mut schedulable = Vec::new();
+        for candidate in targets {
+            let harnesses = store.list_harnesses(candidate.id).await.unwrap_or_default();
+            for harness in harnesses
+                .iter()
+                .filter(|h| h.status == HarnessStatus::Promoted)
+            {
+                schedulable.push(SchedulableTarget {
+                    target: candidate.symbol.clone(),
+                    engine: harness.engine.as_str().to_owned(),
+                    language: harness.language.as_str().to_owned(),
+                });
+            }
+        }
+        schedulable.sort_by(|a, b| (&a.target, &a.engine).cmp(&(&b.target, &b.engine)));
+        schedulable.dedup_by(|a, b| a.target == b.target && a.engine == b.engine);
+        Ok(schedulable)
+    }
+
     /// Resolve a target without assuming that it is C. Persisted discovery is
     /// authoritative; only missing projects are scanned across supported
     /// languages. This prevents run, triage, and corpus records for Rust/C++
@@ -5022,6 +5066,18 @@ fn auto_revert_comparison_key(target_id: Uuid, config: &FuzzRunConfig) -> String
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&context).unwrap_or_default());
     format!("{:x}", hasher.finalize())[..16].to_owned()
+}
+
+/// A target a scheduled campaign can legally run (see
+/// [`ServiceContainer::schedulable_targets`]): it has a promoted harness, and
+/// the engine and language are the harness's own, not a guess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SchedulableTarget {
+    pub target: String,
+    /// Canonical engine id, e.g. `libfuzzer`.
+    pub engine: String,
+    /// Canonical language id, e.g. `c`.
+    pub language: String,
 }
 
 /// One run in the persisted run history (see [`ServiceContainer::run_history`]).

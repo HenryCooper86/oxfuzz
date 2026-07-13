@@ -55,6 +55,41 @@ pub struct DefectDojoConfig {
     /// Use reimport-scan on repeat pushes (dedup + close-fixed) vs a fresh import.
     #[serde(default = "default_true")]
     pub reimport: bool,
+    /// How the local Docker instance is started and stopped (`[lifecycle]`).
+    #[serde(default)]
+    pub lifecycle: LifecycleConfig,
+}
+
+/// Lifecycle settings for a *local* Docker `DefectDojo` (`[lifecycle]` in
+/// `config/defectdojo.toml`). Ignored for a remote `url`, which is never managed.
+/// See [`crate::defectdojo_lifecycle`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleConfig {
+    /// Start the local instance when the app starts.
+    #[serde(default = "default_true")]
+    pub autostart: bool,
+    /// `docker compose` project name of the local install. Blank uses
+    /// [`crate::defectdojo_lifecycle::DEFAULT_COMPOSE_PROJECT`].
+    #[serde(default)]
+    pub compose_project: Option<String>,
+    /// Compose files of the local install. Empty discovers them from the existing
+    /// project's Docker labels, which is what a standard upstream install needs.
+    #[serde(default)]
+    pub compose_files: Vec<String>,
+    /// How long to wait for the server to answer after starting it.
+    #[serde(default)]
+    pub startup_timeout_secs: Option<u64>,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            autostart: true,
+            compose_project: None,
+            compose_files: Vec::new(),
+            startup_timeout_secs: None,
+        }
+    }
 }
 
 const fn default_true() -> bool {
@@ -76,6 +111,28 @@ impl DefectDojoConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or(DEFAULT_PRODUCT_TYPE)
             .to_owned()
+    }
+}
+
+impl LifecycleConfig {
+    /// The compose project name of the local install, defaulting to upstream's.
+    #[must_use]
+    pub fn resolved_compose_project(&self) -> String {
+        self.compose_project
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::defectdojo_lifecycle::DEFAULT_COMPOSE_PROJECT)
+            .to_owned()
+    }
+
+    /// How long to wait for the server to answer after starting the stack.
+    #[must_use]
+    pub fn resolved_startup_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.startup_timeout_secs
+                .unwrap_or(crate::defectdojo_lifecycle::DEFAULT_STARTUP_TIMEOUT_SECS),
+        )
     }
 }
 
@@ -507,6 +564,7 @@ mod tests {
             engagement_name: Some("Fuzzing".to_owned()),
             auto_create: true,
             reimport: true,
+            lifecycle: LifecycleConfig::default(),
         }
     }
 
