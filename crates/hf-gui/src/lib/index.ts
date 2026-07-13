@@ -19,6 +19,6 @@ export function getTransport(): Transport {
 
 export { isTauriEnvironment };
 export type { Transport, UnlistenFn } from "./transport";
-export { pickFolder, pickFile } from "./platform";
+export { pickFolder, pickFile, openExternal } from "./platform";
 export { emitDataChanged, onDataChanged } from "./events";
 export { useDefectDojo, type DefectDojoAccess } from "./useDefectDojo";
