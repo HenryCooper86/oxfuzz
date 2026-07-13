@@ -78,7 +78,7 @@ pub(crate) async fn ensure_docker_ready(
         emit("Docker CLI not found -- install Docker (e.g. your distro's docker.io / docker-ce).");
         #[cfg(not(target_os = "linux"))]
         emit("Docker CLI not found -- install OrbStack or Docker Desktop.");
-        return system_status();
+        return system_status().await;
     }
 
     if !hf_service::docker_daemon_ready() {
@@ -100,7 +100,7 @@ pub(crate) async fn ensure_docker_ready(
         );
         #[cfg(not(target_os = "linux"))]
         emit("Docker daemon did not start -- start OrbStack/Docker manually.");
-        return system_status();
+        return system_status().await;
     }
     emit("Docker daemon ready.");
 
@@ -135,7 +135,7 @@ pub(crate) async fn ensure_docker_ready(
         emit("Sandbox image missing -- run scripts/build-sandbox.sh.");
     }
 
-    system_status()
+    system_status().await
 }
 
 // ---------------------------------------------------------------------------
@@ -143,9 +143,8 @@ pub(crate) async fn ensure_docker_ready(
 // ---------------------------------------------------------------------------
 
 /// Compute the current system status by probing Docker + the sandbox image.
-#[must_use]
-pub fn system_status() -> SystemStatus {
-    hf_service::system_status()
+pub async fn system_status() -> SystemStatus {
+    hf_service::system_status().await
 }
 
 // ---------------------------------------------------------------------------
@@ -481,8 +480,8 @@ pub async fn triage(
 }
 
 #[tauri::command]
-pub fn system_status_cmd() -> SystemStatus {
-    system_status()
+pub async fn system_status_cmd() -> SystemStatus {
+    system_status().await
 }
 
 /// Ensure Docker is ready (daemon running + sandbox image loaded), starting
@@ -780,6 +779,42 @@ pub async fn defectdojo_configured(
     Ok(state.container.defectdojo_configured())
 }
 
+/// State of the `DefectDojo` instance: configured, installed, running, reachable.
+/// Drives the Health panel row and the embedded view's gate.
+#[tauri::command]
+pub async fn defectdojo_status() -> hf_service::DefectDojoStatus {
+    hf_service::defectdojo_lifecycle::status().await
+}
+
+/// On launch, start the local `DefectDojo` if the config asks for it, narrating
+/// each transition over `defectdojo:status` so the UI can show it booting rather
+/// than an empty rectangle. Must run after Docker is up.
+pub(crate) async fn autostart_defectdojo(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let app = app.clone();
+    hf_service::defectdojo_lifecycle::autostart(&move |status| {
+        let _ = app.emit("defectdojo:status", status);
+    })
+    .await;
+}
+
+/// Start the local Docker `DefectDojo` and wait for it to answer. Also invoked
+/// on launch (see `lib.rs`), so this is the manual retry of that.
+#[tauri::command]
+pub async fn defectdojo_start() -> Result<hf_service::DefectDojoStatus, String> {
+    hf_service::defectdojo_lifecycle::start()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Stop the local Docker `DefectDojo`, leaving its data intact.
+#[tauri::command]
+pub async fn defectdojo_stop() -> Result<hf_service::DefectDojoStatus, String> {
+    hf_service::defectdojo_lifecycle::stop()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Verify the configured `DefectDojo` URL + token without pushing.
 #[tauri::command]
 pub async fn defectdojo_test_connection(
@@ -1008,6 +1043,29 @@ pub async fn schedule_history(
     Ok(state.scheduler.recent_executions(limit.unwrap_or(20)).await)
 }
 
+/// Clear the scheduled-campaign execution history.
+#[tauri::command]
+pub async fn schedule_history_clear(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<u64, String> {
+    Ok(state.scheduler.clear_history().await)
+}
+
+/// Targets in `project` a campaign can be scheduled against: those with a
+/// promoted harness. The engine and language ride along, so the schedule is
+/// created with the combination the harness was qualified for.
+#[tauri::command]
+pub async fn schedule_targets(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+) -> Result<Vec<hf_service::SchedulableTarget>, String> {
+    state
+        .container
+        .schedulable_targets(std::path::Path::new(&project))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Create a scheduled fuzz campaign; returns the updated list.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -1017,6 +1075,7 @@ pub async fn schedule_create(
     project: String,
     target: String,
     engine: String,
+    lang: String,
     duration_secs: u64,
     trigger_kind: String,
     trigger_value: String,
@@ -1026,6 +1085,7 @@ pub async fn schedule_create(
         project,
         target,
         engine,
+        lang,
         duration_secs,
     };
     state.scheduler.create(&name, &params, trigger).await;
@@ -1038,7 +1098,9 @@ pub async fn schedule_delete(
     state: tauri::State<'_, crate::state::AppState>,
     id: String,
 ) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
-    state.scheduler.remove(&id).await;
+    if !state.scheduler.remove(&id).await {
+        return Err(format!("no scheduled campaign with id '{id}'"));
+    }
     Ok(state.scheduler.list_views().await)
 }
 
@@ -1049,7 +1111,9 @@ pub async fn schedule_set_enabled(
     id: String,
     enabled: bool,
 ) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
-    state.scheduler.set_enabled(&id, enabled).await;
+    if !state.scheduler.set_enabled(&id, enabled).await {
+        return Err(format!("no scheduled campaign with id '{id}'"));
+    }
     Ok(state.scheduler.list_views().await)
 }
 

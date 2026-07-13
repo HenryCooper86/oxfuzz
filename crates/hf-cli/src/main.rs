@@ -280,6 +280,9 @@ enum ScheduleOp {
         target: String,
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
+        /// Target language of the promoted harness: c | cpp | rust | go | python.
+        #[arg(long, default_value = "c")]
+        lang: String,
         /// Trigger kind: interval | cron | once.
         #[arg(long)]
         trigger_kind: String,
@@ -474,6 +477,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             project,
             target,
             engine,
+            lang,
             trigger_kind,
             trigger_value,
             duration,
@@ -484,6 +488,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
                 project: project.display().to_string(),
                 target,
                 engine,
+                lang,
                 duration_secs: parse_duration(&duration)?,
             };
             scheduler.create(&name, &params, trigger).await;

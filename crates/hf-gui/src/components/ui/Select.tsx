@@ -7,15 +7,22 @@ interface SelectProps {
   onChange: (v: string) => void;
   className?: string;
   mono?: boolean;
+  /**
+   * Trigger text when nothing is selected. Radix reserves the empty string for
+   * "no selection" -- an `Item` may not use it -- so an empty `options` list
+   * plus a placeholder is how a select with nothing to offer says so, rather
+   * than rendering a blank box.
+   */
+  placeholder?: string;
 }
 
-export function Select({ value, options, onChange, className, mono }: SelectProps) {
+export function Select({ value, options, onChange, className, mono, placeholder }: SelectProps) {
   return (
     <RadixSelect.Root value={value} onValueChange={onChange}>
       <RadixSelect.Trigger
         className={`inline-flex items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
       >
-        <RadixSelect.Value />
+        <RadixSelect.Value placeholder={placeholder} />
         <RadixSelect.Icon style={{ opacity: 0.7 }}>
           <ChevronDown size={14} />
         </RadixSelect.Icon>

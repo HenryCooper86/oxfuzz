@@ -47,3 +47,30 @@ auto_create = true
 # (unique_id_from_tool) and closes crashes that no longer reproduce, instead of
 # accumulating duplicates. Set false to always create a fresh import.
 reimport = true
+
+# ---------------------------------------------------------------------------
+# Local instance lifecycle
+# ---------------------------------------------------------------------------
+# hobot_fuzz ships no DefectDojo server. What it can do is adopt one you already
+# installed with upstream's `docker compose` and start it alongside the app, so
+# the embedded DefectDojo view and the crash push are not staring at a dead port.
+# Only a local `url` (localhost / 127.0.0.1) is ever started or stopped -- a
+# remote DefectDojo belongs to whoever operates it.
+
+[lifecycle]
+# Start the local instance when the app starts.
+autostart = true
+
+# The `docker compose -p` project name of your install. Upstream's default is
+# "defectdojo"; leave blank to use it.
+compose_project = "defectdojo"
+
+# Compose files of your install. Leave empty to discover them from the existing
+# project's Docker labels -- a standard upstream install needs no entry here.
+# Set explicitly only for a non-standard layout, e.g.
+#   compose_files = ["/opt/defectdojo/docker-compose.yml"]
+compose_files = []
+
+# How long to wait for the server to answer after starting it. Django migrations
+# on a cold database can take a minute; the app stays usable throughout.
+startup_timeout_secs = 300

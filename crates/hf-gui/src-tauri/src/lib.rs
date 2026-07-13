@@ -17,12 +17,13 @@ use commands::{
     clear_all_artifacts, clear_all_runs, clear_knowledge, clear_project_auto_revert_override,
     clear_workspace, config_toml_to_value, config_value_to_toml, corpus_grow, corpus_list,
     corpus_prune, corpus_seed, coverage_functions, create_session, defectdojo_configured,
-    defectdojo_embed, defectdojo_embed_close, defectdojo_embed_reload, defectdojo_test_connection,
-    delete_agent, delete_corpus_entry, delete_crash, delete_project, delete_report_draft,
-    delete_run, delete_session, delete_skill, diagnostics_cost_summary, discover,
-    dismiss_interrupted_run, effective_auto_revert_policy, ensure_docker, export_markdown,
-    export_project_data, export_report, generate_report, generate_seeds, generate_seeds_llm,
-    get_agent, get_providers, gitlab_issue_export, harness_compile, harness_draft, harness_promote,
+    defectdojo_embed, defectdojo_embed_close, defectdojo_embed_reload, defectdojo_start,
+    defectdojo_status, defectdojo_stop, defectdojo_test_connection, delete_agent,
+    delete_corpus_entry, delete_crash, delete_project, delete_report_draft, delete_run,
+    delete_session, delete_skill, diagnostics_cost_summary, discover, dismiss_interrupted_run,
+    effective_auto_revert_policy, ensure_docker, export_markdown, export_project_data,
+    export_report, generate_report, generate_seeds, generate_seeds_llm, get_agent, get_providers,
+    gitlab_issue_export, harness_compile, harness_draft, harness_promote,
     harness_promote_with_findings, harness_review_queue, harness_smoke, host_arch,
     interrupted_runs, knowledge_index, knowledge_ingest, knowledge_search, knowledge_summary,
     list_agents, list_configs, list_models, list_report_drafts, list_skills, open_defectdojo,
@@ -31,8 +32,9 @@ use commands::{
     read_config, read_skill, report_formats, reveal_path, revert_harness_from_run,
     run_coverage_series, run_fuzzer, run_harness_source, run_history, run_syzkaller, save_agent,
     save_report, save_report_draft, save_skill, schedule_create, schedule_delete, schedule_history,
-    schedule_list, schedule_set_enabled, set_project_auto_revert_override, set_providers,
-    show_window, system_snapshot, system_status_cmd, triage, workbench_dashboard, write_config,
+    schedule_history_clear, schedule_list, schedule_set_enabled, schedule_targets,
+    set_project_auto_revert_override, set_providers, show_window, system_snapshot,
+    system_status_cmd, triage, workbench_dashboard, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -131,6 +133,9 @@ pub fn run() {
             defectdojo_embed,
             defectdojo_embed_close,
             defectdojo_embed_reload,
+            defectdojo_status,
+            defectdojo_start,
+            defectdojo_stop,
             defectdojo_test_connection,
             push_to_defectdojo,
             list_report_drafts,
@@ -140,6 +145,8 @@ pub fn run() {
             dismiss_interrupted_run,
             schedule_list,
             schedule_history,
+            schedule_history_clear,
+            schedule_targets,
             schedule_create,
             schedule_delete,
             schedule_set_enabled,
@@ -183,10 +190,13 @@ pub fn run() {
 
             // On launch, bring Docker up and ensure the sandbox image is loaded
             // in the background so the first compile/run "just works". Progress
-            // is reported to the UI via `docker:status` events.
+            // is reported to the UI via `docker:status` events. DefectDojo rides
+            // on the back of that: it is a Docker stack too, so it can only start
+            // once the daemon is up.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = commands::ensure_docker_ready(&handle, None).await;
+                commands::autostart_defectdojo(&handle).await;
             });
 
             Ok(())

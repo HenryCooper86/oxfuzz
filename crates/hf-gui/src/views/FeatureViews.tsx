@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
 import { getTransport, pickFile, emitDataChanged } from "../lib";
@@ -1119,6 +1119,7 @@ interface CampaignView {
   project: string;
   target: string;
   engine: string;
+  lang: string;
   duration_secs: number;
   last_fire: string | null;
 }
@@ -1132,6 +1133,18 @@ interface ExecutionView {
   summary: string;
 }
 
+/**
+ * A target a campaign can actually be scheduled against: one with a promoted
+ * harness. A campaign refuses to run anything else (generation, smoke and
+ * promotion are deliberately human steps), so scheduling a target without one
+ * only produces a failure at 3am -- the picker offers these and nothing else.
+ */
+interface SchedulableTarget {
+  target: string;
+  engine: string;
+  language: string;
+}
+
 const EXEC_STATUS_COLOR: Record<string, string> = {
   completed: "var(--accent)",
   running: "#d97706",
@@ -1142,8 +1155,8 @@ const EXEC_STATUS_COLOR: Record<string, string> = {
 
 export function AutomationView() {
   const confirm = useConfirm();
-  const { activeProject } = useProject();
-  const { target, engine } = useTarget();
+  const { activeProject, recentProjects } = useProject();
+  const { target: contextTarget } = useTarget();
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
   const [history, setHistory] = useState<ExecutionView[]>([]);
   const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
@@ -1151,6 +1164,19 @@ export function AutomationView() {
   const [duration, setDuration] = useState(60);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // A campaign is scheduled for a project + target, so the view picks both
+  // rather than inheriting whatever the Harness view last touched -- that was
+  // the only writer of the shared target, which left Automation with nothing to
+  // schedule for anyone who had not just authored a harness.
+  const [project, setProject] = useState(activeProject);
+  const [loaded, setLoaded] = useState<{ project: string; items: SchedulableTarget[] } | null>(null);
+  const [picked, setPicked] = useState("");
+
+  const projects = useMemo(() => {
+    const all = [activeProject, ...recentProjects].filter(Boolean);
+    return [...new Set(all)];
+  }, [activeProject, recentProjects]);
 
   // Load + light poll so last-run times and execution history update as
   // campaigns fire.
@@ -1173,7 +1199,42 @@ export function AutomationView() {
     };
   }, []);
 
-  const canSave = !!activeProject && !!target;
+  // Only promoted harnesses can be scheduled; ask the backend which those are.
+  // The answer is stored with the project it belongs to, so a slow reply for a
+  // project the user has already navigated away from cannot be rendered.
+  useEffect(() => {
+    if (!project) return undefined;
+    let cancelled = false;
+    getTransport()
+      .invoke<SchedulableTarget[]>("schedule_targets", { project })
+      .then((items) => !cancelled && setLoaded({ project, items }))
+      .catch(() => !cancelled && setLoaded({ project, items: [] }));
+    return () => {
+      cancelled = true;
+    };
+  }, [project]);
+
+  // `null` means "still loading", which is different from "this project has no
+  // promoted harness" -- the empty-state text says so.
+  const choices = useMemo(
+    () => (project ? (loaded?.project === project ? loaded.items : null) : []),
+    [project, loaded],
+  );
+
+  // The selection is derived, not synced: the explicit pick when it is still
+  // valid, else the target already in focus elsewhere, else the first one -- so
+  // the common case is one click and a stale pick can never be submitted.
+  const selected = useMemo(() => {
+    if (!choices?.length) return null;
+    const key = (t: SchedulableTarget) => `${t.target}::${t.engine}`;
+    return (
+      choices.find((t) => key(t) === picked) ??
+      choices.find((t) => t.target === contextTarget) ??
+      choices[0]
+    );
+  }, [choices, picked, contextTarget]);
+
+  const canSave = !!project && !!selected;
 
   // Validate the trigger value client-side so a malformed schedule is rejected
   // with a clear message rather than failing opaquely on the backend.
@@ -1192,7 +1253,7 @@ export function AutomationView() {
   }
 
   async function save() {
-    if (!canSave) return;
+    if (!canSave || !selected) return;
     const invalid = validateTrigger();
     if (invalid) {
       setError(invalid);
@@ -1202,10 +1263,13 @@ export function AutomationView() {
     setError(null);
     try {
       const next = await getTransport().invoke<CampaignView[]>("schedule_create", {
-        name: `${shortProject(activeProject)} / ${target}`,
-        project: activeProject,
-        target,
-        engine: engine || "libfuzzer",
+        name: `${shortProject(project)} / ${selected.target}`,
+        project,
+        target: selected.target,
+        // Engine and language come off the promoted harness, so the campaign
+        // runs the combination that was actually qualified.
+        engine: selected.engine,
+        lang: selected.language,
         durationSecs: duration,
         triggerKind,
         triggerValue,
@@ -1215,6 +1279,25 @@ export function AutomationView() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function clearHistory() {
+    if (
+      !(await confirm({
+        title: "Clear run history",
+        message: "Delete every recorded scheduled-campaign run? The campaigns themselves stay.",
+        danger: true,
+        confirmLabel: "Clear",
+      }))
+    )
+      return;
+    setError(null);
+    try {
+      await getTransport().invoke<number>("schedule_history_clear");
+      setHistory([]);
+    } catch (e) {
+      setError(String(e));
     }
   }
   async function remove(id: string) {
@@ -1249,13 +1332,38 @@ export function AutomationView() {
       {/* New campaign form */}
       <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
         <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>New Campaign</div>
-        <div className="text-xs text-text-secondary">
-          {canSave ? (
-            <>Target: <span className="font-mono text-text-primary">{shortProject(activeProject)} / {target}</span> · <span className="font-mono">{engine || "libfuzzer"}</span></>
-          ) : (
-            "Pick a project + target first (Discover/Harness)."
-          )}
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={project}
+            onChange={setProject}
+            placeholder="No project open"
+            options={projects.map((p) => ({ value: p, label: shortProject(p) }))}
+          />
+          <Select
+            value={selected ? `${selected.target}::${selected.engine}` : ""}
+            onChange={setPicked}
+            placeholder={
+              !project
+                ? "No target"
+                : choices === null
+                  ? "Loading targets..."
+                  : "No promoted harness"
+            }
+            options={(choices ?? []).map((t) => ({
+              value: `${t.target}::${t.engine}`,
+              label: `${t.target} · ${t.engine} · ${t.language}`,
+            }))}
+          />
         </div>
+        {!canSave && (
+          <div className="text-xs text-text-secondary">
+            {!project
+              ? "Open a project first (Projects)."
+              : choices === null
+                ? "Looking for promoted harnesses..."
+                : "This project has no promoted harness yet. A campaign only runs a harness a human has smoke-tested and promoted (Harness), so there is nothing to schedule yet."}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={triggerKind}
@@ -1285,7 +1393,7 @@ export function AutomationView() {
       </div>
 
       {campaigns.length === 0 && (
-        <EmptyState icon={<Zap size={20} />} hint="No scheduled campaigns yet. Pick a project + target, choose a trigger, and Schedule it to fuzz on autopilot." />
+        <EmptyState icon={<Zap size={20} />} hint="No scheduled campaigns yet. Pick a project and a promoted target, choose a trigger, and Schedule it to fuzz on autopilot." />
       )}
 
       <div className="flex flex-col gap-2">
@@ -1294,7 +1402,7 @@ export function AutomationView() {
             <div className="flex flex-col min-w-0 flex-1">
               <span className="text-sm font-medium truncate">{c.name}</span>
               <span className="text-xs text-text-muted font-mono">
-                {c.trigger} · {c.engine} · {c.duration_secs}s
+                {c.trigger} · {c.engine} · {c.lang} · {c.duration_secs}s
                 {c.last_fire ? ` · last ${new Date(c.last_fire).toLocaleString()}` : " · never run"}
               </span>
             </div>
@@ -1312,11 +1420,24 @@ export function AutomationView() {
         ))}
       </div>
 
-      {/* Execution history */}
+      {/* Execution history. It outlives the schedule that produced it (a run's
+          outcome is worth keeping after its campaign is deleted), so it needs a
+          way to be cleared -- otherwise a campaign deleted months ago is still
+          the only thing here. */}
       {history.length > 0 && (
         <div className="surface-card flex flex-col" style={{ padding: "var(--space-md)" }}>
-          <div className="text-xs text-text-muted uppercase mb-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            Recent Runs
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+              Recent Runs
+            </div>
+            <button
+              onClick={() => void clearHistory()}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md text-text-muted hover:text-error hover:bg-surface-hover"
+              title="Clear run history"
+            >
+              <Trash2 size={12} />
+              Clear
+            </button>
           </div>
           <div className="flex flex-col">
             {history.map((h) => (
