@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
-import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus } from "lucide-react";
-import { getTransport, pickFile, emitDataChanged } from "../lib";
+import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
+import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
 import { useConfirm } from "../providers/ConfirmContext";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -1117,10 +1117,15 @@ interface CampaignView {
   enabled: boolean;
   trigger: string;
   project: string;
-  target: string;
+  /** null = portfolio campaign rotating through all promoted targets. */
+  target: string | null;
   engine: string;
   lang: string;
   duration_secs: number;
+  max_runs: number | null;
+  max_total_secs: number | null;
+  runs_done: number;
+  secs_done: number;
   last_fire: string | null;
 }
 
@@ -1143,6 +1148,7 @@ interface SchedulableTarget {
   target: string;
   engine: string;
   language: string;
+  fit_score: number;
 }
 
 const EXEC_STATUS_COLOR: Record<string, string> = {
@@ -1155,7 +1161,7 @@ const EXEC_STATUS_COLOR: Record<string, string> = {
 
 export function AutomationView() {
   const confirm = useConfirm();
-  const { activeProject, recentProjects } = useProject();
+  const { activeProject, recentProjects, addRecent } = useProject();
   const { target: contextTarget } = useTarget();
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
   const [history, setHistory] = useState<ExecutionView[]>([]);
@@ -1165,20 +1171,25 @@ export function AutomationView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // A campaign is scheduled for a project + target, so the view picks both
-  // rather than inheriting whatever the Harness view last touched -- that was
-  // the only writer of the shared target, which left Automation with nothing to
-  // schedule for anyone who had not just authored a harness.
+  // A campaign is scoped to a project folder it picks itself (independent of the
+  // open project), and either the whole project (all promoted targets, rotated)
+  // or one target.
   const [project, setProject] = useState(activeProject);
+  const [scopeAll, setScopeAll] = useState(true);
   const [loaded, setLoaded] = useState<{ project: string; items: SchedulableTarget[] } | null>(null);
   const [picked, setPicked] = useState("");
+  // Budget (both optional): stop after N runs, or after M minutes of fuzzing.
+  const [maxRuns, setMaxRuns] = useState("");
+  const [maxMinutes, setMaxMinutes] = useState("");
+  // Global cap on how many campaigns fuzz at once.
+  const [concurrency, setConcurrency] = useState(2);
 
   const projects = useMemo(() => {
-    const all = [activeProject, ...recentProjects].filter(Boolean);
+    const all = [project, activeProject, ...recentProjects].filter(Boolean);
     return [...new Set(all)];
-  }, [activeProject, recentProjects]);
+  }, [project, activeProject, recentProjects]);
 
-  // Load + light poll so last-run times and execution history update as
+  // Load + light poll so progress, last-run times, and history update as
   // campaigns fire.
   useEffect(() => {
     let cancelled = false;
@@ -1192,6 +1203,10 @@ export function AutomationView() {
         .catch(() => !cancelled && setHistory([]));
     };
     tick();
+    getTransport()
+      .invoke<number>("schedule_concurrency_get")
+      .then((n) => !cancelled && setConcurrency(n))
+      .catch(() => {});
     const id = setInterval(tick, 10000);
     return () => {
       cancelled = true;
@@ -1221,9 +1236,8 @@ export function AutomationView() {
     [project, loaded],
   );
 
-  // The selection is derived, not synced: the explicit pick when it is still
-  // valid, else the target already in focus elsewhere, else the first one -- so
-  // the common case is one click and a stale pick can never be submitted.
+  // The single-target selection is derived, not synced: the explicit pick when
+  // still valid, else the target in focus elsewhere, else the highest-priority.
   const selected = useMemo(() => {
     if (!choices?.length) return null;
     const key = (t: SchedulableTarget) => `${t.target}::${t.engine}`;
@@ -1234,7 +1248,28 @@ export function AutomationView() {
     );
   }, [choices, picked, contextTarget]);
 
-  const canSave = !!project && !!selected;
+  const promotedCount = choices?.length ?? 0;
+  const canSave = !!project && promotedCount > 0 && (scopeAll || !!selected);
+
+  async function chooseFolder() {
+    const path = await pickFolder();
+    if (!path) return;
+    addRecent(path);
+    setProject(path);
+  }
+
+  async function applyConcurrency(n: number) {
+    const clamped = Math.max(1, Math.min(16, n));
+    setConcurrency(clamped);
+    try {
+      const applied = await getTransport().invoke<number>("schedule_concurrency_set", {
+        maxConcurrent: clamped,
+      });
+      setConcurrency(applied);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   // Validate the trigger value client-side so a malformed schedule is rejected
   // with a clear message rather than failing opaquely on the backend.
@@ -1253,26 +1288,32 @@ export function AutomationView() {
   }
 
   async function save() {
-    if (!canSave || !selected) return;
+    if (!canSave) return;
     const invalid = validateTrigger();
     if (invalid) {
       setError(invalid);
       return;
     }
+    const runs = maxRuns.trim() ? Math.max(1, Number(maxRuns)) : null;
+    const totalSecs = maxMinutes.trim() ? Math.max(1, Math.round(Number(maxMinutes) * 60)) : null;
+    const scopeLabel = scopeAll ? "all targets" : selected?.target ?? "";
     setBusy(true);
     setError(null);
     try {
       const next = await getTransport().invoke<CampaignView[]>("schedule_create", {
-        name: `${shortProject(project)} / ${selected.target}`,
+        name: `${shortProject(project)} / ${scopeLabel}`,
         project,
-        target: selected.target,
-        // Engine and language come off the promoted harness, so the campaign
-        // runs the combination that was actually qualified.
-        engine: selected.engine,
-        lang: selected.language,
+        // null = portfolio over all promoted targets; else the one target.
+        target: scopeAll ? null : selected?.target ?? null,
+        // Engine/lang come off the promoted harness for a single target; a
+        // portfolio resolves them per target at run time.
+        engine: scopeAll ? "" : selected?.engine ?? "",
+        lang: scopeAll ? "c" : selected?.language ?? "c",
         durationSecs: duration,
         triggerKind,
         triggerValue,
+        maxRuns: runs,
+        maxTotalSecs: totalSecs,
       });
       setCampaigns(next);
     } catch (e) {
@@ -1327,43 +1368,80 @@ export function AutomationView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Automation" description="Schedule fuzz campaigns to run automatically — on an interval, a cron expression, or once at a set time. They run headlessly in the background and persist across restarts." />
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <ViewHeader title="Automation" description="Fuzz a whole project on autopilot: pick a folder, and a campaign rotates through its promoted targets on a schedule — headless, in the background, across restarts." />
+        <label className="text-xs text-text-muted flex items-center gap-1.5 shrink-0" title="How many campaigns may fuzz at once">
+          Max concurrent
+          <Input mono type="number" min={1} max={16} value={concurrency}
+            onChange={(e) => void applyConcurrency(Number(e.target.value) || 1)}
+            className="w-14" />
+        </label>
+      </div>
 
       {/* New campaign form */}
       <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
         <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>New Campaign</div>
+
+        {/* Project: a folder the campaign owns, independent of the open project. */}
         <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => void chooseFolder()}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border"
+            style={{ borderColor: "var(--border)", background: "var(--surface-primary)", color: "var(--text-secondary)" }}>
+            <FolderOpen size={13} />
+            Choose folder
+          </button>
           <Select
             value={project}
             onChange={setProject}
-            placeholder="No project open"
+            placeholder="No project chosen"
             options={projects.map((p) => ({ value: p, label: shortProject(p) }))}
-          />
-          <Select
-            value={selected ? `${selected.target}::${selected.engine}` : ""}
-            onChange={setPicked}
-            placeholder={
-              !project
-                ? "No target"
-                : choices === null
-                  ? "Loading targets..."
-                  : "No promoted harness"
-            }
-            options={(choices ?? []).map((t) => ({
-              value: `${t.target}::${t.engine}`,
-              label: `${t.target} · ${t.engine} · ${t.language}`,
-            }))}
+            className="flex-1 min-w-[180px]"
           />
         </div>
-        {!canSave && (
+
+        {/* Scope: the whole project (rotate) or one target. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={scopeAll ? "all" : "one"}
+            onChange={(v) => setScopeAll(v === "all")}
+            options={[
+              { value: "all", label: "All promoted targets" },
+              { value: "one", label: "Single target" },
+            ]}
+          />
+          {scopeAll ? (
+            <span className="text-xs text-text-secondary inline-flex items-center gap-1.5">
+              <Layers size={13} />
+              {choices === null
+                ? "Finding promoted targets…"
+                : promotedCount > 0
+                  ? `Rotates through ${promotedCount} promoted target${promotedCount === 1 ? "" : "s"}, priority-first.`
+                  : "No promoted target yet."}
+            </span>
+          ) : (
+            <Select
+              value={selected ? `${selected.target}::${selected.engine}` : ""}
+              onChange={setPicked}
+              placeholder={choices === null ? "Loading targets…" : "No promoted harness"}
+              options={(choices ?? []).map((t) => ({
+                value: `${t.target}::${t.engine}`,
+                label: `${t.target} · ${t.engine} · ${t.language}`,
+              }))}
+              className="flex-1 min-w-[180px]"
+            />
+          )}
+        </div>
+
+        {!canSave && project && choices !== null && promotedCount === 0 && (
           <div className="text-xs text-text-secondary">
-            {!project
-              ? "Open a project first (Projects)."
-              : choices === null
-                ? "Looking for promoted harnesses..."
-                : "This project has no promoted harness yet. A campaign only runs a harness a human has smoke-tested and promoted (Harness), so there is nothing to schedule yet."}
+            This project has no promoted harness yet. A campaign only runs a harness a human has smoke-tested and promoted (Harness), so there is nothing to schedule yet.
           </div>
         )}
+        {!project && (
+          <div className="text-xs text-text-secondary">Choose a project folder to begin.</div>
+        )}
+
+        {/* Trigger + per-run duration. */}
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={triggerKind}
@@ -1382,6 +1460,22 @@ export function AutomationView() {
               className="w-16" />
             s
           </label>
+        </div>
+
+        {/* Budget (optional): stop after N runs or M minutes of fuzzing. */}
+        <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+          <span>Budget</span>
+          <label className="flex items-center gap-1">
+            <Input mono type="number" min={1} value={maxRuns} placeholder="∞" onChange={(e) => setMaxRuns(e.target.value)} className="w-16" />
+            runs
+          </label>
+          <span>or</span>
+          <label className="flex items-center gap-1">
+            <Input mono type="number" min={1} value={maxMinutes} placeholder="∞" onChange={(e) => setMaxMinutes(e.target.value)} className="w-16" />
+            min total
+          </label>
+          <span className="opacity-70">— blank = unbounded</span>
+          <div className="flex-1" />
           <button onClick={save} disabled={!canSave || busy || !triggerValue.trim()}
             className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50"
             style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }}>
@@ -1393,7 +1487,7 @@ export function AutomationView() {
       </div>
 
       {campaigns.length === 0 && (
-        <EmptyState icon={<Zap size={20} />} hint="No scheduled campaigns yet. Pick a project and a promoted target, choose a trigger, and Schedule it to fuzz on autopilot." />
+        <EmptyState icon={<Zap size={20} />} hint="No scheduled campaigns yet. Choose a project folder, pick a scope and trigger, and Schedule it to fuzz on autopilot." />
       )}
 
       <div className="flex flex-col gap-2">
@@ -1402,7 +1496,8 @@ export function AutomationView() {
             <div className="flex flex-col min-w-0 flex-1">
               <span className="text-sm font-medium truncate">{c.name}</span>
               <span className="text-xs text-text-muted font-mono">
-                {c.trigger} · {c.engine} · {c.lang} · {c.duration_secs}s
+                {c.trigger} · {c.target ?? `all targets`} · {c.engine || c.lang} · {c.duration_secs}s
+                {c.max_runs != null ? ` · ${c.runs_done}/${c.max_runs} runs` : c.max_total_secs != null ? ` · ${c.secs_done}/${c.max_total_secs}s` : c.runs_done > 0 ? ` · ${c.runs_done} runs` : ""}
                 {c.last_fire ? ` · last ${new Date(c.last_fire).toLocaleString()}` : " · never run"}
               </span>
             </div>

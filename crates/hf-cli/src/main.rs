@@ -276,7 +276,9 @@ enum ScheduleOp {
         name: String,
         #[arg(long)]
         project: PathBuf,
-        #[arg(long)]
+        /// Promoted target to fuzz. Omit (or empty) for a portfolio campaign that
+        /// rotates through every promoted target in the project.
+        #[arg(long, default_value = "")]
         target: String,
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
@@ -292,6 +294,12 @@ enum ScheduleOp {
         /// Per-run duration (e.g. 30m, 1h).
         #[arg(long, default_value = "1h")]
         duration: String,
+        /// Budget: stop after this many completed runs.
+        #[arg(long)]
+        max_runs: Option<u32>,
+        /// Budget: stop after this much cumulative fuzz time (seconds).
+        #[arg(long)]
+        max_total_secs: Option<u64>,
     },
     /// Delete a scheduled campaign by id.
     Delete { id: String },
@@ -439,7 +447,7 @@ fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
 async fn start_scheduler() -> hf_service::scheduler::CampaignScheduler {
     let container = ServiceContainer::bootstrap().await;
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
-    hf_service::scheduler::CampaignScheduler::start(container, store_path).await
+    hf_service::scheduler::CampaignScheduler::start(container, store_path, None).await
 }
 
 async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
@@ -451,13 +459,21 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
                 println!("No scheduled campaigns.");
             }
             for v in views {
+                let target = v.target.as_deref().unwrap_or("all promoted targets");
+                let budget = v
+                    .max_runs
+                    .map(|m| format!(" runs={}/{m}", v.runs_done))
+                    .or_else(|| {
+                        v.max_total_secs
+                            .map(|m| format!(" secs={}/{m}", v.secs_done))
+                    })
+                    .unwrap_or_default();
                 println!(
-                    "{}  {}  [{}]  {}  target={} engine={} {}s  last={}",
+                    "{}  {}  [{}]  {}  target={target} engine={} {}s{budget}  last={}",
                     v.id,
                     v.name,
                     if v.enabled { "enabled" } else { "disabled" },
                     v.trigger,
-                    v.target,
                     v.engine,
                     v.duration_secs,
                     v.last_fire.unwrap_or_else(|| "never".to_owned()),
@@ -481,15 +497,21 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             trigger_kind,
             trigger_value,
             duration,
+            max_runs,
+            max_total_secs,
         } => {
             let trigger = hf_service::scheduler::parse_trigger(&trigger_kind, &trigger_value)
                 .map_err(|e| anyhow::anyhow!(e))?;
             let params = hf_service::scheduler::CampaignParams {
+                // Empty target = portfolio campaign over all promoted targets.
+                target: (!target.trim().is_empty()).then_some(target),
                 project: project.display().to_string(),
-                target,
                 engine,
                 lang,
                 duration_secs: parse_duration(&duration)?,
+                max_runs,
+                max_total_secs,
+                schedule_id: String::new(),
             };
             scheduler.create(&name, &params, trigger).await;
             println!("Created schedule '{name}'.");
