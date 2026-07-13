@@ -21,6 +21,18 @@ export async function pickFile(title?: string): Promise<string | null> {
   });
 }
 
+/// Open a URL in the OS default browser. In the desktop app `window.open` is a
+/// no-op (the Tauri webview swallows it), so route through the opener command;
+/// in a real browser `window.open` is correct.
+export async function openExternal(url: string): Promise<void> {
+  if (!url) return;
+  if (isTauriEnvironment()) {
+    await getTransport().invoke("open_url", { url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 /// Open a native folder picker dialog and return the selected path.
 export async function pickFolder(): Promise<string | null> {
   if (isTauriEnvironment()) {

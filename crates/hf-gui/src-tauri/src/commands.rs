@@ -1785,6 +1785,18 @@ pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Open a URL in the OS default browser. `window.open` is a no-op inside the
+/// Tauri webview, so external links (GitLab issue drafts, docs) must go through
+/// the opener instead.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Open the `DefectDojo` web UI at the configured URL. With `in_browser`, hands it
 /// to the OS default browser (a full, separate browser session). Otherwise opens
 /// it in a dedicated, natively-decorated in-app window (title bar + close button;
