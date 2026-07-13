@@ -31,10 +31,10 @@ use commands::{
     project_auto_revert_overrides, provider_statuses, provider_test, push_to_defectdojo,
     read_config, read_skill, report_formats, reveal_path, revert_harness_from_run,
     run_coverage_series, run_fuzzer, run_harness_source, run_history, run_syzkaller, save_agent,
-    save_report, save_report_draft, save_skill, schedule_create, schedule_delete, schedule_history,
-    schedule_history_clear, schedule_list, schedule_set_enabled, schedule_targets,
-    set_project_auto_revert_override, set_providers, show_window, system_snapshot,
-    system_status_cmd, triage, workbench_dashboard, write_config,
+    save_report, save_report_draft, save_skill, schedule_concurrency_get, schedule_concurrency_set,
+    schedule_create, schedule_delete, schedule_history, schedule_history_clear, schedule_list,
+    schedule_set_enabled, schedule_targets, set_project_auto_revert_override, set_providers,
+    show_window, system_snapshot, system_status_cmd, triage, workbench_dashboard, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -147,6 +147,8 @@ pub fn run() {
             schedule_history,
             schedule_history_clear,
             schedule_targets,
+            schedule_concurrency_get,
+            schedule_concurrency_set,
             schedule_create,
             schedule_delete,
             schedule_set_enabled,
@@ -188,6 +190,20 @@ pub fn run() {
 
             main_window.show().expect("failed to show window");
 
+            // Bind the scheduler's crash notifier now that we have an AppHandle:
+            // a headless scheduled campaign that finds crashes emits a
+            // `campaign:crash` event the frontend toasts on.
+            {
+                use tauri::{Emitter, Manager};
+                let emitter = app.handle().clone();
+                let state = app.state::<AppState>();
+                state.scheduler.set_notifier(std::sync::Arc::new(
+                    move |notice: hf_service::scheduler::CampaignNotice| {
+                        let _ = emitter.emit("campaign:crash", notice);
+                    },
+                ));
+            }
+
             // On launch, bring Docker up and ensure the sandbox image is loaded
             // in the background so the first compile/run "just works". Progress
             // is reported to the UI via `docker:status` events. DefectDojo rides
@@ -217,7 +233,8 @@ fn build_app_state() -> AppState {
         // user data dir so they survive restarts.
         let store_path = hf_service::init::user_app_dir().join("schedules.json");
         let scheduler = std::sync::Arc::new(
-            hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path).await,
+            hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path, None)
+                .await,
         );
         AppState::new(container, scheduler)
     })

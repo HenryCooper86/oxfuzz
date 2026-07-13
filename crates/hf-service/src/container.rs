@@ -2375,6 +2375,7 @@ impl ServiceContainer {
                     target: candidate.symbol.clone(),
                     engine: harness.engine.as_str().to_owned(),
                     language: harness.language.as_str().to_owned(),
+                    fit_score: candidate.fit_score,
                 });
             }
         }
@@ -5071,13 +5072,16 @@ fn auto_revert_comparison_key(target_id: Uuid, config: &FuzzRunConfig) -> String
 /// A target a scheduled campaign can legally run (see
 /// [`ServiceContainer::schedulable_targets`]): it has a promoted harness, and
 /// the engine and language are the harness's own, not a guess.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchedulableTarget {
     pub target: String,
     /// Canonical engine id, e.g. `libfuzzer`.
     pub engine: String,
     /// Canonical language id, e.g. `c`.
     pub language: String,
+    /// Discovery fit score (0..1). Portfolio campaigns rotate highest-first, so
+    /// the most promising targets get fuzzed sooner and more often.
+    pub fit_score: f64,
 }
 
 /// One run in the persisted run history (see [`ServiceContainer::run_history`]).
