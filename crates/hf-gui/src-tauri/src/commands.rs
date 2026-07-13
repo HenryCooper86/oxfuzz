@@ -757,17 +757,53 @@ pub async fn harness_review_queue(
         .await)
 }
 
-/// Build a GitLab issue draft/prefilled URL for a triaged crash.
+/// Build an issue draft/prefilled URL for a triaged crash, targeting the fuzzed
+/// project's configured GitHub/GitLab repository.
 #[tauri::command]
-pub async fn gitlab_issue_export(
+pub async fn issue_export(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     crash_id: String,
-) -> Result<hf_service::GitLabIssueExport, String> {
+) -> Result<hf_service::IssueExport, String> {
     state
         .container
-        .gitlab_issue_export(std::path::Path::new(&project), &crash_id)
+        .issue_export(std::path::Path::new(&project), &crash_id)
         .await
+        .map_err(|e| e.to_string())
+}
+
+/// Whether a usable issue-tracker integration is configured (provider + repo).
+#[tauri::command]
+pub async fn issue_tracker_configured(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<bool, String> {
+    Ok(state.container.issue_tracker_configured())
+}
+
+/// File a triaged crash as an issue via the configured provider's API; returns
+/// the created issue's URL.
+#[tauri::command]
+pub async fn file_issue(
+    state: tauri::State<'_, crate::state::AppState>,
+    crash_id: String,
+) -> Result<hf_service::CreatedIssue, String> {
+    state
+        .container
+        .file_issue(&crash_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Verify the issue-tracker host + token without filing anything.
+#[tauri::command]
+pub async fn issue_tracker_test_connection(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<bool, String> {
+    state
+        .container
+        .issue_tracker_test_connection()
+        .await
+        .map(|()| true)
         .map_err(|e| e.to_string())
 }
 

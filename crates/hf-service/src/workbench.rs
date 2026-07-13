@@ -109,15 +109,23 @@ pub struct WorkbenchDashboard {
     pub next_actions: Vec<String>,
 }
 
-/// A human-reviewable GitLab issue draft for one crash.
+/// A human-reviewable issue draft for one crash, targeting the configured
+/// GitHub/GitLab repository of the fuzzed software.
 #[derive(Debug, Clone, Serialize)]
-pub struct GitLabIssueExport {
+pub struct IssueExport {
     pub crash_id: String,
     pub title: String,
     pub description: String,
     pub labels: Vec<String>,
+    /// `github` | `gitlab` -- which forge the URLs and API target.
+    pub provider: String,
+    /// Web URL of the target repository, when resolvable.
     pub project_web_url: Option<String>,
+    /// Prefilled "new issue" URL for opening in a browser, when resolvable.
     pub issue_url: Option<String>,
+    /// True when the issue can be filed directly via the API (configured repo
+    /// plus a token). Otherwise only the prefilled browser page is available.
+    pub can_file: bool,
 }
 
 /// Build dashboard data from persisted store state.
@@ -294,12 +302,18 @@ pub async fn harness_review_queue(
         .harness_reviews
 }
 
-/// Build a GitLab issue draft for a persisted crash.
-pub async fn gitlab_issue_export(
+/// Build an issue draft for a persisted crash, targeting the configured issue
+/// tracker (GitHub/GitLab) of the fuzzed software.
+///
+/// When the issue tracker is configured, the target repo, provider, labels, and
+/// URLs come from that config -- so issues go to the fuzzed project's repo. When
+/// it is not, this falls back to deriving a GitLab-style URL from the project's
+/// git remote (the legacy behaviour), which is best-effort only.
+pub async fn issue_export(
     store: Option<&Store>,
     project: &Path,
     crash_id: &str,
-) -> Result<GitLabIssueExport, ClassifiedError> {
+) -> Result<IssueExport, ClassifiedError> {
     let store =
         store.ok_or_else(|| ClassifiedError::Storage("no database configured".to_owned()))?;
     let crashes = store
@@ -314,24 +328,89 @@ pub async fn gitlab_issue_export(
     let target = targets.iter().find(|t| t.id == crash.target_id);
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);
-    let labels = vec![
-        "hobot-fuzz".to_owned(),
-        "fuzzing".to_owned(),
-        "crash".to_owned(),
-    ];
-    let project_web_url = gitlab_project_url(project);
-    let issue_url = project_web_url
-        .as_ref()
-        .map(|base| issue_url(base, &title, &description, &labels));
 
-    Ok(GitLabIssueExport {
+    let (provider, project_web_url, new_issue_url, labels, can_file) = if let Ok(cfg) =
+        crate::issue_tracker::load_config()
+    {
+        // Configured: file into the explicit target repo of the fuzzed software.
+        let provider = cfg
+            .resolved_provider()
+            .unwrap_or(crate::issue_tracker::Provider::GitLab);
+        let labels = cfg.labels.clone();
+        let (web, issue_url) = if let Some(base) = cfg.web_base() {
+            let repo = cfg.repo.trim();
+            (
+                Some(crate::issue_tracker::repo_web_url(&base, repo)),
+                Some(crate::issue_tracker::new_issue_url(
+                    provider,
+                    &base,
+                    repo,
+                    &title,
+                    &description,
+                    &labels,
+                )),
+            )
+        } else {
+            (None, None)
+        };
+        let can_file = crate::issue_tracker::resolve_token(&cfg).is_ok();
+        (provider.as_str().to_owned(), web, issue_url, labels, can_file)
+    } else {
+        // Not configured: best-effort GitLab URL from the git remote.
+        let labels = vec![
+            "hobot-fuzz".to_owned(),
+            "fuzzing".to_owned(),
+            "crash".to_owned(),
+        ];
+        let web = gitlab_project_url(project);
+        let issue_url = web
+            .as_ref()
+            .map(|base| issue_url(base, &title, &description, &labels));
+        ("gitlab".to_owned(), web, issue_url, labels, false)
+    };
+
+    Ok(IssueExport {
         crash_id: crash.id.to_string(),
         title,
         description,
         labels,
+        provider,
         project_web_url,
-        issue_url,
+        issue_url: new_issue_url,
+        can_file,
     })
+}
+
+/// File a crash as an issue in the configured repository via the provider API,
+/// returning the created issue's URL.
+///
+/// # Errors
+/// Returns [`ClassifiedError`] when the issue tracker is not configured, has no
+/// token, the crash is unknown, or the API rejects the request.
+pub async fn file_issue(
+    store: Option<&Store>,
+    crash_id: &str,
+) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {
+    let cfg = crate::issue_tracker::load_config()?;
+    let token = crate::issue_tracker::resolve_token(&cfg)?;
+    let client = crate::issue_tracker::IssueTrackerClient::from_config(&cfg, &token)?;
+
+    let store =
+        store.ok_or_else(|| ClassifiedError::Storage("no database configured".to_owned()))?;
+    let crashes = store
+        .list_all_crashes()
+        .await
+        .map_err(ClassifiedError::from)?;
+    let crash = crashes
+        .into_iter()
+        .find(|c| c.id.to_string() == crash_id)
+        .ok_or_else(|| ClassifiedError::Validation(format!("crash not found: {crash_id}")))?;
+    let targets = store.list_all_targets().await.unwrap_or_default();
+    let target = targets.iter().find(|t| t.id == crash.target_id);
+    let title = issue_title(&crash, target);
+    let description = issue_description(&crash, target);
+
+    client.create_issue(&title, &description, &cfg.labels).await
 }
 
 fn empty_dashboard(

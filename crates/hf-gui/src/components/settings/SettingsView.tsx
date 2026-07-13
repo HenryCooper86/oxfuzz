@@ -8,7 +8,7 @@
 // persists whichever view is active and clears dirty.
 
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Server, HardDrive, Crosshair, Shield, Database, Info, SlidersHorizontal, MessageSquare, Wrench, Share2 } from "lucide-react";
+import { ArrowLeft, Server, HardDrive, Crosshair, Shield, Database, Info, SlidersHorizontal, MessageSquare, Wrench, Share2, GitPullRequest } from "lucide-react";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18n";
 import { useToast } from "../ui/Toast";
@@ -24,6 +24,7 @@ import { GuardrailsTab } from "./GuardrailsTab";
 import { StorageTab } from "./StorageTab";
 import { ObjectForm } from "./ObjectForm";
 import { IntegrationsTab } from "./IntegrationsTab";
+import { IssueTrackerTab } from "./IssueTrackerTab";
 import { AboutTab } from "./AboutTab";
 
 type SectionId =
@@ -36,6 +37,7 @@ type SectionId =
   | "guardrails"
   | "storage"
   | "integrations"
+  | "issuetracker"
   | "about";
 
 interface Section {
@@ -56,6 +58,7 @@ const SECTIONS: Section[] = [
   { id: "guardrails", label: "Guardrails", icon: Shield, config: "guardrails" },
   { id: "storage", label: "Storage", icon: Database, config: "storage" },
   { id: "integrations", label: "Integrations", icon: Share2, config: "defectdojo" },
+  { id: "issuetracker", label: "Issue Tracker", icon: GitPullRequest, config: "issue_tracker" },
   { id: "about", label: "About", icon: Info, config: null },
 ];
 
@@ -242,6 +245,8 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         return <StorageTab value={obj} onChange={onFormChange} />;
       case "integrations":
         return <IntegrationsTab value={obj} onChange={onFormChange} />;
+      case "issuetracker":
+        return <IssueTrackerTab value={obj} onChange={onFormChange} />;
       case "session":
       case "tools":
         return <ObjectForm value={obj} onChange={onFormChange} />;
