@@ -17,6 +17,7 @@ pub mod defectdojo;
 pub mod defectdojo_lifecycle;
 pub mod diagnostics;
 pub mod init;
+pub mod issue_tracker;
 pub mod knowledge;
 pub mod recovery;
 pub mod report;
@@ -53,9 +54,10 @@ pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
 pub use hf_storage::{AutoRevertEvent, ProjectAutoRevert};
 pub use init::{init_at, init_workspace, InitReport};
+pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
 pub use report_store::ReportDraft;
 pub use system::{system_status, SystemStatus};
 pub use workbench::{
-    CrashReviewItem, GitLabIssueExport, HarnessReviewItem, WorkbenchDashboard, WorkbenchReadiness,
+    CrashReviewItem, HarnessReviewItem, IssueExport, WorkbenchDashboard, WorkbenchReadiness,
     WorkbenchRun, WorkbenchTarget, WorkbenchTotals,
 };
