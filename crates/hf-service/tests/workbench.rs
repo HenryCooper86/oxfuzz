@@ -276,7 +276,7 @@ async fn dashboard_readiness_tracks_operational_state() {
 }
 
 #[tokio::test]
-async fn gitlab_issue_export_returns_reviewable_payload() {
+async fn issue_export_returns_reviewable_payload() {
     let (container, _dir) = test_container().await;
     let store = container.store().unwrap();
     let target = sample_target("/proj");
@@ -300,13 +300,20 @@ async fn gitlab_issue_export_returns_reviewable_payload() {
 
     let project = PathBuf::from("/proj");
     let export = container
-        .gitlab_issue_export(project.as_path(), &crash.id.to_string())
+        .issue_export(project.as_path(), &crash.id.to_string())
         .await
         .unwrap();
 
     assert!(export.title.contains("parse_packet"));
     assert!(export.description.contains("segmentation fault"));
     assert!(export.labels.contains(&"hobot-fuzz".to_owned()));
+    // The payload is provider-tagged (the provider-specific URL building is
+    // unit-tested hermetically in issue_tracker.rs).
+    assert!(
+        export.provider == "gitlab" || export.provider == "github",
+        "unexpected provider: {}",
+        export.provider
+    );
 }
 
 fn isolate_workspace() {
