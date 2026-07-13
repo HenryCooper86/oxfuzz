@@ -80,6 +80,8 @@ data/
 config/providers.toml
 # DefectDojo config may hold a direct api_token -- never commit it.
 config/defectdojo.toml
+# Issue-tracker config may hold a direct Personal Access Token -- never commit it.
+config/issue_tracker.toml
 
 ### TypeScript incremental build cache
 *.tsbuildinfo
