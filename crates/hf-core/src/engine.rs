@@ -43,6 +43,20 @@ pub struct EngineArtifacts {
 }
 
 impl EngineKind {
+    /// The canonical id used on the wire, in configs, and on the command line.
+    /// Round-trips through [`std::str::FromStr`], so a value handed to a frontend
+    /// comes back parseable.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AflPlusPlus => "afl++",
+            Self::Honggfuzz => "honggfuzz",
+            Self::LibFuzzer => "libfuzzer",
+            Self::ClusterFuzzLite => "clusterfuzzlite",
+            Self::Syzkaller => "syzkaller",
+        }
+    }
+
     /// Return the engine's operational capabilities.
     #[must_use]
     pub const fn capabilities(self) -> EngineCapabilities {
@@ -158,6 +172,30 @@ pub enum FuzzProgress {
 mod tests {
     use super::EngineKind;
     use crate::target::TargetLanguage;
+
+    #[test]
+    fn engine_and_language_ids_round_trip_through_from_str() {
+        // A frontend gets `as_str()` and hands it back; it must parse to the
+        // same variant, or a scheduled campaign would silently change engine.
+        for engine in [
+            EngineKind::AflPlusPlus,
+            EngineKind::Honggfuzz,
+            EngineKind::LibFuzzer,
+            EngineKind::ClusterFuzzLite,
+            EngineKind::Syzkaller,
+        ] {
+            assert_eq!(engine.as_str().parse::<EngineKind>(), Ok(engine));
+        }
+        for lang in [
+            TargetLanguage::C,
+            TargetLanguage::Cpp,
+            TargetLanguage::Rust,
+            TargetLanguage::Go,
+            TargetLanguage::Python,
+        ] {
+            assert_eq!(lang.as_str().parse::<TargetLanguage>(), Ok(lang));
+        }
+    }
 
     #[test]
     fn capabilities_reject_unsupported_language_pairs() {

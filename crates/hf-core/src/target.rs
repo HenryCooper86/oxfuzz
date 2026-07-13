@@ -16,6 +16,22 @@ pub enum TargetLanguage {
     Python,
 }
 
+impl TargetLanguage {
+    /// The canonical id used on the wire, in configs, and on the command line.
+    /// Round-trips through [`std::str::FromStr`], so a value handed to a frontend
+    /// comes back parseable.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Python => "python",
+        }
+    }
+}
+
 impl std::str::FromStr for TargetLanguage {
     type Err = String;
 

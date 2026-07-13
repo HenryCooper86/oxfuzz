@@ -1026,6 +1026,22 @@ impl Store {
             .collect())
     }
 
+    /// Delete all persisted schedule executions, returning how many were removed.
+    ///
+    /// Execution history is deliberately decoupled from the schedules themselves
+    /// (so a run's outcome survives its schedule being deleted), which means the
+    /// failures of a long-gone campaign otherwise sit in the history forever.
+    /// This is how an operator clears them.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn clear_schedule_executions(&self) -> Result<u64, StorageError> {
+        let result = sqlx::query("DELETE FROM schedule_executions")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     /// The latest fire time per schedule: `(schedule_id, triggered_at)`.
     ///
     /// # Errors

@@ -119,12 +119,44 @@ describe("transport", () => {
       await transport.invoke("ensure_docker", { arch: "linux/arm64" });
       await transport.invoke("system_status");
 
+      // A GET carries its args as a query string (the handler ignores the ones
+      // it does not declare); a body would be dropped on the floor.
       expect(calls.map((c) => c.url)).toEqual([
-        "http://localhost:8081/system/status",
+        "http://localhost:8081/system/status?arch=linux%2Farm64",
         "http://localhost:8081/system/status",
       ]);
       expect(calls.every((c) => c.init.method === "GET")).toBe(true);
       expect(calls.every((c) => c.init.body === undefined)).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fills path placeholders from args and keeps the rest in the body", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      // Without placeholder support these routes are unreachable in web mode --
+      // the id is part of the path, not the body.
+      await transport.invoke("schedule_delete", { id: "abc-123" });
+      await transport.invoke("schedule_set_enabled", { id: "abc-123", enabled: false });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        "http://localhost:8081/schedule/abc-123",
+        "http://localhost:8081/schedule/abc-123/enabled",
+      ]);
+      expect(calls[0].init.method).toBe("DELETE");
+      expect(calls[1].init.method).toBe("POST");
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ enabled: false });
     } finally {
       globalThis.fetch = originalFetch;
     }

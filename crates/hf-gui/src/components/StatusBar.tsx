@@ -13,6 +13,7 @@ const EMPTY_STATUS: SystemStatus = {
   honggfuzz: false,
   clusterfuzzlite: false,
   syzkaller: false,
+  defectdojo: false,
 };
 
 // Engine display order + how each maps to a SystemStatus flag and the engine id
