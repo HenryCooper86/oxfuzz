@@ -1384,12 +1384,10 @@ export function AutomationView() {
 
         {/* Project: a folder the campaign owns, independent of the open project. */}
         <div className="flex flex-wrap items-center gap-2">
-          <button onClick={() => void chooseFolder()}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border"
-            style={{ borderColor: "var(--border)", background: "var(--surface-primary)", color: "var(--text-secondary)" }}>
+          <Button variant="outline" size="sm" onClick={() => void chooseFolder()} className="shrink-0">
             <FolderOpen size={13} />
             Choose folder
-          </button>
+          </Button>
           <Select
             value={project}
             onChange={setProject}
@@ -1476,12 +1474,11 @@ export function AutomationView() {
           </label>
           <span className="opacity-70">— blank = unbounded</span>
           <div className="flex-1" />
-          <button onClick={save} disabled={!canSave || busy || !triggerValue.trim()}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50"
-            style={{ background: "var(--accent)", color: "var(--accent-contrast)", border: "none" }}>
-            {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+          <Button variant="primary" size="sm" onClick={save} loading={busy}
+            disabled={!canSave || busy || !triggerValue.trim()} className="shrink-0">
+            {!busy && <Plus size={13} />}
             Schedule
-          </button>
+          </Button>
         </div>
         {error && <span className="text-xs" style={{ color: "var(--error)" }}>{error}</span>}
       </div>
@@ -1501,16 +1498,15 @@ export function AutomationView() {
                 {c.last_fire ? ` · last ${new Date(c.last_fire).toLocaleString()}` : " · never run"}
               </span>
             </div>
-            <button onClick={() => toggle(c.id, !c.enabled)}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md border"
-              style={c.enabled ? { borderColor: "var(--border)", background: "var(--surface-primary)", color: "var(--text-secondary)" } : { background: "var(--accent)", color: "var(--accent-contrast)", borderColor: "transparent" }}
+            <Button variant={c.enabled ? "outline" : "primary"} size="sm"
+              onClick={() => toggle(c.id, !c.enabled)}
               title={c.enabled ? "Pause this campaign" : "Resume this campaign"}>
               {c.enabled ? <Square size={13} /> : <Play size={13} />}
               {c.enabled ? "Pause" : "Resume"}
-            </button>
-            <button onClick={() => remove(c.id)} className="inline-flex items-center justify-center p-1.5 rounded-md text-text-muted hover:text-error hover:bg-surface-hover" title="Delete campaign" aria-label="Delete campaign">
+            </Button>
+            <IconButton danger onClick={() => remove(c.id)} title="Delete campaign" aria-label="Delete campaign">
               <Trash2 size={14} />
-            </button>
+            </IconButton>
           </div>
         ))}
       </div>
@@ -1525,14 +1521,10 @@ export function AutomationView() {
             <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
               Recent Runs
             </div>
-            <button
-              onClick={() => void clearHistory()}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md text-text-muted hover:text-error hover:bg-surface-hover"
-              title="Clear run history"
-            >
+            <Button variant="ghost" size="sm" onClick={() => void clearHistory()} title="Clear run history">
               <Trash2 size={12} />
               Clear
-            </button>
+            </Button>
           </div>
           <div className="flex flex-col">
             {history.map((h) => (
