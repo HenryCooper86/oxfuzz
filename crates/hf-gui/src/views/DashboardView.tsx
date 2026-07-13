@@ -26,7 +26,7 @@ import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRe
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
 import { useConfirm } from "../providers/ConfirmContext";
-import { getTransport, onDataChanged, useDefectDojo } from "../lib";
+import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type {
@@ -919,7 +919,7 @@ function GitLabDraft({ draft }: { draft: GitLabIssueExport }) {
             {copied ? "Copied" : "Copy"}
           </Button>
           {draft.issue_url && (
-            <Button variant="primary" size="sm" onClick={() => window.open(draft.issue_url ?? "", "_blank", "noopener,noreferrer")}>
+            <Button variant="primary" size="sm" onClick={() => void openExternal(draft.issue_url ?? "")}>
               <ExternalLink size={13} />
               Open GitLab
             </Button>
