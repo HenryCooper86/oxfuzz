@@ -13,6 +13,7 @@ pub mod checkpoints;
 pub mod config;
 pub mod container;
 pub mod defectdojo;
+pub mod defectdojo_lifecycle;
 pub mod diagnostics;
 pub mod init;
 pub mod knowledge;
@@ -44,10 +45,11 @@ pub use container::{
     provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,
     workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot, ArtifactSummary, CompileOutcome,
     CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome, ProviderSnapshot,
-    RegressionResult, RunHistoryItem, RunSummary, SeedEntry, ServiceContainer, SystemSnapshot,
-    SyzkallerRunOpts, SyzkallerSummary,
+    RegressionResult, RunHistoryItem, RunSummary, SchedulableTarget, SeedEntry, ServiceContainer,
+    SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
+pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
 pub use hf_storage::{AutoRevertEvent, ProjectAutoRevert};
 pub use init::{init_at, init_workspace, InitReport};
 pub use report_store::ReportDraft;
