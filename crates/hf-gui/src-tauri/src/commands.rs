@@ -1066,30 +1066,54 @@ pub async fn schedule_targets(
         .map_err(|e| e.to_string())
 }
 
-/// Create a scheduled fuzz campaign; returns the updated list.
+/// Create a scheduled fuzz campaign; returns the updated list. An empty `target`
+/// makes a portfolio campaign that rotates through all promoted targets.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn schedule_create(
     state: tauri::State<'_, crate::state::AppState>,
     name: String,
     project: String,
-    target: String,
+    target: Option<String>,
     engine: String,
     lang: String,
     duration_secs: u64,
     trigger_kind: String,
     trigger_value: String,
+    max_runs: Option<u32>,
+    max_total_secs: Option<u64>,
 ) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
     let trigger = hf_service::scheduler::parse_trigger(&trigger_kind, &trigger_value)?;
     let params = hf_service::scheduler::CampaignParams {
         project,
-        target,
+        target: target.filter(|t| !t.is_empty()),
         engine,
         lang,
         duration_secs,
+        max_runs,
+        max_total_secs,
+        schedule_id: String::new(),
     };
     state.scheduler.create(&name, &params, trigger).await;
     Ok(state.scheduler.list_views().await)
+}
+
+/// The global concurrent-campaign cap.
+#[tauri::command]
+pub async fn schedule_concurrency_get(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<usize, String> {
+    Ok(state.scheduler.max_concurrent())
+}
+
+/// Set the global concurrent-campaign cap; returns the applied value.
+#[tauri::command]
+pub async fn schedule_concurrency_set(
+    state: tauri::State<'_, crate::state::AppState>,
+    max_concurrent: usize,
+) -> Result<usize, String> {
+    state.scheduler.set_max_concurrent(max_concurrent);
+    Ok(state.scheduler.max_concurrent())
 }
 
 /// Delete a scheduled campaign; returns the updated list.
