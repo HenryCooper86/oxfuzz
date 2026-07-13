@@ -207,6 +207,9 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/defectdojo/push", post(defectdojo_push))
         .route("/defectdojo/test", get(defectdojo_test))
         .route("/defectdojo/configured", get(defectdojo_configured))
+        .route("/defectdojo/status", get(defectdojo_status))
+        .route("/defectdojo/start", post(defectdojo_start))
+        .route("/defectdojo/stop", post(defectdojo_stop))
         .route("/chat/send", post(chat_send))
         .route("/chat/agent", post(chat_agent))
         // Session management (parity with the desktop shell).
@@ -225,6 +228,8 @@ pub fn build_with_state(state: AppState) -> Router {
         // Campaign scheduling.
         .route("/schedule", get(schedule_list).post(schedule_create))
         .route("/schedule/history", get(schedule_history))
+        .route("/schedule/history/clear", post(schedule_history_clear))
+        .route("/schedule/targets", post(schedule_targets))
         .route("/schedule/{id}", axum::routing::delete(schedule_delete))
         .route("/schedule/{id}/enabled", post(schedule_set_enabled))
         .route("/config/models", get(list_models))
@@ -758,7 +763,7 @@ async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json:
 }
 
 async fn system_status(State(_): State<AppState>) -> Json<hf_service::SystemStatus> {
-    Json(hf_service::system_status())
+    Json(hf_service::system_status().await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -871,6 +876,24 @@ async fn defectdojo_test(State(state): State<AppState>) -> ApiResult<bool> {
 
 async fn defectdojo_configured(State(state): State<AppState>) -> ApiResult<bool> {
     Ok(Json(state.container.defectdojo_configured()))
+}
+
+async fn defectdojo_status(State(_): State<AppState>) -> Json<hf_service::DefectDojoStatus> {
+    Json(hf_service::defectdojo_lifecycle::status().await)
+}
+
+async fn defectdojo_start(State(_): State<AppState>) -> ApiResult<hf_service::DefectDojoStatus> {
+    hf_service::defectdojo_lifecycle::start()
+        .await
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
+}
+
+async fn defectdojo_stop(State(_): State<AppState>) -> ApiResult<hf_service::DefectDojoStatus> {
+    hf_service::defectdojo_lifecycle::stop()
+        .await
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
 }
 
 async fn list_report_drafts(
@@ -1331,6 +1354,30 @@ async fn schedule_history(
     }
 }
 
+async fn schedule_history_clear(State(state): State<AppState>) -> Json<u64> {
+    match &state.scheduler {
+        Some(s) => Json(s.clear_history().await),
+        None => Json(0),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleTargetsRequest {
+    project: String,
+}
+
+async fn schedule_targets(
+    State(state): State<AppState>,
+    Json(req): Json<ScheduleTargetsRequest>,
+) -> ApiResult<Vec<hf_service::SchedulableTarget>> {
+    state
+        .container
+        .schedulable_targets(std::path::Path::new(&req.project))
+        .await
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
+}
+
 #[derive(Debug, Deserialize)]
 struct ScheduleCreateRequest {
     name: String,
@@ -1339,7 +1386,15 @@ struct ScheduleCreateRequest {
     project: String,
     target: String,
     engine: String,
+    /// Canonical language id of the promoted harness; defaults to C for clients
+    /// written before scheduled campaigns could be anything else.
+    #[serde(default = "default_campaign_lang")]
+    lang: String,
     duration_secs: u64,
+}
+
+fn default_campaign_lang() -> String {
+    hf_service::TargetLanguage::C.as_str().to_owned()
 }
 
 async fn schedule_create(
@@ -1355,6 +1410,7 @@ async fn schedule_create(
         project: req.project,
         target: req.target,
         engine: req.engine,
+        lang: req.lang,
         duration_secs: req.duration_secs,
     };
     scheduler.create(&req.name, &params, trigger).await;

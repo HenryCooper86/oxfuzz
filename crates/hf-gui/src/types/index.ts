@@ -113,6 +113,27 @@ export interface SystemStatus {
   honggfuzz: boolean;
   clusterfuzzlite: boolean;
   syzkaller: boolean;
+  /** The configured DefectDojo is answering (false also when unconfigured). */
+  defectdojo: boolean;
+}
+
+/** Lifecycle state of the DefectDojo instance the app is pointed at. */
+export type DefectDojoState =
+  | "not_configured"
+  | "remote"
+  | "docker_down"
+  | "not_installed"
+  | "stopped"
+  | "starting"
+  | "ready";
+
+export interface DefectDojoStatus {
+  state: DefectDojoState;
+  url: string | null;
+  /** Human-readable explanation of `state`, safe to render as-is. */
+  message: string;
+  /** True when hobot_fuzz can start/stop this instance itself. */
+  managed: boolean;
 }
 
 /** Engine identifiers used across the Run view and status bar. */

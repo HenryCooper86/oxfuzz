@@ -76,12 +76,53 @@ const TICK: Duration = Duration::from_secs(30);
 const CAMPAIGN_KIND: &str = "fuzz-campaign";
 
 /// Parameters for a scheduled fuzz campaign (stored in `Schedule.parameter_values`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CampaignParams {
     pub project: String,
     pub target: String,
     pub engine: String,
     pub duration_secs: u64,
+    /// Target language, taken from the promoted harness at schedule time.
+    /// Defaults to C so schedules persisted before this field existed still load
+    /// (they could only ever have been C -- the dispatcher hardcoded it).
+    #[serde(default = "default_lang")]
+    pub lang: String,
+}
+
+/// The language a campaign persisted before `lang` existed must have run as.
+fn default_lang() -> String {
+    TargetLanguage::C.as_str().to_owned()
+}
+
+impl Default for CampaignParams {
+    /// Hand-written so the fallback used when stored params fail to parse still
+    /// carries a parseable language; a derived `Default` would leave it empty.
+    fn default() -> Self {
+        Self {
+            project: String::new(),
+            target: String::new(),
+            engine: String::new(),
+            duration_secs: 0,
+            lang: default_lang(),
+        }
+    }
+}
+
+/// Pin the project to an absolute path before persisting a schedule.
+///
+/// A workspace is keyed by a hash of the project *path string*, so a schedule
+/// stored as `tests/fixtures/sample_c` looks for its compiled harness in a
+/// different workspace than the absolute path the harness was compiled under --
+/// and fails every single fire with "compiled harness not found", hours after
+/// anyone was watching. Canonicalizing once, at creation, makes that class of
+/// schedule unrepresentable. A path that does not resolve is left alone: the
+/// campaign's own error is clearer than one invented here.
+fn with_absolute_project(params: &CampaignParams) -> CampaignParams {
+    let mut pinned = params.clone();
+    if let Ok(absolute) = std::fs::canonicalize(&pinned.project) {
+        pinned.project = absolute.display().to_string();
+    }
+    pinned
 }
 
 /// A presentation-friendly view of a scheduled campaign for the GUI.
@@ -95,6 +136,8 @@ pub struct CampaignView {
     pub project: String,
     pub target: String,
     pub engine: String,
+    /// Canonical language id the campaign runs as (`c`, `cpp`, `rust`).
+    pub lang: String,
     pub duration_secs: u64,
     /// Last time the campaign fired (RFC3339), if ever.
     pub last_fire: Option<String>,
@@ -163,6 +206,7 @@ fn view_of(schedule: &Schedule) -> CampaignView {
         project: params.project,
         target: params.target,
         engine: params.engine,
+        lang: params.lang,
         duration_secs: params.duration_secs,
         last_fire: schedule.last_fire.map(|t| t.to_rfc3339()),
     }
@@ -230,10 +274,18 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             .engine
             .parse()
             .map_err(|e: String| DispatchError::ParseError { message: e })?;
+        // The language comes from the harness the campaign was scheduled against.
+        // Assuming C here (as this dispatcher once did) makes every Rust or C++
+        // campaign fail the harness-language check at fire time, hours later.
+        let lang: TargetLanguage = params
+            .lang
+            .parse()
+            .map_err(|e: String| DispatchError::ParseError { message: e })?;
         tracing::info!(
-            "scheduled campaign {workflow_id} firing: {} via {} for {}s",
+            "scheduled campaign {workflow_id} firing: {} via {} ({}) for {}s",
             params.target,
             params.engine,
+            params.lang,
             params.duration_secs
         );
         let started = std::time::Instant::now();
@@ -251,7 +303,7 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                 Path::new(&params.project),
                 target,
                 engine,
-                TargetLanguage::C,
+                lang,
                 params.duration_secs,
                 2,
                 3,
@@ -407,11 +459,23 @@ impl CampaignScheduler {
         trigger: TriggerConfig,
     ) -> Schedule {
         let id = uuid::Uuid::new_v4().to_string();
+        let params = with_absolute_project(params);
         let schedule = Schedule::new(id, name, trigger, CAMPAIGN_KIND)
-            .with_params(serde_json::to_value(params).unwrap_or_default());
+            .with_params(serde_json::to_value(&params).unwrap_or_default());
         self.manager.register(schedule.clone()).await;
         self.persist().await;
         schedule
+    }
+
+    /// Clear the persisted execution history, returning how many rows went.
+    ///
+    /// History outlives the schedule that produced it, so a campaign deleted
+    /// months ago can still be the only thing an operator sees in "Recent runs".
+    pub async fn clear_history(&self) -> u64 {
+        let Some(store) = &self.store else {
+            return 0;
+        };
+        store.clear_schedule_executions().await.unwrap_or(0)
     }
 
     /// Remove a schedule by id.
@@ -463,6 +527,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_relative_project_is_pinned_to_an_absolute_path() {
+        // The whole reason scheduled campaigns failed every fire: a relative
+        // path hashes to a different workspace than the one holding the harness.
+        let params = CampaignParams {
+            project: ".".to_owned(),
+            target: "parse".to_owned(),
+            engine: "libfuzzer".to_owned(),
+            lang: "c".to_owned(),
+            duration_secs: 60,
+        };
+        let pinned = with_absolute_project(&params);
+        assert!(
+            Path::new(&pinned.project).is_absolute(),
+            "expected an absolute project path, got {}",
+            pinned.project
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_project_is_left_alone() {
+        let params = CampaignParams {
+            project: "/no/such/project".to_owned(),
+            ..CampaignParams::default()
+        };
+        assert_eq!(with_absolute_project(&params).project, "/no/such/project");
+    }
+
+    #[test]
+    fn campaign_params_persisted_before_lang_load_as_c() {
+        // Schedules stored by an older build have no `lang` key; they could only
+        // ever have run as C, because the dispatcher hardcoded it.
+        let legacy = serde_json::json!({
+            "project": "/p", "target": "t", "engine": "libfuzzer", "duration_secs": 60
+        });
+        let params: CampaignParams = serde_json::from_value(legacy).expect("legacy params load");
+        assert_eq!(params.lang, "c");
+        assert_eq!(
+            params.lang.parse::<TargetLanguage>(),
+            Ok(TargetLanguage::C),
+            "the default must be parseable by the dispatcher"
+        );
+    }
+
+    #[test]
+    fn default_campaign_params_carry_a_parseable_language() {
+        assert!(CampaignParams::default()
+            .lang
+            .parse::<TargetLanguage>()
+            .is_ok());
+    }
+
+    #[test]
     fn parse_trigger_handles_each_kind() {
         assert!(matches!(
             parse_trigger("interval", "3600"),
@@ -491,6 +607,7 @@ mod tests {
             project: "/p".to_owned(),
             target: "t".to_owned(),
             engine: "libfuzzer".to_owned(),
+            lang: "c".to_owned(),
             duration_secs: 60,
         };
         let sched = Schedule::new(
