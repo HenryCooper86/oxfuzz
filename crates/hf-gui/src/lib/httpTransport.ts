@@ -51,6 +51,16 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   push_to_defectdojo: { method: "POST", path: "/defectdojo/push" },
   defectdojo_test_connection: { method: "GET", path: "/defectdojo/test" },
   defectdojo_configured: { method: "GET", path: "/defectdojo/configured" },
+  defectdojo_status: { method: "GET", path: "/defectdojo/status" },
+  defectdojo_start: { method: "POST", path: "/defectdojo/start" },
+  defectdojo_stop: { method: "POST", path: "/defectdojo/stop" },
+  schedule_list: { method: "GET", path: "/schedule" },
+  schedule_create: { method: "POST", path: "/schedule" },
+  schedule_history: { method: "GET", path: "/schedule/history" },
+  schedule_history_clear: { method: "POST", path: "/schedule/history/clear" },
+  schedule_targets: { method: "POST", path: "/schedule/targets" },
+  schedule_delete: { method: "DELETE", path: "/schedule/{id}" },
+  schedule_set_enabled: { method: "POST", path: "/schedule/{id}/enabled" },
   system_status: { method: "GET", path: "/system/status" },
   system_status_cmd: { method: "GET", path: "/system/status" },
   ensure_docker: { method: "GET", path: "/system/status" },
@@ -104,6 +114,35 @@ function toWebArgs(args?: Record<string, unknown>): Record<string, unknown> | un
   return mapped;
 }
 
+/**
+ * Resolve a command's URL and body.
+ *
+ * Path placeholders (`/schedule/{id}`) are filled from the args and consumed, so
+ * a REST route that keys on an id works from the same invoke() call shape the
+ * Tauri transport takes. What is left over becomes the query string on a GET, or
+ * the JSON body otherwise.
+ */
+function buildRequest(
+  endpoint: { method: string; path: string },
+  args?: Record<string, unknown>,
+): { url: string; body: Record<string, unknown> } {
+  const rest: Record<string, unknown> = { ...(args ?? {}) };
+  const path = endpoint.path.replace(/\{(\w+)\}/g, (_, key: string) => {
+    const value = rest[key];
+    delete rest[key];
+    return encodeURIComponent(String(value ?? ""));
+  });
+  const body = toWebArgs(rest) ?? {};
+  if (endpoint.method !== "GET") return { url: `${BASE_URL}${path}`, body };
+
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value !== undefined && value !== null) query.append(key, String(value));
+  }
+  const suffix = query.toString();
+  return { url: `${BASE_URL}${path}${suffix ? `?${suffix}` : ""}`, body };
+}
+
 export function createHttpTransport(): Transport {
   const sse = new SseAdapter(BASE_URL);
   return {
@@ -138,14 +177,11 @@ export function createHttpTransport(): Transport {
         // already `.catch()` this and degrade to an empty/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
-      const url = `${BASE_URL}${endpoint.path}`;
+      const { url, body } = buildRequest(endpoint, args);
       const response = await fetch(url, {
         method: endpoint.method,
         headers: { "content-type": "application/json" },
-        body:
-          endpoint.method === "GET"
-            ? undefined
-            : JSON.stringify(toWebArgs(args) ?? {}),
+        body: endpoint.method === "GET" ? undefined : JSON.stringify(body),
       });
       if (!response.ok) {
         throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);

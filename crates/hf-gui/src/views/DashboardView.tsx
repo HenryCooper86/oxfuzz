@@ -31,6 +31,7 @@ import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type {
   CrashReviewItem,
+  DefectDojoStatus,
   GitLabIssueExport,
   HarnessReviewItem,
   ReportDraft,
@@ -951,6 +952,7 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
           </div>
         ))}
       </div>
+      <DefectDojoHealth />
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
         <ReadinessItem ready={dashboard.totals.targets > 0} label="Targets discovered" detail={`${dashboard.totals.targets} target(s)`} />
         <ReadinessItem ready={dashboard.totals.harnesses > 0} label="Harness library" detail={`${dashboard.totals.harnesses} harness(es)`} />
@@ -958,6 +960,92 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
         <ReadinessItem ready={dashboard.totals.harnesses_needing_review === 0} label="Harness review queue" detail={`${dashboard.totals.harnesses_needing_review} pending`} />
       </div>
     </section>
+  );
+}
+
+/** Badge text per DefectDojo lifecycle state. `missing`/`ready` also drive the badge tone. */
+const DD_BADGE: Record<DefectDojoStatus["state"], string> = {
+  ready: "ready",
+  starting: "starting",
+  stopped: "stopped",
+  docker_down: "missing",
+  not_installed: "not installed",
+  not_configured: "not configured",
+  remote: "unreachable",
+};
+
+/**
+ * DefectDojo's row in Production Readiness. Unlike the engine flags it is a
+ * server with a lifecycle, so it gets its own row: what state it is in, why,
+ * and -- when it is an instance we manage -- a way to start it from here.
+ */
+function DefectDojoHealth() {
+  const { toast } = useToast();
+  const [dd, setDd] = useState<DefectDojoStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(
+    () =>
+      getTransport()
+        .invoke<DefectDojoStatus>("defectdojo_status")
+        .then(setDd)
+        .catch(() => setDd(null)),
+    [],
+  );
+
+  useEffect(() => {
+    void refresh();
+    let unlisten: (() => void) | undefined;
+    getTransport()
+      .listen<DefectDojoStatus>("defectdojo:status", (e) => setDd(e.payload))
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [refresh]);
+
+  // Keep the row honest while the server boots (it takes ~a minute).
+  useEffect(() => {
+    if (dd?.state !== "starting") return undefined;
+    const id = setInterval(() => void refresh(), 3000);
+    return () => clearInterval(id);
+  }, [dd?.state, refresh]);
+
+  async function start() {
+    setBusy(true);
+    try {
+      setDd(await getTransport().invoke<DefectDojoStatus>("defectdojo_start"));
+    } catch (e) {
+      toast({ title: "Could not start DefectDojo", description: String(e), variant: "error" });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const state = dd?.state;
+  const ready = state === "ready";
+  const starting = busy || state === "starting";
+  return (
+    <div className="rounded-md border border-border flex items-center gap-3" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
+      <div className="flex flex-col min-w-0 flex-1">
+        <span className="text-sm">DefectDojo</span>
+        <span className="block text-xs text-text-muted truncate">
+          {dd?.message ?? "Checking DefectDojo..."}
+        </span>
+      </div>
+      {dd?.managed && !ready && (
+        <Button variant="outline" size="sm" onClick={() => void start()} disabled={starting}>
+          {starting ? <RotateCw size={13} className="animate-spin" /> : <Play size={13} />}
+          {starting ? "Starting" : "Start"}
+        </Button>
+      )}
+      <StatusBadge
+        value={state ? DD_BADGE[state] : "missing"}
+        tone={ready ? "ok" : "warn"}
+      />
+    </div>
   );
 }
 
