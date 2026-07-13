@@ -124,7 +124,7 @@ pub async fn build_bootstrapped() -> Router {
     // the user data dir so they survive restarts.
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
     let scheduler = std::sync::Arc::new(
-        hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path).await,
+        hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path, None).await,
     );
     build_with_state(AppState::new(container).with_scheduler(scheduler))
 }
@@ -230,6 +230,10 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/schedule/history", get(schedule_history))
         .route("/schedule/history/clear", post(schedule_history_clear))
         .route("/schedule/targets", post(schedule_targets))
+        .route(
+            "/schedule/concurrency",
+            get(schedule_concurrency_get).post(schedule_concurrency_set),
+        )
         .route("/schedule/{id}", axum::routing::delete(schedule_delete))
         .route("/schedule/{id}/enabled", post(schedule_set_enabled))
         .route("/config/models", get(list_models))
@@ -1384,13 +1388,22 @@ struct ScheduleCreateRequest {
     trigger_kind: String,
     trigger_value: String,
     project: String,
-    target: String,
+    /// Promoted target to fuzz; `None`/empty = portfolio over all promoted targets.
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
     engine: String,
     /// Canonical language id of the promoted harness; defaults to C for clients
     /// written before scheduled campaigns could be anything else.
     #[serde(default = "default_campaign_lang")]
     lang: String,
     duration_secs: u64,
+    /// Budget: stop after this many completed runs.
+    #[serde(default)]
+    max_runs: Option<u32>,
+    /// Budget: stop after this much cumulative fuzz time (seconds).
+    #[serde(default)]
+    max_total_secs: Option<u64>,
 }
 
 fn default_campaign_lang() -> String {
@@ -1408,13 +1421,38 @@ async fn schedule_create(
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     let params = hf_service::scheduler::CampaignParams {
         project: req.project,
-        target: req.target,
+        target: req.target.filter(|t| !t.is_empty()),
         engine: req.engine,
         lang: req.lang,
         duration_secs: req.duration_secs,
+        max_runs: req.max_runs,
+        max_total_secs: req.max_total_secs,
+        schedule_id: String::new(),
     };
     scheduler.create(&req.name, &params, trigger).await;
     Ok(Json(scheduler.list_views().await))
+}
+
+async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> {
+    Json(state.scheduler.as_ref().map_or(0, |s| s.max_concurrent()))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConcurrencyRequest {
+    max_concurrent: usize,
+}
+
+async fn schedule_concurrency_set(
+    State(state): State<AppState>,
+    Json(req): Json<ConcurrencyRequest>,
+) -> Json<usize> {
+    match &state.scheduler {
+        Some(s) => {
+            s.set_max_concurrent(req.max_concurrent);
+            Json(s.max_concurrent())
+        }
+        None => Json(0),
+    }
 }
 
 async fn schedule_delete(
