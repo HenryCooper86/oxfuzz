@@ -59,6 +59,8 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   schedule_history: { method: "GET", path: "/schedule/history" },
   schedule_history_clear: { method: "POST", path: "/schedule/history/clear" },
   schedule_targets: { method: "POST", path: "/schedule/targets" },
+  schedule_concurrency_get: { method: "GET", path: "/schedule/concurrency" },
+  schedule_concurrency_set: { method: "POST", path: "/schedule/concurrency" },
   schedule_delete: { method: "DELETE", path: "/schedule/{id}" },
   schedule_set_enabled: { method: "POST", path: "/schedule/{id}/enabled" },
   system_status: { method: "GET", path: "/system/status" },

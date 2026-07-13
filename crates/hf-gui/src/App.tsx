@@ -7,7 +7,8 @@ import { RecoveryBanner } from "./components/RecoveryBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConfirmProvider } from "./providers/ConfirmContext";
 import { TooltipProvider } from "./components/ui/Tooltip";
-import { ToastProvider } from "./components/ui/Toast";
+import { ToastProvider, useToast } from "./components/ui/Toast";
+import { getTransport } from "./lib";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
 import { ObservabilityPanel } from "./components/observation/ObservabilityPanel";
 import { InfoPanel } from "./components/observation/InfoPanel";
@@ -116,6 +117,7 @@ function AppInner() {
   return (
     <TooltipProvider>
       <ToastProvider>
+        <CampaignCrashToaster />
         <div className="app-root flex h-full w-full bg-surface-primary text-text-primary">
         {activeView === "settings" ? (
           <SettingsView
@@ -252,6 +254,44 @@ function AppInner() {
       </ToastProvider>
     </TooltipProvider>
   );
+}
+
+interface CampaignCrashNotice {
+  target: string;
+  crashes: number;
+  report_saved: boolean;
+  defectdojo_pushed: boolean;
+}
+
+/**
+ * Toasts when a headless scheduled campaign finds crashes, wherever the user is
+ * in the app. Lives inside ToastProvider so it can raise toasts; the backend
+ * emits `campaign:crash` after a scheduled run triages a crash.
+ */
+function CampaignCrashToaster() {
+  const { toast } = useToast();
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getTransport()
+      .listen<CampaignCrashNotice>("campaign:crash", (e) => {
+        const p = e.payload;
+        const extras = [
+          p.report_saved ? "report saved" : null,
+          p.defectdojo_pushed ? "pushed to DefectDojo" : null,
+        ].filter(Boolean);
+        toast({
+          title: `${p.crashes} crash${p.crashes === 1 ? "" : "es"} on ${p.target}`,
+          description: `Scheduled campaign${extras.length ? ` — ${extras.join(", ")}` : ""}`,
+          variant: "error",
+        });
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [toast]);
+  return null;
 }
 
 export default function App() {
