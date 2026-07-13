@@ -1,0 +1,44 @@
+# Issue-tracker integration -- file triaged crashes as GitHub or GitLab issues
+# in the FUZZED project's repository (not hobot_fuzz's own).
+#
+# hobot_fuzz builds a crash issue (title + stack/repro + labels) and either opens
+# a prefilled "new issue" page in your browser, or -- when a token is set -- files
+# the issue directly through the provider's REST API and links you to it.
+#
+# Auth is a Personal Access Token. There is deliberately no password field:
+# GitHub removed password auth for its API in 2021 and GitLab's API is
+# token-based. `username` below is for attribution/display only, never auth.
+
+# Which tracker to use: "github", "gitlab", or "none" to disable.
+provider = "none"
+
+# Base web URL. Leave blank for the public host (github.com / gitlab.com). Set it
+# for GitHub Enterprise (e.g. https://ghe.example.com) or a self-hosted GitLab
+# (e.g. https://gitlab.example.com).
+host = ""
+
+# The target repository of the software you are fuzzing:
+#   GitHub: "owner/repo"          e.g. "acme/libwidget"
+#   GitLab: "group/project"       e.g. "acme/libwidget"  (or a numeric project id)
+repo = ""
+
+# Personal Access Token. Two ways to provide it:
+#   1. Paste it into `api_token` below (stored with your desktop settings, like a
+#      provider key). Needs the "repo"/"Issues: write" scope on GitHub, or the
+#      "api" scope on GitLab.
+#   2. Set `api_token_env` to the NAME of an environment variable that holds it,
+#      and export that variable (preferred for CLI/CI so the secret stays out of
+#      the config file). A direct `api_token` takes priority.
+# api_token = "ghp_xxx or glpat-xxx"
+api_token_env = "HF_ISSUE_TRACKER_TOKEN"
+
+# Optional: your username on the tracker, shown for attribution. Never used to
+# authenticate.
+username = ""
+
+# Labels applied to every filed issue.
+labels = ["hobot-fuzz", "fuzzing", "crash"]
+
+# Verify the server's TLS certificate. Set false ONLY for a self-signed cert on
+# a trusted on-prem instance.
+verify_tls = true

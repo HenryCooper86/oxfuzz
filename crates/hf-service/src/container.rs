@@ -1888,16 +1888,46 @@ impl ServiceContainer {
         crate::workbench::harness_review_queue(self.store.as_deref(), project, target).await
     }
 
-    /// Build a human-reviewable GitLab issue draft for a crash.
+    /// Build a human-reviewable issue draft for a crash, targeting the fuzzed
+    /// project's configured GitHub/GitLab repository.
     ///
-    /// This is intentionally non-publishing: it returns a title, Markdown body,
-    /// labels, and a prefilled issue URL when a GitLab remote/config is known.
-    pub async fn gitlab_issue_export(
+    /// Non-publishing: it returns a title, Markdown body, labels, the provider,
+    /// and a prefilled new-issue URL. Use [`Self::file_issue`] to actually file it.
+    pub async fn issue_export(
         &self,
         project: &Path,
         crash_id: &str,
-    ) -> Result<crate::workbench::GitLabIssueExport, ClassifiedError> {
-        crate::workbench::gitlab_issue_export(self.store.as_deref(), project, crash_id).await
+    ) -> Result<crate::workbench::IssueExport, ClassifiedError> {
+        crate::workbench::issue_export(self.store.as_deref(), project, crash_id).await
+    }
+
+    /// Whether a usable issue-tracker integration is configured (provider + repo).
+    #[must_use]
+    pub fn issue_tracker_configured(&self) -> bool {
+        crate::issue_tracker::is_configured()
+    }
+
+    /// File a crash as an issue via the configured provider's API.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the tracker is unconfigured, lacks a token,
+    /// the crash is unknown, or the API rejects the request.
+    pub async fn file_issue(
+        &self,
+        crash_id: &str,
+    ) -> Result<crate::issue_tracker::CreatedIssue, ClassifiedError> {
+        crate::workbench::file_issue(self.store.as_deref(), crash_id).await
+    }
+
+    /// Verify the issue-tracker URL + token without filing anything.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if unconfigured, tokenless, or the API rejects it.
+    pub async fn issue_tracker_test_connection(&self) -> Result<(), ClassifiedError> {
+        let cfg = crate::issue_tracker::load_config()?;
+        let token = crate::issue_tracker::resolve_token(&cfg)?;
+        let client = crate::issue_tracker::IssueTrackerClient::from_config(&cfg, &token)?;
+        client.test_connection().await
     }
 
     /// Saved editable report drafts for the internal workbench.

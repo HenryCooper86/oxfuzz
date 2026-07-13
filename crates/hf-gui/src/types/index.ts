@@ -217,13 +217,23 @@ export interface WorkbenchDashboard {
   next_actions: string[];
 }
 
-export interface GitLabIssueExport {
+export interface IssueExport {
   crash_id: string;
   title: string;
   description: string;
   labels: string[];
+  /** "github" | "gitlab" -- which forge the URLs/API target. */
+  provider: string;
   project_web_url: string | null;
   issue_url: string | null;
+  /** True when the issue can be filed directly via the API (repo + token). */
+  can_file: boolean;
+}
+
+/** The issue created by filing via the provider API. */
+export interface CreatedIssue {
+  url: string;
+  number: number | null;
 }
 
 export interface ReportDraft {

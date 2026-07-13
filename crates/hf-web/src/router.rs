@@ -203,7 +203,11 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/system/status", get(system_status))
         .route("/workbench/dashboard", post(workbench_dashboard))
         .route("/workbench/harnesses", post(harness_review_queue))
-        .route("/gitlab/issue", post(gitlab_issue_export))
+        .route("/gitlab/issue", post(issue_export))
+        .route("/issues/export", post(issue_export))
+        .route("/issues/file", post(file_issue))
+        .route("/issues/configured", get(issue_tracker_configured))
+        .route("/issues/test", get(issue_tracker_test))
         .route("/defectdojo/push", post(defectdojo_push))
         .route("/defectdojo/test", get(defectdojo_test))
         .route("/defectdojo/configured", get(defectdojo_configured))
@@ -833,21 +837,51 @@ async fn artifact_summary(
 }
 
 #[derive(Debug, Deserialize)]
-struct GitLabIssueRequest {
+struct IssueExportRequest {
     project: String,
     crash_id: String,
 }
 
-async fn gitlab_issue_export(
+async fn issue_export(
     State(state): State<AppState>,
-    Json(req): Json<GitLabIssueRequest>,
-) -> ApiResult<hf_service::GitLabIssueExport> {
+    Json(req): Json<IssueExportRequest>,
+) -> ApiResult<hf_service::IssueExport> {
     let export = state
         .container
-        .gitlab_issue_export(std::path::Path::new(&req.project), &req.crash_id)
+        .issue_export(std::path::Path::new(&req.project), &req.crash_id)
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(export))
+}
+
+#[derive(Debug, Deserialize)]
+struct FileIssueRequest {
+    crash_id: String,
+}
+
+async fn file_issue(
+    State(state): State<AppState>,
+    Json(req): Json<FileIssueRequest>,
+) -> ApiResult<hf_service::CreatedIssue> {
+    let created = state
+        .container
+        .file_issue(&req.crash_id)
+        .await
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(created))
+}
+
+async fn issue_tracker_configured(State(state): State<AppState>) -> Json<bool> {
+    Json(state.container.issue_tracker_configured())
+}
+
+async fn issue_tracker_test(State(state): State<AppState>) -> ApiResult<bool> {
+    state
+        .container
+        .issue_tracker_test_connection()
+        .await
+        .map(|()| Json(true))
+        .map_err(map_err(StatusCode::BAD_REQUEST))
 }
 
 #[derive(Debug, Deserialize)]
