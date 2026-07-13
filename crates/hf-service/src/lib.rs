@@ -9,6 +9,7 @@
 //! build/run through `hf-runtime` sandboxing (AGENTS.md 2.12).
 
 pub mod agent;
+pub mod campaign_state;
 pub mod checkpoints;
 pub mod config;
 pub mod container;

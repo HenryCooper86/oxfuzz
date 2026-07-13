@@ -7,7 +7,7 @@
 //! the background, and persists schedules to JSON so they survive restarts.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,7 +22,30 @@ use hf_scheduler::{
 use hf_storage::Store;
 use serde::{Deserialize, Serialize};
 
-use crate::container::ServiceContainer;
+use crate::campaign_state::{CampaignRuntimeState, CampaignStateStore, ConcurrencyGate};
+use crate::container::{SchedulableTarget, ServiceContainer};
+
+/// Notified to the presentation layer when a scheduled campaign finds crashes,
+/// so a headless run can raise a toast. Set by the Tauri shell; `None` elsewhere.
+pub type CampaignNotifier = Arc<dyn Fn(CampaignNotice) + Send + Sync>;
+
+/// A late-bindable notifier slot: the desktop shell only has an `AppHandle` to
+/// emit with *after* the scheduler is built, so it fills this in during setup.
+type NotifierSlot = Arc<Mutex<Option<CampaignNotifier>>>;
+
+/// What a scheduled campaign found, for a UI notification.
+#[derive(Debug, Clone, Serialize)]
+pub struct CampaignNotice {
+    pub schedule_id: String,
+    pub campaign: String,
+    pub project: String,
+    pub target: String,
+    pub crashes: usize,
+    /// A report draft was saved for the crashes.
+    pub report_saved: bool,
+    /// The crashes were pushed to `DefectDojo`.
+    pub defectdojo_pushed: bool,
+}
 
 /// Persists scheduler executions to the database so history survives restarts.
 struct DbSchedulerPersistence {
@@ -76,17 +99,39 @@ const TICK: Duration = Duration::from_secs(30);
 const CAMPAIGN_KIND: &str = "fuzz-campaign";
 
 /// Parameters for a scheduled fuzz campaign (stored in `Schedule.parameter_values`).
+///
+/// A campaign is a *portfolio*: `target: None` fuzzes every promoted target in the
+/// project, rotating priority-first across fires; `Some` pins one target (the
+/// original behaviour). Either way it only ever runs a human-promoted harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CampaignParams {
     pub project: String,
-    pub target: String,
+    /// `None` = rotate through all promoted targets in the project; `Some` = a
+    /// single fixed target. Deserialises an old bare-string `target` as `Some`.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Engine for a single-target campaign (display only in all-targets mode,
+    /// where each promoted harness carries its own).
+    #[serde(default)]
     pub engine: String,
-    pub duration_secs: u64,
     /// Target language, taken from the promoted harness at schedule time.
     /// Defaults to C so schedules persisted before this field existed still load
     /// (they could only ever have been C -- the dispatcher hardcoded it).
     #[serde(default = "default_lang")]
     pub lang: String,
+    /// Duration of one target's fuzz run.
+    pub duration_secs: u64,
+    /// Budget: stop after this many completed runs (`None` = unbounded).
+    #[serde(default)]
+    pub max_runs: Option<u32>,
+    /// Budget: stop after this much cumulative fuzz time (`None` = unbounded).
+    #[serde(default)]
+    pub max_total_secs: Option<u64>,
+    /// The owning schedule's id, injected at creation so the headless dispatcher
+    /// (which is handed only the constant workflow kind) can key rotation and
+    /// budget state. Empty for legacy schedules, which never rotate.
+    #[serde(default)]
+    pub schedule_id: String,
 }
 
 /// The language a campaign persisted before `lang` existed must have run as.
@@ -100,12 +145,56 @@ impl Default for CampaignParams {
     fn default() -> Self {
         Self {
             project: String::new(),
-            target: String::new(),
+            target: None,
             engine: String::new(),
-            duration_secs: 0,
             lang: default_lang(),
+            duration_secs: 0,
+            max_runs: None,
+            max_total_secs: None,
+            schedule_id: String::new(),
         }
     }
+}
+
+/// Order promoted targets by priority: highest fit score first, then symbol, then
+/// engine, so the rotation is deterministic and high-value targets lead each cycle.
+fn priority_order(mut targets: Vec<SchedulableTarget>) -> Vec<SchedulableTarget> {
+    targets.sort_by(|a, b| {
+        b.fit_score
+            .partial_cmp(&a.fit_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.target.cmp(&b.target))
+            .then_with(|| a.engine.cmp(&b.engine))
+    });
+    targets
+}
+
+/// The target a given fire fuzzes: round-robin over the priority order, so every
+/// target is eventually covered and the cursor survives restarts.
+fn rotate(ordered: &[SchedulableTarget], cursor: u64) -> Option<&SchedulableTarget> {
+    if ordered.is_empty() {
+        return None;
+    }
+    let idx = usize::try_from(cursor % ordered.len() as u64).unwrap_or(0);
+    ordered.get(idx)
+}
+
+/// Whether the campaign has spent its budget; the message names which limit hit.
+fn budget_skip_reason(state: &CampaignRuntimeState, params: &CampaignParams) -> Option<String> {
+    if let Some(max) = params.max_runs {
+        if state.runs_done >= max {
+            return Some(format!("budget reached: {max} run(s) completed"));
+        }
+    }
+    if let Some(max) = params.max_total_secs {
+        if state.secs_done >= max {
+            return Some(format!(
+                "budget reached: {}s of the {max}s fuzzing budget spent",
+                state.secs_done
+            ));
+        }
+    }
+    None
 }
 
 /// Pin the project to an absolute path before persisting a schedule.
@@ -134,11 +223,20 @@ pub struct CampaignView {
     /// Human-readable trigger summary (e.g. "every 3600s", "cron: 0 2 * * *").
     pub trigger: String,
     pub project: String,
-    pub target: String,
+    /// `None` = a portfolio campaign rotating through all promoted targets.
+    pub target: Option<String>,
     pub engine: String,
     /// Canonical language id the campaign runs as (`c`, `cpp`, `rust`).
     pub lang: String,
     pub duration_secs: u64,
+    /// Budget: max completed runs, if bounded.
+    pub max_runs: Option<u32>,
+    /// Budget: max cumulative fuzz seconds, if bounded.
+    pub max_total_secs: Option<u64>,
+    /// Completed runs so far (progress against the budget).
+    pub runs_done: u32,
+    /// Cumulative fuzz seconds so far.
+    pub secs_done: u64,
     /// Last time the campaign fired (RFC3339), if ever.
     pub last_fire: Option<String>,
 }
@@ -208,6 +306,11 @@ fn view_of(schedule: &Schedule) -> CampaignView {
         engine: params.engine,
         lang: params.lang,
         duration_secs: params.duration_secs,
+        max_runs: params.max_runs,
+        max_total_secs: params.max_total_secs,
+        // Progress is filled in by `list_views` from the state store.
+        runs_done: 0,
+        secs_done: 0,
         last_fire: schedule.last_fire.map(|t| t.to_rfc3339()),
     }
 }
@@ -255,8 +358,129 @@ pub fn parse_trigger(kind: &str, value: &str) -> Result<TriggerConfig, String> {
 }
 
 /// Runs due campaigns headlessly through the service container.
+///
+/// A portfolio campaign resolves the project's promoted targets on each fire and
+/// fuzzes the next one in priority-weighted rotation, under a global concurrency
+/// cap and a per-campaign budget. Only promoted harnesses are ever run.
 struct FuzzCampaignDispatcher {
     container: ServiceContainer,
+    state: Arc<CampaignStateStore>,
+    gate: Arc<ConcurrencyGate>,
+    notifier: NotifierSlot,
+    /// Weak so the manager <-> dispatcher cycle does not leak; used to pause a
+    /// campaign once its budget is spent.
+    manager: Weak<SchedulerManager>,
+}
+
+/// A fire that ran nothing (budget spent or concurrency full). Recorded as a
+/// completed execution whose summary explains why; it never advances state.
+fn skip_result(reason: &str) -> DispatchResult {
+    DispatchResult {
+        success: true,
+        summary: format!("skipped: {reason}"),
+        output: serde_json::json!({ "skipped": true, "reason": reason }),
+        duration_ms: 0,
+        error: None,
+    }
+}
+
+impl FuzzCampaignDispatcher {
+    /// The promoted targets this campaign may fuzz, in priority order. A single
+    /// campaign narrows to its one target; a portfolio takes them all.
+    async fn resolve_targets(
+        &self,
+        params: &CampaignParams,
+    ) -> Result<Vec<SchedulableTarget>, String> {
+        let all = self
+            .container
+            .schedulable_targets(Path::new(&params.project))
+            .await
+            .map_err(|e| e.to_string())?;
+        let selected: Vec<SchedulableTarget> =
+            match params.target.as_deref().filter(|t| !t.is_empty()) {
+                Some(sym) => all.into_iter().filter(|t| t.target == sym).collect(),
+                None => all,
+            };
+        Ok(priority_order(selected))
+    }
+
+    /// Best-effort follow-up when a scheduled run finds crashes: save a report
+    /// draft, push to `DefectDojo` if configured, and notify the UI. Failures are
+    /// logged, never propagated -- the campaign already did its job.
+    async fn on_crashes(&self, params: &CampaignParams, target: &str, crashes: usize) {
+        let project = Path::new(&params.project);
+        let report_saved = self.save_crash_report(project, target, crashes).await;
+
+        let defectdojo_pushed = if self.container.defectdojo_configured() {
+            match self
+                .container
+                .push_to_defectdojo(project, Some(target))
+                .await
+            {
+                Ok(outcome) => outcome.findings_pushed > 0,
+                Err(e) => {
+                    tracing::warn!("scheduled campaign DefectDojo push failed: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        // Clone the callback out of the lock, then call it unlocked.
+        let notifier = self.notifier.lock().ok().and_then(|slot| slot.clone());
+        if let Some(notify) = notifier {
+            notify(CampaignNotice {
+                schedule_id: params.schedule_id.clone(),
+                campaign: params.schedule_id.clone(),
+                project: params.project.clone(),
+                target: target.to_owned(),
+                crashes,
+                report_saved,
+                defectdojo_pushed,
+            });
+        }
+    }
+
+    async fn save_crash_report(&self, project: &Path, target: &str, crashes: usize) -> bool {
+        let markdown = match self.container.generate_report(project, target).await {
+            Ok(md) => md,
+            Err(e) => {
+                tracing::warn!("scheduled campaign report generation failed: {e}");
+                return false;
+            }
+        };
+        let title = format!("{target} - {crashes} crash(es) (scheduled)");
+        match self.container.save_report_draft(
+            None,
+            &title,
+            &project.to_string_lossy(),
+            Some(target),
+            "Needs Review",
+            &markdown,
+        ) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("scheduled campaign report save failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Pause a campaign whose budget is spent, so it stops firing skips forever.
+    /// Fire-and-forget: dispatch runs after the manager released its store lock.
+    fn pause_self(&self, schedule_id: &str) {
+        if schedule_id.is_empty() {
+            return;
+        }
+        let manager = self.manager.clone();
+        let id = schedule_id.to_owned();
+        tokio::spawn(async move {
+            if let Some(manager) = manager.upgrade() {
+                manager.pause(&id).await;
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -270,38 +494,79 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             serde_json::from_value(parameter_values).map_err(|e| DispatchError::ParseError {
                 message: format!("campaign params: {e}"),
             })?;
-        let engine: EngineKind = params
-            .engine
-            .parse()
-            .map_err(|e: String| DispatchError::ParseError { message: e })?;
-        // The language comes from the harness the campaign was scheduled against.
-        // Assuming C here (as this dispatcher once did) makes every Rust or C++
-        // campaign fail the harness-language check at fire time, hours later.
-        let lang: TargetLanguage = params
-            .lang
-            .parse()
-            .map_err(|e: String| DispatchError::ParseError { message: e })?;
-        tracing::info!(
-            "scheduled campaign {workflow_id} firing: {} via {} ({}) for {}s",
-            params.target,
-            params.engine,
-            params.lang,
-            params.duration_secs
-        );
-        let started = std::time::Instant::now();
-        // Run the full autonomous campaign (discover -> harness+repair -> seed ->
-        // run -> triage -> refine), not just a single fixed run. A named target
-        // pins the campaign; an empty one lets it pick the top-ranked target.
-        let target = if params.target.trim().is_empty() {
-            None
-        } else {
-            Some(params.target.as_str())
+
+        // 1. Budget. Spent -> record one skip and pause, so it stops re-firing.
+        let state = self.state.snapshot(&params.schedule_id);
+        if let Some(reason) = budget_skip_reason(&state, &params) {
+            self.pause_self(&params.schedule_id);
+            return Ok(skip_result(&reason));
+        }
+
+        // 2. Concurrency. Full -> skip this fire (never queue: short intervals
+        // over long runs would pile up unbounded background work).
+        let Some(_permit) = self.gate.try_enter() else {
+            return Ok(skip_result(&format!(
+                "max concurrent campaigns reached ({})",
+                self.gate.limit()
+            )));
         };
+
+        // 3. Pick the next target in priority rotation (promoted only).
+        let targets = match self.resolve_targets(&params).await {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(DispatchResult {
+                    success: false,
+                    summary: "could not resolve promoted targets".to_owned(),
+                    output: serde_json::Value::Null,
+                    duration_ms: 0,
+                    error: Some(e),
+                });
+            }
+        };
+        let Some(pick) = rotate(&targets, state.cursor).cloned() else {
+            let hint = params.target.as_deref().map_or_else(
+                || "project has no promoted harness yet".to_owned(),
+                |t| format!("target '{t}' has no promoted harness"),
+            );
+            return Ok(DispatchResult {
+                success: false,
+                summary: format!("no target to fuzz: {hint}"),
+                output: serde_json::Value::Null,
+                duration_ms: 0,
+                error: Some(hint),
+            });
+        };
+        let (Ok(engine), Ok(lang)) = (
+            pick.engine.parse::<EngineKind>(),
+            pick.language.parse::<TargetLanguage>(),
+        ) else {
+            return Ok(DispatchResult {
+                success: false,
+                summary: format!("target '{}' has an unparseable engine/lang", pick.target),
+                output: serde_json::Value::Null,
+                duration_ms: 0,
+                error: Some(format!("{}/{}", pick.engine, pick.language)),
+            });
+        };
+
+        tracing::info!(
+            "campaign {workflow_id} [{}] firing: {} via {engine:?} ({lang:?}) for {}s ({} of {} target(s))",
+            params.schedule_id,
+            pick.target,
+            params.duration_secs,
+            (state.cursor % targets.len() as u64) + 1,
+            targets.len(),
+        );
+
+        // 4. Run one promoted target, then advance the rotation + budget (any
+        // real attempt counts; only skips above leave the state untouched).
+        let started = std::time::Instant::now();
         let result = self
             .container
             .run_campaign(
                 Path::new(&params.project),
-                target,
+                Some(&pick.target),
                 engine,
                 lang,
                 params.duration_secs,
@@ -310,40 +575,63 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             )
             .await;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let advanced = self
+            .state
+            .record_run(&params.schedule_id, params.duration_secs);
+
         match result {
-            Ok(outcome) => Ok(DispatchResult {
-                success: true,
-                summary: format!(
-                    "{} crash(es), {} edges over {} iteration(s) on {}{}",
-                    outcome.crashes,
-                    outcome.edges,
-                    outcome.iterations,
-                    outcome.target,
-                    if outcome.auto_reverts > 0 {
-                        format!(", {} auto-revert(s)", outcome.auto_reverts)
-                    } else {
-                        String::new()
-                    },
-                ),
-                output: serde_json::json!({
-                    "target": outcome.target,
-                    "crashes": outcome.crashes,
-                    "edges": outcome.edges,
-                    "iterations": outcome.iterations,
-                    "repairs_used": outcome.repairs_used,
-                    "auto_reverts": outcome.auto_reverts,
-                }),
-                duration_ms,
-                error: None,
-            }),
+            Ok(outcome) => {
+                if outcome.crashes > 0 {
+                    self.on_crashes(&params, &outcome.target, outcome.crashes)
+                        .await;
+                }
+                let budget = budget_note(&advanced, &params);
+                Ok(DispatchResult {
+                    success: true,
+                    summary: format!(
+                        "{} crash(es), {} edges over {} iteration(s) on {}{}{budget}",
+                        outcome.crashes,
+                        outcome.edges,
+                        outcome.iterations,
+                        outcome.target,
+                        if outcome.auto_reverts > 0 {
+                            format!(", {} auto-revert(s)", outcome.auto_reverts)
+                        } else {
+                            String::new()
+                        },
+                    ),
+                    output: serde_json::json!({
+                        "target": outcome.target,
+                        "crashes": outcome.crashes,
+                        "edges": outcome.edges,
+                        "iterations": outcome.iterations,
+                        "repairs_used": outcome.repairs_used,
+                        "auto_reverts": outcome.auto_reverts,
+                        "runs_done": advanced.runs_done,
+                    }),
+                    duration_ms,
+                    error: None,
+                })
+            }
             Err(e) => Ok(DispatchResult {
                 success: false,
-                summary: "campaign failed".to_owned(),
+                summary: format!("campaign failed on {}", pick.target),
                 output: serde_json::Value::Null,
                 duration_ms,
                 error: Some(e.to_string()),
             }),
         }
+    }
+}
+
+/// A short " -- N/M runs" suffix for the history summary when a budget is set.
+fn budget_note(state: &CampaignRuntimeState, params: &CampaignParams) -> String {
+    if let Some(max) = params.max_runs {
+        format!(" -- {}/{max} runs", state.runs_done)
+    } else if let Some(max) = params.max_total_secs {
+        format!(" -- {}/{max}s", state.secs_done)
+    } else {
+        String::new()
     }
 }
 
@@ -354,19 +642,47 @@ pub struct CampaignScheduler {
     store_path: PathBuf,
     /// Database for persisted execution history (when configured).
     store: Option<Arc<Store>>,
+    /// Rotation cursor + budget consumption per campaign (JSON sidecar).
+    state: Arc<CampaignStateStore>,
+    /// Global cap on concurrent campaign runs.
+    gate: Arc<ConcurrencyGate>,
+    /// Late-bound crash notifier (filled by the desktop shell after setup).
+    notifier: NotifierSlot,
+}
+
+/// The campaign runtime-state sidecar lives beside `schedules.json`.
+fn campaign_state_path(schedules_path: &Path) -> PathBuf {
+    schedules_path.parent().map_or_else(
+        || PathBuf::from("campaign_state.json"),
+        |p| p.join("campaign_state.json"),
+    )
 }
 
 impl CampaignScheduler {
     /// Start the scheduler: install the dispatcher, reload persisted schedules,
     /// and begin ticking. Campaigns run with permissive guardrails -- creating a
     /// schedule is the human authorization for its future headless runs.
-    pub async fn start(container: ServiceContainer, store_path: PathBuf) -> Self {
+    ///
+    /// `notifier` (set by the desktop shell) is called when a scheduled run finds
+    /// crashes, so the UI can toast; pass `None` for headless CLI/web.
+    pub async fn start(
+        container: ServiceContainer,
+        store_path: PathBuf,
+        notifier: Option<CampaignNotifier>,
+    ) -> Self {
         let manager = Arc::new(SchedulerManager::with_defaults());
         // Grab the DB handle (for persisted execution history) before the
         // container is moved into the dispatcher.
         let store = container.store().cloned();
+        let state = Arc::new(CampaignStateStore::load(campaign_state_path(&store_path)));
+        let gate = Arc::new(ConcurrencyGate::new(state.max_concurrent()));
+        let notifier: NotifierSlot = Arc::new(Mutex::new(notifier));
         let dispatcher = Arc::new(FuzzCampaignDispatcher {
             container: container.with_guardrails(Guardrails::permissive()),
+            state: Arc::clone(&state),
+            gate: Arc::clone(&gate),
+            notifier: Arc::clone(&notifier),
+            manager: Arc::downgrade(&manager),
         });
         manager.set_dispatcher(dispatcher).await;
         if let Some(store) = &store {
@@ -384,7 +700,30 @@ impl CampaignScheduler {
             manager,
             store_path,
             store,
+            state,
+            gate,
+            notifier,
         }
+    }
+
+    /// Bind the crash notifier after construction (the desktop shell only has an
+    /// `AppHandle` to emit with once Tauri has set up).
+    pub fn set_notifier(&self, notifier: CampaignNotifier) {
+        if let Ok(mut slot) = self.notifier.lock() {
+            *slot = Some(notifier);
+        }
+    }
+
+    /// The global concurrent-campaign cap.
+    #[must_use]
+    pub fn max_concurrent(&self) -> usize {
+        self.gate.limit()
+    }
+
+    /// Set the global concurrent-campaign cap (persisted; applies immediately).
+    pub fn set_max_concurrent(&self, n: usize) {
+        self.state.set_max_concurrent(n);
+        self.gate.set_limit(self.state.max_concurrent());
     }
 
     /// All scheduled campaigns.
@@ -413,6 +752,9 @@ impl CampaignScheduler {
                 if view.last_fire.is_none() {
                     view.last_fire = fires.get(&s.id).cloned();
                 }
+                let progress = self.state.snapshot(&s.id);
+                view.runs_done = progress.runs_done;
+                view.secs_done = progress.secs_done;
                 view
             })
             .collect()
@@ -459,7 +801,10 @@ impl CampaignScheduler {
         trigger: TriggerConfig,
     ) -> Schedule {
         let id = uuid::Uuid::new_v4().to_string();
-        let params = with_absolute_project(params);
+        let mut params = with_absolute_project(params);
+        // Inject the id so the dispatcher (handed only the constant kind) can key
+        // this campaign's rotation and budget state.
+        params.schedule_id.clone_from(&id);
         let schedule = Schedule::new(id, name, trigger, CAMPAIGN_KIND)
             .with_params(serde_json::to_value(&params).unwrap_or_default());
         self.manager.register(schedule.clone()).await;
@@ -478,10 +823,12 @@ impl CampaignScheduler {
         store.clear_schedule_executions().await.unwrap_or(0)
     }
 
-    /// Remove a schedule by id.
+    /// Remove a schedule by id, discarding its rotation/budget state so a
+    /// recreated campaign starts fresh.
     pub async fn remove(&self, id: &str) -> bool {
         let removed = self.manager.remove(id).await;
         if removed {
+            self.state.forget(id);
             self.persist().await;
         }
         removed
@@ -532,10 +879,11 @@ mod tests {
         // path hashes to a different workspace than the one holding the harness.
         let params = CampaignParams {
             project: ".".to_owned(),
-            target: "parse".to_owned(),
+            target: Some("parse".to_owned()),
             engine: "libfuzzer".to_owned(),
             lang: "c".to_owned(),
             duration_secs: 60,
+            ..CampaignParams::default()
         };
         let pinned = with_absolute_project(&params);
         assert!(
@@ -563,6 +911,9 @@ mod tests {
         });
         let params: CampaignParams = serde_json::from_value(legacy).expect("legacy params load");
         assert_eq!(params.lang, "c");
+        // An old bare-string `target` still loads as a single-target campaign.
+        assert_eq!(params.target.as_deref(), Some("t"));
+        assert!(params.max_runs.is_none() && params.max_total_secs.is_none());
         assert_eq!(
             params.lang.parse::<TargetLanguage>(),
             Ok(TargetLanguage::C),
@@ -605,10 +956,11 @@ mod tests {
         let path = dir.path().join("schedules.json");
         let params = CampaignParams {
             project: "/p".to_owned(),
-            target: "t".to_owned(),
+            target: Some("t".to_owned()),
             engine: "libfuzzer".to_owned(),
             lang: "c".to_owned(),
             duration_secs: 60,
+            ..CampaignParams::default()
         };
         let sched = Schedule::new(
             "id1",
@@ -623,7 +975,68 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "nightly");
         let p: CampaignParams = serde_json::from_value(loaded[0].parameter_values.clone()).unwrap();
-        assert_eq!(p.target, "t");
+        assert_eq!(p.target.as_deref(), Some("t"));
         assert_eq!(p.duration_secs, 60);
+    }
+
+    fn target(sym: &str, fit: f64) -> SchedulableTarget {
+        SchedulableTarget {
+            target: sym.to_owned(),
+            engine: "libfuzzer".to_owned(),
+            language: "c".to_owned(),
+            fit_score: fit,
+        }
+    }
+
+    #[test]
+    fn priority_order_is_highest_fit_first_then_stable() {
+        let ordered = priority_order(vec![
+            target("low", 0.2),
+            target("high", 0.9),
+            target("mid", 0.5),
+        ]);
+        let syms: Vec<&str> = ordered.iter().map(|t| t.target.as_str()).collect();
+        assert_eq!(syms, vec!["high", "mid", "low"]);
+    }
+
+    #[test]
+    fn rotation_covers_every_target_and_wraps() {
+        let ordered = priority_order(vec![target("a", 0.9), target("b", 0.5), target("c", 0.1)]);
+        // Cursor 0,1,2 sweep all three in priority order; 3 wraps back to the top.
+        let picks: Vec<&str> = (0..4)
+            .map(|c| rotate(&ordered, c).unwrap().target.as_str())
+            .collect();
+        assert_eq!(picks, vec!["a", "b", "c", "a"]);
+        assert!(rotate(&[], 0).is_none(), "no targets -> nothing to fuzz");
+    }
+
+    #[test]
+    fn budget_stops_on_runs_then_on_time() {
+        let mut params = CampaignParams {
+            max_runs: Some(3),
+            ..CampaignParams::default()
+        };
+        let under = CampaignRuntimeState {
+            runs_done: 2,
+            ..CampaignRuntimeState::default()
+        };
+        assert!(budget_skip_reason(&under, &params).is_none());
+        let at = CampaignRuntimeState {
+            runs_done: 3,
+            ..CampaignRuntimeState::default()
+        };
+        assert!(budget_skip_reason(&at, &params).unwrap().contains("run(s)"));
+
+        params.max_runs = None;
+        params.max_total_secs = Some(600);
+        let spent = CampaignRuntimeState {
+            secs_done: 600,
+            ..CampaignRuntimeState::default()
+        };
+        assert!(budget_skip_reason(&spent, &params)
+            .unwrap()
+            .contains("budget"));
+        // Unbounded campaign never hits a budget skip.
+        assert!(budget_skip_reason(&spent, &CampaignParams::default()).is_none());
     }
 }
