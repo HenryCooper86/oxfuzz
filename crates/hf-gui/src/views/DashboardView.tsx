@@ -31,8 +31,9 @@ import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type {
   CrashReviewItem,
+  CreatedIssue,
   DefectDojoStatus,
-  GitLabIssueExport,
+  IssueExport,
   HarnessReviewItem,
   ReportDraft,
   SystemStatus,
@@ -129,7 +130,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [issue, setIssue] = useState<GitLabIssueExport | null>(null);
+  const [issue, setIssue] = useState<IssueExport | null>(null);
   // The active project's effective auto-revert policy (override or global), for
   // the header badge. Null until loaded or when no project is active.
   const [autoRevert, setAutoRevert] = useState<(AutoRevertPolicyView & { overridden: boolean }) | null>(null);
@@ -326,7 +327,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       return;
     }
     try {
-      const draft = await getTransport().invoke<GitLabIssueExport>("gitlab_issue_export", {
+      const draft = await getTransport().invoke<IssueExport>("issue_export", {
         project: activeProject,
         crashId: crash.crash_id,
       });
@@ -861,7 +862,7 @@ function GitLabIntegration({
 }: {
   project: string;
   crashes: CrashReviewItem[];
-  issue: GitLabIssueExport | null;
+  issue: IssueExport | null;
   onExport: (crash: CrashReviewItem) => void;
 }) {
   return (
@@ -888,18 +889,38 @@ function GitLabIntegration({
         )}
       </section>
       <div style={{ flex: "2 1 380px", minWidth: 0 }}>
-        {issue ? <GitLabDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint="Choose a crash to preview a GitLab issue draft." />}
+        {issue ? <IssueDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint="Choose a crash to preview an issue draft." />}
       </div>
     </div>
   );
 }
 
-function GitLabDraft({ draft }: { draft: GitLabIssueExport }) {
+function IssueDraft({ draft }: { draft: IssueExport }) {
+  const { toast } = useToast();
   const [copied, setCopied] = useState(false);
+  const [filing, setFiling] = useState(false);
+  const providerLabel = draft.provider === "github" ? "GitHub" : "GitLab";
+
   async function copyBody() {
     await copyText(`${draft.title}\n\n${draft.description}`);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  // File the issue directly via the provider API, then open the created issue.
+  async function fileIssue() {
+    setFiling(true);
+    try {
+      const created = await getTransport().invoke<CreatedIssue>("file_issue", {
+        crashId: draft.crash_id,
+      });
+      toast({ title: `Filed ${providerLabel} issue`, description: created.url, variant: "success" });
+      if (created.url) void openExternal(created.url);
+    } catch (e) {
+      toast({ title: `Could not file ${providerLabel} issue`, description: String(e), variant: "error" });
+    } finally {
+      setFiling(false);
+    }
   }
 
   return (
@@ -907,25 +928,41 @@ function GitLabDraft({ draft }: { draft: GitLabIssueExport }) {
       <SectionHeader icon={<GitPullRequest size={15} />} title="Issue Draft" />
       <div className="mt-3 flex flex-col gap-2">
         <div className="text-sm font-medium">{draft.title}</div>
+        {draft.project_web_url && (
+          <div className="text-xs text-text-muted truncate">
+            {providerLabel} · <span className="font-mono">{draft.project_web_url.replace(/^https?:\/\//, "")}</span>
+          </div>
+        )}
         <div className="flex flex-wrap gap-1">
           {draft.labels.map((label) => (
             <span key={label} className="text-xs px-2 py-0.5 rounded-sm" style={{ background: "var(--surface-active)", color: "var(--text-secondary)" }}>{label}</span>
           ))}
         </div>
         <Textarea value={draft.description} readOnly rows={12} />
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" size="sm" onClick={() => void copyBody()}>
             <Clipboard size={13} />
             {copied ? "Copied" : "Copy"}
           </Button>
+          {draft.can_file && (
+            <Button variant="primary" size="sm" onClick={() => void fileIssue()} loading={filing}>
+              {!filing && <GitPullRequest size={13} />}
+              File {providerLabel} issue
+            </Button>
+          )}
           {draft.issue_url && (
-            <Button variant="primary" size="sm" onClick={() => void openExternal(draft.issue_url ?? "")}>
+            <Button variant={draft.can_file ? "outline" : "primary"} size="sm" onClick={() => void openExternal(draft.issue_url ?? "")}>
               <ExternalLink size={13} />
-              Open GitLab
+              Open in browser
             </Button>
           )}
         </div>
-        {!draft.issue_url && <InlineNotice tone="warn" text="No GitLab remote or HF_GITLAB_* config was found for the selected project." />}
+        {!draft.issue_url && (
+          <InlineNotice
+            tone="warn"
+            text="No issue tracker configured. Set the fuzzed project's GitHub/GitLab repo and token in Settings > Issue Tracker."
+          />
+        )}
       </div>
     </section>
   );
