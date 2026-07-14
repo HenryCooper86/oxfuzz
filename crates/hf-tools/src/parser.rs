@@ -803,7 +803,11 @@ fn extract_quoted_attr<'a>(tag_fragment: &'a str, attr: &str) -> Option<&'a str>
 /// Strip surrounding single or double quotes from a string.
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    // Require at least two bytes so a lone `"` (where both starts_with and
+    // ends_with match the same char) does not slice a reverse range and panic.
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
         &s[1..s.len() - 1]
     } else {
         s

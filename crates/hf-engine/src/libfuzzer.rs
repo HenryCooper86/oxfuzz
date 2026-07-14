@@ -15,9 +15,11 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     if duration > 0 {
         args.push(format!("-max_total_time={duration}"));
     }
-    // Disable leak detection so the fuzzer can run long enough to find
-    // coverage (leaks are reported separately via ASan logs).
-    args.push("-detect_leaks=0".to_owned());
+    // Leak detection is left at libFuzzer's default (on). Memory leaks are a bug
+    // class the triage pipeline explicitly ingests (`leak-*` artifacts), and the
+    // smoke step also runs with leak detection on, so a run must match. A caller
+    // that wants it off can append `-detect_leaks=0` via `cfg.extra_args`, which
+    // libFuzzer honors (last occurrence wins).
     // libFuzzer writes crashes to the corpus dir by default; use -artifact_prefix
     // to direct them to the out dir. The trailing slash is REQUIRED: libFuzzer
     // concatenates `{prefix}{type}-{hash}`, so without it an artifact lands at

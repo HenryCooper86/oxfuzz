@@ -212,6 +212,38 @@ async fn absorb_adds_unique_crash_inputs_and_skips_dups() {
 }
 
 #[tokio::test]
+async fn absorb_keeps_distinct_inputs_that_share_a_basename() {
+    // Two different crash reproducers pulled from different run dirs can share a
+    // file name. Absorb must keep both on disk, not silently overwrite one.
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+
+    let run_a = dir.path().join("a");
+    let run_b = dir.path().join("b");
+    fs::create_dir_all(&run_a).unwrap();
+    fs::create_dir_all(&run_b).unwrap();
+    let crash_a = run_a.join("crash-abc");
+    let crash_b = run_b.join("crash-abc"); // same basename, different content
+    fs::write(&crash_a, b"first-distinct-input").unwrap();
+    fs::write(&crash_b, b"second-distinct-input").unwrap();
+
+    let (corpus, added) = absorb(&corpus_root, &[crash_a, crash_b]).unwrap();
+
+    assert_eq!(added, 2, "both distinct inputs are absorbed");
+    // Both byte payloads must survive on disk under distinct files.
+    let has_first = corpus
+        .entries
+        .iter()
+        .any(|e| std::fs::read(&e.path).unwrap() == b"first-distinct-input");
+    let has_second = corpus
+        .entries
+        .iter()
+        .any(|e| std::fs::read(&e.path).unwrap() == b"second-distinct-input");
+    assert!(has_first && has_second, "neither input was overwritten");
+}
+
+#[tokio::test]
 async fn list_returns_correct_metadata() {
     let dir = TempDir::new().unwrap();
     let corpus_root = dir.path().join("corpus");

@@ -482,15 +482,31 @@ pub async fn smoke_fuzz(
     let combined = format!("{}\n{}", result.stdout, result.stderr);
     let execs = parse_execs_per_sec(&combined);
     let crashes = parse_crashes(&combined);
-    // The harness is valid if the fuzzer actually ran. A campaign that finds a
-    // crash immediately (so it reports 0 exec/s) still proves the harness
-    // exercises the target -- the crash is reported, not treated as a failure.
+    // The harness is valid only if the fuzzer actually exercised the target. A
+    // crash (even at 0 exec/s, found immediately) proves it did. Otherwise we
+    // require measured throughput. HARNESS_STANDARD requires execs/sec > 0: a
+    // harness that deadlocks right after libFuzzer prints `INITED` (then is
+    // killed at the sandbox cap) must NOT be promoted just because the log
+    // contains "inited"/"done".
+    //
+    // libFuzzer/ClusterFuzzLite emit a parseable `exec/s: N`, so require
+    // `execs > 0` for them (closing the INITED-then-hang loophole). AFL++ and
+    // honggfuzz print engine-specific status whose rate `parse_execs_per_sec`
+    // may not capture, so keep the lenient throughput-marker check for them
+    // rather than risk rejecting a genuinely-running smoke.
     let lower = combined.to_ascii_lowercase();
-    let ran = execs > 0.0
-        || crashes > 0
-        || lower.contains("exec/s")
-        || lower.contains("inited")
-        || lower.contains("done");
+    let ran = if matches!(
+        harness.engine,
+        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
+    ) {
+        execs > 0.0 || crashes > 0
+    } else {
+        execs > 0.0
+            || crashes > 0
+            || lower.contains("exec/s")
+            || lower.contains("exec speed")
+            || lower.contains("cycles done")
+    };
     if !ran {
         return Err(ClassifiedError::Harness(format!(
             "smoke fuzz: no fuzzer activity detected; output: {}",

@@ -10,6 +10,18 @@ use serde::Deserialize;
 /// large project does not blow the context window.
 pub const MAX_SOURCE_CONTEXT_CHARS: usize = 8000;
 
+/// Length to keep from `s`, floored to a UTF-8 char boundary so slicing
+/// `&s[..n]` never panics on a multibyte character straddling the limit.
+/// Source with non-ASCII bytes (accented identifiers, non-English comments,
+/// a stray `©`) routinely crosses the 8000-byte mark mid-character.
+fn char_floor(s: &str, max: usize) -> usize {
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// Draft a bug report for a crash using an LLM.
 ///
 /// When `source` is provided (the relevant target source), the model is asked
@@ -29,7 +41,7 @@ pub async fn draft_report(
     let source_block = source.map_or_else(String::new, |s| {
         format!(
             "\nTarget source (for root-cause analysis):\n```\n{}\n```\n",
-            &s[..s.len().min(MAX_SOURCE_CONTEXT_CHARS)]
+            &s[..char_floor(s, MAX_SOURCE_CONTEXT_CHARS)]
         )
     });
     let prompt = format!(
@@ -154,5 +166,25 @@ mod tests {
         let r = parse_report_json(json).expect("valid json");
         assert_eq!(r.root_cause, "");
         assert_eq!(r.suggested_fix, "");
+    }
+
+    #[test]
+    fn char_floor_never_splits_a_multibyte_char() {
+        // A 3-byte char (U+00A9 is 2 bytes; U+20AC EURO SIGN is 3 bytes) placed
+        // so the limit lands in its middle must floor back to a boundary, so the
+        // subsequent slice does not panic.
+        let s = "abc€def"; // '€' occupies bytes 3..6
+        for max in 0..=s.len() {
+            let end = char_floor(s, max);
+            assert!(s.is_char_boundary(end), "floor must land on a boundary");
+            let _ = &s[..end]; // must not panic
+            assert!(end <= max);
+        }
+        // A limit that lands inside '€' (byte 4 or 5) floors to byte 3.
+        assert_eq!(char_floor(s, 4), 3);
+        assert_eq!(char_floor(s, 5), 3);
+        assert_eq!(char_floor(s, 6), 6);
+        // Beyond the string keeps the whole string.
+        assert_eq!(char_floor(s, 999), s.len());
     }
 }

@@ -186,3 +186,42 @@ async fn discover_rust_finds_public_parameterized_functions() {
     assert!(inv.candidates.iter().all(|c| c.symbol != "private_helper"));
     assert!(inv.candidates.iter().all(|c| c.symbol != "getter"));
 }
+
+#[tokio::test]
+async fn discover_rust_scans_crlf_identically_to_lf() {
+    // CRLF sources must scan identically to LF ones. A byte offset that only
+    // accounts for '\n' drifts one byte per preceding line on CRLF files, so the
+    // offset-derived parameter list and complexity get read from the wrong span.
+    // The preceding line ends in a stray '(' so a drifted offset latches onto
+    // the wrong parenthesis group -- the exact failure mode of the bug.
+    let body = "// region helpers\n\
+                let region = open_scope(\n\
+                pub fn decode_frame(buf: &[u8], len: usize) -> bool {\n\
+                \x20   !buf.is_empty() && len > 0\n\
+                }\n";
+    let lf_dir = tempfile::tempdir().unwrap();
+    std::fs::write(lf_dir.path().join("lib.rs"), body).unwrap();
+    let crlf_dir = tempfile::tempdir().unwrap();
+    std::fs::write(crlf_dir.path().join("lib.rs"), body.replace('\n', "\r\n")).unwrap();
+
+    let lf = hf_discovery::discover(lf_dir.path(), TargetLanguage::Rust)
+        .await
+        .expect("lf discovery");
+    let crlf = hf_discovery::discover(crlf_dir.path(), TargetLanguage::Rust)
+        .await
+        .expect("crlf discovery");
+
+    let pick = |inv: &hf_core::target::TargetInventory| {
+        inv.candidates
+            .iter()
+            .find(|c| c.symbol == "decode_frame")
+            .map(|c| (c.input_surface, c.complexity))
+    };
+    let lf_frame = pick(&lf).expect("decode_frame found on LF");
+    let crlf_frame = pick(&crlf).expect("decode_frame found on CRLF");
+    // The offset-derived input surface and complexity must match LF exactly.
+    assert_eq!(
+        lf_frame, crlf_frame,
+        "CRLF scan diverged from LF (offset drift): LF={lf_frame:?} CRLF={crlf_frame:?}"
+    );
+}

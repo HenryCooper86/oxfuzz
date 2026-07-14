@@ -347,7 +347,14 @@ fn redact_json_value(
 fn truncate_json_value(value: &serde_json::Value, max_len: usize) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) if s.len() > max_len => {
-            serde_json::Value::String(s[..max_len].to_string())
+            // Floor to a UTF-8 char boundary: an LLM response string can have a
+            // multibyte char (emoji/CJK) straddling `max_len`, and byte-slicing
+            // there would panic.
+            let mut end = max_len;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            serde_json::Value::String(s[..end].to_string())
         }
         serde_json::Value::Array(arr) => serde_json::Value::Array(
             arr.iter()

@@ -622,6 +622,14 @@ async fn cmd_harness(
             "refined: status={:?} repairs_used={}",
             outcome.status, outcome.repairs_used
         );
+        // Refine must recompile to measure coverage, but --draft-only still means
+        // "stop before smoke qualification and promotion".
+        if draft_only {
+            println!(
+                "--draft-only: refined and recompiled; skipping smoke qualification and promotion."
+            );
+            return Ok(());
+        }
         qualify_harness(&container, &project, target, engine, lang, promote).await?;
         return Ok(());
     }
@@ -689,10 +697,14 @@ async fn cmd_run(
     project: PathBuf,
     target: &str,
     engine: &str,
-    _lang: &str,
+    lang: &str,
     duration: Option<&str>,
 ) -> anyhow::Result<()> {
     let engine_kind = parse_engine(engine)?;
+    // `run` drives the already-built harness, which carries its own language, so
+    // the value is not threaded further. Still validate it (like triage/ci) so an
+    // invalid `--lang` is rejected up front rather than silently ignored.
+    parse_lang(lang)?;
     let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
     let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
     // Ensure a seed corpus exists before running. A failure here is not fatal
