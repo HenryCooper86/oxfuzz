@@ -72,10 +72,15 @@ impl ContextProvider for InjectBootstrap {
             let tokens = estimate_tokens(&formatted);
 
             if tokens > remaining {
-                // Truncate to fit within budget.
+                // Truncate to fit within budget. Floor to a UTF-8 char boundary so
+                // non-ASCII bootstrap content cannot panic the byte slice.
                 let max_chars = (remaining as usize) * 4;
                 let truncated = if formatted.len() > max_chars {
-                    format!("{}... [truncated]", &formatted[..max_chars])
+                    let mut end = max_chars;
+                    while end > 0 && !formatted.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}... [truncated]", &formatted[..end])
                 } else {
                     formatted
                 };

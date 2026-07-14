@@ -30,6 +30,7 @@ import { AuditView } from "./views/AuditView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
+import { HelpView } from "./views/HelpView";
 import { ProjectProvider, useProject } from "./providers/ProjectContext";
 import { PipelineProvider } from "./providers/PipelineContext";
 import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
@@ -39,7 +40,7 @@ import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck } from "lucide-react";
+import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy } from "lucide-react";
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -232,6 +233,11 @@ function AppInner() {
                     <AutomationView />
                   </div>
                 )}
+                {activeView === "help" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <HelpView />
+                  </div>
+                )}
                 {activeView === "defectdojo" && <DefectDojoView onBack={() => navigate("dashboard")} />}
                 </ErrorBoundary>
               </main>
@@ -370,4 +376,5 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   knowledge: <BookOpen size={18} />,
   automation: <Zap size={18} />,
   defectdojo: <ShieldCheck size={18} />,
+  help: <LifeBuoy size={18} />,
 };

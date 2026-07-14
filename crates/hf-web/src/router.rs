@@ -685,7 +685,8 @@ async fn generate_seeds_llm(
         Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
     };
-    let count = req.count.unwrap_or(12).clamp(1, 64);
+    // The service clamps the count to a sane range; default when unspecified.
+    let count = req.count.unwrap_or(12);
     let entries = state
         .container
         .generate_seeds_llm(std::path::Path::new(&req.project), &req.target, lang, count)

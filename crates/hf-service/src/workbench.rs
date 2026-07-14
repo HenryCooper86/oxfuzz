@@ -329,45 +329,50 @@ pub async fn issue_export(
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);
 
-    let (provider, project_web_url, new_issue_url, labels, can_file) = if let Ok(cfg) =
-        crate::issue_tracker::load_config()
-    {
-        // Configured: file into the explicit target repo of the fuzzed software.
-        let provider = cfg
-            .resolved_provider()
-            .unwrap_or(crate::issue_tracker::Provider::GitLab);
-        let labels = cfg.labels.clone();
-        let (web, issue_url) = if let Some(base) = cfg.web_base() {
-            let repo = cfg.repo.trim();
+    let (provider, project_web_url, new_issue_url, labels, can_file) =
+        if let Ok(cfg) = crate::issue_tracker::load_config() {
+            // Configured: file into the explicit target repo of the fuzzed software.
+            let provider = cfg
+                .resolved_provider()
+                .unwrap_or(crate::issue_tracker::Provider::GitLab);
+            let labels = cfg.labels.clone();
+            let (web, issue_url) = if let Some(base) = cfg.web_base() {
+                let repo = cfg.repo.trim();
+                (
+                    Some(crate::issue_tracker::repo_web_url(&base, repo)),
+                    Some(crate::issue_tracker::new_issue_url(
+                        provider,
+                        &base,
+                        repo,
+                        &title,
+                        &description,
+                        &labels,
+                    )),
+                )
+            } else {
+                (None, None)
+            };
+            let can_file = crate::issue_tracker::resolve_token(&cfg).is_ok();
             (
-                Some(crate::issue_tracker::repo_web_url(&base, repo)),
-                Some(crate::issue_tracker::new_issue_url(
-                    provider,
-                    &base,
-                    repo,
-                    &title,
-                    &description,
-                    &labels,
-                )),
+                provider.as_str().to_owned(),
+                web,
+                issue_url,
+                labels,
+                can_file,
             )
         } else {
-            (None, None)
+            // Not configured: best-effort GitLab URL from the git remote.
+            let labels = vec![
+                "hobot-fuzz".to_owned(),
+                "fuzzing".to_owned(),
+                "crash".to_owned(),
+            ];
+            let web = gitlab_project_url(project);
+            let issue_url = web
+                .as_ref()
+                .map(|base| issue_url(base, &title, &description, &labels));
+            ("gitlab".to_owned(), web, issue_url, labels, false)
         };
-        let can_file = crate::issue_tracker::resolve_token(&cfg).is_ok();
-        (provider.as_str().to_owned(), web, issue_url, labels, can_file)
-    } else {
-        // Not configured: best-effort GitLab URL from the git remote.
-        let labels = vec![
-            "hobot-fuzz".to_owned(),
-            "fuzzing".to_owned(),
-            "crash".to_owned(),
-        ];
-        let web = gitlab_project_url(project);
-        let issue_url = web
-            .as_ref()
-            .map(|base| issue_url(base, &title, &description, &labels));
-        ("gitlab".to_owned(), web, issue_url, labels, false)
-    };
 
     Ok(IssueExport {
         crash_id: crash.id.to_string(),

@@ -212,16 +212,25 @@ pub fn absorb(
         let data = std::fs::read(input)
             .map_err(|e| ClassifiedError::Internal(format!("read crash input: {e}")))?;
         let hash = sha256_hex(&data);
-        if !seen.insert(hash) {
+        if !seen.insert(hash.clone()) {
             continue;
         }
         // Name absorbed entries distinctly so they never collide with an
-        // existing corpus file of the same basename.
+        // existing corpus file of the same basename. Two distinct crash inputs
+        // that share a basename (e.g. `crash-abc` pulled from different run
+        // dirs) must not overwrite each other, so fall back to a content-hash
+        // suffix when the preferred name is already taken -- mirroring `grow`.
         let stem = input
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("crash");
-        let dest = corpus_root.join(format!("crash_{stem}"));
+        let base = format!("crash_{stem}");
+        let preferred = corpus_root.join(&base);
+        let dest = if preferred.exists() {
+            corpus_root.join(format!("{base}-{}", &hash[..8.min(hash.len())]))
+        } else {
+            preferred
+        };
         std::fs::write(&dest, &data)
             .map_err(|e| ClassifiedError::Internal(format!("write absorbed: {e}")))?;
         entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));

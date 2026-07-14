@@ -242,7 +242,14 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
       setTestMsg(msg);
     } catch (e) {
       setTestOk(false);
-      setTestMsg(String(e));
+      // In browser (web) mode the connection test runs only in the desktop app;
+      // surface that plainly instead of a raw "Unsupported command" string.
+      const raw = String(e);
+      setTestMsg(
+        raw.includes("Unsupported command")
+          ? "Connection testing is available in the desktop app."
+          : raw,
+      );
     } finally {
       setTesting(false);
     }

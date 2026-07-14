@@ -40,6 +40,7 @@ const en: Dict = {
   "nav.knowledge": "Knowledge",
   "nav.automation": "Automation",
   "nav.defectdojo": "DefectDojo",
+  "nav.help": "Help & Docs",
   "nav.settings": "Settings",
   "sidebar.newTarget": "Open project",
   "sidebar.targets": "Recent",
@@ -68,6 +69,7 @@ const en: Dict = {
   "title.knowledge": "Knowledge",
   "title.automation": "Automation",
   "title.defectdojo": "DefectDojo",
+  "title.help": "Help & Documentation",
 
   // Header toggles (right-side panels)
   "header.progress": "Progress",

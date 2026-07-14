@@ -109,3 +109,70 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [~] CI: cargo fmt/clippy gates pass workspace-wide; add cargo-deny + test job.
 - [~] Tests: storage, service, guardrails, agent covered; expand crash/triage
   and end-to-end coverage.
+
+## Audit backlog (2026-07-14)
+
+A multi-crate audit fixed ~30 correctness/dead-code/doc issues (see git log).
+The following verified findings remain open, ranked by user impact. Each is real
+but larger or riskier than a drop-in fix.
+
+### Correctness (highest impact)
+- [ ] Target-scoped "latest run": `container.rs` resolves the latest run
+  project-scoped, not target-scoped, so `triage`/`generate_report`/`export_sarif`/
+  `push_to_defectdojo` can misattribute crashes across targets (and race between
+  the scheduler's concurrent campaigns). Add a target-scoped resolver and use it
+  in `triage`, `verify_regressions`, `corpus_absorb_crashes`, `crashes_for_latest_run`.
+- [ ] `persist_corpus` is upsert-only: `corpus_prune`/`corpus_prune_coverage`/
+  `corpus_minimize` delete files but never remove persisted rows, so reported
+  corpus counts only grow. Reconcile rows against the survivor set.
+- [ ] `harness_smoke` inserts a fresh config-less `RunRecord` per call, creating
+  orphan runs that shadow the real campaign run in Run History and feed the
+  latest-run bug above. Attach the qualified harness id or update in place.
+- [ ] AFL++ coverage: edge count is parsed from stdout (`count coverage :
+  2.55 bits/tuple` -> ~2) instead of `out/default/fuzzer_stats` (`edges_found`),
+  so AFL++ coverage/deltas/stagnation are wrong. Parse `fuzzer_stats`.
+- [ ] Crash minimization is unwired: `hf-crash::build_minimize_args` has no
+  caller and `Crash.minimized` is always false. Wire a minimize step into triage.
+- [ ] Agent tool results are sent as `Role::Tool` with no `tool_call_id`, which
+  OpenAI/strict relays reject (openai-compat is the shipped default). Feed tool
+  results in a provider-accepted shape.
+
+### REST/web parity
+- [ ] REST cannot start or observe a fuzz run (`run_fuzzer`/`run_syzkaller`/
+  `cancel_all_runs` have no route) and the SSE `RunProgress`/`DockerStatus`
+  channel is never fed. Add the routes + wire the SSE producer.
+- [ ] Web mode needs a `CorsLayer` and the frontend must send the `Authorization`
+  bearer header, or browser + token auth stay mutually exclusive.
+- [ ] REST handlers hardcode status codes; map `ClassifiedError` category to
+  4xx/5xx instead.
+- [ ] Path safety: `discover`/`knowledge_*` REST handlers pass raw user paths to
+  the host FS (`knowledge_search` returns file snippets). Canonicalize + bound.
+
+### Config knobs that silently no-op
+- [ ] Provider `cost_per_1k_input/output` never reaches `ProviderMetadata`, so
+  `CostOptimized` routing degenerates to "first candidate".
+- [ ] Per-schedule `concurrency_policy` / `max_executions_per_hour` are persisted
+  but never enforced; `SchedulerConfig.history_retention_limit`/others are inert.
+- [ ] `KnowledgeConfig.retrieval_strategy`/weights and `SessionConfig` fields are
+  deserialized but never mapped into the retriever/session manager.
+- [ ] `cmd_ci` composes pipeline logic in the CLI and mutates global env
+  (`HF_GUARDRAILS`); move to a `ServiceContainer::run_ci_gate` method.
+
+### Data / schema
+- [ ] `hf-storage` has two schema systems: live `migrations/*.sql` and a
+  test-only `schema.sql` + `migration.rs` whose `prepare_database` would archive
+  any real DB if ever wired in. Unify on one; fix `DATABASE_SCHEMA.md` drift
+  (runs missing 6 columns; ~12 tables undocumented).
+- [ ] `list_all_crashes` doc claims newest-first but has no `ORDER BY`.
+- [ ] `container.rs` storage reads use `.await.unwrap_or_default()` (14 sites), so
+  a DB error renders as "no data" (worst for the crash list). At least log the error.
+
+### Unwired subsystems (decide: roadmap or remove)
+- [ ] `hf-mcp` (3.3k LOC) has zero dependents. Most of `hf-journal` (file_history/
+  rollback/middleware/hash) and much of `hf-diagnostics` (subscriber/search/
+  replay/langfuse/cost) are dead. Hook execution/blocking path is never
+  constructed. Per-tool `RateLimiter`, `PriorityScheduler`, `LeaseManager` unused.
+- [ ] Knowledge dedup fingerprints only the first 100 chars and keys on a
+  never-written `l1_section_index`, so distinct chunks are dropped from RAG.
+- [ ] Cron `timezone` is dropped at evaluation (latent; creation forces UTC).
+- [ ] `providers.example.toml` recommends a retired Anthropic model id.

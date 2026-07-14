@@ -17,6 +17,7 @@ import {
   Save,
   Server,
   ShieldCheck,
+  Square,
   Crosshair,
   Trash2,
   Users,
@@ -1061,6 +1062,18 @@ function DefectDojoHealth() {
     }
   }
 
+  async function stop() {
+    setBusy(true);
+    try {
+      setDd(await getTransport().invoke<DefectDojoStatus>("defectdojo_stop"));
+    } catch (e) {
+      toast({ title: "Could not stop DefectDojo", description: String(e), variant: "error" });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const state = dd?.state;
   const ready = state === "ready";
   const starting = busy || state === "starting";
@@ -1076,6 +1089,11 @@ function DefectDojoHealth() {
         <Button variant="outline" size="sm" onClick={() => void start()} disabled={starting}>
           {starting ? <RotateCw size={13} className="animate-spin" /> : <Play size={13} />}
           {starting ? "Starting" : "Start"}
+        </Button>
+      )}
+      {dd?.managed && (ready || state === "starting") && (
+        <Button variant="outline" size="sm" onClick={() => void stop()} disabled={busy} title="Stop the local DefectDojo stack">
+          <Square size={13} /> Stop
         </Button>
       )}
       <StatusBadge
