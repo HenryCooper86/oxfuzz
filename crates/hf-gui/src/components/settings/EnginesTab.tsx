@@ -7,6 +7,7 @@ import { Switch } from "../ui/Switch";
 import { Badge } from "../ui/Badge";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { Crosshair, Bug, Zap, Cloud, Cpu } from "lucide-react";
+import { useI18n } from "../../i18n";
 
 type Cfg = Record<string, unknown>;
 type Engine = Record<string, unknown>;
@@ -21,6 +22,7 @@ const META: Record<string, { label: string; icon: React.ComponentType<{ size?: n
 };
 
 export function EnginesTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const engines: Engine[] = Array.isArray(value.engines) ? (value.engines as Engine[]) : [];
 
   function patchEngine(i: number, patch: Engine) {
@@ -31,7 +33,7 @@ export function EnginesTab({ value, onChange }: { value: Cfg; onChange: (next: C
   if (engines.length === 0) {
     return (
       <div className="text-text-muted text-sm" style={{ padding: "var(--space-md)" }}>
-        No engines configured. Switch to RAW to add an <code>[[engines]]</code> entry.
+        {t("settings.engines.emptyPre")} <code>[[engines]]</code> {t("settings.engines.emptyPost")}
       </div>
     );
   }
@@ -48,28 +50,28 @@ export function EnginesTab({ value, onChange }: { value: Cfg; onChange: (next: C
         const mem = (e.default_mem_mb as number) ?? 2048;
         const supports = Array.isArray(e.supports) ? (e.supports as string[]) : [];
         return (
-          <SettingsGroup key={kind} title={meta.label} description={idx === 0 ? "Configure and enable fuzzing engines. Disabled engines won't appear in the Run panel." : undefined}>
+          <SettingsGroup key={kind} title={meta.label} description={idx === 0 ? t("settings.engines.desc") : undefined}>
             <div style={{ padding: "10px 14px" }}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Icon size={16} />
                   <span className="text-sm font-medium text-text-primary">{meta.label}</span>
-                  {enabled ? <Badge variant="success">enabled</Badge> : <Badge>disabled</Badge>}
+                  {enabled ? <Badge variant="success">{t("settings.engines.enabled")}</Badge> : <Badge>{t("settings.engines.disabled")}</Badge>}
                 </div>
                 <Switch checked={enabled} onChange={(v) => patchEngine(idx, { enabled: v })} />
               </div>
             </div>
-            <SettingsItem title="Binary / Command">
+            <SettingsItem title={t("settings.engines.binary")}>
               <div style={{ width: 220 }}>
-                <Input value={binary} onChange={(ev) => patchEngine(idx, { fuzz_bin: ev.target.value })} mono disabled={!enabled} placeholder="auto-detected" />
+                <Input value={binary} onChange={(ev) => patchEngine(idx, { fuzz_bin: ev.target.value })} mono disabled={!enabled} placeholder={t("settings.engines.autoDetected")} />
               </div>
             </SettingsItem>
-            <SettingsItem title="Default Duration (s)">
+            <SettingsItem title={t("settings.engines.defaultDuration")}>
               <div style={{ width: 120 }}>
                 <Input type="number" value={duration} onChange={(ev) => patchEngine(idx, { default_duration_secs: parseInt(ev.target.value) || 3600 })} disabled={!enabled} />
               </div>
             </SettingsItem>
-            <SettingsItem title="Default Memory (MB)">
+            <SettingsItem title={t("settings.engines.defaultMemory")}>
               <div style={{ width: 120 }}>
                 <Input type="number" value={mem} onChange={(ev) => patchEngine(idx, { default_mem_mb: parseInt(ev.target.value) || 2048 })} disabled={!enabled} />
               </div>

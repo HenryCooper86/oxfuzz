@@ -16,6 +16,7 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { getTransport } from "../../lib";
+import { useI18n } from "../../i18n";
 import { normalizeProvider, type Provider } from "./providerTypes";
 
 export type { Provider } from "./providerTypes";
@@ -53,6 +54,7 @@ export function ProvidersTab({
   value: Provider[];
   onChange: (next: Provider[]) => void;
 }) {
+  const { t } = useI18n();
   const providers = value;
   const [active, setActive] = useState(0);
 
@@ -99,12 +101,12 @@ export function ProvidersTab({
         <div style={{ width: "210px", flexShrink: 0 }}>
           <div className="flex items-center gap-1" style={{ marginBottom: "8px" }}>
             <Button variant="ghost" size="sm" onClick={add}>
-              <Plus size={13} /> Add
+              <Plus size={13} /> {t("common.add")}
             </Button>
-            <Button variant="icon" size="sm" onClick={duplicate} disabled={providers.length === 0} title="Duplicate" aria-label="Duplicate">
+            <Button variant="icon" size="sm" onClick={duplicate} disabled={providers.length === 0} title={t("common.duplicate")} aria-label={t("common.duplicate")}>
               <Copy size={14} />
             </Button>
-            <Button variant="icon" size="sm" onClick={moveUp} disabled={active <= 0} title="Move up" aria-label="Move up">
+            <Button variant="icon" size="sm" onClick={moveUp} disabled={active <= 0} title={t("settings.providers.moveUp")} aria-label={t("settings.providers.moveUp")}>
               <ChevronUp size={14} />
             </Button>
             <Button
@@ -112,8 +114,8 @@ export function ProvidersTab({
               size="sm"
               onClick={moveDown}
               disabled={active >= providers.length - 1}
-              title="Move down"
-              aria-label="Move down"
+              title={t("settings.providers.moveDown")}
+              aria-label={t("settings.providers.moveDown")}
             >
               <ChevronDown size={14} />
             </Button>
@@ -141,12 +143,12 @@ export function ProvidersTab({
                   className="text-xs font-mono flex-1 truncate"
                   style={{ opacity: p.enabled ? 1 : 0.5, color: "var(--text-primary)" }}
                 >
-                  {p.id || `Provider ${i + 1}`}
+                  {p.id || t("settings.providers.providerN", { n: i + 1 })}
                 </span>
                 <span
                   role="button"
                   tabIndex={0}
-                  title="Remove"
+                  title={t("common.remove")}
                   onClick={(e) => {
                     e.stopPropagation();
                     remove(i);
@@ -160,7 +162,7 @@ export function ProvidersTab({
             ))}
             {providers.length === 0 && (
               <div className="text-xs text-text-muted" style={{ padding: "8px 10px" }}>
-                No providers. Click + to add one.
+                {t("settings.providers.empty")}
               </div>
             )}
           </div>
@@ -171,7 +173,7 @@ export function ProvidersTab({
           {cur ? (
             <ProviderForm provider={cur} onChange={(patch) => update(active, patch)} />
           ) : (
-            <div className="text-text-muted text-sm">No provider selected.</div>
+            <div className="text-text-muted text-sm">{t("settings.providers.noneSelected")}</div>
           )}
         </div>
       </div>
@@ -187,6 +189,7 @@ function HeadersEditor({
   headers: Record<string, string>;
   onChange: (next: Record<string, string>) => void;
 }) {
+  const { t } = useI18n();
   const entries = Object.entries(headers ?? {});
 
   function setKey(oldKey: string, newKey: string) {
@@ -210,16 +213,16 @@ function HeadersEditor({
     <div className="flex flex-col gap-1.5">
       {entries.map(([k, v], i) => (
         <div key={i} className="flex items-center gap-1.5">
-          <Input className="w-[150px]" value={k} onChange={(e) => setKey(k, e.target.value)} placeholder="Header" mono />
-          <Input className="w-[180px]" value={v} onChange={(e) => setVal(k, e.target.value)} placeholder="Value" mono />
-          <Button variant="icon" size="sm" onClick={() => removeKey(k)} title="Remove header" aria-label="Remove header">
+          <Input className="w-[150px]" value={k} onChange={(e) => setKey(k, e.target.value)} placeholder={t("settings.providers.headerName")} mono />
+          <Input className="w-[180px]" value={v} onChange={(e) => setVal(k, e.target.value)} placeholder={t("settings.providers.headerValue")} mono />
+          <Button variant="icon" size="sm" onClick={() => removeKey(k)} title={t("settings.providers.removeHeader")} aria-label={t("settings.providers.removeHeader")}>
             <Trash2 size={13} />
           </Button>
         </div>
       ))}
       <div>
         <Button variant="ghost" size="sm" onClick={addRow}>
-          <Plus size={12} /> Add header
+          <Plus size={12} /> {t("settings.providers.addHeader")}
         </Button>
       </div>
     </div>
@@ -227,6 +230,7 @@ function HeadersEditor({
 }
 
 function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (patch: Partial<Provider>) => void }) {
+  const { t } = useI18n();
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testOk, setTestOk] = useState<boolean | null>(null);
@@ -247,7 +251,7 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
       const raw = String(e);
       setTestMsg(
         raw.includes("Unsupported command")
-          ? "Connection testing is available in the desktop app."
+          ? t("settings.providers.testDesktopOnly")
           : raw,
       );
     } finally {
@@ -262,19 +266,19 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
 
   return (
     <div className="flex flex-col">
-      <SettingsGroup title="Identity">
-        <SettingsItem title="Enabled">
+      <SettingsGroup title={t("settings.providers.identity")}>
+        <SettingsItem title={t("settings.providers.enabled")}>
           <div className="flex items-center gap-2">
             <Switch checked={provider.enabled} onChange={(v) => onChange({ enabled: v })} />
             <span className="text-xs" style={{ color: provider.enabled ? "var(--success)" : "var(--text-muted)" }}>
-              {provider.enabled ? "Active" : "Disabled"}
+              {provider.enabled ? t("settings.providers.active") : t("settings.providers.disabled")}
             </span>
           </div>
         </SettingsItem>
-        <SettingsItem title="ID">
+        <SettingsItem title={t("settings.providers.id")}>
           <Input className="w-[260px]" value={provider.id} onChange={(e) => onChange({ id: e.target.value })} placeholder="e.g. openai-main" mono />
         </SettingsItem>
-        <SettingsItem title="Provider Type">
+        <SettingsItem title={t("settings.providers.providerType")}>
           <div className="flex items-center gap-2">
             <span className="inline-flex items-center justify-center shrink-0" style={{ width: "18px", height: "18px", color: "var(--text-primary)" }}>
               <ProviderBrandIcon type={provider.icon || provider.provider_type} size={17} />
@@ -282,40 +286,40 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
             <Select value={provider.provider_type} onChange={(v) => onChange({ provider_type: v })} options={PROVIDER_TYPES} className="w-[230px]" />
           </div>
         </SettingsItem>
-        <SettingsItem title="Icon" description="Optional brand icon id (e.g. openai, deepseek, qwen).">
-          <Input className="w-[200px]" value={provider.icon ?? ""} onChange={(e) => onChange({ icon: e.target.value || null })} placeholder="auto from type" mono />
+        <SettingsItem title={t("settings.providers.icon")} description={t("settings.providers.iconDesc")}>
+          <Input className="w-[200px]" value={provider.icon ?? ""} onChange={(e) => onChange({ icon: e.target.value || null })} placeholder={t("settings.providers.autoFromType")} mono />
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Tool Calling">
+      <SettingsGroup title={t("settings.providers.toolCalling")}>
         <SettingsItem
-          title="Tool Calling Mode"
-          description={provider.tool_calling_mode ? "Manually set" : `Auto-detected from provider type (${PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native"})`}
+          title={t("settings.providers.toolCallingMode")}
+          description={provider.tool_calling_mode ? t("settings.providers.manuallySet") : t("settings.providers.autoDetected", { mode: PROMPT_BASED.includes(provider.provider_type) ? "prompt_based" : "native" })}
         >
           <div className="flex items-center gap-2">
             <Switch checked={isNative} onChange={(v) => onChange({ tool_calling_mode: v ? "native" : "prompt_based" })} />
             <span className="text-xs" style={{ color: isNative ? "var(--accent)" : "var(--text-muted)" }}>
-              {isNative ? "Native" : "Prompt-based"}
+              {isNative ? t("settings.providers.native") : t("settings.providers.promptBased")}
             </span>
           </div>
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Connection">
-        <SettingsItem title="Model ID">
+      <SettingsGroup title={t("settings.providers.connection")}>
+        <SettingsItem title={t("settings.providers.modelId")}>
           <Input className="w-[260px]" value={provider.model} onChange={(e) => onChange({ model: e.target.value })} placeholder="e.g. gpt-4o" mono />
         </SettingsItem>
-        <SettingsItem title="Base URL">
+        <SettingsItem title={t("settings.providers.baseUrl")}>
           <Input className="w-[260px]" value={provider.base_url ?? ""} onChange={(e) => onChange({ base_url: e.target.value || null })} placeholder={BASE_URL_PLACEHOLDERS[provider.provider_type] ?? "Default"} mono />
         </SettingsItem>
-        <SettingsItem title="API Key">
+        <SettingsItem title={t("settings.providers.apiKey")}>
           <div className="relative w-[260px]">
-            <Input className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder="Direct key (optional)" />
+            <Input className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder={t("settings.providers.directKeyOptional")} />
             <button
               type="button"
               onClick={() => setShowKey((s) => !s)}
-              title={showKey ? "Hide" : "Reveal"}
-              aria-label={showKey ? "Hide" : "Reveal"}
+              title={showKey ? t("settings.providers.hide") : t("settings.providers.reveal")}
+              aria-label={showKey ? t("settings.providers.hide") : t("settings.providers.reveal")}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary transition-colors"
               style={{ background: "transparent", border: "none", cursor: "pointer", display: "inline-flex" }}
             >
@@ -323,10 +327,10 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
             </button>
           </div>
         </SettingsItem>
-        <SettingsItem title="API Key Env Var">
+        <SettingsItem title={t("settings.providers.apiKeyEnv")}>
           <Input className="w-[260px]" value={provider.api_key_env ?? ""} onChange={(e) => onChange({ api_key_env: e.target.value || null })} placeholder="e.g. OPENAI_API_KEY" mono />
         </SettingsItem>
-        <SettingsItem title="HTTP Protocol">
+        <SettingsItem title={t("settings.providers.httpProtocol")}>
           <Select
             value={provider.http_protocol}
             onChange={(v) => onChange({ http_protocol: v as "http1" | "http2" })}
@@ -337,12 +341,12 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
             className="w-[140px]"
           />
         </SettingsItem>
-        <SettingsItem title="Test Connection" description={testMsg || undefined}>
+        <SettingsItem title={t("settings.providers.testConnection")} description={testMsg || undefined}>
           <div className="flex items-center gap-2">
             {testOk === true && <CheckCircle2 size={15} style={{ color: "var(--success)" }} />}
             {testOk === false && <XCircle size={15} style={{ color: "var(--error)" }} />}
             <Button variant="outline" size="sm" onClick={test} loading={testing}>
-              {testing ? "Testing…" : "Test Connection"}
+              {testing ? t("settings.providers.testing") : t("settings.providers.testConnection")}
             </Button>
           </div>
         </SettingsItem>
@@ -350,21 +354,21 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
 
       {isAzure && (
         <SettingsGroup title="Azure">
-          <SettingsItem title="Resource Name">
+          <SettingsItem title={t("settings.providers.resourceName")}>
             <Input className="w-[260px]" value={provider.azure_resource_name ?? ""} onChange={(e) => onChange({ azure_resource_name: e.target.value || null })} placeholder="myresource" mono />
           </SettingsItem>
-          <SettingsItem title="API Version">
+          <SettingsItem title={t("settings.providers.apiVersion")}>
             <Input className="w-[200px]" value={provider.azure_api_version ?? ""} onChange={(e) => onChange({ azure_api_version: e.target.value || null })} placeholder="2024-10-21" mono />
           </SettingsItem>
-          <SettingsItem title="Deployment URLs" description="Use /deployments/{model} URL format.">
+          <SettingsItem title={t("settings.providers.deploymentUrls")} description={t("settings.providers.deploymentUrlsDesc")}>
             <Switch checked={provider.azure_use_deployment_urls ?? false} onChange={(v) => onChange({ azure_use_deployment_urls: v })} />
           </SettingsItem>
-          <SettingsItem title="Auth Mode">
+          <SettingsItem title={t("settings.providers.authMode")}>
             <Select
               value={provider.azure_auth_mode ?? "api_key"}
               onChange={(v) => onChange({ azure_auth_mode: v })}
               options={[
-                { value: "api_key", label: "API Key" },
+                { value: "api_key", label: t("settings.providers.apiKey") },
                 { value: "bearer", label: "Bearer (Entra ID)" },
               ]}
               className="w-[180px]"
@@ -373,53 +377,53 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
         </SettingsGroup>
       )}
 
-      <SettingsGroup title="HTTP Headers">
-        <SettingsItem title="Custom Headers" description="Extra headers sent with every request to this provider.">
+      <SettingsGroup title={t("settings.providers.httpHeaders")}>
+        <SettingsItem title={t("settings.providers.customHeaders")} description={t("settings.providers.customHeadersDesc")}>
           <HeadersEditor headers={provider.headers} onChange={(h) => onChange({ headers: h })} />
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Parameters">
-        <SettingsItem title="Tags">
+      <SettingsGroup title={t("settings.providers.parameters")}>
+        <SettingsItem title={t("settings.providers.tags")}>
           <Input
             className="w-[260px]"
             value={provider.tags.join(", ")}
-            onChange={(e) => onChange({ tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })}
+            onChange={(e) => onChange({ tags: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
             placeholder="general, reasoning, code"
             mono
           />
         </SettingsItem>
-        <SettingsItem title="Capabilities" description="text, vision, image_generation">
+        <SettingsItem title={t("settings.providers.capabilities")} description="text, vision, image_generation">
           <Input
             className="w-[260px]"
             value={provider.capabilities.join(", ")}
-            onChange={(e) => onChange({ capabilities: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })}
+            onChange={(e) => onChange({ capabilities: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
             placeholder="text"
             mono
           />
         </SettingsItem>
-        <SettingsItem title="Max Concurrency">
+        <SettingsItem title={t("settings.providers.maxConcurrency")}>
           <Input className="w-[100px]" type="number" min={1} value={provider.max_concurrency} onChange={(e) => onChange({ max_concurrency: Number(e.target.value) || 1 })} />
         </SettingsItem>
-        <SettingsItem title="Context Window">
+        <SettingsItem title={t("settings.providers.contextWindow")}>
           <Input className="w-[120px]" type="number" min={1} value={provider.context_window} onChange={(e) => onChange({ context_window: Number(e.target.value) || 128000 })} />
         </SettingsItem>
-        <SettingsItem title="Temperature" description="0.0 - 2.0, blank = model default.">
-          <Input className="w-[100px]" type="number" value={provider.temperature ?? ""} onChange={(e) => onChange({ temperature: numOrNull(e.target.value) })} placeholder="default" />
+        <SettingsItem title={t("settings.providers.temperature")} description={t("settings.providers.temperatureDesc")}>
+          <Input className="w-[100px]" type="number" value={provider.temperature ?? ""} onChange={(e) => onChange({ temperature: numOrNull(e.target.value) })} placeholder={t("settings.providers.default")} />
         </SettingsItem>
-        <SettingsItem title="Top P" description="0.0 - 1.0, blank = model default.">
-          <Input className="w-[100px]" type="number" value={provider.top_p ?? ""} onChange={(e) => onChange({ top_p: numOrNull(e.target.value) })} placeholder="default" />
+        <SettingsItem title={t("settings.providers.topP")} description={t("settings.providers.topPDesc")}>
+          <Input className="w-[100px]" type="number" value={provider.top_p ?? ""} onChange={(e) => onChange({ top_p: numOrNull(e.target.value) })} placeholder={t("settings.providers.default")} />
         </SettingsItem>
-        <SettingsItem title="max_completion_tokens" description="Send output limit as max_completion_tokens (o1/o3/gpt-5).">
+        <SettingsItem title="max_completion_tokens" description={t("settings.providers.maxCompletionTokensDesc")}>
           <Switch checked={provider.use_max_completion_tokens ?? false} onChange={(v) => onChange({ use_max_completion_tokens: v })} />
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Cost">
-        <SettingsItem title="Cost / 1k Input">
+      <SettingsGroup title={t("settings.providers.cost")}>
+        <SettingsItem title={t("settings.providers.costInput")}>
           <Input className="w-[120px]" type="number" min={0} step="0.0001" value={provider.cost_per_1k_input} onChange={(e) => onChange({ cost_per_1k_input: Number(e.target.value) || 0 })} />
         </SettingsItem>
-        <SettingsItem title="Cost / 1k Output">
+        <SettingsItem title={t("settings.providers.costOutput")}>
           <Input className="w-[120px]" type="number" min={0} step="0.0001" value={provider.cost_per_1k_output} onChange={(e) => onChange({ cost_per_1k_output: Number(e.target.value) || 0 })} />
         </SettingsItem>
       </SettingsGroup>

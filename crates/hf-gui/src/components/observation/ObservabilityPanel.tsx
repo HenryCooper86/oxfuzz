@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { Server, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { getTransport } from "../../lib";
+import { useI18n } from "../../i18n";
 import "./ObservabilityPanel.css";
 
 interface ProviderSnapshot {
@@ -54,6 +55,7 @@ interface SystemSnapshot {
 const n = (v: number) => v.toLocaleString();
 
 function ProviderCard({ p }: { p: ProviderSnapshot }) {
+  const { t } = useI18n();
   const pct = p.max_concurrency > 0 ? (p.active_requests / p.max_concurrency) * 100 : 0;
   const fillClass = pct >= 100 ? "full" : pct >= 75 ? "high" : "";
   return (
@@ -65,7 +67,7 @@ function ProviderCard({ p }: { p: ProviderSnapshot }) {
         <span className="obs-provider-name">{p.id}</span>
         <span className="obs-provider-model">{p.model}</span>
         <span className={`obs-badge ${p.is_frozen ? "obs-badge-frozen" : "obs-badge-healthy"}`}>
-          {p.is_frozen ? "FROZEN" : "OK"}
+          {p.is_frozen ? t("obs.frozen") : t("obs.ok")}
         </span>
       </div>
 
@@ -79,7 +81,7 @@ function ProviderCard({ p }: { p: ProviderSnapshot }) {
 
       <div className="obs-concurrency">
         <div className="obs-concurrency-label">
-          <span className="obs-concurrency-text">CONCURRENCY</span>
+          <span className="obs-concurrency-text">{t("obs.concurrency")}</span>
           <span className="obs-concurrency-text">{p.active_requests} / {p.max_concurrency}</span>
         </div>
         <div className="obs-concurrency-bar">
@@ -88,12 +90,12 @@ function ProviderCard({ p }: { p: ProviderSnapshot }) {
       </div>
 
       <div className="obs-metrics">
-        <Metric label="Requests" value={n(p.total_requests)} />
-        <Metric label="Errors" value={n(p.total_errors)} />
-        <Metric label="Err Rate" value={`${(p.error_rate * 100).toFixed(1)}%`} />
-        <Metric label="In Tokens" value={n(p.total_input_tokens)} />
-        <Metric label="Out Tokens" value={n(p.total_output_tokens)} />
-        <Metric label="Cost" value={`$${p.estimated_cost_usd.toFixed(4)}`} />
+        <Metric label={t("obs.requests")} value={n(p.total_requests)} />
+        <Metric label={t("obs.errors")} value={n(p.total_errors)} />
+        <Metric label={t("obs.errRate")} value={`${(p.error_rate * 100).toFixed(1)}%`} />
+        <Metric label={t("obs.inTokens")} value={n(p.total_input_tokens)} />
+        <Metric label={t("obs.outTokens")} value={n(p.total_output_tokens)} />
+        <Metric label={t("obs.cost")} value={`$${p.estimated_cost_usd.toFixed(4)}`} />
       </div>
     </div>
   );
@@ -140,6 +142,7 @@ function Section({
 }
 
 export function ObservabilityPanel() {
+  const { t } = useI18n();
   const [snap, setSnap] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [providersOpen, setProvidersOpen] = useState(true);
@@ -179,15 +182,15 @@ export function ObservabilityPanel() {
       <div className="obs-summary">
         <div className="obs-summary-item">
           <span className="obs-summary-value">{providerCount}</span>
-          <span className="obs-summary-label">providers</span>
+          <span className="obs-summary-label">{t("obs.providers")}</span>
         </div>
         <div className="obs-summary-item">
           <span className="obs-summary-value">{activeAgents}</span>
-          <span className="obs-summary-label">agents</span>
+          <span className="obs-summary-label">{t("obs.agents")}</span>
         </div>
         <div className="obs-summary-item">
           <span className="obs-summary-value">{slots}</span>
-          <span className="obs-summary-label">slots</span>
+          <span className="obs-summary-label">{t("obs.slots")}</span>
         </div>
       </div>
 
@@ -196,23 +199,23 @@ export function ObservabilityPanel() {
           <div className="obs-empty">
             <Server size={24} className="obs-empty-icon" />
             <p className="obs-empty-text">
-              {error ? `Failed to load system state: ${error}` : "Loading system state..."}
+              {error ? t("obs.loadFailed", { error }) : t("obs.loadingSystem")}
             </p>
           </div>
         ) : (
           <>
-            <Section title="Provider Pool" count={providerCount} open={providersOpen} onToggle={() => setProvidersOpen(!providersOpen)}>
+            <Section title={t("obs.providerPool")} count={providerCount} open={providersOpen} onToggle={() => setProvidersOpen(!providersOpen)}>
               {snap.providers.length === 0 ? (
-                <div className="obs-no-items">No LLM provider configured</div>
+                <div className="obs-no-items">{t("obs.noProvider")}</div>
               ) : (
                 snap.providers.map((p) => <ProviderCard key={p.id} p={p} />)
               )}
             </Section>
 
-            <Section title="Agent Pool" count={snap.agents.total_instances} open={agentsOpen} onToggle={() => setAgentsOpen(!agentsOpen)}>
+            <Section title={t("obs.agentPool")} count={snap.agents.total_instances} open={agentsOpen} onToggle={() => setAgentsOpen(!agentsOpen)}>
               {snap.agents.instances.length === 0 ? (
                 <div className="obs-no-items">
-                  No active agent instances ({slots} available)
+                  {t("obs.noAgents", { slots })}
                 </div>
               ) : (
                 snap.agents.instances.map((a) => (
@@ -229,14 +232,14 @@ export function ObservabilityPanel() {
               )}
             </Section>
 
-            <Section title="Memory" open={memoryOpen} onToggle={() => setMemoryOpen(!memoryOpen)}>
+            <Section title={t("obs.memory")} open={memoryOpen} onToggle={() => setMemoryOpen(!memoryOpen)}>
               <div className="obs-provider-card">
                 <div className="obs-metrics">
-                  <Metric label="Pending Runs" value={n(snap.memory.pending_runs)} />
-                  <Metric label="Interrupted Runs" value={n(snap.memory.interrupted_runs)} />
-                  <Metric label="LLM Calls" value={n(snap.memory.llm_calls)} />
-                  <Metric label="Targets" value={n(snap.memory.targets)} />
-                  <Metric label="Crashes" value={n(snap.memory.crashes)} />
+                  <Metric label={t("obs.pendingRuns")} value={n(snap.memory.pending_runs)} />
+                  <Metric label={t("obs.interruptedRuns")} value={n(snap.memory.interrupted_runs)} />
+                  <Metric label={t("obs.llmCalls")} value={n(snap.memory.llm_calls)} />
+                  <Metric label={t("obs.targets")} value={n(snap.memory.targets)} />
+                  <Metric label={t("obs.crashes")} value={n(snap.memory.crashes)} />
                 </div>
               </div>
             </Section>

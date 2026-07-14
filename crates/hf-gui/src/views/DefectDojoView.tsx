@@ -19,11 +19,13 @@ import { getTransport, isTauriEnvironment } from "../lib";
 import type { DefectDojoStatus } from "../types";
 import { Button, Spinner } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { useI18n } from "../i18n";
 
 /// How often to re-check while the server is booting (uwsgi takes ~30-60s).
 const STARTING_POLL_MS = 3000;
 
 export function DefectDojoView({ onBack }: { onBack: () => void }) {
+  const { t } = useI18n();
   const { toast } = useToast();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -72,9 +74,9 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
     getTransport()
       .invoke("defectdojo_embed", { x: r.left, y: r.top, width: r.width, height: r.height })
       .catch((e) =>
-        toast({ title: "Could not embed DefectDojo", description: String(e), variant: "error" }),
+        toast({ title: t("defectdojo.embedFailed"), description: String(e), variant: "error" }),
       );
-  }, [toast]);
+  }, [toast, t]);
 
   // Coalesce bursts of layout changes into one reposition per frame.
   const scheduleSync = useCallback(() => {
@@ -108,7 +110,7 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
     try {
       setStatus(await getTransport().invoke<DefectDojoStatus>("defectdojo_start"));
     } catch (e) {
-      toast({ title: "Could not start DefectDojo", description: String(e), variant: "error" });
+      toast({ title: t("defectdojo.startFailed"), description: String(e), variant: "error" });
       await refresh();
     } finally {
       setStarting(false);
@@ -125,7 +127,7 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
     getTransport()
       .invoke("open_defectdojo", { inBrowser: true })
       .catch((e) =>
-        toast({ title: "Could not open DefectDojo", description: String(e), variant: "error" }),
+        toast({ title: t("defectdojo.openFailed"), description: String(e), variant: "error" }),
       );
   }
 
@@ -134,13 +136,13 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
       <div className="flex items-center gap-2 border-b border-border" style={{ padding: "8px 12px" }}>
         <Button variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeft size={14} />
-          Back
+          {t("common.back")}
         </Button>
         <div className="flex-1" />
         {isTauriEnvironment() && ready && (
-          <Button variant="ghost" size="sm" onClick={reload} title="Reload DefectDojo">
+          <Button variant="ghost" size="sm" onClick={reload} title={t("defectdojo.reloadTitle")}>
             <RotateCw size={14} />
-            Reload
+            {t("defectdojo.reload")}
           </Button>
         )}
         <Button
@@ -148,17 +150,17 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
           size="sm"
           onClick={openBrowser}
           disabled={!ready}
-          title={ready ? "Open in your default browser" : "DefectDojo is not running"}
+          title={ready ? t("defectdojo.openBrowserTitle") : t("defectdojo.notRunning")}
         >
           <ExternalLink size={14} />
-          Open in browser
+          {t("common.openInBrowser")}
         </Button>
       </div>
       {/* The native DefectDojo webview is overlaid on this host by the backend. */}
       <div ref={hostRef} className="flex-1 min-h-0" style={{ background: "var(--surface-secondary)" }}>
         {!isTauriEnvironment() ? (
           <div className="flex items-center justify-center h-full text-text-muted" style={{ fontSize: "13px" }}>
-            DefectDojo opens in your browser in web mode -- use &ldquo;Open in browser&rdquo; above.
+            {t("defectdojo.webModeNote")}
           </div>
         ) : (
           !ready && (
@@ -166,8 +168,8 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
               {booting ? <Spinner size={20} /> : <ShieldAlert size={22} className="text-text-muted" />}
               <div className="text-sm text-text-secondary text-center" style={{ maxWidth: "460px" }}>
                 {booting
-                  ? "Starting DefectDojo -- the server takes a minute to come up."
-                  : (status?.message ?? "Checking DefectDojo...")}
+                  ? t("defectdojo.starting")
+                  : (status?.message ?? t("defectdojo.checking"))}
               </div>
               {status?.url && (
                 <div className="text-xs font-mono text-text-muted">{status.url}</div>
@@ -175,7 +177,7 @@ export function DefectDojoView({ onBack }: { onBack: () => void }) {
               {status?.managed && !booting && (
                 <Button variant="primary" size="sm" onClick={() => void start()}>
                   <Play size={13} />
-                  Start DefectDojo
+                  {t("defectdojo.start")}
                 </Button>
               )}
             </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useI18n } from "../i18n";
 import { pickFolder, pickFile, getTransport } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
@@ -17,6 +18,7 @@ export function RunView({
   embedded?: boolean;
   onNavigate?: (view: ViewType) => void;
 }) {
+  const { t } = useI18n();
   const { activeProject, setActiveProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { sandboxArch } = usePrefs();
@@ -149,12 +151,8 @@ export function RunView({
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
         <ViewHeader
-          title="Fuzz Run"
-          description={
-            isSyz
-              ? "Drive a syzkaller kernel-fuzzing campaign in the sandbox via syz-manager against a KCOV kernel + rootfs."
-              : "Compile a harness in the sandbox and drive a fuzzing engine against the target."
-          }
+          title={t("title.run")}
+          description={isSyz ? t("run.descSyz") : t("run.descStd")}
         />
       )}
 
@@ -163,7 +161,7 @@ export function RunView({
       <div className="grid grid-cols-2 gap-3">
         {!embedded && (
           <div className="flex flex-col gap-1">
-            <Label>Project</Label>
+            <Label>{t("run.project")}</Label>
             <div className="flex gap-1">
               <Input
                 mono
@@ -177,7 +175,7 @@ export function RunView({
                 variant="outline"
                 size="sm"
                 onClick={browse}
-                title="Browse for folder"
+                title={t("run.browseFolder")}
               >
                 <FolderOpen size={14} />
               </Button>
@@ -187,13 +185,13 @@ export function RunView({
         {!isSyz && (
           <div className="flex flex-col gap-1">
             <Label>
-              Target Symbol
+              {t("run.targetSymbol")}
               {harnessApproved && harnessBuilt ? (
-                <span style={{ color: "var(--success)", marginLeft: "8px" }}> (approved)</span>
+                <span style={{ color: "var(--success)", marginLeft: "8px" }}>{t("run.approved")}</span>
               ) : harnessBuilt ? (
-                <span style={{ color: "var(--warning)", marginLeft: "8px" }}> (approval required)</span>
+                <span style={{ color: "var(--warning)", marginLeft: "8px" }}>{t("run.approvalRequired")}</span>
               ) : (
-                target && <span style={{ color: "var(--text-muted)", marginLeft: "8px" }}> (not built)</span>
+                target && <span style={{ color: "var(--text-muted)", marginLeft: "8px" }}>{t("run.notBuilt")}</span>
               )}
             </Label>
             <Input
@@ -212,7 +210,7 @@ export function RunView({
           </div>
         )}
         <div className="flex flex-col gap-1">
-          <Label>Engine</Label>
+          <Label>{t("run.engine")}</Label>
           <Select
             value={engine}
             onChange={(v) => setEngine(v)}
@@ -226,7 +224,7 @@ export function RunView({
           />
         </div>
         <div className="flex flex-col gap-1">
-          <Label>Duration (seconds)</Label>
+          <Label>{t("run.duration")}</Label>
           <Input
             type="number"
             min={1}
@@ -242,22 +240,21 @@ export function RunView({
           style={{ padding: "var(--space-md)", animation: "slideInUp 0.2s ease" }}
         >
           <div className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-text-primary">Kernel campaign artifacts</span>
+            <span className="text-xs font-semibold text-text-primary">{t("run.kernelArtifacts")}</span>
             <span className="text-xs text-text-muted">
-              Supply a kernel image (bzImage) + rootfs to auto-generate a qemu config, or point at an existing
-              manager.cfg. A matching SSH key is required to log into the rootfs.
+              {t("run.kernelArtifactsHint")}
             </span>
           </div>
-          <FileField label="Kernel image (bzImage)" placeholder="/path/to/bzImage" value={kernelImage}
-            onChange={setKernelImage} onPick={() => pickFile("Select kernel image (bzImage)").then((p) => p && setKernelImage(p))} />
-          <FileField label="Rootfs disk image" placeholder="/path/to/rootfs.img" value={diskImage}
-            onChange={setDiskImage} onPick={() => pickFile("Select rootfs disk image").then((p) => p && setDiskImage(p))} />
-          <FileField label="SSH key (rootfs login)" placeholder="/path/to/id_rsa" value={sshKey}
-            onChange={setSshKey} onPick={() => pickFile("Select SSH private key").then((p) => p && setSshKey(p))} />
-          <FileField label="Existing manager.cfg (optional override)" placeholder="/path/to/manager.cfg" value={managerCfg}
-            onChange={setManagerCfg} onPick={() => pickFile("Select manager.cfg").then((p) => p && setManagerCfg(p))} />
+          <FileField label={t("run.kernelImage")} placeholder="/path/to/bzImage" value={kernelImage}
+            onChange={setKernelImage} onPick={() => pickFile(t("run.selectKernelImage")).then((p) => p && setKernelImage(p))} />
+          <FileField label={t("run.rootfsImage")} placeholder="/path/to/rootfs.img" value={diskImage}
+            onChange={setDiskImage} onPick={() => pickFile(t("run.selectRootfsImage")).then((p) => p && setDiskImage(p))} />
+          <FileField label={t("run.sshKey")} placeholder="/path/to/id_rsa" value={sshKey}
+            onChange={setSshKey} onPick={() => pickFile(t("run.selectSshKey")).then((p) => p && setSshKey(p))} />
+          <FileField label={t("run.managerCfg")} placeholder="/path/to/manager.cfg" value={managerCfg}
+            onChange={setManagerCfg} onPick={() => pickFile(t("run.selectManagerCfg")).then((p) => p && setManagerCfg(p))} />
           <div className="flex flex-col gap-1" style={{ maxWidth: "160px" }}>
-            <Label>VM count</Label>
+            <Label>{t("run.vmCount")}</Label>
             <Input
               type="number"
               min={1}
@@ -277,7 +274,7 @@ export function RunView({
           loading={running}
         >
           {!running && <Play size={14} />}
-          {running ? "Running..." : isSyz ? "Launch Campaign" : "Run Fuzzer"}
+          {running ? t("run.running") : isSyz ? t("run.launchCampaign") : t("run.runFuzzer")}
         </Button>
 
         {/* Stop is offered for any in-flight run. Both harness fuzzing and
@@ -289,10 +286,10 @@ export function RunView({
             className="self-start"
             onClick={() => void cancelRun()}
             loading={cancelling}
-            title="Cancel the running campaign"
+            title={t("run.cancelTitle")}
           >
             {!cancelling && <Square size={14} />}
-            {cancelling ? "Stopping..." : "Stop"}
+            {cancelling ? t("run.stopping") : t("common.stop")}
           </Button>
         )}
       </div>
@@ -301,7 +298,7 @@ export function RunView({
           the run button is disabled, so point the user at where to get one. */}
       {!isSyz && !target && project && !running && (
         <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}>
-          No harness target selected for this project yet.
+          {t("run.noTargetSelected")}
           {onNavigate ? (
             <>
               {" "}
@@ -310,12 +307,12 @@ export function RunView({
                 className="underline"
                 style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0 }}
               >
-                Discover and build a harness first
+                {t("run.discoverFirst")}
               </button>
               .
             </>
           ) : (
-            " Discover and build a harness first (Harness view)."
+            <>{" "}{t("run.discoverFirstHint")}</>
           )}
         </div>
       )}
@@ -323,8 +320,8 @@ export function RunView({
       {!isSyz && target && project && !running && (!harnessBuilt || !harnessApproved) && (
         <div className="surface-card text-sm" style={{ padding: "var(--space-md)", borderLeft: "3px solid var(--warning, #d9a441)" }}>
           {!harnessBuilt
-            ? "The active harness binary is missing."
-            : "The active harness has not been explicitly approved for full campaigns."}
+            ? t("run.harnessMissing")
+            : t("run.harnessNotApproved")}
           {onNavigate ? (
             <>
               {" "}
@@ -333,12 +330,12 @@ export function RunView({
                 className="underline"
                 style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0 }}
               >
-                Open harness qualification
+                {t("run.openHarnessQual")}
               </button>
               .
             </>
           ) : (
-            " Open the Harness view to compile, smoke-test, review, and approve it."
+            <>{" "}{t("run.openHarnessHint")}</>
           )}
         </div>
       )}
@@ -346,17 +343,17 @@ export function RunView({
       {/* Live stats while fuzzing (updates in place from streamed events). */}
       {running && !isSyz && (
         <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
-          <StatCard icon={<Activity size={16} />} label="Edges Covered" value={liveStats.edges} color="var(--success)" />
-          <StatCard icon={<AlertTriangle size={16} />} label="Crashes" value={liveStats.crashes} color="var(--error)" />
-          <StatCard icon={<Play size={16} />} label="Execs/sec (peak)" value={liveStats.execs} color="var(--accent)" />
+          <StatCard icon={<Activity size={16} />} label={t("run.edgesCovered")} value={liveStats.edges} color="var(--success)" />
+          <StatCard icon={<AlertTriangle size={16} />} label={t("run.crashes")} value={liveStats.crashes} color="var(--error)" />
+          <StatCard icon={<Play size={16} />} label={t("run.execsPeak")} value={liveStats.execs} color="var(--accent)" />
         </div>
       )}
 
       {summary && !running && (
         <div className="grid grid-cols-3 gap-3" style={{ animation: "slideInUp 0.2s ease" }}>
-          <StatCard icon={<Activity size={16} />} label={isSyz ? "Coverage" : "Edges Covered"} value={summary.edges} color="var(--success)" />
-          <StatCard icon={<AlertTriangle size={16} />} label="Crashes" value={summary.crashes} color="var(--error)" />
-          <StatCard icon={<Play size={16} />} label={isSyz ? "Executed" : "Execs/sec"} value={summary.execs} color="var(--accent)" />
+          <StatCard icon={<Activity size={16} />} label={isSyz ? t("run.coverage") : t("run.edgesCovered")} value={summary.edges} color="var(--success)" />
+          <StatCard icon={<AlertTriangle size={16} />} label={t("run.crashes")} value={summary.crashes} color="var(--error)" />
+          <StatCard icon={<Play size={16} />} label={isSyz ? t("run.executed") : t("run.execsPerSec")} value={summary.execs} color="var(--accent)" />
         </div>
       )}
 
@@ -372,15 +369,15 @@ export function RunView({
           <AlertTriangle size={18} style={{ color: "var(--warning, var(--accent))", flexShrink: 0 }} />
           <div className="flex-1">
             <div className="text-sm" style={{ fontWeight: 600 }}>
-              Coverage stalled
+              {t("run.coverageStalled")}
             </div>
             <div className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
-              {stagnationHint(summary.stagnation)}
+              {t(stagnationHint(summary.stagnation))}
             </div>
           </div>
           {summary.stagnation === "new_harness" && onNavigate && (
             <Button variant="outline" size="sm" onClick={() => onNavigate("harness")}>
-              <RotateCw size={14} /> Regenerate harness
+              <RotateCw size={14} /> {t("run.regenerateHarness")}
             </Button>
           )}
         </div>
@@ -402,20 +399,28 @@ export function RunView({
           )}
           <div className="flex-1">
             <div className="text-sm" style={{ fontWeight: 600 }}>
-              {summary.autoRevert.reverted ? "Auto-reverted the harness" : "Coverage regression detected"}
+              {summary.autoRevert.reverted ? t("run.autoReverted") : t("run.coverageRegression")}
             </div>
             <div className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
-              This revision dropped coverage {summary.autoRevert.drop_pct.toFixed(1)}% (
-              {summary.autoRevert.regressed_edges} &lt; {summary.autoRevert.previous_edges} edges).{" "}
+              {t("run.autoRevertDrop", {
+                pct: summary.autoRevert.drop_pct.toFixed(1),
+                regressed: summary.autoRevert.regressed_edges,
+                previous: summary.autoRevert.previous_edges,
+              })}
+              {" "}
               {summary.autoRevert.reverted ? (
                 <>
-                  The comparable last-good revision <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was restored
-                  and recompiled.
+                  {t("run.autoRevertRestoredPre")}
+                  <code>{summary.autoRevert.to_rev.slice(0, 8)}</code>
+                  {t("run.autoRevertRestoredPost")}
                 </>
               ) : (
                 <>
-                  Notify-only mode is on, so the comparable last-good revision{" "}
-                  <code>{summary.autoRevert.to_rev.slice(0, 8)}</code> was <strong>not</strong> restored.
+                  {t("run.autoRevertNotifyPre")}
+                  <code>{summary.autoRevert.to_rev.slice(0, 8)}</code>
+                  {t("run.autoRevertNotifyMid")}
+                  <strong>{t("run.notEmphasis")}</strong>
+                  {t("run.autoRevertNotifyPost")}
                 </>
               )}
             </div>
@@ -444,17 +449,18 @@ function normalizeEngine(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-/** User-facing guidance for a backend coverage-stagnation proposal. */
+/** Translation key for the user-facing guidance on a backend
+ *  coverage-stagnation proposal. */
 function stagnationHint(proposal: string): string {
   switch (proposal) {
     case "new_harness":
-      return "Coverage plateaued during the run. Regenerating the harness may reach new code paths.";
+      return "run.stallNewHarness";
     case "custom_mutator":
-      return "Coverage plateaued. Adding a dictionary or seed corpus may help the fuzzer make progress.";
+      return "run.stallCustomMutator";
     case "stop":
-      return "Coverage plateaued and further fuzzing is unlikely to find more. Consider stopping this target.";
+      return "run.stallStop";
     default:
-      return "Coverage plateaued during the run.";
+      return "run.stallDefault";
   }
 }
 
@@ -479,6 +485,7 @@ function FileField({
   onChange: (v: string) => void;
   onPick: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-col gap-1">
       <Label>{label}</Label>
@@ -495,7 +502,7 @@ function FileField({
           variant="outline"
           size="sm"
           onClick={onPick}
-          title="Browse for file"
+          title={t("run.browseFile")}
         >
           <FolderOpen size={14} />
         </Button>

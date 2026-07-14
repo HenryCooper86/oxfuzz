@@ -7,6 +7,7 @@ import { useToast } from "../components/ui/Toast";
 import { Button, IconButton, EmptyState, ViewHeader } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2 } from "lucide-react";
 import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRevertBadge";
+import { useI18n } from "../i18n";
 
 type ProjectAutoRevert = AutoRevertPolicyView;
 
@@ -15,6 +16,7 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
     useProject();
   const confirm = useConfirm();
   const { toast } = useToast();
+  const { t } = useI18n();
   // Per-project auto-revert overrides, keyed by project root. Absence = the
   // project inherits the global policy (no badge).
   const [overrides, setOverrides] = useState<Record<string, ProjectAutoRevert>>({});
@@ -47,20 +49,19 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
     const name = path.split("/").pop() || path;
     if (
       !(await confirm({
-        title: `Delete all data for "${name}"?`,
-        message:
-          "This removes its targets, harnesses, corpus, crashes, and runs from the database and deletes its on-disk workspace. This cannot be undone.",
+        title: t("projects.deleteDataTitle", { name }),
+        message: t("projects.deleteDataMessage"),
         danger: true,
-        confirmLabel: "Delete data",
+        confirmLabel: t("projects.deleteData"),
       }))
     ) {
       return;
     }
     try {
       await deleteProjectData(path);
-      toast({ title: "Project data deleted", description: name, variant: "success" });
+      toast({ title: t("projects.dataDeleted"), description: name, variant: "success" });
     } catch (e) {
-      toast({ title: "Failed to delete project data", description: String(e), variant: "error" });
+      toast({ title: t("projects.deleteFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -72,22 +73,22 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <ViewHeader title="Projects" description="Recent project folders you've scanned and fuzzed." />
+        <ViewHeader title={t("projects.title")} description={t("projects.description")} />
         <Button variant="primary" onClick={addProject}>
           <FolderPlus size={14} />
-          Add project
+          {t("projects.addProject")}
         </Button>
       </div>
 
       {recentProjects.length === 0 ? (
         <EmptyState
           icon={<Folder size={20} />}
-          title="No projects yet"
-          hint="Add a C/C++ project folder to start discovering targets."
+          title={t("projects.empty")}
+          hint={t("projects.emptyHint")}
           action={
             <Button variant="primary" onClick={addProject}>
               <FolderPlus size={14} />
-              Add project
+              {t("projects.addProject")}
             </Button>
           }
         />
@@ -113,26 +114,26 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
                   </span>
                 </div>
                 {overrides[path] && <AutoRevertBadge policy={overrides[path]} overridden />}
-                <Button variant="outline" size="sm" onClick={() => open(path, "discover")} title="Discover targets">
+                <Button variant="outline" size="sm" onClick={() => open(path, "discover")} title={t("projects.discoverTooltip")}>
                   <Crosshair size={13} />
-                  Discover
+                  {t("projects.discover")}
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => open(path, "run")} title="Run a fuzz campaign">
+                <Button variant="outline" size="sm" onClick={() => open(path, "run")} title={t("projects.runTooltip")}>
                   <Play size={13} />
-                  Run
+                  {t("common.run")}
                 </Button>
                 <IconButton
                   onClick={() => removeRecent(path)}
-                  title="Remove from recents (keeps data)"
-                  aria-label="Remove from recents"
+                  title={t("projects.removeTooltip")}
+                  aria-label={t("projects.removeAria")}
                 >
                   <X size={14} />
                 </IconButton>
                 <IconButton
                   danger
                   onClick={() => deleteData(path)}
-                  title="Delete all data for this project"
-                  aria-label="Delete all data for this project"
+                  title={t("projects.deleteTooltip")}
+                  aria-label={t("projects.deleteAria")}
                 >
                   <Trash2 size={14} />
                 </IconButton>
@@ -146,7 +147,8 @@ export function ProjectsView({ onNavigate }: { onNavigate: (view: ViewType) => v
         <div className="flex items-center gap-2 text-xs text-text-muted">
           <FolderOpen size={13} />
           <span>
-            Active: <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>{activeProject}</span>
+            {t("projects.active")}{" "}
+            <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>{activeProject}</span>
           </span>
         </div>
       )}

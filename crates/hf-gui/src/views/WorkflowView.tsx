@@ -10,6 +10,7 @@ import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
 import { CorpusView } from "./CorpusView";
 import { ViewHeader, Button } from "../components/ui";
+import { useI18n } from "../i18n";
 
 // A unified, connected fuzzing flow: choose a project, then Discover -> Harness
 // -> Run -> Triage as one stacked accordion (no jumping between sidebar pages).
@@ -23,8 +24,6 @@ type CoreStageId = "discover" | "harness" | "run" | "triage";
 interface CoreStage {
   id: CoreStageId;
   n: number;
-  label: string;
-  hint: string;
   icon: React.ComponentType<{ size?: number }>;
   // Embedded stage views accept an optional navigate callback; in the workflow
   // it expands the target section (e.g. Run's "regenerate harness" -> Harness).
@@ -37,16 +36,20 @@ interface CoreStage {
   }>;
 }
 
+// Labels and hints are looked up by id via t(`workflow.${id}Label`/`Hint`) at
+// render time; keeping them out of this module-scope array avoids calling the
+// i18n hook outside a component.
 const CORE_STAGES: CoreStage[] = [
-  { id: "discover", n: 1, label: "Discover Targets", hint: "Scan the project for fuzzable functions", icon: Crosshair, Component: DiscoverView },
-  { id: "harness", n: 2, label: "Generate Harness", hint: "Draft, compile, and seed a harness", icon: FileCode, Component: HarnessView },
-  { id: "run", n: 3, label: "Run Fuzzer", hint: "Drive the engine and watch live progress", icon: Play, Component: RunView },
-  { id: "triage", n: 4, label: "Triage Crashes", hint: "Reproduce, classify, and dedup crashes", icon: Bug, Component: TriageView },
+  { id: "discover", n: 1, icon: Crosshair, Component: DiscoverView },
+  { id: "harness", n: 2, icon: FileCode, Component: HarnessView },
+  { id: "run", n: 3, icon: Play, Component: RunView },
+  { id: "triage", n: 4, icon: Bug, Component: TriageView },
 ];
 
 type SectionId = CoreStageId | "corpus";
 
 export function WorkflowView() {
+  const { t } = useI18n();
   const { activeProject, recentProjects, setActiveProject } = useProject();
   // Single source of truth for stage state: the pipeline's rolled-up core
   // stages, so the Workflow and the Progress panel always agree.
@@ -88,8 +91,8 @@ export function WorkflowView() {
   return (
     <div className="flex flex-col gap-3" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
-        title="Fuzzing Workflow"
-        description="One connected flow: choose a project, discover a target, generate a harness, run the fuzzer, then triage crashes."
+        title={t("workflow.title")}
+        description={t("workflow.description")}
       />
 
       {/* Project gate -- everything below runs in the chosen project's workspace. */}
@@ -98,9 +101,9 @@ export function WorkflowView() {
           <div className="flex items-center gap-3 min-w-0">
             <FolderOpen size={16} style={{ color: activeProject ? "var(--success)" : "var(--accent)" }} />
             <div className="flex flex-col min-w-0">
-              <span className="text-sm font-medium">{projectName ?? "No project selected"}</span>
+              <span className="text-sm font-medium">{projectName ?? t("workflow.noProjectSelected")}</span>
               <span className="text-xs text-text-muted truncate" style={{ fontFamily: activeProject ? "var(--font-mono)" : undefined }}>
-                {activeProject || "Choose a project folder to begin — every stage runs in its workspace."}
+                {activeProject || t("workflow.chooseProjectHint")}
               </span>
             </div>
           </div>
@@ -111,12 +114,12 @@ export function WorkflowView() {
             className="shrink-0"
           >
             <FolderOpen size={13} />
-            {activeProject ? "Change" : "Choose Folder…"}
+            {activeProject ? t("workflow.change") : t("workflow.chooseFolder")}
           </Button>
         </div>
         {gated && recentProjects.length > 0 && (
           <div className="mt-3 flex flex-col gap-1">
-            <span className="text-xs text-text-muted">Recent projects</span>
+            <span className="text-xs text-text-muted">{t("workflow.recentProjects")}</span>
             {recentProjects.slice(0, 5).map((p) => (
               <button
                 key={p}
@@ -132,7 +135,9 @@ export function WorkflowView() {
       </section>
 
       {/* Core linear stages */}
-      {CORE_STAGES.map(({ id, n, label, hint, icon: Icon, Component }) => {
+      {CORE_STAGES.map(({ id, n, icon: Icon, Component }) => {
+        const label = t(`workflow.${id}Label`);
+        const hint = t(`workflow.${id}Hint`);
         const done = stageDone(id);
         const skipped = coreById[id]?.skipped ?? false;
         const current = !gated && !allComplete && (coreById[id]?.current ?? false);
@@ -162,7 +167,7 @@ export function WorkflowView() {
                   <span className="text-sm font-medium flex items-center gap-2">
                     <Icon size={14} />
                     {label}
-                    {skipped && <span className="text-xs text-text-muted">(skipped)</span>}
+                    {skipped && <span className="text-xs text-text-muted">{t("workflow.skipped")}</span>}
                   </span>
                   <span className="text-xs text-text-muted">{hint}</span>
                 </span>
@@ -190,7 +195,7 @@ export function WorkflowView() {
 
       {/* Corpus -- an ongoing resource, not a numbered step. */}
       <div className="mt-1 mb-1 text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
-        Ongoing
+        {t("workflow.ongoing")}
       </div>
       <section
         ref={(el) => {
@@ -210,8 +215,8 @@ export function WorkflowView() {
               <Database size={12} />
             </span>
             <span className="flex flex-col">
-              <span className="text-sm font-medium">Corpus</span>
-              <span className="text-xs text-text-muted">Seed, grow, and prune — used throughout the loop, not a final step</span>
+              <span className="text-sm font-medium">{t("workflow.corpus")}</span>
+              <span className="text-xs text-text-muted">{t("workflow.corpusHint")}</span>
             </span>
           </span>
           {expanded === "corpus" ? <ChevronDown size={16} className="text-text-muted" /> : <ChevronRight size={16} className="text-text-muted" />}

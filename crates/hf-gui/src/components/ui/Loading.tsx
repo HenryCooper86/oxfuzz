@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { useI18n } from "../../i18n";
 
 // Shared loading primitives so spinners and placeholders look the same
 // everywhere (the complement to EmptyState).
@@ -15,14 +16,15 @@ export function Spinner({ size = 16, className }: { size?: number; className?: s
 }
 
 /** A centered spinner + label, for a section/panel that is loading. */
-export function LoadingState({ label = "Loading…" }: { label?: string }) {
+export function LoadingState({ label }: { label?: string }) {
+  const { t } = useI18n();
   return (
     <div
       className="surface-card flex flex-col items-center justify-center text-center text-text-muted"
       style={{ padding: "var(--space-xl) var(--space-md)", gap: "var(--space-sm)" }}
     >
       <Spinner size={20} />
-      <p className="text-sm">{label}</p>
+      <p className="text-sm">{label ?? t("common.loading")}</p>
     </div>
   );
 }

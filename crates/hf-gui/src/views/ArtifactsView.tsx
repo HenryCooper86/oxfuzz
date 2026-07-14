@@ -7,11 +7,13 @@ import type { Crash, CorpusEntry } from "../types";
 import { Button, IconButton, Input, ViewHeader, EmptyState, ErrorState, Badge } from "../components/ui";
 import { Bug, Database, RotateCw, FileWarning, Download, Search, Trash2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
+import { useI18n } from "../i18n";
 
 export function ArtifactsView() {
   const { activeProject } = useProject();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const { t } = useI18n();
   const [crashes, setCrashes] = useState<Crash[]>([]);
   const [corpus, setCorpus] = useState<CorpusEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -55,46 +57,46 @@ export function ArtifactsView() {
       const saved = await getTransport().invoke<string | null>("export_project_data", {
         project: activeProject || undefined,
       });
-      if (saved) toast({ title: "Exported", description: `Saved to ${saved}`, variant: "success" });
+      if (saved) toast({ title: t("artifacts.exported"), description: t("artifacts.savedTo", { path: saved }), variant: "success" });
     } catch (e) {
-      toast({ title: "Export failed", description: String(e), variant: "error" });
+      toast({ title: t("artifacts.exportFailed"), description: String(e), variant: "error" });
     } finally {
       setExporting(false);
     }
   }
 
   async function deleteCrash(c: Crash) {
-    if (!(await confirm({ title: "Delete crash", message: `Delete the crash reproducer "${c.input_path.split("/").pop()}"? The record is removed from the database.`, danger: true, confirmLabel: "Delete" }))) return;
+    if (!(await confirm({ title: t("artifacts.deleteCrashTitle"), message: t("artifacts.deleteCrashMessage", { name: c.input_path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
     try {
       await getTransport().invoke("delete_crash", { crashId: c.id });
       setCrashes((cs) => cs.filter((x) => x.id !== c.id));
       emitDataChanged();
     } catch (e) {
-      toast({ title: "Delete failed", description: String(e), variant: "error" });
+      toast({ title: t("artifacts.deleteFailed"), description: String(e), variant: "error" });
     }
   }
 
   async function deleteCorpus(e: CorpusEntry) {
-    if (!(await confirm({ title: "Delete corpus entry", message: `Delete the corpus input "${e.path.split("/").pop()}"?`, danger: true, confirmLabel: "Delete" }))) return;
+    if (!(await confirm({ title: t("artifacts.deleteCorpusTitle"), message: t("artifacts.deleteCorpusMessage", { name: e.path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
     try {
       await getTransport().invoke("delete_corpus_entry", { sha256: e.sha256 });
       setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256));
       emitDataChanged();
     } catch (err) {
-      toast({ title: "Delete failed", description: String(err), variant: "error" });
+      toast({ title: t("artifacts.deleteFailed"), description: String(err), variant: "error" });
     }
   }
 
   async function clearAll() {
-    if (!(await confirm({ title: "Clear all artifacts", message: "Delete every crash reproducer and corpus entry across all projects from the database? This cannot be undone.", danger: true, confirmLabel: "Clear all" }))) return;
+    if (!(await confirm({ title: t("artifacts.clearAllTitle"), message: t("artifacts.clearAllMessage"), danger: true, confirmLabel: t("common.clearAll") }))) return;
     try {
       await getTransport().invoke("clear_all_artifacts");
       setCrashes([]);
       setCorpus([]);
       emitDataChanged();
-      toast({ title: "Artifacts cleared", variant: "success" });
+      toast({ title: t("artifacts.cleared"), variant: "success" });
     } catch (e) {
-      toast({ title: "Clear failed", description: String(e), variant: "error" });
+      toast({ title: t("artifacts.clearFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -111,23 +113,23 @@ export function ArtifactsView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <ViewHeader title="Artifacts" description="Crash reproducers and corpus inputs from your fuzz runs." />
+        <ViewHeader title={t("artifacts.title")} description={t("artifacts.description")} />
         <div className="flex items-center gap-2">
           {isTauriEnvironment() && (
-            <Button variant="outline" onClick={() => void exportData()} loading={exporting} title="Export this project's data as JSON">
+            <Button variant="outline" onClick={() => void exportData()} loading={exporting} title={t("artifacts.exportTooltip")}>
               {!exporting && <Download size={14} />}
-              Export
+              {t("common.export")}
             </Button>
           )}
           {(crashes.length > 0 || corpus.length > 0) && (
-            <Button variant="danger" onClick={() => void clearAll()} title="Delete every crash reproducer and corpus entry from the database">
+            <Button variant="danger" onClick={() => void clearAll()} title={t("artifacts.clearAllTooltip")}>
               <Trash2 size={14} />
-              Clear all
+              {t("common.clearAll")}
             </Button>
           )}
           <Button variant="primary" onClick={() => void scan()} loading={loading}>
             {!loading && <RotateCw size={14} />}
-            {loading ? "Scanning..." : "Rescan"}
+            {loading ? t("artifacts.scanning") : t("common.rescan")}
           </Button>
         </div>
       </div>
@@ -135,25 +137,25 @@ export function ArtifactsView() {
       {(crashes.length > 0 || corpus.length > 0) && (
         <div className="flex items-center gap-2">
           <Search size={14} className="text-text-muted shrink-0" />
-          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by filename, kind, or source..." className="flex-1" />
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("artifacts.filterPlaceholder")} className="flex-1" />
         </div>
       )}
 
       {!scanned && !loading && (
         <EmptyState
           icon={<FileWarning size={20} />}
-          hint="Scan to collect crash and corpus artifacts."
+          hint={t("artifacts.scanHint")}
         />
       )}
 
       {error && (
         <ErrorState
-          title="Failed to load artifacts"
+          title={t("artifacts.loadFailed")}
           message={error}
           action={
             <Button variant="outline" size="sm" onClick={() => void scan()}>
               <RotateCw size={13} />
-              Retry
+              {t("common.retry")}
             </Button>
           }
         />
@@ -162,13 +164,13 @@ export function ArtifactsView() {
       {empty && (
         <EmptyState
           icon={<FileWarning size={20} />}
-          title="No artifacts found"
-          hint="Run a fuzz campaign first, then rescan to collect crash reproducers and corpus inputs."
+          title={t("artifacts.empty")}
+          hint={t("artifacts.emptyHint")}
         />
       )}
 
       {shownCrashes.length > 0 && (
-        <Section icon={<Bug size={15} style={{ color: "var(--error)" }} />} title="Crashes" count={shownCrashes.length}>
+        <Section icon={<Bug size={15} style={{ color: "var(--error)" }} />} title={t("artifacts.crashes")} count={shownCrashes.length}>
           {shownCrashes.map((c) => (
             <div
               key={c.id}
@@ -180,9 +182,9 @@ export function ArtifactsView() {
               <span className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0" title={c.input_path}>
                 {c.input_path.split("/").pop()}
               </span>
-              {c.minimized && <span className="text-xs text-text-muted shrink-0">minimized</span>}
+              {c.minimized && <span className="text-xs text-text-muted shrink-0">{t("artifacts.minimized")}</span>}
               <PathActions path={c.input_path} />
-              <IconButton danger onClick={() => void deleteCrash(c)} title="Delete this crash" aria-label="Delete crash">
+              <IconButton danger onClick={() => void deleteCrash(c)} title={t("artifacts.deleteCrashTooltip")} aria-label={t("artifacts.deleteCrashAria")}>
                 <Trash2 size={14} />
               </IconButton>
             </div>
@@ -191,7 +193,7 @@ export function ArtifactsView() {
       )}
 
       {shownCorpus.length > 0 && (
-        <Section icon={<Database size={15} style={{ color: "var(--accent)" }} />} title="Corpus" count={shownCorpus.length}>
+        <Section icon={<Database size={15} style={{ color: "var(--accent)" }} />} title={t("artifacts.corpus")} count={shownCorpus.length}>
           {shownCorpus.map((e) => (
             <div
               key={e.sha256}
@@ -205,7 +207,7 @@ export function ArtifactsView() {
               <span className="text-xs text-text-muted shrink-0">{e.size} B</span>
               <span className="text-xs text-text-muted shrink-0">{e.source}</span>
               <PathActions path={e.path} />
-              <IconButton danger onClick={() => void deleteCorpus(e)} title="Delete this corpus entry" aria-label="Delete corpus entry">
+              <IconButton danger onClick={() => void deleteCorpus(e)} title={t("artifacts.deleteCorpusTooltip")} aria-label={t("artifacts.deleteCorpusAria")}>
                 <Trash2 size={14} />
               </IconButton>
             </div>

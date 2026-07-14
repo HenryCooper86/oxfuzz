@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged, emitDataChanged } from "../lib";
+import { useI18n } from "../i18n";
 import { useProject } from "../providers/ProjectContext";
 import { useToast } from "../components/ui/Toast";
 import { useConfirm } from "../providers/ConfirmContext";
@@ -29,6 +30,7 @@ const STATUS_COLOR: Record<string, string> = {
 // selected), with crash counts and durations, plus a two-run compare. Runs are
 // read from the persisted store, so the history survives restarts.
 export function RunsView() {
+  const { t } = useI18n();
   const { activeProject } = useProject();
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -76,27 +78,27 @@ export function RunsView() {
   }, [activeProject]);
 
   async function deleteRun(r: RunHistoryItem) {
-    if (!(await confirm({ title: "Delete run", message: `Delete this ${r.engine} run and the ${r.crashes} crash(es) it produced?`, danger: true, confirmLabel: "Delete" }))) return;
+    if (!(await confirm({ title: t("runs.deleteRunTitle"), message: t("runs.deleteRunMsg", { engine: r.engine, n: r.crashes }), danger: true, confirmLabel: t("common.delete") }))) return;
     try {
       await getTransport().invoke("delete_run", { runId: r.id });
       setRuns((rs) => rs.filter((x) => x.id !== r.id));
       setSelected((s) => s.filter((id) => id !== r.id));
       emitDataChanged();
     } catch (e) {
-      toast({ title: "Delete failed", description: String(e), variant: "error" });
+      toast({ title: t("runs.deleteFailed"), description: String(e), variant: "error" });
     }
   }
 
   async function clearAllRuns() {
-    if (!(await confirm({ title: "Clear run history", message: "Delete every run and the crashes they produced from the database? This cannot be undone.", danger: true, confirmLabel: "Clear all" }))) return;
+    if (!(await confirm({ title: t("runs.clearTitle"), message: t("runs.clearMsg"), danger: true, confirmLabel: t("common.clearAll") }))) return;
     try {
       await getTransport().invoke("clear_all_runs");
       setRuns([]);
       setSelected([]);
       emitDataChanged();
-      toast({ title: "Run history cleared", variant: "success" });
+      toast({ title: t("runs.historyCleared"), variant: "success" });
     } catch (e) {
-      toast({ title: "Clear failed", description: String(e), variant: "error" });
+      toast({ title: t("runs.clearFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -132,7 +134,7 @@ export function RunsView() {
     if (h && !revOrder.includes(h)) revOrder.push(h);
   }
   const revLabel = (h: string | null): string | null =>
-    h ? `rev ${revOrder.indexOf(h) + 1}` : null;
+    h ? t("runs.rev", { n: revOrder.indexOf(h) + 1 }) : null;
   // Compare each bar with the most recent service-approved comparable baseline,
   // even when another target/engine ran in between.
   const { baselineAt, changeAt, regressAt } = buildRunComparisons(trend);
@@ -152,8 +154,8 @@ export function RunsView() {
         getTransport().invoke<string>("run_harness_source", { runId: cur.id }),
       ]);
       setDiff({
-        from: revLabel(prev.harness_rev) ?? "previous",
-        to: revLabel(cur.harness_rev) ?? "current",
+        from: revLabel(prev.harness_rev) ?? t("runs.previous"),
+        to: revLabel(cur.harness_rev) ?? t("runs.current"),
         fromId: prev.id,
         toId: cur.id,
         oldText,
@@ -168,9 +170,9 @@ export function RunsView() {
   async function revertTo(runId: string, label: string) {
     if (
       !(await confirm({
-        title: `Revert harness to ${label}?`,
-        message: "This restores that revision's harness source and recompiles it in the sandbox, making it the current harness for the target.",
-        confirmLabel: "Revert & recompile",
+        title: t("runs.revertConfirmTitle", { label }),
+        message: t("runs.revertConfirmMsg"),
+        confirmLabel: t("runs.revertRecompile"),
       }))
     ) {
       return;
@@ -180,14 +182,14 @@ export function RunsView() {
       const res = await getTransport().invoke<{ status: string; message: string }>("revert_harness_from_run", { runId });
       const ok = res?.status === "Compiled";
       toast({
-        title: ok ? `Reverted to ${label}` : "Revert finished with a compile issue",
+        title: ok ? t("runs.revertedTo", { label }) : t("runs.revertCompileIssue"),
         description: res?.message,
         variant: ok ? "success" : "error",
       });
       setDiff(null);
       emitDataChanged();
     } catch (e) {
-      toast({ title: "Revert failed", description: String(e), variant: "error" });
+      toast({ title: t("runs.revertFailed"), description: String(e), variant: "error" });
     } finally {
       setReverting(false);
     }
@@ -197,21 +199,21 @@ export function RunsView() {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <ViewHeader
-          title="Run History"
-          description="Every fuzz run for this project, with crashes and duration. Select two runs to compare."
+          title={t("runs.title")}
+          description={t("runs.description")}
         />
         {runs.length > 0 && (
-          <Button variant="danger" size="sm" onClick={() => void clearAllRuns()} title="Delete all runs and their crashes from the database">
+          <Button variant="danger" size="sm" onClick={() => void clearAllRuns()} title={t("runs.clearAllTitle")}>
             <Trash2 size={14} />
-            Clear all
+            {t("common.clearAll")}
           </Button>
         )}
       </div>
 
       {error && (
         <div className="surface-card flex items-center justify-between gap-3" style={{ padding: "var(--space-sm) var(--space-md)", borderColor: "var(--error)" }}>
-          <span className="text-xs min-w-0 truncate" style={{ color: "var(--error)" }}>Failed to load run history: {error}</span>
-          <Button variant="outline" size="sm" onClick={() => void load()}>Retry</Button>
+          <span className="text-xs min-w-0 truncate" style={{ color: "var(--error)" }}>{t("runs.loadError", { error })}</span>
+          <Button variant="outline" size="sm" onClick={() => void load()}>{t("common.retry")}</Button>
         </div>
       )}
 
@@ -221,12 +223,12 @@ export function RunsView() {
         <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
           <div className="flex items-center gap-2">
             <TrendingUp size={15} style={{ color: "var(--accent)" }} />
-            <span className="text-sm font-semibold">Trends</span>
-            <span className="text-xs text-text-muted">last {trend.length} runs</span>
+            <span className="text-sm font-semibold">{t("runs.trends")}</span>
+            <span className="text-xs text-text-muted">{t("runs.lastNRuns", { n: trend.length })}</span>
           </div>
           <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
             <MiniTrend
-              title="Coverage (edges)"
+              title={t("runs.coverageEdges")}
               icon={<Activity size={13} />}
               runs={trend}
               value={(r) => r.edges ?? 0}
@@ -236,14 +238,14 @@ export function RunsView() {
               onMark={(i) => void openRevDiff(i)}
             />
             <MiniTrend
-              title="Throughput (execs/sec)"
+              title={t("runs.throughput")}
               icon={<Zap size={13} />}
               runs={trend}
               value={(r) => Math.round(r.execs ?? 0)}
               color="var(--accent)"
             />
             <MiniTrend
-              title="Crashes"
+              title={t("runs.crashes")}
               icon={<Bug size={13} />}
               runs={trend}
               value={(r) => r.crashes}
@@ -257,15 +259,15 @@ export function RunsView() {
             >
               <AlertTriangle size={14} style={{ color: "var(--error)", flexShrink: 0, marginTop: 1 }} />
               <span style={{ color: "var(--error)" }}>
-                {regressCount} harness revision{regressCount === 1 ? "" : "s"} reduced coverage under comparable run conditions. Click a{" "}
-                <span style={{ fontWeight: 600 }}>red ▲</span> to see the change that regressed it.
+                {t("runs.regressWarnPre", { n: regressCount })}{" "}
+                <span style={{ fontWeight: 600 }}>{t("runs.redTriangle")}</span>{t("runs.regressWarnPost")}
               </span>
             </div>
           )}
           {anyRevChange && (
             <p className="text-xs text-text-muted flex items-center gap-1">
               <span style={{ color: "var(--accent)" }}>▲</span>
-              marks a run where the harness revision changed versus a comparable baseline{regressCount > 0 ? " (red = coverage dropped)" : ""} — click it to see exactly what changed in the harness.
+              {t("runs.markLegend", { redNote: regressCount > 0 ? t("runs.redDropNote") : "" })}
             </p>
           )}
         </section>
@@ -275,8 +277,8 @@ export function RunsView() {
         <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
           <div className="flex items-center gap-2">
             <GitCompare size={15} style={{ color: "var(--accent)" }} />
-            <span className="text-sm font-semibold">Compare</span>
-            <IconButton size={24} className="ml-auto" onClick={() => setSelected([])} title="Clear comparison" aria-label="Clear comparison">
+            <span className="text-sm font-semibold">{t("runs.compare")}</span>
+            <IconButton size={24} className="ml-auto" onClick={() => setSelected([])} title={t("runs.clearComparison")} aria-label={t("runs.clearComparison")}>
               <X size={14} />
             </IconButton>
           </div>
@@ -284,13 +286,13 @@ export function RunsView() {
             {compareRuns.map((r) => (
               <div key={r.id} className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
                 <div className="text-sm font-semibold truncate">{r.engine}</div>
-                <div className="text-xs text-text-muted mb-2">{r.target ?? "Unknown target"} · {new Date(r.started_at).toLocaleString()}</div>
-                <CompareRow label="Status" value={r.status} />
-                <CompareRow label="Harness" value={revLabel(r.harness_rev) ?? "—"} />
-                <CompareRow label="Coverage (edges)" value={r.edges != null ? r.edges.toLocaleString() : "—"} />
-                <CompareRow label="Execs/sec (peak)" value={r.execs != null ? Math.round(r.execs).toLocaleString() : "—"} />
-                <CompareRow label="Crashes" value={String(r.crashes)} />
-                <CompareRow label="Duration" value={fmtDuration(r.duration_secs)} />
+                <div className="text-xs text-text-muted mb-2">{r.target ?? t("runs.unknownTarget")} · {new Date(r.started_at).toLocaleString()}</div>
+                <CompareRow label={t("runs.status")} value={r.status} />
+                <CompareRow label={t("runs.harness")} value={revLabel(r.harness_rev) ?? "—"} />
+                <CompareRow label={t("runs.coverageEdges")} value={r.edges != null ? r.edges.toLocaleString() : "—"} />
+                <CompareRow label={t("runs.execsPeak")} value={r.execs != null ? Math.round(r.execs).toLocaleString() : "—"} />
+                <CompareRow label={t("runs.crashes")} value={String(r.crashes)} />
+                <CompareRow label={t("runs.duration")} value={fmtDuration(r.duration_secs)} />
               </div>
             ))}
           </div>
@@ -298,15 +300,15 @@ export function RunsView() {
       )}
 
       {loading ? (
-        <p className="text-sm text-text-muted">Loading runs…</p>
+        <p className="text-sm text-text-muted">{t("runs.loadingRuns")}</p>
       ) : runs.length === 0 ? (
-        <EmptyState icon={<Play size={20} />} title="No runs yet" hint="Start a fuzz campaign from the Run view; each run is recorded here." />
+        <EmptyState icon={<Play size={20} />} title={t("runs.emptyTitle")} hint={t("runs.emptyHint")} />
       ) : (
         <div className="flex flex-col gap-1.5">
           {runs.length > 4 && (
             <div className="flex items-center gap-2 mb-1">
               <Search size={14} className="text-text-muted shrink-0" />
-              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by target, engine, or status..." className="flex-1" />
+              <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("runs.filterPlaceholder")} className="flex-1" />
             </div>
           )}
           {shownRuns.map((r) => {
@@ -323,7 +325,7 @@ export function RunsView() {
                     onClick={() => toggle(r.id)}
                     className="flex items-center gap-3 flex-1 min-w-0 text-left bg-transparent"
                     style={{ border: "none", cursor: "pointer" }}
-                    title="Select to compare (up to 2)"
+                    title={t("runs.selectToCompare")}
                   >
                     <Play size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
                     <span className="text-sm font-medium truncate" style={{ minWidth: 90 }}>{r.engine}</span>
@@ -333,7 +335,7 @@ export function RunsView() {
                       <span
                         className="text-xs shrink-0 px-1.5 py-0.5 rounded-sm hidden md:inline"
                         style={{ background: "var(--surface-active)", color: "var(--text-muted)" }}
-                        title={`Harness revision ${r.harness_rev}`}
+                        title={t("runs.harnessRevTitle", { rev: r.harness_rev })}
                       >
                         {revLabel(r.harness_rev)}
                       </span>
@@ -342,25 +344,25 @@ export function RunsView() {
                       <span
                         className="text-xs shrink-0 px-1.5 py-0.5 rounded-sm inline-flex items-center gap-1"
                         style={{ background: "var(--error-subtle)", color: "var(--error)" }}
-                        title="Coverage dropped after this harness revision"
+                        title={t("runs.regressedTitle")}
                       >
-                        <AlertTriangle size={10} /> regressed
+                        <AlertTriangle size={10} /> {t("runs.regressed")}
                       </span>
                     )}
                     <span className="flex-1" />
-                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak edge coverage">
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title={t("runs.peakEdgeTitle")}>
                       <Activity size={12} />
                       {r.edges != null ? r.edges.toLocaleString() : "—"}
                     </span>
-                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title="Peak execs/sec">
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0 hidden sm:flex" title={t("runs.peakExecsTitle")}>
                       <Zap size={12} />
                       {r.execs != null ? Math.round(r.execs).toLocaleString() : "—"}
                     </span>
-                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Crashes">
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title={t("runs.crashes")}>
                       <Bug size={12} style={{ color: r.crashes > 0 ? "var(--error)" : "var(--text-muted)" }} />
                       {r.crashes}
                     </span>
-                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title="Duration">
+                    <span className="text-xs text-text-muted flex items-center gap-1 shrink-0" title={t("runs.duration")}>
                       <Clock size={12} />
                       {fmtDuration(r.duration_secs)}
                     </span>
@@ -371,8 +373,8 @@ export function RunsView() {
                     className="shrink-0"
                     style={isOpen ? { color: "var(--accent)" } : undefined}
                     onClick={() => void toggleCurve(r.id)}
-                    title="Coverage-over-time curve"
-                    aria-label="Toggle coverage curve"
+                    title={t("runs.coverageCurveTitle")}
+                    aria-label={t("runs.toggleCoverageCurve")}
                   >
                     <LineChart size={14} />
                   </IconButton>
@@ -381,8 +383,8 @@ export function RunsView() {
                     danger
                     className="shrink-0"
                     onClick={() => void deleteRun(r)}
-                    title="Delete this run and its crashes"
-                    aria-label="Delete run"
+                    title={t("runs.deleteRunTip")}
+                    aria-label={t("runs.deleteRunAria")}
                   >
                     <Trash2 size={14} />
                   </IconButton>
@@ -390,9 +392,9 @@ export function RunsView() {
                 {isOpen && (
                   <div className="surface-card mt-1" style={{ padding: "var(--space-md)" }}>
                     {data === "loading" || data === undefined ? (
-                      <p className="text-xs text-text-muted">Loading coverage curve…</p>
+                      <p className="text-xs text-text-muted">{t("runs.loadingCurve")}</p>
                     ) : data.length < 2 ? (
-                      <p className="text-xs text-text-muted">No coverage samples were recorded for this run (older runs, very short runs, or engines that don't stream coverage).</p>
+                      <p className="text-xs text-text-muted">{t("runs.noCoverageSamples")}</p>
                     ) : (
                       <CoverageCurve samples={data} />
                     )}
@@ -406,8 +408,8 @@ export function RunsView() {
 
       {runs.length > 0 && (
         <div className="flex items-center gap-2 text-xs text-text-muted">
-          <Button variant="outline" size="sm" onClick={() => void load()}>Refresh</Button>
-          {selected.length === 1 && <span>Select one more run to compare.</span>}
+          <Button variant="outline" size="sm" onClick={() => void load()}>{t("common.refresh")}</Button>
+          {selected.length === 1 && <span>{t("runs.selectOneMore")}</span>}
         </div>
       )}
 
@@ -425,34 +427,34 @@ export function RunsView() {
             <div className="flex items-center justify-between border-b border-border" style={{ padding: "var(--space-md)" }}>
               <span className="text-sm font-semibold flex items-center gap-2">
                 <GitCompare size={15} style={{ color: "var(--accent)" }} />
-                Harness diff{diff !== "loading" ? `: ${diff.from} → ${diff.to}` : ""}
+                {diff !== "loading" ? t("runs.harnessDiffRange", { from: diff.from, to: diff.to }) : t("runs.harnessDiff")}
               </span>
-              <button onClick={() => setDiff(null)} className="hf-action-btn" title="Close" aria-label="Close">
+              <button onClick={() => setDiff(null)} className="hf-action-btn" title={t("common.close")} aria-label={t("common.close")}>
                 <X size={16} />
               </button>
             </div>
             <div className="overflow-auto" style={{ padding: "var(--space-md)" }}>
               {diff === "loading" ? (
-                <p className="text-xs text-text-muted">Loading harness diff…</p>
+                <p className="text-xs text-text-muted">{t("runs.loadingDiff")}</p>
               ) : diff.oldText === diff.newText ? (
-                <p className="text-xs text-text-muted">The stored harness sources are identical.</p>
+                <p className="text-xs text-text-muted">{t("runs.diffIdentical")}</p>
               ) : !diff.oldText && !diff.newText ? (
-                <p className="text-xs text-text-muted">No harness source was recorded for these runs (older runs).</p>
+                <p className="text-xs text-text-muted">{t("runs.diffNoSource")}</p>
               ) : (
                 <DiffView oldText={diff.oldText} newText={diff.newText} />
               )}
             </div>
             {diff !== "loading" && (diff.oldText || diff.newText) && (
               <div className="flex items-center justify-end gap-2 border-t border-border" style={{ padding: "var(--space-md)" }}>
-                <span className="text-xs text-text-muted mr-auto">Restore either revision as the current harness (recompiles):</span>
+                <span className="text-xs text-text-muted mr-auto">{t("runs.restoreEither")}</span>
                 {diff.oldText && (
                   <Button variant="primary" size="sm" onClick={() => void revertTo(diff.fromId, diff.from)} loading={reverting} disabled={reverting}>
-                    <RotateCcw size={13} /> Revert to {diff.from}
+                    <RotateCcw size={13} /> {t("runs.revertTo", { label: diff.from })}
                   </Button>
                 )}
                 {diff.newText && diff.newText !== diff.oldText && (
                   <Button variant="outline" size="sm" onClick={() => void revertTo(diff.toId, diff.to)} disabled={reverting}>
-                    <RotateCcw size={13} /> Restore {diff.to}
+                    <RotateCcw size={13} /> {t("runs.restore", { label: diff.to })}
                   </Button>
                 )}
               </div>
@@ -475,6 +477,7 @@ interface ProjectAutoRevert {
 // (persisted in the store, keyed by project root). A project with an override
 // ignores the global policy; clearing it falls back to global.
 function AutoRevertPolicyCard({ project }: { project: string }) {
+  const { t } = useI18n();
   const { toast } = useToast();
   const [enabled, setEnabled] = useState(false);
   const [threshold, setThreshold] = useState(20);
@@ -554,23 +557,23 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
           const toml = await getTransport().invoke<string>("config_value_to_toml", { value: val });
           await getTransport().invoke("write_config", { name: "hobot-fuzz", content: toml });
         }
-        const where = toScope === "project" ? projectName : "global default";
+        const where = toScope === "project" ? projectName : t("runs.globalDefaultLower");
         toast({
           title: next.enabled
-            ? `Auto-revert armed for ${where} (>${next.threshold}% drop${next.notifyOnly ? ", notify-only" : ""})`
-            : `Auto-revert disabled for ${where}`,
+            ? t("runs.armedToast", { where, threshold: next.threshold, notifyOnly: next.notifyOnly ? t("runs.notifyOnlySuffix") : "" })
+            : t("runs.disabledToast", { where }),
           variant: "success",
         });
         // Refresh dependent views (Projects overview + Workbench badges). A
         // global change matters too: projects that inherit it show it.
         emitDataChanged();
       } catch (e) {
-        toast({ title: "Could not save the auto-revert policy", description: String(e), variant: "error" });
+        toast({ title: t("runs.saveFailed"), description: String(e), variant: "error" });
       } finally {
         setSaving(false);
       }
     },
-    [project, projectName, toast],
+    [project, projectName, toast, t],
   );
 
   const toggle = () => {
@@ -608,10 +611,10 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
       setEnabled(g.enabled);
       setThreshold(g.threshold);
       setNotifyOnly(g.notifyOnly);
-      toast({ title: `${projectName} now inherits the global policy`, variant: "success" });
+      toast({ title: t("runs.inheritsGlobal", { name: projectName }), variant: "success" });
       emitDataChanged();
     } catch (e) {
-      toast({ title: "Could not clear the override", description: String(e), variant: "error" });
+      toast({ title: t("runs.clearOverrideFailed"), description: String(e), variant: "error" });
     } finally {
       setSaving(false);
     }
@@ -624,7 +627,7 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2 min-w-0">
           <RotateCcw size={15} style={{ color: "var(--accent)", flexShrink: 0 }} />
-          <span className="text-sm font-semibold">Auto-revert policy</span>
+          <span className="text-sm font-semibold">{t("runs.autoRevertPolicy")}</span>
           <span
             className="text-xs rounded-full"
             style={{
@@ -633,9 +636,9 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
               color: perProject ? "var(--accent)" : "var(--text-muted)",
               fontWeight: 600,
             }}
-            title={perProject ? `Overriding the global default for ${projectName}` : "The global default (all projects)"}
+            title={perProject ? t("runs.overridingTitle", { name: projectName }) : t("runs.globalDefaultTitle")}
           >
-            {perProject ? `Project: ${projectName}` : "Global default"}
+            {perProject ? t("runs.projectBadge", { name: projectName }) : t("runs.globalDefault")}
           </span>
           <span
             className="text-xs rounded-full"
@@ -646,12 +649,12 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
               fontWeight: 600,
             }}
           >
-            {enabled ? "On" : "Off"}
+            {enabled ? t("runs.on") : t("runs.off")}
           </span>
         </div>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-text-muted">
-            drop &gt;
+            {t("runs.dropGt")}
             <Input
               type="number"
               min={1}
@@ -661,7 +664,7 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
               onChange={(e) => setThreshold(Number(e.target.value))}
               onBlur={commitThreshold}
               style={{ width: 68 }}
-              aria-label="Coverage-drop threshold percent"
+              aria-label={t("runs.thresholdAria")}
             />
             %
           </label>
@@ -669,7 +672,7 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
             type="button"
             role="switch"
             aria-checked={enabled}
-            aria-label="Enable auto-revert"
+            aria-label={t("runs.enableAutoRevert")}
             disabled={!ready || saving}
             onClick={toggle}
             className="relative rounded-full transition-colors"
@@ -704,35 +707,30 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
             checked={notifyOnly}
             disabled={!ready || saving}
             onChange={toggleNotifyOnly}
-            aria-label="Notify only, do not restore automatically"
+            aria-label={t("runs.notifyOnlyAria")}
           />
-          Notify-only &mdash; flag the regression but don&apos;t restore automatically (recommended for
-          scheduled campaigns)
+          {t("runs.notifyOnlyLabel")}
         </label>
       )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <p className="text-xs text-text-muted min-w-0" style={{ lineHeight: 1.5 }}>
           {perProject ? (
-            <>These settings apply only to <strong>{projectName}</strong>, overriding the global default. </>
+            <>{t("runs.applyPerProjectPre")}<strong>{projectName}</strong>{t("runs.applyPerProjectPost")}</>
           ) : (
-            <>These settings are the default for every project. </>
-          )}
-          When a harness revision drops coverage by at least this much versus the latest comparable run,{" "}
-          {notifyOnly ? (
-            <>the regression is flagged in run history and the campaign log, but the harness is left as-is.</>
-          ) : (
-            <>that last-good revision is restored and recompiled (sandbox approval still applies).</>
+            t("runs.applyGlobal")
           )}{" "}
-          Comparable runs must use the same target, engine, duration, resources, sanitizer, corpus, environment, and engine arguments. Scheduled campaigns apply the same policy between refinement iterations.
+          {t("runs.dropClause")}{" "}
+          {notifyOnly ? t("runs.notifyOutcome") : t("runs.revertOutcome")}{" "}
+          {t("runs.comparableNote")}
         </p>
         {hasProject &&
           (perProject ? (
             <Button variant="outline" size="sm" disabled={!ready || saving} onClick={() => void revertToGlobalDefault()}>
-              Use global default
+              {t("runs.useGlobalDefault")}
             </Button>
           ) : (
             <Button variant="outline" size="sm" disabled={!ready || saving} onClick={startOverride}>
-              Override for {projectName}
+              {t("runs.overrideFor", { name: projectName })}
             </Button>
           ))}
       </div>
@@ -763,6 +761,7 @@ function MiniTrend({
   /** Clicking a change marker opens the harness diff for that run. */
   onMark?: (index: number) => void;
 }) {
+  const { t } = useI18n();
   const values = runs.map(value);
   const max = Math.max(1, ...values);
   const latest = values[values.length - 1] ?? 0;
@@ -779,7 +778,7 @@ function MiniTrend({
         {delta !== 0 && (
           <span className="text-xs" style={{ color: delta > 0 ? "var(--success)" : "var(--text-muted)" }}>
             {delta > 0 ? "+" : ""}
-            {delta.toLocaleString()} vs prev
+            {delta.toLocaleString()} {t("runs.vsPrev")}
           </span>
         )}
       </div>
@@ -795,13 +794,14 @@ function MiniTrend({
               : i === values.length - 1
                 ? color
                 : "var(--border)";
+          const barSuffix = regressed ? t("runs.barRegressedSuffix") : changed ? t("runs.barChangedSuffix") : "";
           return (
             <div key={i} className="flex flex-col items-center justify-end" style={{ flex: 1, minWidth: 2, height: "100%" }}>
               {changed && onMark ? (
                 <button
                   onClick={() => onMark(i)}
-                  title={regressed ? "Coverage dropped here — view the harness diff" : "View the harness diff that caused this"}
-                  aria-label="View harness diff"
+                  title={regressed ? t("runs.markRegressedTitle") : t("runs.markChangedTitle")}
+                  aria-label={t("runs.viewHarnessDiff")}
                   style={{ height: 8, lineHeight: "8px", fontSize: 8, color: markColor, background: "transparent", border: "none", cursor: "pointer", padding: 0 }}
                 >
                   ▲
@@ -812,7 +812,7 @@ function MiniTrend({
                 </span>
               )}
               <div
-                title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${regressed ? " (coverage regressed after harness change)" : changed ? " (harness changed)" : ""}`}
+                title={`${new Date(runs[i].started_at).toLocaleString()}: ${v.toLocaleString()}${barSuffix}`}
                 style={{
                   width: "100%",
                   height: `${Math.max(3, (v / max) * 100)}%`,
@@ -830,6 +830,7 @@ function MiniTrend({
 
 // The intra-run coverage curve: edges over elapsed time, drawn as an area chart.
 function CoverageCurve({ samples }: { samples: CoverageSample[] }) {
+  const { t } = useI18n();
   const W = 600;
   const H = 150;
   const padL = 6;
@@ -851,10 +852,10 @@ function CoverageCurve({ samples }: { samples: CoverageSample[] }) {
     <div className="min-w-0">
       <div className="flex items-center justify-between text-xs text-text-muted mb-2 gap-2">
         <span className="flex items-center gap-1">
-          <Activity size={12} /> Coverage over time
+          <Activity size={12} /> {t("runs.coverageOverTime")}
         </span>
         <span className="truncate">
-          peak {peakEdges.toLocaleString()} edges · {Math.round(duration)}s · {samples.length} samples
+          {t("runs.curveSummary", { edges: peakEdges.toLocaleString(), duration: Math.round(duration), samples: samples.length })}
         </span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" style={{ display: "block" }}>

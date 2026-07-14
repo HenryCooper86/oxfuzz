@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, lazy, Suspense } from "react";
 import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
+import { useI18n } from "../i18n";
 import { useConfirm } from "../providers/ConfirmContext";
 import type { ReportDraft } from "../types";
 import { ViewHeader, EmptyState, ErrorState, Input, Button, IconButton } from "../components/ui";
@@ -14,6 +15,7 @@ const ReportPreview = lazy(() =>
 // Reports are produced by Triage (auto-composed on crashes) and the Workbench
 // Reports tab; this view lists, previews, exports, and deletes them.
 export function ReportsView() {
+  const { t } = useI18n();
   const confirm = useConfirm();
   const [reports, setReports] = useState<ReportDraft[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,15 +37,14 @@ export function ReportsView() {
         { project: r.project, target: r.target ?? undefined },
       );
       const where = outcome.url ? ` (${outcome.url})` : "";
-      setNotice(
-        `Pushed ${outcome.findings_pushed} finding(s) to DefectDojo${outcome.reimported ? " (reimport)" : ""}${where}.`,
-      );
+      const reimport = outcome.reimported ? t("reports.reimportSuffix") : "";
+      setNotice(t("reports.pushed", { n: outcome.findings_pushed, reimport, where }));
     } catch (e) {
-      setNotice(`DefectDojo push failed: ${String(e)}`);
+      setNotice(t("reports.pushFailed", { error: String(e) }));
     } finally {
       setPushingId(null);
     }
-  }, []);
+  }, [t]);
 
   const load = useCallback(async () => {
     try {
@@ -75,16 +76,16 @@ export function ReportsView() {
 
   const remove = useCallback(
     async (r: ReportDraft) => {
-      if (!(await confirm({ title: "Delete report", message: `Delete "${r.title}"? This cannot be undone.`, danger: true, confirmLabel: "Delete" }))) return;
+      if (!(await confirm({ title: t("reports.deleteTitle"), message: t("reports.deleteMsg", { title: r.title }), danger: true, confirmLabel: t("common.delete") }))) return;
       try {
         await getTransport().invoke("delete_report_draft", { id: r.id });
         if (open?.id === r.id) setOpen(null);
         await load();
       } catch (e) {
-        setNotice(`Delete failed: ${String(e)}`);
+        setNotice(t("reports.deleteFailed", { error: String(e) }));
       }
     },
-    [open, load, confirm],
+    [open, load, confirm, t],
   );
 
   // Export the *saved* content (not a recompose) in the chosen format.
@@ -98,7 +99,7 @@ export function ReportsView() {
             title: r.title,
             format,
           });
-          if (saved) setNotice(`Saved ${format.toUpperCase()} to ${saved}`);
+          if (saved) setNotice(t("reports.savedTo", { format: format.toUpperCase(), path: saved }));
         } else if (format === "md") {
           const blob = new Blob([r.content], { type: "text/markdown" });
           const url = URL.createObjectURL(blob);
@@ -108,13 +109,13 @@ export function ReportsView() {
           a.click();
           URL.revokeObjectURL(url);
         } else {
-          setNotice(`${format.toUpperCase()} export is only available in the desktop app.`);
+          setNotice(t("reports.exportDesktopOnly", { format: format.toUpperCase() }));
         }
       } catch (e) {
-        setNotice(`Export failed: ${String(e)}`);
+        setNotice(t("reports.exportFailed", { error: String(e) }));
       }
     },
-    [],
+    [t],
   );
 
   const q = filter.trim().toLowerCase();
@@ -125,8 +126,8 @@ export function ReportsView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <ViewHeader
-        title="Composed Reports"
-        description="Every report generated from triage and the workbench. Preview, export (MD / HTML / PDF / DOCX), or delete."
+        title={t("reports.title")}
+        description={t("reports.description")}
       />
 
       {notice && <p className="text-xs text-text-muted">{notice}</p>}
@@ -134,28 +135,28 @@ export function ReportsView() {
       {!loading && reports.length > 0 && (
         <div className="flex items-center gap-2">
           <Search size={14} className="text-text-muted shrink-0" />
-          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter by title, target, or status..." className="flex-1" />
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("reports.filterPlaceholder")} className="flex-1" />
         </div>
       )}
 
       {loadError ? (
         <ErrorState
-          title="Failed to load reports"
+          title={t("reports.loadErrorTitle")}
           message={loadError}
           action={
             <Button variant="outline" size="sm" onClick={() => void load()}>
               <RotateCw size={13} />
-              Retry
+              {t("common.retry")}
             </Button>
           }
         />
       ) : loading ? (
-        <p className="text-sm text-text-muted">Loading reports…</p>
+        <p className="text-sm text-text-muted">{t("reports.loading")}</p>
       ) : reports.length === 0 ? (
         <EmptyState
           icon={<FileText size={20} />}
-          title="No reports yet"
-          hint="Run a fuzz campaign; when triage finds crashes it composes and saves a report here automatically."
+          title={t("reports.emptyTitle")}
+          hint={t("reports.emptyHint")}
         />
       ) : (
         <div className="flex flex-col gap-1.5">
@@ -173,25 +174,25 @@ export function ReportsView() {
                   {r.target ? ` · ${r.target}` : ""} · {new Date(r.updated_at).toLocaleString()}
                 </span>
               </div>
-              <Button variant="outline" size="sm" onClick={() => setOpen(r)} title="Preview and export">
+              <Button variant="outline" size="sm" onClick={() => setOpen(r)} title={t("reports.previewExportTitle")}>
                 <Eye size={13} />
-                Open
+                {t("common.open")}
               </Button>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => void pushReport(r)}
                 disabled={pushingId === r.id}
-                title="Push this report's crashes to DefectDojo (configure in Settings > Integrations)"
+                title={t("reports.pushTitle")}
               >
                 <Share2 size={13} />
-                {pushingId === r.id ? "Pushing..." : "DefectDojo"}
+                {pushingId === r.id ? t("reports.pushing") : "DefectDojo"}
               </Button>
               <IconButton
                 danger
                 onClick={() => void remove(r)}
-                title="Delete report"
-                aria-label="Delete report"
+                title={t("reports.deleteReport")}
+                aria-label={t("reports.deleteReport")}
               >
                 <Trash2 size={14} />
               </IconButton>

@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { Database, FolderOpen } from "lucide-react";
 import { getTransport, pickFile, emitDataChanged } from "../../lib";
+import { useI18n } from "../../i18n";
 import { useToast } from "../ui/Toast";
 import { Button, Input } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
@@ -11,6 +12,7 @@ import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 type Cfg = Record<string, unknown>;
 
 export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const { toast } = useToast();
   const dbPath = (value.db_path as string) ?? "";
   const transcriptDir = (value.transcript_dir as string) ?? "";
@@ -36,7 +38,7 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
   }
 
   async function browseDb() {
-    const file = await pickFile("Select the SQLite database file");
+    const file = await pickFile(t("settings.storage.pickDbTitle"));
     if (file) patch({ db_path: file });
   }
 
@@ -50,9 +52,9 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
       await getTransport().invoke("clear_workspace");
       // Corpus/artifact views read from these now-deleted files -- refresh them.
       emitDataChanged();
-      toast({ title: "Workspace cleared", description: "On-disk fuzz artifacts were removed.", variant: "success" });
+      toast({ title: t("settings.storage.workspaceCleared"), description: t("settings.storage.workspaceClearedDesc"), variant: "success" });
     } catch (e) {
-      toast({ title: "Clear failed", description: String(e), variant: "error" });
+      toast({ title: t("settings.storage.clearFailed"), description: String(e), variant: "error" });
     } finally {
       setClearing(false);
       setConfirmClear(false);
@@ -61,43 +63,41 @@ export function StorageTab({ value, onChange }: { value: Cfg; onChange: (next: C
 
   return (
     <div>
-      <SettingsGroup title="Database" description="Configure where run data, transcripts, and fuzz artifacts are stored.">
-        <SettingsItem title="SQLite Path">
+      <SettingsGroup title={t("settings.storage.database")} description={t("settings.storage.databaseDesc")}>
+        <SettingsItem title={t("settings.storage.sqlitePath")}>
           <div style={{ display: "flex", gap: 4, width: 220 }}>
             <Input value={dbPath} onChange={(e) => patch({ db_path: e.target.value })} mono />
-            <button onClick={browseDb} aria-label="Browse for database file" className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
+            <button onClick={browseDb} aria-label={t("settings.storage.browseDb")} className="inline-flex items-center justify-center px-3 py-2 text-xs rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover" style={{ cursor: "pointer" }}>
               <FolderOpen size={14} />
             </button>
           </div>
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Transcripts">
-        <SettingsItem title="Transcript Directory">
+      <SettingsGroup title={t("settings.storage.transcripts")}>
+        <SettingsItem title={t("settings.storage.transcriptDir")}>
           <div style={{ width: 220 }}>
             <Input value={transcriptDir} onChange={(e) => patch({ transcript_dir: e.target.value })} mono />
           </div>
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Fuzz Workspace">
-        <SettingsItem title="Location">
+      <SettingsGroup title={t("settings.storage.fuzzWorkspace")}>
+        <SettingsItem title={t("settings.storage.location")}>
           <div style={{ width: 320 }}>
             <Input value={workspacePath} readOnly mono />
           </div>
         </SettingsItem>
-        <SettingsItem title="Reset">
+        <SettingsItem title={t("common.reset")}>
           <Button variant={confirmClear ? "danger" : "outline"} onClick={clearWorkspace} disabled={clearing}>
-            {clearing ? "Clearing..." : confirmClear ? "Click again to confirm" : "Clear Workspace"}
+            {clearing ? t("settings.storage.clearing") : confirmClear ? t("settings.storage.clickAgain") : t("settings.storage.clearWorkspace")}
           </Button>
         </SettingsItem>
         <div className="settings-item" style={{ padding: "10px 14px" }}>
           <div className="flex items-center gap-2 text-xs text-text-muted">
             <Database size={12} />
             <span>
-              Corpora, crashes, and compiled harnesses persist here across sessions. Override the
-              location with the <code>HF_WORKSPACE_DIR</code> environment variable. Clearing reclaims
-              disk space; discovered targets, runs, and crashes in the database are kept.
+              {t("settings.storage.workspaceNotePre")} <code>HF_WORKSPACE_DIR</code> {t("settings.storage.workspaceNotePost")}
             </span>
           </div>
         </div>

@@ -7,6 +7,7 @@
 // dictionaries to extend coverage.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { enExtra, zhExtra } from "./i18n.extra";
 
 export type Locale = "en" | "zh";
 
@@ -138,6 +139,7 @@ const zh: Dict = {
   "nav.knowledge": "知识库",
   "nav.automation": "自动化",
   "nav.defectdojo": "DefectDojo",
+  "nav.help": "帮助与文档",
   "nav.settings": "设置",
   "sidebar.newTarget": "打开项目",
   "sidebar.targets": "最近",
@@ -166,6 +168,7 @@ const zh: Dict = {
   "title.knowledge": "知识库",
   "title.automation": "自动化",
   "title.defectdojo": "DefectDojo",
+  "title.help": "帮助与文档",
 
   // Header toggles (right-side panels)
   "header.progress": "进度",
@@ -213,13 +216,26 @@ const zh: Dict = {
   "common.noProject": "未选择项目",
 };
 
-const DICTS: Record<Locale, Dict> = { en, zh };
+// The curated inline dicts (nav/title/settings tabs/welcome) plus the
+// per-view keys generated from the localized components (i18n.extra.ts).
+// Inline keys win on any accidental overlap, keeping the hand-tuned wording.
+const DICTS: Record<Locale, Dict> = {
+  en: { ...enExtra, ...en },
+  zh: { ...zhExtra, ...zh },
+};
+
+/** Values substituted into `{name}` placeholders in a translated string. */
+export type TParams = Record<string, string | number>;
 
 interface I18nContextValue {
   locale: Locale;
   setLocale: (l: Locale) => void;
-  /** Translate a key, falling back to English then the key itself. */
-  t: (key: string) => string;
+  /**
+   * Translate a key, falling back to English then the key itself. Optional
+   * `params` replace `{name}` placeholders -- passing `{ n: 3 }` for a value of
+   * "{n} items" yields "3 items".
+   */
+  t: (key: string, params?: TParams) => string;
 }
 
 const I18nContext = createContext<I18nContextValue | null>(null);
@@ -249,7 +265,15 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const t = useCallback(
-    (key: string) => DICTS[locale][key] ?? en[key] ?? key,
+    (key: string, params?: TParams) => {
+      let s = DICTS[locale][key] ?? en[key] ?? key;
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          s = s.split(`{${k}}`).join(String(v));
+        }
+      }
+      return s;
+    },
     [locale],
   );
 

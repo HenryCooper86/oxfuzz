@@ -30,6 +30,7 @@ import { useConfirm } from "../providers/ConfirmContext";
 import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
+import { useI18n } from "../i18n";
 import type {
   CrashReviewItem,
   CreatedIssue,
@@ -74,6 +75,7 @@ const EMPTY_TOTALS = {
   runs: 0,
   active_runs: 0,
   crashes: 0,
+  crashes_needing_triage: 0,
   corpus_entries: 0,
 };
 
@@ -122,6 +124,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const { target } = useTarget();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const { t } = useI18n();
   const { configured: defectDojoOn } = useDefectDojo();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
@@ -174,10 +177,10 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       return await getTransport().invoke<WorkbenchDashboard>("workbench_dashboard", args);
     } catch (e) {
       // Don't silently show a zeroed dashboard as if there were no data.
-      toast({ title: "Failed to load workbench", description: String(e), variant: "error" });
+      toast({ title: t("dashboard.failedLoadWorkbench"), description: String(e), variant: "error" });
       return emptyDashboard(activeProject, target);
     }
-  }, [activeProject, args, target, toast]);
+  }, [activeProject, args, target, toast, t]);
 
   const reloadReports = useCallback(async () => {
     try {
@@ -186,10 +189,10 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       return next;
     } catch (e) {
       setReports([]);
-      toast({ title: "Failed to load reports", description: String(e), variant: "error" });
+      toast({ title: t("dashboard.failedLoadReports"), description: String(e), variant: "error" });
       return [];
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -260,7 +263,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     setNotice(null);
     setError(null);
     if (!activeProject || !target) {
-      setError("Select an active project and target before generating a report.");
+      setError(t("dashboard.selectProjectTarget"));
       setTab("reports");
       return;
     }
@@ -278,9 +281,9 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
         content,
       });
       setTab("reports");
-      setNotice("Generated a report draft from the latest campaign data.");
+      setNotice(t("dashboard.generatedDraft"));
     } catch (e) {
-      setError(`Report generation failed: ${e}`);
+      setError(t("dashboard.reportGenFailed", { error: String(e) }));
       setTab("reports");
     }
   }
@@ -299,23 +302,23 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       });
       setEditor(editorFromReport(saved));
       await reloadReports();
-      setNotice("Report draft saved.");
+      setNotice(t("dashboard.reportSaved"));
     } catch (e) {
-      setError(`Save failed: ${e}`);
+      setError(t("dashboard.saveFailed", { error: String(e) }));
     }
   }
 
   async function deleteDraft(report: ReportDraft) {
-    if (!(await confirm({ title: "Delete report", message: `Delete "${report.title}"?`, danger: true, confirmLabel: "Delete" }))) return;
+    if (!(await confirm({ title: t("dashboard.deleteReportTitle"), message: t("dashboard.deleteReportMessage", { title: report.title }), danger: true, confirmLabel: t("common.delete") }))) return;
     setNotice(null);
     setError(null);
     try {
       await getTransport().invoke("delete_report_draft", { id: report.id });
       const next = await reloadReports();
       setEditor(next[0] ? editorFromReport(next[0]) : emptyEditor(activeProject, target));
-      setNotice("Report draft deleted.");
+      setNotice(t("dashboard.reportDeleted"));
     } catch (e) {
-      setError(`Delete failed: ${e}`);
+      setError(t("dashboard.deleteFailed", { error: String(e) }));
     }
   }
 
@@ -323,7 +326,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     setError(null);
     setNotice(null);
     if (!activeProject) {
-      setError("Select the project that produced this crash before exporting.");
+      setError(t("dashboard.selectProjectForExport"));
       setTab("gitlab");
       return;
     }
@@ -335,20 +338,20 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       setIssue(draft);
       setTab("gitlab");
     } catch (e) {
-      setError(`GitLab export failed: ${e}`);
+      setError(t("dashboard.gitlabExportFailed", { error: String(e) }));
       setTab("gitlab");
     }
   }
 
-  const tabs = workbenchTabs(dashboard);
+  const tabs = workbenchTabs(dashboard, t);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0" style={{ overflowWrap: "anywhere" }}>
           <ViewHeader
-            title="Dashboard"
-            description={activeProject ? `${activeProject}${target ? ` / ${target}` : ""}` : "No active project selected"}
+            title={t("dashboard.title")}
+            description={activeProject ? `${activeProject}${target ? ` / ${target}` : ""}` : t("dashboard.noActiveProject")}
           />
         </div>
         <div className="flex items-center gap-2">
@@ -360,7 +363,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
               variant="outline"
               size="sm"
               onClick={() => onNavigate("defectdojo")}
-              title="Open DefectDojo in the app"
+              title={t("dashboard.openDefectDojo")}
             >
               <ShieldCheck size={14} />
               DefectDojo
@@ -368,11 +371,11 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
           )}
           <Button variant="outline" size="sm" onClick={() => void generateActiveReport()} disabled={!activeProject || !target}>
             <FileText size={14} />
-            Draft report
+            {t("dashboard.draftReport")}
           </Button>
           <Button variant="outline" size="sm" onClick={() => void reload()} disabled={loading}>
             <RotateCw size={14} />
-            Refresh
+            {t("common.refresh")}
           </Button>
         </div>
       </div>
@@ -385,9 +388,9 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
         >
           <FolderOpen size={18} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-text-primary">Choose a project to begin</h2>
+            <h2 className="text-sm font-semibold text-text-primary">{t("dashboard.chooseProjectTitle")}</h2>
             <p className="mt-1 text-sm text-text-secondary">
-              The dashboard is scoped to one project at a time. Use <strong className="text-text-primary">Open project</strong> in the sidebar to open a codebase and start discovery.
+              {t("dashboard.chooseProjectPre")}<strong className="text-text-primary">{t("dashboard.openProject")}</strong>{t("dashboard.chooseProjectPost")}
             </p>
           </div>
         </section>
@@ -396,9 +399,9 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       <div
         className="flex flex-wrap gap-1 border-b border-border"
         role="tablist"
-        aria-label="Workbench sections"
+        aria-label={t("dashboard.workbenchSections")}
         onKeyDown={(e) => {
-          const ids = tabs.map((t) => t.id);
+          const ids = tabs.map((item) => item.id);
           const idx = ids.indexOf(tab);
           let next = idx;
           if (e.key === "ArrowRight") next = (idx + 1) % ids.length;
@@ -439,7 +442,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       {error && <InlineNotice tone="error" text={error} />}
 
       {loading ? (
-        <LoadingState label="Loading workbench state..." />
+        <LoadingState label={t("dashboard.loadingWorkbench")} />
       ) : (
         <>
           {tab === "overview" && (
@@ -497,14 +500,17 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   );
 }
 
-function workbenchTabs(dashboard: WorkbenchDashboard): { id: WorkbenchTab; label: string; icon: React.ReactNode; count?: number }[] {
+function workbenchTabs(
+  dashboard: WorkbenchDashboard,
+  t: (key: string) => string,
+): { id: WorkbenchTab; label: string; icon: React.ReactNode; count?: number }[] {
   return [
-    { id: "overview", label: "Overview", icon: <Activity size={14} /> },
-    { id: "reports", label: "Reports", icon: <FileText size={14} /> },
-    { id: "repro", label: "Repro", icon: <Play size={14} /> },
-    { id: "team", label: "Review", icon: <Users size={14} />, count: dashboard.harness_reviews.length + dashboard.crash_reviews.length },
+    { id: "overview", label: t("dashboard.tabOverview"), icon: <Activity size={14} /> },
+    { id: "reports", label: t("dashboard.tabReports"), icon: <FileText size={14} /> },
+    { id: "repro", label: t("dashboard.tabRepro"), icon: <Play size={14} /> },
+    { id: "team", label: t("dashboard.tabReview"), icon: <Users size={14} />, count: dashboard.harness_reviews.length + dashboard.crash_reviews.length },
     { id: "gitlab", label: "GitLab", icon: <GitPullRequest size={14} /> },
-    { id: "health", label: "Health", icon: <Server size={14} /> },
+    { id: "health", label: t("dashboard.tabHealth"), icon: <Server size={14} /> },
   ];
 }
 
@@ -539,13 +545,14 @@ function OverviewTab({
 }
 
 function ReadinessSummary({ readiness }: { readiness: WorkbenchReadiness }) {
+  const { t } = useI18n();
   const isReady = readiness.state === "ready" || readiness.state === "active";
   const tone = isReady ? "ok" : "warn";
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <SectionHeader icon={<ShieldCheck size={15} />} title="Operational Readiness" />
+          <SectionHeader icon={<ShieldCheck size={15} />} title={t("dashboard.operationalReadiness")} />
           <h2 className="mt-2 text-lg font-semibold text-text-primary">{readiness.headline}</h2>
           <p className="mt-1 text-sm text-text-secondary">{readiness.detail}</p>
         </div>
@@ -577,7 +584,7 @@ function ReadinessSummary({ readiness }: { readiness: WorkbenchReadiness }) {
       ) : (
         <div className="flex items-center gap-2 text-xs text-text-secondary">
           <CheckCircle2 size={13} style={{ color: "var(--success)" }} />
-          <span>No readiness blockers in the selected scope.</span>
+          <span>{t("dashboard.noBlockers")}</span>
         </div>
       )}
     </section>
@@ -603,23 +610,24 @@ function ReportStudio({
   onSave: () => void;
   onDelete: (report: ReportDraft) => void;
 }) {
+  const { t } = useI18n();
   const selectedId = editor.id;
   return (
     <div className="flex flex-wrap gap-4 min-w-0">
       <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520, flex: "1 1 260px", maxWidth: 360, minWidth: 0 }}>
-        <SectionHeader icon={<FileText size={15} />} title="Composed Reports" count={reports.length} />
+        <SectionHeader icon={<FileText size={15} />} title={t("dashboard.composedReports")} count={reports.length} />
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={onBlank}>
             <FileText size={13} />
-            New
+            {t("common.new")}
           </Button>
           <Button variant="primary" size="sm" onClick={onGenerate}>
             <Wrench size={13} />
-            Generate
+            {t("common.generate")}
           </Button>
         </div>
         {reports.length === 0 ? (
-          <EmptyState icon={<FileText size={18} />} hint="No saved reports yet." />
+          <EmptyState icon={<FileText size={18} />} hint={t("dashboard.noSavedReports")} />
         ) : (
           <div className="flex flex-col gap-2 overflow-auto">
             {reports.map((report) => (
@@ -637,13 +645,13 @@ function ReportStudio({
                     <StatusBadge value={report.status} />
                   </div>
                   <div className="text-xs text-text-muted truncate mt-1">
-                    {report.target || "project report"} · {formatDate(report.updated_at)}
+                    {report.target || t("dashboard.projectReport")} · {formatDate(report.updated_at)}
                   </div>
                 </button>
                 <div className="flex justify-end mt-2">
                   <Button variant="outline" size="sm" onClick={() => onDelete(report)}>
                     <Trash2 size={13} />
-                    Delete
+                    {t("common.delete")}
                   </Button>
                 </div>
               </div>
@@ -655,11 +663,11 @@ function ReportStudio({
       <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", minHeight: 520, flex: "2 1 380px", minWidth: 0 }}>
         <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(120px, 180px)" }}>
           <label className="flex flex-col gap-1 min-w-0">
-            <span className="text-xs text-text-muted">Title</span>
+            <span className="text-xs text-text-muted">{t("dashboard.labelTitle")}</span>
             <Input value={editor.title} onChange={(e) => onEditor({ ...editor, title: e.target.value })} />
           </label>
           <label className="flex flex-col gap-1">
-            <span className="text-xs text-text-muted">Status</span>
+            <span className="text-xs text-text-muted">{t("dashboard.labelStatus")}</span>
             <Select
               value={editor.status}
               options={REPORT_STATUSES.map((status) => ({ value: status, label: status }))}
@@ -669,11 +677,11 @@ function ReportStudio({
         </div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0, 1fr) minmax(120px, 240px)" }}>
           <label className="flex flex-col gap-1 min-w-0">
-            <span className="text-xs text-text-muted">Project</span>
+            <span className="text-xs text-text-muted">{t("dashboard.labelProject")}</span>
             <Input value={editor.project} onChange={(e) => onEditor({ ...editor, project: e.target.value })} mono />
           </label>
           <label className="flex flex-col gap-1">
-            <span className="text-xs text-text-muted">Target</span>
+            <span className="text-xs text-text-muted">{t("dashboard.labelTarget")}</span>
             <Input value={editor.target} onChange={(e) => onEditor({ ...editor, target: e.target.value })} mono />
           </label>
         </div>
@@ -682,18 +690,18 @@ function ReportStudio({
           value={editor.content}
           onChange={(e) => onEditor({ ...editor, content: e.target.value })}
           rows={18}
-          placeholder="Generate a report from the active campaign or write Markdown here."
+          placeholder={t("dashboard.reportPlaceholder")}
         />
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs text-text-muted">{editor.content.length.toLocaleString()} characters</span>
+          <span className="text-xs text-text-muted">{t("dashboard.charactersCount", { count: editor.content.length.toLocaleString() })}</span>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => copyText(editor.content)} disabled={!editor.content}>
               <Copy size={13} />
-              Copy
+              {t("common.copy")}
             </Button>
             <Button variant="primary" size="sm" onClick={onSave} disabled={!editor.content.trim() || !editor.title.trim()}>
               <Save size={13} />
-              Save draft
+              {t("common.saveDraft")}
             </Button>
           </div>
         </div>
@@ -703,6 +711,7 @@ function ReportStudio({
 }
 
 function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () => void }) {
+  const { t } = useI18n();
   return (
     <div className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
       <div className="flex items-start justify-between gap-3">
@@ -710,16 +719,16 @@ function CrashCard({ crash, onExport }: { crash: CrashReviewItem; onExport: () =
           <div className="text-sm font-semibold truncate">{crash.target_symbol}</div>
           <div className="text-xs text-text-muted mt-1">{crash.kind} · {crash.severity}</div>
         </div>
-        <StatusBadge value={crash.has_bug_report ? "Report ready" : "Needs report"} />
+        <StatusBadge value={t(crash.has_bug_report ? "dashboard.reportReady" : "dashboard.needsReport")} tone={crash.has_bug_report ? "ok" : "warn"} />
       </div>
       <p className="text-xs text-text-secondary mt-3" style={{ minHeight: 34 }}>
-        {crash.summary || "No summary available yet."}
+        {crash.summary || t("dashboard.noSummary")}
       </p>
       <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
         <span className="text-xs text-text-muted font-mono">{shortId(crash.crash_id)}</span>
         <Button variant="outline" size="sm" onClick={onExport}>
           <GitPullRequest size={13} />
-          GitLab draft
+          {t("dashboard.gitlabDraft")}
         </Button>
       </div>
     </div>
@@ -736,25 +745,26 @@ function ReproCenter({
   crashes: CrashReviewItem[];
   harnesses: HarnessReviewItem[];
 }) {
+  const { t } = useI18n();
   const firstHarness = harnesses[0];
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Play size={15} />} title="Repro Center" count={crashes.length} />
-      {!project && <InlineNotice tone="warn" text="Select a project to build exact regression commands." />}
+      <SectionHeader icon={<Play size={15} />} title={t("dashboard.reproCenter")} count={crashes.length} />
+      {!project && <InlineNotice tone="warn" text={t("dashboard.reproSelectProject")} />}
       {crashes.length === 0 ? (
-        <EmptyState icon={<Play size={18} />} hint="No crash reproducers are available yet." />
+        <EmptyState icon={<Play size={18} />} hint={t("dashboard.noReproducers")} />
       ) : (
         <div className="flex flex-col gap-3">
           {crashes.map((crash) => {
             const target = firstHarness?.target_symbol || crash.target_symbol;
             const command = project
               ? `hobot-fuzz regress ${shellQuote(project)} --target ${shellQuote(target)}`
-              : "Select a project to build a command.";
+              : t("dashboard.selectProjectForCommand");
             return (
               <div key={crash.crash_id} className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-sm font-medium truncate">{crash.target_symbol}</span>
-                  <StatusBadge value={crash.minimized ? "minimized" : "raw input"} />
+                  <StatusBadge value={t(crash.minimized ? "dashboard.minimized" : "dashboard.rawInput")} />
                 </div>
                 <code className="block text-xs font-mono mt-3 p-2 rounded-md whitespace-pre-wrap" style={{ background: "var(--surface-code)", color: "var(--text-secondary)" }}>
                   {command}
@@ -762,7 +772,7 @@ function ReproCenter({
                 <div className="flex justify-end mt-2">
                   <Button variant="outline" size="sm" onClick={() => copyText(command)} disabled={!project}>
                     <Clipboard size={13} />
-                    Copy command
+                    {t("dashboard.copyCommand")}
                   </Button>
                 </div>
               </div>
@@ -789,25 +799,26 @@ function TeamReview({
   onOpenHarnesses: () => void;
   onOpenCrashes: () => void;
 }) {
+  const { t } = useI18n();
   const reportNeedsReview = reports.filter((report) => report.status === "Needs Review");
   const harnessNeedsReview = harnesses.filter((item) => item.needs_review);
   const crashNeedsReport = crashes.filter((item) => !item.has_bug_report);
   return (
     <section className="surface-card flex flex-col gap-3 min-w-0" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Users size={15} />} title="Review Flow" />
+      <SectionHeader icon={<Users size={15} />} title={t("dashboard.reviewFlow")} />
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
         <ReviewLane
-          title="Reports needing review"
+          title={t("dashboard.reportsNeedingReview")}
           count={reportNeedsReview.length}
           items={reportNeedsReview.map((r) => ({ label: r.title, onClick: () => onOpenReport(r) }))}
         />
         <ReviewLane
-          title="Harnesses needing approval"
+          title={t("dashboard.harnessesNeedingApproval")}
           count={harnessNeedsReview.length}
           items={harnessNeedsReview.map((h) => ({ label: h.target_symbol, onClick: onOpenHarnesses }))}
         />
         <ReviewLane
-          title="Crashes needing reports"
+          title={t("dashboard.crashesNeedingReports")}
           count={crashNeedsReport.length}
           items={crashNeedsReport.map((c) => ({ label: c.target_symbol, onClick: onOpenCrashes }))}
         />
@@ -825,6 +836,7 @@ function ReviewLane({
   count: number;
   items: { label: string; onClick: () => void }[];
 }) {
+  const { t } = useI18n();
   return (
     <div className="rounded-md border border-border min-w-0" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>
       <div className="flex items-center justify-between gap-2">
@@ -832,14 +844,14 @@ function ReviewLane({
         <span className="text-xs text-text-muted shrink-0">{count}</span>
       </div>
       {items.length === 0 ? (
-        <p className="text-xs text-text-muted mt-3">Nothing queued.</p>
+        <p className="text-xs text-text-muted mt-3">{t("dashboard.nothingQueued")}</p>
       ) : (
         <div className="flex flex-col gap-0.5 mt-3">
           {items.slice(0, 6).map((item, i) => (
             <button
               key={`${item.label}:${i}`}
               onClick={item.onClick}
-              title={`Open ${item.label}`}
+              title={t("dashboard.openItem", { label: item.label })}
               className="flex items-center gap-1.5 text-left text-xs text-text-secondary truncate rounded px-1.5 py-1 -mx-1.5 transition-colors hover:bg-surface-hover hover:text-text-primary"
             >
               <ChevronRight size={11} className="shrink-0 text-text-muted" />
@@ -847,7 +859,7 @@ function ReviewLane({
             </button>
           ))}
           {items.length > 6 && (
-            <span className="text-xs text-text-muted mt-1">+{items.length - 6} more</span>
+            <span className="text-xs text-text-muted mt-1">{t("dashboard.moreCount", { count: items.length - 6 })}</span>
           )}
         </div>
       )}
@@ -866,13 +878,14 @@ function GitLabIntegration({
   issue: IssueExport | null;
   onExport: (crash: CrashReviewItem) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-wrap gap-4 min-w-0">
       <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)", flex: "1 1 300px", maxWidth: 440, minWidth: 0 }}>
-        <SectionHeader icon={<GitPullRequest size={15} />} title="GitLab Export" count={crashes.length} />
-        {!project && <InlineNotice tone="warn" text="Select a project so hobot_fuzz can resolve the GitLab remote." />}
+        <SectionHeader icon={<GitPullRequest size={15} />} title={t("dashboard.gitlabExport")} count={crashes.length} />
+        {!project && <InlineNotice tone="warn" text={t("dashboard.gitlabSelectProject")} />}
         {crashes.length === 0 ? (
-          <EmptyState icon={<GitPullRequest size={18} />} hint="No crashes are ready for issue export." />
+          <EmptyState icon={<GitPullRequest size={18} />} hint={t("dashboard.noCrashesForExport")} />
         ) : (
           <div className="flex flex-col gap-2">
             {crashes.map((crash) => (
@@ -890,7 +903,7 @@ function GitLabIntegration({
         )}
       </section>
       <div style={{ flex: "2 1 380px", minWidth: 0 }}>
-        {issue ? <IssueDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint="Choose a crash to preview an issue draft." />}
+        {issue ? <IssueDraft draft={issue} /> : <EmptyState icon={<GitPullRequest size={18} />} hint={t("dashboard.chooseCrashPreview")} />}
       </div>
     </div>
   );
@@ -898,6 +911,7 @@ function GitLabIntegration({
 
 function IssueDraft({ draft }: { draft: IssueExport }) {
   const { toast } = useToast();
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const [filing, setFiling] = useState(false);
   const providerLabel = draft.provider === "github" ? "GitHub" : "GitLab";
@@ -915,10 +929,10 @@ function IssueDraft({ draft }: { draft: IssueExport }) {
       const created = await getTransport().invoke<CreatedIssue>("file_issue", {
         crashId: draft.crash_id,
       });
-      toast({ title: `Filed ${providerLabel} issue`, description: created.url, variant: "success" });
+      toast({ title: t("dashboard.filedIssue", { provider: providerLabel }), description: created.url, variant: "success" });
       if (created.url) void openExternal(created.url);
     } catch (e) {
-      toast({ title: `Could not file ${providerLabel} issue`, description: String(e), variant: "error" });
+      toast({ title: t("dashboard.couldNotFileIssue", { provider: providerLabel }), description: String(e), variant: "error" });
     } finally {
       setFiling(false);
     }
@@ -926,7 +940,7 @@ function IssueDraft({ draft }: { draft: IssueExport }) {
 
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<GitPullRequest size={15} />} title="Issue Draft" />
+      <SectionHeader icon={<GitPullRequest size={15} />} title={t("dashboard.issueDraft")} />
       <div className="mt-3 flex flex-col gap-2">
         <div className="text-sm font-medium">{draft.title}</div>
         {draft.project_web_url && (
@@ -943,25 +957,25 @@ function IssueDraft({ draft }: { draft: IssueExport }) {
         <div className="flex items-center gap-2 flex-wrap">
           <Button variant="outline" size="sm" onClick={() => void copyBody()}>
             <Clipboard size={13} />
-            {copied ? "Copied" : "Copy"}
+            {copied ? t("common.copied") : t("common.copy")}
           </Button>
           {draft.can_file && (
             <Button variant="primary" size="sm" onClick={() => void fileIssue()} loading={filing}>
               {!filing && <GitPullRequest size={13} />}
-              File {providerLabel} issue
+              {t("dashboard.fileIssue", { provider: providerLabel })}
             </Button>
           )}
           {draft.issue_url && (
             <Button variant={draft.can_file ? "outline" : "primary"} size="sm" onClick={() => void openExternal(draft.issue_url ?? "")}>
               <ExternalLink size={13} />
-              Open in browser
+              {t("common.openInBrowser")}
             </Button>
           )}
         </div>
         {!draft.issue_url && (
           <InlineNotice
             tone="warn"
-            text="No issue tracker configured. Set the fuzzed project's GitHub/GitLab repo and token in Settings > Issue Tracker."
+            text={t("dashboard.noIssueTracker")}
           />
         )}
       </div>
@@ -970,9 +984,10 @@ function IssueDraft({ draft }: { draft: IssueExport }) {
 }
 
 function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashboard: WorkbenchDashboard }) {
+  const { t } = useI18n();
   const checks = [
     ["Docker", status?.docker],
-    ["Sandbox image", status?.sandbox_image],
+    [t("dashboard.sandboxImage"), status?.sandbox_image],
     ["libFuzzer", status?.libfuzzer],
     ["AFL++", status?.aflplusplus],
     ["honggfuzz", status?.honggfuzz],
@@ -981,35 +996,35 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
   ] as const;
   return (
     <section className="surface-card flex flex-col gap-4" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<ShieldCheck size={15} />} title="Production Readiness" />
+      <SectionHeader icon={<ShieldCheck size={15} />} title={t("dashboard.productionReadiness")} />
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 180px), 1fr))" }}>
         {checks.map(([label, ok]) => (
           <div key={label} className="rounded-md border border-border flex items-center justify-between gap-3" style={{ padding: "var(--space-sm)", background: "var(--surface-secondary)" }}>
             <span className="text-sm">{label}</span>
-            <StatusBadge value={ok ? "ready" : "missing"} tone={ok ? "ok" : "warn"} />
+            <StatusBadge value={ok ? t("dashboard.ready") : t("dashboard.missing")} tone={ok ? "ok" : "warn"} />
           </div>
         ))}
       </div>
       <DefectDojoHealth />
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
-        <ReadinessItem ready={dashboard.totals.targets > 0} label="Targets discovered" detail={`${dashboard.totals.targets} target(s)`} />
-        <ReadinessItem ready={dashboard.totals.harnesses > 0} label="Harness library" detail={`${dashboard.totals.harnesses} harness(es)`} />
-        <ReadinessItem ready={dashboard.totals.runs > 0} label="Campaign history" detail={`${dashboard.totals.runs} run(s)`} />
-        <ReadinessItem ready={dashboard.totals.harnesses_needing_review === 0} label="Harness review queue" detail={`${dashboard.totals.harnesses_needing_review} pending`} />
+        <ReadinessItem ready={dashboard.totals.targets > 0} label={t("dashboard.targetsDiscovered")} detail={t("dashboard.targetsCount", { count: dashboard.totals.targets })} />
+        <ReadinessItem ready={dashboard.totals.harnesses > 0} label={t("dashboard.harnessLibrary")} detail={t("dashboard.harnessesCount", { count: dashboard.totals.harnesses })} />
+        <ReadinessItem ready={dashboard.totals.runs > 0} label={t("dashboard.campaignHistory")} detail={t("dashboard.runsCount", { count: dashboard.totals.runs })} />
+        <ReadinessItem ready={dashboard.totals.harnesses_needing_review === 0} label={t("dashboard.harnessReviewQueue")} detail={t("dashboard.pendingCount", { count: dashboard.totals.harnesses_needing_review })} />
       </div>
     </section>
   );
 }
 
-/** Badge text per DefectDojo lifecycle state. `missing`/`ready` also drive the badge tone. */
+/** Badge i18n key per DefectDojo lifecycle state; the badge tone is driven separately by whether the state is `ready`. */
 const DD_BADGE: Record<DefectDojoStatus["state"], string> = {
-  ready: "ready",
-  starting: "starting",
-  stopped: "stopped",
-  docker_down: "missing",
-  not_installed: "not installed",
-  not_configured: "not configured",
-  remote: "unreachable",
+  ready: "dashboard.ready",
+  starting: "dashboard.ddStarting",
+  stopped: "dashboard.ddStopped",
+  docker_down: "dashboard.missing",
+  not_installed: "dashboard.ddNotInstalled",
+  not_configured: "dashboard.ddNotConfigured",
+  remote: "dashboard.ddUnreachable",
 };
 
 /**
@@ -1019,6 +1034,7 @@ const DD_BADGE: Record<DefectDojoStatus["state"], string> = {
  */
 function DefectDojoHealth() {
   const { toast } = useToast();
+  const { t } = useI18n();
   const [dd, setDd] = useState<DefectDojoStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -1055,7 +1071,7 @@ function DefectDojoHealth() {
     try {
       setDd(await getTransport().invoke<DefectDojoStatus>("defectdojo_start"));
     } catch (e) {
-      toast({ title: "Could not start DefectDojo", description: String(e), variant: "error" });
+      toast({ title: t("dashboard.couldNotStartDD"), description: String(e), variant: "error" });
       await refresh();
     } finally {
       setBusy(false);
@@ -1067,7 +1083,7 @@ function DefectDojoHealth() {
     try {
       setDd(await getTransport().invoke<DefectDojoStatus>("defectdojo_stop"));
     } catch (e) {
-      toast({ title: "Could not stop DefectDojo", description: String(e), variant: "error" });
+      toast({ title: t("dashboard.couldNotStopDD"), description: String(e), variant: "error" });
       await refresh();
     } finally {
       setBusy(false);
@@ -1082,22 +1098,22 @@ function DefectDojoHealth() {
       <div className="flex flex-col min-w-0 flex-1">
         <span className="text-sm">DefectDojo</span>
         <span className="block text-xs text-text-muted truncate">
-          {dd?.message ?? "Checking DefectDojo..."}
+          {dd?.message ?? t("dashboard.checkingDD")}
         </span>
       </div>
       {dd?.managed && !ready && (
         <Button variant="outline" size="sm" onClick={() => void start()} disabled={starting}>
           {starting ? <RotateCw size={13} className="animate-spin" /> : <Play size={13} />}
-          {starting ? "Starting" : "Start"}
+          {starting ? t("dashboard.starting") : t("common.start")}
         </Button>
       )}
       {dd?.managed && (ready || state === "starting") && (
-        <Button variant="outline" size="sm" onClick={() => void stop()} disabled={busy} title="Stop the local DefectDojo stack">
-          <Square size={13} /> Stop
+        <Button variant="outline" size="sm" onClick={() => void stop()} disabled={busy} title={t("dashboard.stopDDStack")}>
+          <Square size={13} /> {t("common.stop")}
         </Button>
       )}
       <StatusBadge
-        value={state ? DD_BADGE[state] : "missing"}
+        value={t(state ? DD_BADGE[state] : "dashboard.missing")}
         tone={ready ? "ok" : "warn"}
       />
     </div>
@@ -1119,14 +1135,15 @@ function ReadinessItem({ ready, label, detail }: { ready: boolean; label: string
 }
 
 function MetricGrid({ dashboard }: { dashboard: WorkbenchDashboard }) {
-  const t = dashboard.totals;
+  const { t } = useI18n();
+  const totals = dashboard.totals;
   return (
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))" }}>
-      <Metric icon={<Crosshair size={16} />} label="Targets" value={t.targets} />
-      <Metric icon={<FileCode size={16} />} label="Harnesses" value={t.harnesses} accent={t.harnesses_needing_review > 0} detail={`${t.harnesses_needing_review} review`} />
-      <Metric icon={<Play size={16} />} label="Runs" value={t.runs} detail={`${t.active_runs} active`} />
-      <Metric icon={<Bug size={16} />} label="Crashes" value={t.crashes} accent={t.crashes > 0} />
-      <Metric icon={<Activity size={16} />} label="Corpus" value={t.corpus_entries} />
+      <Metric icon={<Crosshair size={16} />} label={t("dashboard.metricTargets")} value={totals.targets} />
+      <Metric icon={<FileCode size={16} />} label={t("dashboard.metricHarnesses")} value={totals.harnesses} accent={totals.harnesses_needing_review > 0} detail={t("dashboard.reviewCount", { count: totals.harnesses_needing_review })} />
+      <Metric icon={<Play size={16} />} label={t("dashboard.metricRuns")} value={totals.runs} detail={t("dashboard.activeCount", { count: totals.active_runs })} />
+      <Metric icon={<Bug size={16} />} label={t("dashboard.metricCrashes")} value={totals.crashes} accent={totals.crashes_needing_triage > 0} detail={totals.crashes_needing_triage > 0 ? t("dashboard.crashesToTriage", { n: totals.crashes_needing_triage }) : undefined} />
+      <Metric icon={<Activity size={16} />} label={t("dashboard.metricCorpus")} value={totals.corpus_entries} />
     </div>
   );
 }
@@ -1147,13 +1164,14 @@ function Metric({ icon, label, value, detail, accent }: { icon: React.ReactNode;
 }
 
 function NextActions({ actions, onReport }: { actions: string[]; onReport: () => void }) {
+  const { t } = useI18n();
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
       <div className="flex items-center justify-between gap-3">
-        <SectionHeader icon={<CheckCircle2 size={15} />} title="Attention" />
+        <SectionHeader icon={<CheckCircle2 size={15} />} title={t("dashboard.attention")} />
         <Button variant="outline" size="sm" onClick={onReport}>
           <FileText size={13} />
-          Draft report
+          {t("dashboard.draftReport")}
         </Button>
       </div>
       <div className="flex flex-col gap-2 mt-3">
@@ -1169,11 +1187,12 @@ function NextActions({ actions, onReport }: { actions: string[]; onReport: () =>
 }
 
 function HarnessQueue({ items, onOpen }: { items: HarnessReviewItem[]; onOpen?: () => void }) {
+  const { t } = useI18n();
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<FileCode size={15} />} title="Harness Review" count={items.length} action={<ViewAllLink onClick={onOpen} />} />
+      <SectionHeader icon={<FileCode size={15} />} title={t("dashboard.harnessReview")} count={items.length} action={<ViewAllLink onClick={onOpen} />} />
       {items.length === 0 ? (
-        <EmptyState icon={<FileCode size={18} />} hint="No generated harnesses are waiting for review." />
+        <EmptyState icon={<FileCode size={18} />} hint={t("dashboard.noHarnessesWaiting")} />
       ) : (
         <div className="flex flex-col gap-2 mt-3">
           {items.slice(0, 5).map((item) => (
@@ -1200,18 +1219,19 @@ function HarnessRow({ item }: { item: HarnessReviewItem }) {
 }
 
 function RecentRuns({ runs, onOpen }: { runs: WorkbenchRun[]; onOpen?: () => void }) {
+  const { t } = useI18n();
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Play size={15} />} title="Recent Runs" count={runs.length} action={<ViewAllLink onClick={onOpen} />} />
+      <SectionHeader icon={<Play size={15} />} title={t("dashboard.recentRuns")} count={runs.length} action={<ViewAllLink onClick={onOpen} />} />
       {runs.length === 0 ? (
-        <EmptyState icon={<Play size={18} />} hint="No persisted runs yet." />
+        <EmptyState icon={<Play size={18} />} hint={t("dashboard.noPersistedRuns")} />
       ) : (
         <div className="flex flex-col gap-1 mt-3">
           {runs.map((run) => (
             <div key={run.id} className="grid items-center gap-2 text-xs" style={{ gridTemplateColumns: "1fr auto auto" }}>
               <span className="truncate text-text-secondary">{run.engine}</span>
               <span className="text-text-muted">{run.status}</span>
-              <span style={{ color: run.crash_count > 0 ? "var(--error)" : "var(--text-muted)" }}>{run.crash_count} crashes</span>
+              <span style={{ color: run.crash_count > 0 ? "var(--error)" : "var(--text-muted)" }}>{t("dashboard.crashesCount", { count: run.crash_count })}</span>
             </div>
           ))}
         </div>
@@ -1221,11 +1241,12 @@ function RecentRuns({ runs, onOpen }: { runs: WorkbenchRun[]; onOpen?: () => voi
 }
 
 function TopTargets({ targets, onOpen }: { targets: WorkbenchTarget[]; onOpen?: () => void }) {
+  const { t } = useI18n();
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Crosshair size={15} />} title="Top Targets" count={targets.length} action={<ViewAllLink onClick={onOpen} />} />
+      <SectionHeader icon={<Crosshair size={15} />} title={t("dashboard.topTargets")} count={targets.length} action={<ViewAllLink onClick={onOpen} />} />
       {targets.length === 0 ? (
-        <EmptyState icon={<Crosshair size={18} />} hint="No ranked targets persisted yet." />
+        <EmptyState icon={<Crosshair size={18} />} hint={t("dashboard.noRankedTargets")} />
       ) : (
         <div className="flex flex-col gap-2 mt-3">
           {targets.slice(0, 6).map((target) => (
@@ -1246,11 +1267,12 @@ function TopTargets({ targets, onOpen }: { targets: WorkbenchTarget[]; onOpen?: 
 }
 
 function CrashQueue({ items, onExport, onOpen }: { items: CrashReviewItem[]; onExport: (crash: CrashReviewItem) => void; onOpen?: () => void }) {
+  const { t } = useI18n();
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
-      <SectionHeader icon={<Bug size={15} />} title="Crash Handoff" count={items.length} action={<ViewAllLink onClick={onOpen} />} />
+      <SectionHeader icon={<Bug size={15} />} title={t("dashboard.crashHandoff")} count={items.length} action={<ViewAllLink onClick={onOpen} />} />
       {items.length === 0 ? (
-        <EmptyState icon={<Bug size={18} />} hint="No crashes are waiting for issue export." />
+        <EmptyState icon={<Bug size={18} />} hint={t("dashboard.noCrashesForIssueExport")} />
       ) : (
         <div className="flex flex-col gap-2 mt-3">
           {items.slice(0, 5).map((crash) => (
@@ -1287,6 +1309,7 @@ function SectionHeader({
 
 /** A subtle "View all ->" deep-link to a section's canonical standalone view. */
 function ViewAllLink({ onClick }: { onClick?: () => void }) {
+  const { t } = useI18n();
   if (!onClick) return null;
   return (
     <button
@@ -1296,7 +1319,7 @@ function ViewAllLink({ onClick }: { onClick?: () => void }) {
       onMouseEnter={(e) => (e.currentTarget.style.color = "var(--accent)")}
       onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
     >
-      View all
+      {t("common.viewAll")}
       <ChevronRight size={12} />
     </button>
   );

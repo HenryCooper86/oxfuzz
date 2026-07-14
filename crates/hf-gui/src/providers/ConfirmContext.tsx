@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
+import { useI18n } from "../i18n";
 
 interface ConfirmOptions {
   title: string;
@@ -18,6 +19,7 @@ const ConfirmCtx = createContext<ConfirmFn | null>(null);
 // mode, is keyboard-accessible (Enter confirms, Escape cancels), and returns a
 // promise resolving to the user's choice.
 export function ConfirmProvider({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
   const [opts, setOpts] = useState<ConfirmOptions | null>(null);
   const resolver = useRef<((v: boolean) => void) | null>(null);
 
@@ -63,7 +65,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
             )}
             <div className="flex items-center justify-end gap-2 mt-1">
               <Button variant="outline" size="sm" onClick={() => settle(false)}>
-                {opts.cancelLabel ?? "Cancel"}
+                {opts.cancelLabel ?? t("common.cancel")}
               </Button>
               <Button
                 autoFocus
@@ -71,7 +73,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
                 size="sm"
                 onClick={() => settle(true)}
               >
-                {opts.confirmLabel ?? "Confirm"}
+                {opts.confirmLabel ?? t("common.confirm")}
               </Button>
             </div>
           </div>

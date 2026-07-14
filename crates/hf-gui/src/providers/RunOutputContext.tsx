@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useI18n } from "../i18n";
 import { getTransport } from "../lib";
 import { useProject } from "./ProjectContext";
 import { useRunStatus } from "./RunStatusContext";
@@ -118,6 +119,7 @@ function loadSummaries(): Record<string, RunData> {
 }
 
 export function RunOutputProvider({ children }: { children: React.ReactNode }) {
+  const { t } = useI18n();
   const { activeProject, recentProjects } = useProject();
   // The status bar's "active engine" indicator is owned here (where every run
   // path lives) rather than in a single view, so runs launched from the agent,
@@ -236,7 +238,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         });
         // Web mode has no run_fuzzer endpoint and resolves to undefined.
         if (!result) {
-          appendLog(`[${now()}] Fuzzing is not available in web mode.`);
+          appendLog(`[${now()}] ${t("run.webModeUnavailable")}`);
           return 0;
         }
         patch(k, (d) => ({
@@ -270,7 +272,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         activeRunKeyRef.current = null;
       }
     },
-    [appendLog, patch, setActiveEngine],
+    [appendLog, patch, setActiveEngine, t],
   );
 
   // Cooperatively cancel the active fuzz run. The backend kills the sandboxed
@@ -301,7 +303,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         const result = await getTransport().invoke<RunResult>("run_syzkaller", { opts });
         // Web mode has no run_syzkaller endpoint and resolves to undefined.
         if (!result) {
-          appendLog(`[${now()}] Syzkaller is not available in web mode.`);
+          appendLog(`[${now()}] ${t("run.webModeSyzUnavailable")}`);
           return 0;
         }
         patch(k, (d) => ({
@@ -320,7 +322,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         activeRunKeyRef.current = null;
       }
     },
-    [appendLog, patch, setActiveEngine],
+    [appendLog, patch, setActiveEngine, t],
   );
 
   const value = useMemo(
