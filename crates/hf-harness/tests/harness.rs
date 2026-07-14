@@ -270,6 +270,40 @@ async fn smoke_fuzz_fails_on_zero_execs() {
     );
 }
 
+#[tokio::test]
+async fn smoke_fuzz_rejects_libfuzzer_inited_without_execs() {
+    // A harness that deadlocks right after libFuzzer prints its INITED banner
+    // (no `exec/s` line, no crash) must NOT be promoted. Previously the bare
+    // "INITED"/"DONE" markers made it pass with 0 exec/s.
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: "INFO: Seed: 12345\nINFO: Loaded 1 module\n#0\tINITED cov: 1 ft: 1\n".to_owned(),
+    };
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let err = smoke_fuzz(harness, &rt, workspace.path())
+        .await
+        .expect_err("a harness that only reached INITED must be rejected");
+    assert!(
+        err.to_string().contains("no fuzzer activity"),
+        "expected the no-activity rejection, got: {err}"
+    );
+}
+
 #[test]
 fn build_command_for_libfuzzer_has_fuzzer_flag() {
     let cmd =

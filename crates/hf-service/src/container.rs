@@ -2035,7 +2035,11 @@ impl ServiceContainer {
     /// apply live without a restart. Returns `true` if a pool was loaded (i.e.
     /// the config has at least one enabled provider).
     pub fn reload_providers(&self) -> bool {
-        let pool = provider_pool_from_config();
+        // Mirror `bootstrap`'s config-or-env resolution: a provider configured
+        // only via `HF_PROVIDER_API_KEY` must survive a Settings reload. Using
+        // config alone here would swap in `None` and silently disable the LLM
+        // (e.g. after saving an unrelated setting) until a restart.
+        let pool = provider_pool_from_config().or_else(provider_pool_from_env);
         let loaded = pool.is_some();
         if let Ok(mut guard) = self.provider_pool.write() {
             *guard = pool;
@@ -2689,6 +2693,13 @@ impl ServiceContainer {
             match hf_harness::try_compile(harness, self.runtime.as_ref(), workspace).await? {
                 hf_harness::CompileResult::Ok(compiled) => {
                     write_current_harness_source(workspace, &compiled.source)?;
+                    // Point `harness.active` at the freshly-compiled harness, as
+                    // `harness_compile` does. Without this, a repair/refine that
+                    // rewrites the source leaves the marker on the previous id, so
+                    // `active_harness` later reads a stale id whose source no
+                    // longer matches and hard-errors ("compile it again") even
+                    // though the refined harness built cleanly.
+                    write_current_harness_id(workspace, compiled.id)?;
                     if let Some(store) = &self.store {
                         if let Err(e) = store.upsert_harness(&compiled).await {
                             tracing::warn!("failed to persist harness {}: {e}", compiled.id);
@@ -3092,6 +3103,11 @@ impl ServiceContainer {
         count: usize,
     ) -> Result<Vec<SeedEntry>, ClassifiedError> {
         use sha2::{Digest, Sha256};
+        // Clamp the requested count to a sane range so no presentation layer can
+        // ask the LLM for zero or an absurd number of seeds. Owning the bound
+        // here keeps CLI, REST, and Tauri consistent (the clamp previously lived
+        // only in the web handler).
+        let count = count.clamp(1, 64);
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         std::fs::create_dir_all(&corpus_dir)
@@ -5861,7 +5877,7 @@ mod downsample_tests {
 
     #[test]
     fn caps_and_keeps_last() {
-        let s: Vec<(f64, u64, f64)> = (0..100).map(|i| (i as f64, i as u64, 0.0)).collect();
+        let s: Vec<(f64, u64, f64)> = (0..100).map(|i| (f64::from(i), i as u64, 0.0)).collect();
         let out = downsample(&s, 10);
         assert!(out.len() <= 11, "capped near the target, got {}", out.len());
         assert_eq!(out.last().unwrap().1, 99, "always keeps the final sample");
@@ -5903,7 +5919,7 @@ mod auto_revert_tests {
         baseline.engine = EngineKind::AflPlusPlus;
         assert!(!auto_revert_baseline_compatible(&baseline, &current));
         baseline = current.clone();
-        baseline.duration = Some(Duration::from_secs(3600));
+        baseline.duration = Some(Duration::from_hours(1));
         assert!(!auto_revert_baseline_compatible(&baseline, &current));
         baseline = current.clone();
         baseline.max_cpus = 4;
@@ -5934,7 +5950,7 @@ mod auto_revert_tests {
             auto_revert_comparison_key(target, &current),
             auto_revert_comparison_key(Uuid::new_v4(), &current)
         );
-        other_revision.duration = Some(Duration::from_secs(600));
+        other_revision.duration = Some(Duration::from_mins(10));
         assert_ne!(
             auto_revert_comparison_key(target, &current),
             auto_revert_comparison_key(target, &other_revision)

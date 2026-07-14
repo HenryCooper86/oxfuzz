@@ -198,12 +198,14 @@ impl GrepTool {
         } else {
             let limit = limit as usize;
             let truncated = after_offset.len() > limit;
+            // `offset`/`limit` come from LLM-supplied JSON (unbounded u64), so add
+            // saturating to avoid an overflow panic near usize::MAX.
             let result: Vec<String> = after_offset
                 .into_iter()
                 .take(limit)
                 .map(std::string::ToString::to_string)
                 .collect();
-            (result, truncated || total > offset + limit)
+            (result, truncated || total > offset.saturating_add(limit))
         }
     }
 

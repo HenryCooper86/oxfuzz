@@ -62,15 +62,28 @@ impl Tui {
         app.list_state.select(Some(0));
 
         let mut terminal = setup_terminal()?;
-        loop {
-            terminal.draw(|f| app.render(f))?;
-            if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
+        // Run the event loop as an expression that yields its result, then ALWAYS
+        // restore the terminal -- even on an I/O error from draw/poll/read -- so a
+        // failure never leaves the user's shell stuck in raw/alternate-screen mode.
+        let loop_result: std::io::Result<()> = loop {
+            if let Err(e) = terminal.draw(|f| app.render(f)) {
+                break Err(e);
+            }
+            let ready = match event::poll(std::time::Duration::from_millis(100)) {
+                Ok(ready) => ready,
+                Err(e) => break Err(e),
+            };
+            if ready {
+                let ev = match event::read() {
+                    Ok(ev) => ev,
+                    Err(e) => break Err(e),
+                };
+                if let Event::Key(key) = ev {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
                     match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => break Ok(()),
                         KeyCode::Tab => {
                             app.active_panel = (app.active_panel + 1) % 3;
                         }
@@ -119,8 +132,11 @@ impl Tui {
                     }
                 }
             }
-        }
-        restore_terminal(terminal)?;
+        };
+        // Restore the terminal unconditionally, then surface any loop error.
+        let restore_result = restore_terminal(terminal);
+        loop_result?;
+        restore_result?;
         Ok(())
     }
 

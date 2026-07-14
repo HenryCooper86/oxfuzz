@@ -56,10 +56,12 @@ of every term. The rest of this README is the technical reference.
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and Syzkaller behind one `EngineAdapter` trait. |
 | **Crash Triage** | Dedup by stack signature, CASR severity/exploitability, minimize, and LLM-drafted bug reports under human review. |
 | **Corpus & Coverage** | Seed, grow, prune, and merge corpora; track coverage deltas; feed crashes back into the corpus. |
-| **AI Assistant** | A conversational agent that drives the whole pipeline with tool calls, streaming, and approval gates. |
+| **AI Assistant** | A conversational agent that drives the whole pipeline with tool calls, live tool-activity updates, and human approval gates. |
 | **Multi-Provider LLM Pool** | Tag-based routing, automatic failover, provider freeze/thaw across OpenAI, Anthropic, Gemini, and OpenAI-compatible backends. |
 | **Sandboxed Execution** | Every build and fuzz run goes through `hf-runtime` (Docker or native); nothing untrusted runs on the host without approval. |
-| **Desktop, CLI & Web** | A native macOS app (Tauri v2 + React), a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
+| **Scheduled Campaigns** | Headless, budget-bounded fuzzing on an interval/cron/once schedule, rotating through a project's promoted targets. |
+| **Issue & Vuln Tracking** | File crashes as GitHub/GitLab issues or push them to DefectDojo as findings; export SARIF for code scanning. |
+| **Desktop, CLI & Web** | A native macOS app (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
 
 ---
 
@@ -218,17 +220,31 @@ hobot-fuzz triage /path/to/project --target parse_value
 | --- | --- |
 | `init` | Scaffold config from templates and create/migrate the database. |
 | `discover <project> --lang c [--rank]` | Scan a project and produce a ranked Target Inventory. |
-| `harness <project> --target <sym> --engine <e> [--draft-only] [--promote]` | Write, compile, and smoke-qualify a harness; `--promote` is the explicit approval step. |
+| `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a harness; `--promote` is the explicit approval step. |
 | `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). |
+| `campaign <project> --target <sym> --engine <e>` | Autonomous loop: draft, compile (with repair), qualify, run, and triage without stopping at each gate. |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
-| `corpus <project> --target <sym> --op seed\|grow\|prune\|minimize\|absorb\|list` | Manage the corpus. |
+| `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|minimize\|cmin\|absorb\|list` | Manage the corpus (`llmseed` = LLM-authored seeds, `cprune`/`cmin` = coverage-guided prune/minimize). |
 | `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
+| `regress <project> --target <sym>` | Re-run the known crash reproducers to verify they still (or no longer) crash. |
+| `ci <project> --target <sym> --engine <e> [--sarif out.sarif]` | CI gate: seed, run, triage, and export SARIF; exits non-zero when crashes are found. |
+| `sarif <project> --target <sym> --out results.sarif` | Export triaged crashes as a SARIF report for code scanning. |
+| `defectdojo <project> --target <sym>` | Push triaged crashes to DefectDojo as findings. |
+| `ingest <project> <file>` | Ingest a document (PDF/Office/HTML) into the knowledge base. |
+| `knowledge index\|search <project> [query]` | Index a project for search, or run a full-text (BM25) query over it. |
+| `agent <project> "<message>"` | Drive the conversational agent from the terminal. |
+| `schedule list\|create\|history\|... ` | Manage scheduled headless fuzzing campaigns. |
+| `session list\|history\|new\|... ` | Manage chat sessions and their checkpoints. |
 | `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
 | `serve --port 8081` | Start the REST + SSE API (`hf-web`). |
 | `tui <project>` | Terminal UI. |
 
 Engines: `afl++`, `honggfuzz`, `libfuzzer`, `clusterfuzzlite`, `syzkaller`.
+
+The REST API today exposes discovery, harness, corpus, triage, reporting, and
+management endpoints. Launching a fuzz run is available from the CLI and the
+desktop app; drive campaigns there rather than over REST.
 
 ---
 
@@ -304,10 +320,10 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-storage` | SQLite storage (sqlx), transcript persistence. |
 | `hf-runtime` | Sandbox (Docker/native), resource limits, build isolation. |
 | `hf-scheduler` | Cron-style and one-shot campaign scheduling. |
-| `hf-knowledge` | RAG over project source, fuzzer docs, CVE patterns. |
+| `hf-knowledge` | Full-text (BM25) retrieval over project source and ingested documents; optional vector search behind the `vector_qdrant` feature. |
 | `hf-diagnostics` | Span-based tracing, cost intelligence, run metrics. |
 | `hf-guardrails` | Permission model, loop detection, risk scoring. |
-| `hf-journal` | WAL-based run journaling and replay. |
+| `hf-journal` | WAL-based run journaling for interrupted-run recovery. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, reachability. |
 | `hf-harness` | Harness generation, compile validation, smoke fuzz. |
 | `hf-engine` | `EngineAdapter` adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller. |

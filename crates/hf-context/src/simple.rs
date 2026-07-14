@@ -53,6 +53,20 @@ pub fn assemble(messages: &[Message], max_tokens: usize) -> Vec<Message> {
             window_closed = true;
         }
     }
+    // The newest-window cut above is role-blind, so the first kept non-system
+    // message can be an `assistant` or `tool` turn -- which providers reject
+    // (Anthropic: "first message must use the user role") and which orphans a
+    // tool result from its originating call. Drop any leading non-system kept
+    // messages until the first one is a `user` turn.
+    for (i, m) in messages.iter().enumerate() {
+        if matches!(m.role, Role::System) || !keep[i] {
+            continue;
+        }
+        if matches!(m.role, Role::User) {
+            break;
+        }
+        keep[i] = false;
+    }
     messages
         .iter()
         .enumerate()
@@ -89,5 +103,30 @@ mod tests {
         assert!(kept
             .iter()
             .any(|m| m.role == Role::System && m.content == sys.content));
+    }
+
+    #[test]
+    fn assemble_never_starts_with_a_non_user_message() {
+        // A window whose newest turns are (assistant, tool) -- e.g. a big tool
+        // result -- must not be sent with the user turn trimmed away: providers
+        // reject a leading assistant/tool message. The leading non-user turns are
+        // dropped until the first kept non-system message is a user turn.
+        let sys = Message::system("sys");
+        let user = Message::user("do the thing");
+        let assistant = Message::new(Role::Assistant, "calling a tool".to_owned());
+        let tool = Message::new(Role::Tool, "z".repeat(4000)); // huge tool result
+        let msgs = vec![sys.clone(), user, assistant, tool];
+
+        // Budget fits only the newest ~1000-token tool message, so the role-blind
+        // cut would keep [sys, tool] and start with a tool turn.
+        let kept = assemble(&msgs, 1200);
+        let first_non_system = kept.iter().find(|m| m.role != Role::System);
+        // Either the first non-system message is a user turn, or the window
+        // collapsed to system-only -- never a leading assistant/tool.
+        assert!(
+            first_non_system.is_none_or(|m| m.role == Role::User),
+            "assembled window must not start with a non-user message: {:?}",
+            first_non_system.map(|m| m.role),
+        );
     }
 }

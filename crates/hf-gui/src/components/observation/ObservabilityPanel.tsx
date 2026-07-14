@@ -123,11 +123,17 @@ function Section({
 }) {
   return (
     <div className="obs-section">
-      <div className="obs-section-header" onClick={onToggle}>
+      <button
+        type="button"
+        className="obs-section-header"
+        onClick={onToggle}
+        aria-expanded={open}
+        style={{ width: "100%", background: "none", border: "none", font: "inherit", color: "inherit", textAlign: "left" }}
+      >
         <span className="obs-section-chevron">{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
         <span className="obs-section-title">{title}</span>
         {count !== undefined && <span className="obs-section-count">{count}</span>}
-      </div>
+      </button>
       {open && children}
     </div>
   );

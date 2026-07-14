@@ -11,9 +11,15 @@ use hf_core::engine::FuzzRunConfig;
 
 /// Construct the `ClusterFuzzLite` run argument list.
 ///
-/// oss-fuzz's `infra/helper.py run_fuzzer` requires two positional arguments,
-/// `<project> <fuzzer_name>`, after its flags:
-/// `run_fuzzer [--corpus-dir DIR] [--timeout SECS] <project> <fuzzer_name>`.
+/// oss-fuzz's `infra/helper.py run_fuzzer` takes its flags, then two positional
+/// arguments `<project> <fuzzer_name>`, then trailing `fuzzer_args` forwarded to
+/// the fuzzer itself:
+/// `run_fuzzer [--corpus-dir DIR] <project> <fuzzer_name> [fuzzer_args...]`.
+///
+/// `helper.py` has no `--timeout` flag; the time budget is a fuzzer argument, so
+/// the duration is forwarded as libFuzzer's `-max_total_time=<secs>` after the
+/// positional arguments. (A `--timeout` flag makes `helper.py` exit with an
+/// argparse error, which the runner then classifies as an engine failure.)
 ///
 /// The adapter trait only threads through container-internal paths, not a
 /// project name, so both are derived from `binary` (the harness path): the
@@ -42,15 +48,17 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, _out: &st
         "infra/helper.py".to_owned(),
         "run_fuzzer".to_owned(),
     ];
-    if duration > 0 {
-        args.push(format!("--timeout={duration}"));
-    }
     if !corpus.is_empty() {
         args.push(format!("--corpus-dir={corpus}"));
     }
     // Positional arguments must follow the flags.
     args.push(project.to_owned());
     args.push(fuzzer_name.to_owned());
+    // The time budget is a fuzzer argument, not a helper.py flag, so it trails
+    // the positionals.
+    if duration > 0 {
+        args.push(format!("-max_total_time={duration}"));
+    }
     if !cfg.env.is_empty() {
         let mut env_prefix = vec!["env".to_owned()];
         for (k, v) in &cfg.env {

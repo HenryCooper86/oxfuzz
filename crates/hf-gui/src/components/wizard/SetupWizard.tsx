@@ -14,6 +14,20 @@ import { normalizeProvider, type Provider } from "../settings/providerTypes";
 
 type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
 
+/** Read a TOML config section, apply `patch`, and write it back (form-mode round
+ * trip, matching how Settings persists a section). */
+async function patchConfig(
+  name: string,
+  patch: (value: Record<string, unknown>) => Record<string, unknown>,
+): Promise<void> {
+  const T = getTransport();
+  const text = await T.invoke<string>("read_config", { name });
+  const value = await T.invoke<Record<string, unknown>>("config_toml_to_value", { content: text });
+  const next = patch(value ?? {});
+  const nextText = await T.invoke<string>("config_value_to_toml", { value: next });
+  await T.invoke("write_config", { name, content: nextText });
+}
+
 const STEPS: { id: Step; label: string; icon: ReactNode }[] = [
   { id: "welcome", label: "Welcome", icon: <Crosshair size={16} /> },
   { id: "providers", label: "Providers", icon: <Server size={16} /> },
@@ -64,6 +78,28 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
           tags: ["general", "reasoning", "code"],
         });
         await getTransport().invoke("set_providers", { providers: [provider] });
+      }
+      // Persist the sandbox + guardrails choices the wizard collected. Without
+      // this they were UI-only and silently ignored -- toggling off the Docker
+      // sandbox or an approval gate here did nothing. Best-effort: the defaults
+      // are already the safe values, so a config write failure should not trap
+      // the user in the wizard.
+      try {
+        await patchConfig("runtime", (v) => ({ ...v, backend: useDocker ? "docker" : "native" }));
+        await patchConfig("guardrails", (v) => ({
+          ...v,
+          hitl_gates: {
+            ...(typeof v.hitl_gates === "object" && v.hitl_gates ? v.hitl_gates : {}),
+            harness: requireHarnessApproval,
+            run: requireRunApproval,
+          },
+        }));
+      } catch (e) {
+        toast({
+          title: "Saved provider, but sandbox/guardrails settings did not persist",
+          description: `${e} -- adjust them later under Settings.`,
+          variant: "error",
+        });
       }
       // ChatView reads the preferred model from localStorage; the API key now
       // lives only in the backend config, not in the browser store.

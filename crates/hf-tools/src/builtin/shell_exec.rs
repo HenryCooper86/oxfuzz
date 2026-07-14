@@ -98,7 +98,14 @@ impl ShellExecTool {
 
     fn truncate_output(s: &str) -> String {
         if s.len() > MAX_OUTPUT_BYTES {
-            let truncated = &s[..MAX_OUTPUT_BYTES];
+            // Floor to a UTF-8 char boundary: command output is arbitrary bytes,
+            // so a multibyte char can straddle MAX_OUTPUT_BYTES and slicing there
+            // would panic.
+            let mut end = MAX_OUTPUT_BYTES;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = &s[..end];
             format!(
                 "{}...\n\n[output truncated: {} bytes total, showing first {}]",
                 truncated,

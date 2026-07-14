@@ -93,10 +93,15 @@ impl ContextProvider for LoadHistory {
             let tokens = estimate_tokens(&formatted);
 
             if tokens > remaining {
-                // Truncate last message to fit.
+                // Truncate last message to fit. Floor to a UTF-8 char boundary so
+                // non-ASCII history content cannot panic the byte slice.
                 let max_chars = (remaining as usize) * 4;
                 let truncated = if formatted.len() > max_chars {
-                    format!("{}... [truncated]", &formatted[..max_chars])
+                    let mut end = max_chars;
+                    while end > 0 && !formatted.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}... [truncated]", &formatted[..end])
                 } else {
                     formatted
                 };

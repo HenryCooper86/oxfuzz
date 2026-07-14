@@ -601,8 +601,8 @@ mod tests {
         // meaningful coverage gates and must not silently disable rollback.
         for invalid in ["0", "100.1", "inf", "NaN"] {
             let p = resolve_auto_revert_policy(Some("yes"), Some(invalid), None, None);
-            assert_eq!(
-                p.threshold_pct, DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
+            assert!(
+                (p.threshold_pct - DEFAULT_AUTO_REVERT_THRESHOLD_PCT).abs() < f64::EPSILON,
                 "invalid threshold {invalid} was accepted"
             );
         }

@@ -19,7 +19,8 @@ export type ViewType =
   | "skills"
   | "knowledge"
   | "automation"
-  | "defectdojo";
+  | "defectdojo"
+  | "help";
 
 export interface CoverageSample {
   t: number;

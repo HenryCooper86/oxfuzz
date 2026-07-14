@@ -360,7 +360,13 @@ impl CompactionEngine {
                 self.validate_identifiers(original_messages, &summary);
                 summary
             }
-            None => truncate_fallback(original_messages),
+            // The summarizer failed all retries. Return an EMPTY summary rather
+            // than a non-empty "[Compacted N messages -- LLM unavailable]"
+            // placeholder: callers (e.g. the agent loop) skip compaction only on
+            // an empty result, so a placeholder would silently overwrite the
+            // real conversation history with content-free text. Empty means
+            // "keep the raw messages".
+            None => String::new(),
         }
     }
 
@@ -673,9 +679,9 @@ mod tests {
         engine.validate_identifiers(&messages, "A summary without identifiers.");
     }
 
-    /// T-P3-05: LLM failure falls back to truncation.
+    /// T-P3-05: LLM failure yields an EMPTY summary so callers keep raw history.
     #[tokio::test]
-    async fn test_llm_failure_fallback() {
+    async fn test_llm_failure_yields_empty_summary() {
         let llm = MockLlm {
             response: String::new(),
             should_fail: true,
@@ -684,9 +690,15 @@ mod tests {
         let messages: Vec<String> = (0..20).map(|i| format!("message {i} content")).collect();
         let result = engine.compact_async(&messages).await;
 
-        // Should still produce a result via fallback.
-        assert!(result.messages_compacted > 0);
-        assert!(result.summary.contains("LLM unavailable"));
+        // When the summarizer is unavailable the summary must be empty, NOT a
+        // "[Compacted N messages -- LLM unavailable]" placeholder: callers skip
+        // compaction only on an empty summary, so a non-empty placeholder would
+        // silently overwrite the real conversation history with content-free text.
+        assert!(
+            result.summary.trim().is_empty(),
+            "LLM-failure fallback must be an empty summary, got: {:?}",
+            result.summary
+        );
     }
 
     /// T-P3-06: Retry logic works (mock LLM failures).

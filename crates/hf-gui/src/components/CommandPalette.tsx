@@ -17,11 +17,13 @@ const VIEWS: ViewType[] = [
   "artifacts",
   "reports",
   "runs",
+  "audit",
   "agents",
   "skills",
   "knowledge",
   "automation",
   "defectdojo",
+  "help",
   "settings",
 ];
 

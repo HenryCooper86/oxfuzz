@@ -134,7 +134,7 @@ impl SkillDefinition {
         let domain = self
             .domain
             .iter()
-            .map(|d| format!("\"{}\"", d.replace('"', "")))
+            .map(|d| format!("\"{}\"", toml_escape(d)))
             .collect::<Vec<_>>()
             .join(", ");
         let token_count = self.body.chars().count() / 4;
@@ -149,11 +149,35 @@ author = \"hobot_fuzz\"\nsource_format = \"markdown\"\n\n\
 [skill.classification]\ntype = \"llm_reasoning\"\ndomain = [{domain}]\natomic = true\n\n\
 [skill.constraints]\nmax_input_tokens = {max_in}\nmax_output_tokens = 4000\n\n\
 [skill.root]\npath = \"root.md\"\ntoken_count = {token_count}\n",
-            name = self.name,
-            version = self.version,
-            desc = self.description.replace('"', ""),
+            name = toml_escape(&self.name),
+            version = toml_escape(&self.version),
+            desc = toml_escape(&self.description),
         )
     }
+}
+
+/// Escape a string for a TOML basic (double-quoted) string. A user-authored
+/// skill saved via the GUI can carry a backslash (a `\d+` regex, a Windows
+/// path) or a newline in its description/version; interpolating those raw
+/// produced invalid TOML, so `load_user_skills` failed to parse the manifest and
+/// the saved skill silently vanished on the next reload.
+fn toml_escape(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Errors from registry mutations.
@@ -385,6 +409,29 @@ mod tests {
     fn render_empty_when_none_resolve() {
         let reg = SkillRegistry::builtin();
         assert!(reg.render(&["nope".to_owned()]).is_none());
+    }
+
+    #[test]
+    fn manifest_round_trips_special_characters() {
+        // A user-authored skill whose description carries a backslash, a quote,
+        // and a newline must produce valid TOML that parses back losslessly --
+        // previously it emitted broken TOML and the skill vanished on reload.
+        let skill = SkillDefinition {
+            name: "my-skill".to_owned(),
+            version: "1.0.0-rc.1".to_owned(),
+            description: "matches \\d+ and \"quoted\"\nsecond line".to_owned(),
+            domain: vec!["path\\with\\slash".to_owned(), "plain".to_owned()],
+            body: "root body".to_owned(),
+            max_input_tokens: 0,
+            trust_tier: TrustTier::UserDefined,
+        };
+        let manifest = skill.manifest_toml();
+        let reparsed =
+            SkillDefinition::from_files(&manifest, &skill.body).expect("manifest must parse");
+        assert_eq!(reparsed.name, skill.name);
+        assert_eq!(reparsed.version, skill.version);
+        assert_eq!(reparsed.description, skill.description);
+        assert_eq!(reparsed.domain, skill.domain);
     }
 
     #[test]

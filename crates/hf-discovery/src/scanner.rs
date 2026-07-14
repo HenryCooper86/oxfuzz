@@ -110,9 +110,15 @@ fn scan_rust(root: &Path) -> ScanResult {
 /// Extract public, parameter-bearing function definitions from Rust source.
 fn extract_rust_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) {
     let mut byte_off = 0usize;
-    for (idx, line) in src.lines().enumerate() {
+    // Iterate with `split_inclusive` so each piece carries its own line
+    // terminator: `byte_off += raw.len()` then stays exact on both LF and CRLF
+    // files. (`str::lines()` strips a preceding '\r' too, so `line.len() + 1`
+    // under-counted by one byte per CRLF line, drifting `line_start` into the
+    // previous line and reading parameter lists from the wrong span.)
+    for (idx, raw) in src.split_inclusive('\n').enumerate() {
         let line_start = byte_off;
-        byte_off += line.len() + 1; // account for the '\n' lines() stripped
+        byte_off += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
         let Some(after_fn) = strip_pub_fn(line.trim_start()) else {
             continue;
         };

@@ -3,7 +3,7 @@ import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import { useI18n } from "../i18n";
 import { useDefectDojo } from "../lib";
-import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -14,33 +14,36 @@ interface SidebarProps {
   onSelectTarget: (path: string) => void;
 }
 
-type NavItem = { view: ViewType; label: string; icon: React.ComponentType<{ size?: number }> };
+// Labels are resolved from i18n at render (`t(`nav.${view}`)`), so an item only
+// needs its view id and icon -- no hardcoded label to drift out of sync.
+type NavItem = { view: ViewType; icon: React.ComponentType<{ size?: number }> };
 
 // The pipeline tools that operate on the active target, in fuzzing-workflow
 // order: chat drives the agent, then discover -> harness -> run -> triage ->
 // corpus mirrors a campaign's lifecycle.
 const PIPELINE_ITEMS: NavItem[] = [
-  { view: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { view: "chat", label: "AI Assistant", icon: MessageSquare },
-  { view: "workflow", label: "Fuzzing Workflow", icon: Workflow },
-  { view: "discover", label: "Discover", icon: Crosshair },
-  { view: "harness", label: "Harness", icon: FileCode },
-  { view: "run", label: "Run", icon: Play },
-  { view: "triage", label: "Triage", icon: Bug },
-  { view: "corpus", label: "Corpus", icon: Database },
+  { view: "dashboard", icon: LayoutDashboard },
+  { view: "chat", icon: MessageSquare },
+  { view: "workflow", icon: Workflow },
+  { view: "discover", icon: Crosshair },
+  { view: "harness", icon: FileCode },
+  { view: "run", icon: Play },
+  { view: "triage", icon: Bug },
+  { view: "corpus", icon: Database },
 ];
 
 // Cross-cutting resources, not tied to a single target.
 const LIBRARY_ITEMS: NavItem[] = [
-  { view: "projects", label: "Projects", icon: FolderOpen },
-  { view: "artifacts", label: "Artifacts", icon: Boxes },
-  { view: "reports", label: "Reports", icon: FileText },
-  { view: "runs", label: "Run History", icon: History },
-  { view: "audit", label: "Policy Audit", icon: ScrollText },
-  { view: "agents", label: "Agents", icon: Bot },
-  { view: "skills", label: "Skills", icon: Puzzle },
-  { view: "knowledge", label: "Knowledge", icon: BookOpen },
-  { view: "automation", label: "Automation", icon: Zap },
+  { view: "projects", icon: FolderOpen },
+  { view: "artifacts", icon: Boxes },
+  { view: "reports", icon: FileText },
+  { view: "runs", icon: History },
+  { view: "audit", icon: ScrollText },
+  { view: "agents", icon: Bot },
+  { view: "skills", icon: Puzzle },
+  { view: "knowledge", icon: BookOpen },
+  { view: "automation", icon: Zap },
+  { view: "help", icon: LifeBuoy },
 ];
 
 function basename(path: string): string {
@@ -230,7 +233,7 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
       {/* Footer: Settings pinned at the bottom (Apple-style nav), then version */}
       <div className="border-t border-border" style={{ padding: "6px 8px 8px 8px" }}>
         <NavButton
-          item={{ view: "settings", label: "Settings", icon: Settings }}
+          item={{ view: "settings", icon: Settings }}
           active={activeView === "settings"}
           onNavigate={onNavigate}
         />

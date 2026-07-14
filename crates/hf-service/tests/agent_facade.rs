@@ -6,6 +6,7 @@ use hf_core::provider::{
     ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderPool,
     RouteRequest,
 };
+use hf_core::types::TokenUsage;
 use hf_service::{AgentTurnRequest, CollectingSink, ServiceContainer};
 
 struct AnswerPool;
@@ -23,7 +24,7 @@ impl ProviderPool for AnswerPool {
             content: Some(r#"{"final":"service facade works"}"#.to_owned()),
             reasoning_content: None,
             tool_calls: Vec::new(),
-            usage: Default::default(),
+            usage: TokenUsage::default(),
             finish_reason: FinishReason::Stop,
             raw_request: None,
             raw_response: None,
