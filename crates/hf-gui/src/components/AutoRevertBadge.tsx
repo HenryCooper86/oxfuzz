@@ -1,4 +1,5 @@
 import { RotateCcw } from "lucide-react";
+import { useI18n } from "../i18n";
 
 export interface AutoRevertPolicyView {
   enabled: boolean;
@@ -19,19 +20,21 @@ export function AutoRevertBadge({
   overridden: boolean;
   showScope?: boolean;
 }) {
+  const { t } = useI18n();
   const { enabled, threshold_pct, notify_only } = policy;
   const label = !enabled
-    ? "Auto-revert off"
+    ? t("autoRevert.off")
     : notify_only
-      ? `Auto-revert notify >${threshold_pct}%`
-      : `Auto-revert >${threshold_pct}%`;
+      ? t("autoRevert.notify", { pct: threshold_pct })
+      : t("autoRevert.on", { pct: threshold_pct });
   const color = overridden ? "var(--accent)" : "var(--text-muted)";
-  const scope = showScope ? (overridden ? " · project" : " · global") : "";
+  const scope = showScope ? ` · ${overridden ? t("autoRevert.project") : t("autoRevert.global")}` : "";
   const tip = overridden
-    ? `This project overrides the global auto-revert policy: ${label.toLowerCase()}${
-        enabled && notify_only ? " (detect only, no restore)" : ""
-      }`
-    : `Inherits the global auto-revert policy: ${label.toLowerCase()}`;
+    ? t("autoRevert.tipOverride", {
+        label: label.toLowerCase(),
+        extra: enabled && notify_only ? t("autoRevert.detectOnly") : "",
+      })
+    : t("autoRevert.tipInherit", { label: label.toLowerCase() });
   return (
     <span
       className="inline-flex items-center gap-1 text-xs rounded-full whitespace-nowrap"

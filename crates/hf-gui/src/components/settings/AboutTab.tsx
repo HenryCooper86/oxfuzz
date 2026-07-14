@@ -5,6 +5,7 @@ import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Separator } from "../ui/Separator";
 import { useToast } from "../ui/Toast";
+import { useI18n } from "../../i18n";
 import { getTransport, openExternal } from "../../lib";
 import type { SystemStatus } from "../../types";
 import { Crosshair, Github, BookOpen, ClipboardCheck } from "lucide-react";
@@ -38,6 +39,7 @@ function buildReport(status: SystemStatus | null): string {
 }
 
 export function AboutTab() {
+  const { t } = useI18n();
   const { toast } = useToast();
   const [copying, setCopying] = useState(false);
 
@@ -49,9 +51,9 @@ export function AboutTab() {
         .catch(() => null);
       const report = buildReport(status);
       await navigator.clipboard?.writeText(report);
-      toast({ title: "System report copied", description: "Paste it into your bug report.", variant: "success" });
+      toast({ title: t("settings.about.reportCopied"), description: t("settings.about.reportCopiedDesc"), variant: "success" });
     } catch (e) {
-      toast({ title: "Could not copy system report", description: String(e), variant: "error" });
+      toast({ title: t("settings.about.reportCopyFailed"), description: String(e), variant: "error" });
     } finally {
       setCopying(false);
     }
@@ -79,18 +81,16 @@ export function AboutTab() {
       <Separator />
 
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-semibold">AI Fuzzing Agent</h3>
+        <h3 className="text-sm font-semibold">{t("settings.about.aiFuzzingAgent")}</h3>
         <p className="text-xs text-text-secondary leading-relaxed">
-          hobot_fuzz is an autonomous agent that discovers fuzzing targets, writes harnesses, drives
-          open-source fuzzing engines (AFL++, honggfuzz, libFuzzer, ClusterFuzzLite), triages crashes,
-          and iterates on corpus and coverage -- all under human-in-the-loop supervision.
+          {t("settings.about.description")}
         </p>
       </div>
 
       <Separator />
 
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-semibold">Engines</h3>
+        <h3 className="text-sm font-semibold">{t("settings.about.engines")}</h3>
         <div className="flex flex-wrap gap-2">
           <Badge variant="accent">libFuzzer</Badge>
           <Badge variant="accent">AFL++</Badge>
@@ -100,7 +100,7 @@ export function AboutTab() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-semibold">Languages</h3>
+        <h3 className="text-sm font-semibold">{t("settings.about.languages")}</h3>
         <div className="flex flex-wrap gap-2">
           <Badge>C</Badge>
           <Badge>C++</Badge>
@@ -113,15 +113,14 @@ export function AboutTab() {
       <Separator />
 
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-semibold">Troubleshooting</h3>
+        <h3 className="text-sm font-semibold">{t("settings.about.troubleshooting")}</h3>
         <p className="text-xs text-text-secondary">
-          Copy a plain-text summary of your environment (app version, platform, Docker and engine
-          availability) to include in a bug report.
+          {t("settings.about.troubleshootingDesc")}
         </p>
         <div>
           <Button variant="outline" size="sm" onClick={() => void copyReport()} loading={copying}>
             {!copying && <ClipboardCheck size={14} />}
-            Copy system report
+            {t("settings.about.copyReport")}
           </Button>
         </div>
       </div>
@@ -129,24 +128,24 @@ export function AboutTab() {
       <Separator />
 
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-semibold">Links</h3>
+        <h3 className="text-sm font-semibold">{t("settings.about.links")}</h3>
         <div className="flex flex-col gap-1 items-start">
           <button
             onClick={() => void openExternal(REPO_URL)}
             className="text-xs text-accent flex items-center gap-2 hover:underline"
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
-            <Github size={14} /> GitHub Repository
+            <Github size={14} /> {t("settings.about.repo")}
           </button>
           <button
             onClick={() => void openExternal(DOCS_URL)}
             className="text-xs text-accent flex items-center gap-2 hover:underline"
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
-            <BookOpen size={14} /> Documentation
+            <BookOpen size={14} /> {t("settings.about.docs")}
           </button>
           <span className="text-xs text-text-muted mt-1">
-            An in-app guide is available under <strong className="text-text-primary">Help &amp; Docs</strong> in the sidebar.
+            {t("settings.about.guidePre")}<strong className="text-text-primary">{t("nav.help")}</strong>{t("settings.about.guidePost")}
           </span>
         </div>
       </div>

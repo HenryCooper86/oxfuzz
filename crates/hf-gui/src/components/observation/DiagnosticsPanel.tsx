@@ -8,6 +8,7 @@ import { Activity, Loader2, RotateCw } from "lucide-react";
 import { getTransport } from "../../lib";
 import { Badge } from "../ui/Badge";
 import { IconButton } from "../ui/IconButton";
+import { useI18n } from "../../i18n";
 
 interface ModelCost {
   model: string;
@@ -28,6 +29,7 @@ const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n
 const fmtCost = (n: number) => (n > 0 ? `$${n.toFixed(n < 0.01 ? 4 : 2)}` : "$0");
 
 export function DiagnosticsPanel() {
+  const { t } = useI18n();
   const [data, setData] = useState<CostSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -75,11 +77,11 @@ export function DiagnosticsPanel() {
       <div className="flex items-center justify-between p-2 border-b border-border">
         <div className="flex items-center gap-2">
           <Activity size={14} style={{ color: "var(--accent)" }} />
-          <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>Diagnostics</span>
+          <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>{t("header.diagnostics")}</span>
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="default">{data?.calls ?? 0}</Badge>
-          <IconButton size={22} onClick={load} title="Refresh" aria-label="Refresh">
+          <IconButton size={22} onClick={load} title={t("common.refresh")} aria-label={t("common.refresh")}>
             {loading ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
           </IconButton>
         </div>
@@ -91,13 +93,13 @@ export function DiagnosticsPanel() {
             <Activity size={20} className="text-text-muted" style={{ opacity: 0.5, color: error && !data ? "var(--error)" : undefined }} />
             {error && !data ? (
               <>
-                <span className="text-xs" style={{ color: "var(--error)" }}>Diagnostics unavailable</span>
+                <span className="text-xs" style={{ color: "var(--error)" }}>{t("diag.unavailable")}</span>
                 <span className="text-xs text-text-muted font-mono" style={{ opacity: 0.7 }}>{error}</span>
               </>
             ) : (
               <>
-                <span className="text-xs text-text-muted">No LLM calls yet</span>
-                <span className="text-xs text-text-muted" style={{ opacity: 0.7 }}>Rank, harness, triage, and chat are tracked here.</span>
+                <span className="text-xs text-text-muted">{t("diag.noCalls")}</span>
+                <span className="text-xs text-text-muted" style={{ opacity: 0.7 }}>{t("diag.tracked")}</span>
               </>
             )}
           </div>
@@ -106,14 +108,14 @@ export function DiagnosticsPanel() {
         <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
           {/* Session totals */}
           <div className="grid grid-cols-3 gap-2">
-            <Stat label="Cost" value={fmtCost(data.cost_usd)} accent />
-            <Stat label="Calls" value={`${data.calls}`} />
-            <Stat label="Tokens" value={fmtTokens(data.input_tokens + data.output_tokens)} />
+            <Stat label={t("diag.cost")} value={fmtCost(data.cost_usd)} accent />
+            <Stat label={t("diag.calls")} value={`${data.calls}`} />
+            <Stat label={t("diag.tokens")} value={fmtTokens(data.input_tokens + data.output_tokens)} />
           </div>
 
           {/* Per-model breakdown */}
           <div>
-            <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>By Model</div>
+            <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("diag.byModel")}</div>
             <div className="flex flex-col">
               {data.by_model.map((m) => (
                 <div key={m.model} className="flex items-center gap-2 py-1.5 border-b border-border last:border-0 text-xs">

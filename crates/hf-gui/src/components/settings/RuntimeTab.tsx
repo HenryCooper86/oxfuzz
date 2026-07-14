@@ -6,10 +6,12 @@ import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { Container } from "lucide-react";
+import { useI18n } from "../../i18n";
 
 type Cfg = Record<string, unknown>;
 
 export function RuntimeTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const backend = (value.backend as string) === "native" ? "native" : "docker";
   const image = (value.docker_image as string) ?? "";
   const limits = (value.limits as Cfg) ?? {};
@@ -32,7 +34,7 @@ export function RuntimeTab({ value, onChange }: { value: Cfg; onChange: (next: C
 
   return (
     <div>
-      <SettingsGroup title="Backend" description="Configure the sandbox for harness compilation and fuzz execution. Safety-first: all builds and runs are isolated.">
+      <SettingsGroup title={t("settings.runtime.backend")} description={t("settings.runtime.backendDesc")}>
         <div className="settings-item" style={{ padding: "10px 14px" }}>
         <div className="flex gap-2">
           <button
@@ -46,7 +48,7 @@ export function RuntimeTab({ value, onChange }: { value: Cfg; onChange: (next: C
             }}
           >
             <Container size={14} />
-            <span className="text-xs font-medium">Docker (recommended)</span>
+            <span className="text-xs font-medium">{t("settings.runtime.docker")}</span>
           </button>
           <button
             onClick={() => patch({ backend: "native" })}
@@ -58,40 +60,40 @@ export function RuntimeTab({ value, onChange }: { value: Cfg; onChange: (next: C
               cursor: "pointer",
             }}
           >
-            <span className="text-xs font-medium">Native (dev only)</span>
+            <span className="text-xs font-medium">{t("settings.runtime.native")}</span>
           </button>
         </div>
         </div>
-        <SettingsItem title="Docker Image">
+        <SettingsItem title={t("settings.runtime.dockerImage")}>
           <div style={{ width: 220 }}>
             <Input value={image} onChange={(e) => patch({ docker_image: e.target.value })} mono />
           </div>
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Resource Limits">
-        <SettingsItem title="Max Memory (MB)">
+      <SettingsGroup title={t("settings.runtime.resourceLimits")}>
+        <SettingsItem title={t("settings.runtime.maxMemory")}>
           <div style={{ width: 120 }}>
             <Input type="number" value={maxMem} onChange={(e) => patchLimits({ max_mem_mb: parseInt(e.target.value) || 4096 })} />
           </div>
         </SettingsItem>
-        <SettingsItem title="Max CPUs">
+        <SettingsItem title={t("settings.runtime.maxCpus")}>
           <div style={{ width: 120 }}>
             <Input type="number" value={maxCpus} onChange={(e) => patchLimits({ max_cpus: parseInt(e.target.value) || 2 })} />
           </div>
         </SettingsItem>
-        <SettingsItem title="Max Duration (seconds)">
+        <SettingsItem title={t("settings.runtime.maxDuration")}>
           <div style={{ width: 120 }}>
             <Input type="number" value={maxDuration} onChange={(e) => patchLimits({ max_duration_secs: parseInt(e.target.value) || 7200 })} />
           </div>
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Network Access">
-        <SettingsItem title="Build phase" description="Allow network access during harness compilation (needed for package downloads).">
+      <SettingsGroup title={t("settings.runtime.networkAccess")}>
+        <SettingsItem title={t("settings.runtime.buildPhase")} description={t("settings.runtime.buildPhaseDesc")}>
           <Switch checked={networkBuild} onChange={(v) => patchNetwork({ build: v })} />
         </SettingsItem>
-        <SettingsItem title="Fuzz phase" description="Allow network access during fuzzing. Not recommended -- untrusted code should not access the network.">
+        <SettingsItem title={t("settings.runtime.fuzzPhase")} description={t("settings.runtime.fuzzPhaseDesc")}>
           <Switch checked={networkFuzz} onChange={(v) => patchNetwork({ fuzz: v })} />
         </SettingsItem>
       </SettingsGroup>

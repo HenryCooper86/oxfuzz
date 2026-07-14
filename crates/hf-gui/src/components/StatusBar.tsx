@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
-import { getTransport } from "../lib";
+import { getTransport, useDefectDojo } from "../lib";
 import { usePrefs } from "../providers/PrefsContext";
 import { useRunStatus } from "../providers/RunStatusContext";
 import type { SystemStatus } from "../types";
-import { Container, Box } from "lucide-react";
+import { Container, Box, ShieldCheck } from "lucide-react";
 
 const EMPTY_STATUS: SystemStatus = {
   docker: false,
@@ -29,6 +29,9 @@ const ENGINES: { label: string; key: keyof SystemStatus; runId: string }[] = [
 export function StatusBar() {
   const { sandboxArch } = usePrefs();
   const { activeEngine } = useRunStatus();
+  // DefectDojo is an optional integration, so it appears in the bar only once
+  // configured -- matching the sidebar entry. Green when the instance answers.
+  const { configured: defectDojoOn } = useDefectDojo();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   // Which engine kinds are enabled in settings (config/engines.toml). Disabled
   // engines are dimmed below so the bar matches the Run panel. Empty until
@@ -135,6 +138,12 @@ export function StatusBar() {
                 />
               );
             })}
+            {defectDojoOn && (
+              <>
+                <span style={{ width: "1px", height: "12px", background: "var(--border)" }} />
+                <StatusDot label="DefectDojo" active={status.defectdojo} icon={<ShieldCheck size={11} />} />
+              </>
+            )}
           </>
         )}
         {dockerMsg && !(status?.docker && status?.sandbox_image) && (

@@ -5,9 +5,11 @@ import { usePipeline } from "../providers/PipelineContext";
 import { useTarget } from "../providers/TargetContext";
 import type { TargetInventory, TargetCandidate } from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
+import { useI18n } from "../i18n";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
+  const { t } = useI18n();
   const { activeProject, setActiveProject } = useProject();
   const { markDone } = usePipeline();
   // Language lives in the shared TargetContext so the C/C++ choice made here
@@ -55,8 +57,8 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       {!embedded && (
         <ViewHeader
-          title="Target Discovery"
-          description="Scan a C/C++ project to find functions worth fuzzing. Ranked by input surface, complexity, parser heuristics, and call-graph reachability."
+          title={t("discover.title")}
+          description={t("discover.description")}
         />
       )}
 
@@ -86,8 +88,8 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             size="sm"
             onClick={browse}
             loading={scanning}
-            title="Browse for folder"
-            aria-label="Browse for folder"
+            title={t("discover.browseFolder")}
+            aria-label={t("discover.browseFolder")}
           >
             {!scanning && <FolderOpen size={14} />}
           </Button>
@@ -99,7 +101,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           loading={loading}
         >
           {!loading && <Search size={14} />}
-          {loading ? "Scanning..." : "Discover"}
+          {loading ? t("discover.scanning") : t("discover.discover")}
         </Button>
       </div>
 
@@ -115,7 +117,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
       {inventory && (
         <div className="flex flex-col gap-2" style={{ animation: "slideInUp 0.2s ease" }}>
           <div className="text-xs text-text-secondary">
-            {inventory.candidates.length} candidates found
+            {t("discover.candidatesFound", { n: inventory.candidates.length })}
           </div>
           <div className="flex flex-col gap-1">
             {[...inventory.candidates]
@@ -131,6 +133,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
 }
 
 function CandidateCard({ candidate: c, callGraph, project }: { candidate: TargetCandidate; callGraph: Record<string, string[]>; project: string }) {
+  const { t } = useI18n();
   const fitColor = c.fit_score > 0.8 ? "var(--accent)" : c.fit_score > 0.6 ? "var(--warning)" : "var(--text-muted)";
   const reaches = c.reachable_functions?.length ?? 0;
   const hasTree = (callGraph[c.symbol]?.length ?? 0) > 0;
@@ -197,14 +200,14 @@ function CandidateCard({ candidate: c, callGraph, project }: { candidate: Target
         <span className="text-sm font-mono" style={{ color: fitColor, fontWeight: 600 }}>
           {c.fit_score.toFixed(3)}
         </span>
-        <span className="text-xs text-text-muted">complexity: {c.complexity}</span>
+        <span className="text-xs text-text-muted">{t("discover.complexity", { n: c.complexity })}</span>
         {reaches > 0 && (
           <span
             className="text-xs px-1.5 py-0.5 rounded-sm"
             style={{ background: "var(--accent-subtle)", color: "var(--accent)", fontSize: "10px", fontWeight: 500 }}
-            title={`Reaches ${reaches} project function${reaches === 1 ? "" : "s"}:\n${(c.reachable_functions ?? []).join(", ")}`}
+            title={t("discover.reachesTooltip", { n: reaches, fns: (c.reachable_functions ?? []).join(", ") })}
           >
-            reaches {reaches} · acc {c.accumulated_complexity ?? c.complexity}
+            {t("discover.reachesBadge", { n: reaches, acc: c.accumulated_complexity ?? c.complexity })}
           </span>
         )}
       </div>
@@ -213,17 +216,17 @@ function CandidateCard({ candidate: c, callGraph, project }: { candidate: Target
       <div style={{ padding: "0 var(--space-md) var(--space-md) calc(var(--space-md) + 22px)", borderTop: "1px solid var(--border)" }}>
         <div className="flex items-center gap-2 mt-2 mb-1">
           <span className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            Call Tree
+            {t("discover.callTree")}
           </span>
           {covLoading && <Loader2 size={11} className="animate-spin text-text-muted" />}
           {covered && covered.size > 0 && (
             <span className="text-xs text-text-muted flex items-center gap-2">
-              <span style={{ color: "var(--success, #16a34a)" }}>● covered</span>
-              <span style={{ color: "var(--text-muted)" }}>○ not covered</span>
+              <span style={{ color: "var(--success, #16a34a)" }}>● {t("discover.covered")}</span>
+              <span style={{ color: "var(--text-muted)" }}>○ {t("discover.notCovered")}</span>
             </span>
           )}
           {covered && covered.size === 0 && !covLoading && (
-            <span className="text-xs text-text-muted">no coverage yet — run a campaign for this target</span>
+            <span className="text-xs text-text-muted">{t("discover.noCoverageYet")}</span>
           )}
         </div>
         {(callGraph[c.symbol] ?? []).map((child) => (
@@ -250,6 +253,7 @@ function CallTreeNode({
   depth: number;
   covered: Set<string> | null;
 }) {
+  const { t } = useI18n();
   const isCycle = ancestors.has(name);
   const children = isCycle ? [] : graph[name] ?? [];
   const hasChildren = children.length > 0;
@@ -268,7 +272,7 @@ function CallTreeNode({
     <div>
       <div className="flex items-center gap-1 text-xs font-mono" style={{ padding: "1px 0" }}>
         {hasChildren ? (
-          <button onClick={() => setOpen((o) => !o)} aria-label="Toggle call tree node" className="text-text-muted hover:text-text-primary outline-none">
+          <button onClick={() => setOpen((o) => !o)} aria-label={t("discover.toggleCallTreeNode")} className="text-text-muted hover:text-text-primary outline-none">
             {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
         ) : (

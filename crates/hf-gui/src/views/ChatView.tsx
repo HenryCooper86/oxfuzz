@@ -148,7 +148,7 @@ export function ChatView() {
       // Web mode has no chat_answer_permission endpoint; every other chat call
       // is guarded the same way. Surface it rather than throwing an unhandled
       // rejection.
-      toast({ title: "Could not send permission decision", description: String(e), variant: "error" });
+      toast({ title: t("chat.permissionDecisionFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -206,7 +206,7 @@ export function ChatView() {
   // forget the mapping, mint a fresh session, and empty the thread.
   const clearHistory = useCallback(async () => {
     if (busy) return;
-    if (!(await confirm({ title: "Clear chat history", message: "Clear this project's chat history? This cannot be undone.", danger: true, confirmLabel: "Clear" }))) return;
+    if (!(await confirm({ title: t("chat.clearHistoryTitle"), message: t("chat.clearHistoryMessage"), danger: true, confirmLabel: t("common.clear") }))) return;
     const projectKey = activeProject || "";
     const T = getTransport();
     try {
@@ -325,7 +325,7 @@ export function ChatView() {
         await getTransport().invoke("chat_rollback", { sessionId });
       } catch (e) {
         // The local undo still happens below; note the backend didn't persist it.
-        toast({ title: "Rollback not saved on server", description: String(e), variant: "error" });
+        toast({ title: t("chat.rollbackNotSaved"), description: String(e), variant: "error" });
       }
     }
     setMessages((m) => m.slice(0, -2));
@@ -349,7 +349,7 @@ export function ChatView() {
       try {
         await getTransport().invoke("chat_rollback_to", { sessionId, checkpointId: cp.checkpoint_id });
       } catch (e) {
-        toast({ title: "Rollback not saved on server", description: String(e), variant: "error" });
+        toast({ title: t("chat.rollbackNotSaved"), description: String(e), variant: "error" });
       }
     }
     setMessages((m) => m.slice(0, cp.message_count_before));
@@ -367,7 +367,7 @@ export function ChatView() {
       });
       if (id) setSessionId(id);
     } catch (e) {
-      toast({ title: "Branch failed", description: String(e), variant: "error" });
+      toast({ title: t("chat.branchFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -402,7 +402,7 @@ export function ChatView() {
         }),
       );
     } catch (e) {
-      toast({ title: "Could not switch branch", description: String(e), variant: "error" });
+      toast({ title: t("chat.switchBranchFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -429,7 +429,7 @@ export function ChatView() {
         if (e.type === "tool_call") {
           setMessages((m) => [
             ...m,
-            { role: "system", content: `Calling tool: ${e.name}(${JSON.stringify(e.args)})`, timestamp: now() },
+            { role: "system", content: t("chat.callingTool", { name: e.name, args: JSON.stringify(e.args) }), timestamp: now() },
           ]);
         } else if (e.type === "tool_result") {
           setMessages((m) => [
@@ -454,7 +454,7 @@ export function ChatView() {
           role: "assistant",
           content:
             (responseText ? normalizeAssistantContent(responseText) : "") ||
-            "I couldn't generate a response. Make sure a provider is configured in Settings.",
+            t("chat.noResponse"),
           timestamp: now(),
         },
       ]);
@@ -463,7 +463,7 @@ export function ChatView() {
         ...m,
         {
           role: "assistant",
-          content: `I hit an error: ${err instanceof Error ? err.message : String(err)}. Configure a provider in Settings, and pick a project folder so I can run tools.`,
+          content: t("chat.agentError", { error: err instanceof Error ? err.message : String(err) }),
           timestamp: now(),
         },
       ]);
@@ -618,7 +618,7 @@ export function ChatView() {
             style={{ padding: "var(--space-sm) var(--space-md)" }}
           >
             <Loader2 size={14} className="animate-spin" />
-            <span>Thinking...</span>
+            <span>{t("chat.thinking")}</span>
           </div>
         )}
       </div>
@@ -630,15 +630,15 @@ export function ChatView() {
           style={{ borderColor: "var(--accent)", background: "var(--surface-secondary)" }}
         >
           <div className="text-sm">
-            <span style={{ color: "var(--accent)" }}>Approval required:</span> {permission.action}
+            <span style={{ color: "var(--accent)" }}>{t("chat.approvalRequired")}</span> {permission.action}
             <span className="text-text-secondary"> — {permission.reason}</span>
           </div>
           <div className="flex gap-2 shrink-0">
             <Button variant="outline" size="sm" onClick={() => answerPermission(false)}>
-              Deny
+              {t("chat.deny")}
             </Button>
             <Button variant="primary" size="sm" onClick={() => answerPermission(true)}>
-              Approve
+              {t("common.approve")}
             </Button>
           </div>
         </div>
@@ -680,8 +680,8 @@ export function ChatView() {
                     cursor: "pointer",
                     padding: 0,
                   }}
-                  title="Remove attachment"
-                  aria-label="Remove attachment"
+                  title={t("chat.removeAttachment")}
+                  aria-label={t("chat.removeAttachment")}
                 >
                   <X size={12} />
                 </button>
@@ -713,7 +713,7 @@ export function ChatView() {
               <ModeToggle mode={mode} onChange={setMode} />
               <ToolbarIconButton
                 icon={<FolderPlus size={17} />}
-                title="Attach project folder"
+                title={t("chat.attachProject")}
                 onClick={attachProjectFolder}
               />
               {agents.length > 0 && (
@@ -722,14 +722,14 @@ export function ChatView() {
               {messages.length >= 2 && !busy && (
                 <ToolbarIconButton
                   icon={<RotateCcw size={16} />}
-                  title="Undo last turn (rollback)"
+                  title={t("chat.undoLastTurn")}
                   onClick={rollbackLast}
                 />
               )}
               {messages.length > 0 && !busy && (
                 <ToolbarIconButton
                   icon={<Trash2 size={16} />}
-                  title="Clear this project's chat history"
+                  title={t("chat.clearHistoryTooltip")}
                   onClick={() => void clearHistory()}
                 />
               )}
@@ -737,7 +737,7 @@ export function ChatView() {
                 <div className="relative">
                   <ToolbarIconButton
                     icon={<History size={16} />}
-                    title="Roll back to an earlier turn"
+                    title={t("chat.rollBackTooltip")}
                     onClick={() => (pickerOpen ? setPickerOpen(false) : void openPicker())}
                   />
                   {pickerOpen && (
@@ -746,11 +746,11 @@ export function ChatView() {
                       style={{ background: "var(--surface-secondary)", width: "300px", maxHeight: "260px" }}
                     >
                       <div className="text-xs text-text-muted px-3 py-2 border-b border-border" style={{ fontWeight: 600, letterSpacing: "0.04em" }}>
-                        ROLL BACK TO BEFORE…
+                        {t("chat.rollBackToBefore")}
                       </div>
                       <div className="overflow-y-auto" style={{ maxHeight: "220px" }}>
                         {checkpoints.length === 0 && (
-                          <div className="text-xs text-text-muted px-3 py-3">No earlier turns.</div>
+                          <div className="text-xs text-text-muted px-3 py-3">{t("chat.noEarlierTurns")}</div>
                         )}
                         {checkpoints.map((cp) => (
                           <button
@@ -759,9 +759,9 @@ export function ChatView() {
                             className="flex items-start gap-2 w-full text-left px-3 py-2 hover:bg-surface-hover border-b border-border last:border-0"
                           >
                             <span className="text-xs font-mono shrink-0" style={{ color: "var(--accent)", minWidth: "44px" }}>
-                              turn {cp.turn_number}
+                              {t("chat.turnN", { n: cp.turn_number })}
                             </span>
-                            <span className="text-xs text-text-secondary truncate">{cp.preview || "(no preview)"}</span>
+                            <span className="text-xs text-text-secondary truncate">{cp.preview || t("chat.noPreview")}</span>
                           </button>
                         ))}
                       </div>
@@ -773,7 +773,7 @@ export function ChatView() {
                 <div className="relative">
                   <ToolbarIconButton
                     icon={<GitBranch size={16} />}
-                    title="Branches (fork / switch)"
+                    title={t("chat.branchesTooltip")}
                     onClick={() => (branchesOpen ? setBranchesOpen(false) : void openBranches())}
                   />
                   {branchesOpen && (
@@ -789,10 +789,10 @@ export function ChatView() {
                         className="flex items-center gap-2 w-full text-left px-3 py-2 hover:bg-surface-hover border-b border-border text-xs font-medium"
                         style={{ color: "var(--accent)" }}
                       >
-                        <GitBranch size={13} /> Branch from here
+                        <GitBranch size={13} /> {t("chat.branchFromHere")}
                       </button>
                       <div className="text-xs text-text-muted px-3 py-1.5 border-b border-border" style={{ fontWeight: 600, letterSpacing: "0.04em" }}>
-                        CONVERSATION TREE
+                        {t("chat.conversationTree")}
                       </div>
                       <div className="overflow-y-auto" style={{ maxHeight: "180px" }}>
                         {branches.map((b) => (
@@ -806,7 +806,7 @@ export function ChatView() {
                             <span className="truncate" style={{ color: b.active ? "var(--accent)" : "var(--text-secondary)" }}>
                               {b.is_main ? "● " : "└ "}
                               {b.title}
-                              {b.active ? " · current" : ""}
+                              {b.active ? t("chat.currentBranchSuffix") : ""}
                             </span>
                           </button>
                         ))}
@@ -817,12 +817,12 @@ export function ChatView() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-text-muted" title="In-flight fuzz runs" style={{ whiteSpace: "nowrap" }}>
-                {taskCount} task{taskCount === 1 ? "" : "s"}
+              <span className="text-xs text-text-muted" title={t("chat.inFlightRuns")} style={{ whiteSpace: "nowrap" }}>
+                {t("chat.tasks", { n: taskCount })}
               </span>
               <ToolbarIconButton
                 icon={expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-                title={expanded ? "Collapse input" : "Expand input"}
+                title={expanded ? t("chat.collapseInput") : t("chat.expandInput")}
                 onClick={() => setExpanded((e) => !e)}
               />
               {models.length > 0 ? (
@@ -831,16 +831,16 @@ export function ChatView() {
                 <span
                   className="text-xs text-text-muted"
                   style={{ padding: "5px 8px" }}
-                  title="Configure a provider in Settings"
+                  title={t("chat.configureProvider")}
                 >
-                  No provider
+                  {t("chat.noProvider")}
                 </span>
               )}
               <button
                 onClick={send}
                 disabled={busy || !hasText}
-                title="Send"
-                aria-label="Send"
+                title={t("chat.send")}
+                aria-label={t("chat.send")}
                 className="inline-flex items-center justify-center rounded-full transition-all duration-150 outline-none disabled:opacity-55"
                 style={{
                   width: "30px",
@@ -917,7 +917,7 @@ function WelcomeProjectSelector({
           >
             {recentProjects.length === 0 ? (
               <div className="text-xs text-text-muted" style={{ padding: "10px 12px" }}>
-                No recent projects
+                {t("chat.noRecentProjects")}
               </div>
             ) : (
               recentProjects.map((p) => (
@@ -953,7 +953,7 @@ function WelcomeProjectSelector({
               onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
             >
               <FolderPlus size={13} />
-              <span className="text-sm">Browse for project…</span>
+              <span className="text-sm">{t("chat.browseForProject")}</span>
             </button>
           </div>
         </>
@@ -964,6 +964,7 @@ function WelcomeProjectSelector({
 
 /** Auto / Plan composer mode toggle, styled as a pair of pills. */
 function ModeToggle({ mode, onChange }: { mode: ChatMode; onChange: (m: ChatMode) => void }) {
+  const { t } = useI18n();
   const pill = (m: ChatMode, label: string, icon: React.ReactNode, title: string) => {
     const active = mode === m;
     return (
@@ -986,8 +987,8 @@ function ModeToggle({ mode, onChange }: { mode: ChatMode; onChange: (m: ChatMode
   };
   return (
     <div className="inline-flex items-center rounded-md" style={{ background: "var(--surface-active)", padding: "2px" }}>
-      {pill("auto", "Auto", <Sparkles size={13} />, "Auto: send the message as-is")}
-      {pill("plan", "Plan", <ListChecks size={13} />, "Plan: the agent outlines a plan before acting")}
+      {pill("auto", t("chat.modeAuto"), <Sparkles size={13} />, t("chat.modeAutoTip"))}
+      {pill("plan", t("chat.modePlan"), <ListChecks size={13} />, t("chat.modePlanTip"))}
     </div>
   );
 }
@@ -1019,6 +1020,7 @@ function AgentDropdown({
 }) {
   const [open, setOpen] = useState(false);
   const { triggerRef, menuRef, onMenuKey, onTriggerKey } = useListboxNav(open, () => setOpen(false));
+  const { t } = useI18n();
   const active = agents.find((a) => a.id === value);
   return (
     <div className="relative">
@@ -1028,7 +1030,7 @@ function AgentDropdown({
         onKeyDown={(e) => onTriggerKey(e, () => setOpen(true))}
         aria-haspopup="listbox"
         aria-expanded={open}
-        title="Active agent"
+        title={t("chat.activeAgent")}
         className="inline-flex items-center gap-1 rounded-md transition-all duration-150"
         style={{
           padding: "5px 8px",

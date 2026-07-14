@@ -276,18 +276,21 @@ interface CampaignCrashNotice {
  */
 function CampaignCrashToaster() {
   const { toast } = useToast();
+  const { t } = useI18n();
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getTransport()
       .listen<CampaignCrashNotice>("campaign:crash", (e) => {
         const p = e.payload;
         const extras = [
-          p.report_saved ? "report saved" : null,
-          p.defectdojo_pushed ? "pushed to DefectDojo" : null,
+          p.report_saved ? t("app.reportSaved") : null,
+          p.defectdojo_pushed ? t("app.pushedDefectDojo") : null,
         ].filter(Boolean);
         toast({
-          title: `${p.crashes} crash${p.crashes === 1 ? "" : "es"} on ${p.target}`,
-          description: `Scheduled campaign${extras.length ? ` — ${extras.join(", ")}` : ""}`,
+          title: t("app.crashToastTitle", { n: p.crashes, target: p.target }),
+          description: extras.length
+            ? t("app.scheduledCampaignExtras", { extras: extras.join(", ") })
+            : t("app.scheduledCampaign"),
           variant: "error",
         });
       })
@@ -296,7 +299,7 @@ function CampaignCrashToaster() {
       })
       .catch(() => {});
     return () => unlisten?.();
-  }, [toast]);
+  }, [toast, t]);
   return null;
 }
 

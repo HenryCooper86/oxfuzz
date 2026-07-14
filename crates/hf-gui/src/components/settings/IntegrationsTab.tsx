@@ -8,12 +8,14 @@
 import { useState } from "react";
 import { AppWindow, ExternalLink } from "lucide-react";
 import { getTransport, isTauriEnvironment } from "../../lib";
+import { useI18n } from "../../i18n";
 import { Button } from "../ui/Button";
 import { ObjectForm } from "./ObjectForm";
 
 type Cfg = Record<string, unknown>;
 
 export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -25,7 +27,7 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
     setResult(null);
     try {
       await getTransport().invoke("defectdojo_test_connection");
-      setResult({ ok: true, msg: "Connected to DefectDojo successfully." });
+      setResult({ ok: true, msg: t("settings.integrations.connected") });
     } catch (e) {
       setResult({ ok: false, msg: String(e) });
     } finally {
@@ -53,13 +55,11 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
     <div className="flex flex-col gap-4">
       <div className="text-text-secondary" style={{ fontSize: "13px", lineHeight: 1.6 }}>
         <p>
-          Push triaged crashes to <strong>DefectDojo</strong> as findings. Set the instance{" "}
-          <code>url</code>, then provide the API v2 token one of two ways: paste it into{" "}
-          <code>api_token</code> (stored with your desktop settings, like a provider key), or set{" "}
-          <code>api_token_env</code> to the NAME of an environment variable that holds it and export
-          that variable (preferred for CLI/CI so the secret stays out of the config file). A direct{" "}
-          <code>api_token</code> takes priority. Repeat pushes use reimport-scan, so re-found crashes
-          update in place instead of duplicating.
+          {t("settings.integrations.p1a")}<strong>DefectDojo</strong>{t("settings.integrations.p1b")}
+          <code>url</code>{t("settings.integrations.p1c")}
+          <code>api_token</code>{t("settings.integrations.p1d")}
+          <code>api_token_env</code>{t("settings.integrations.p1e")}
+          <code>api_token</code>{t("settings.integrations.p1f")}
         </p>
       </div>
 
@@ -73,27 +73,27 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
           loading={testing}
           disabled={testing}
         >
-          Test connection
+          {t("settings.testConnection")}
         </Button>
         <Button
           variant="primary"
           size="sm"
           onClick={() => void openDojo(false)}
           disabled={!hasUrl}
-          title={hasUrl ? "Open DefectDojo in a window inside hobot_fuzz" : "Set the DefectDojo URL first"}
+          title={hasUrl ? t("settings.integrations.openDojoTitle") : t("settings.integrations.setUrlFirst")}
         >
           <AppWindow size={14} />
-          Open DefectDojo
+          {t("settings.integrations.openDojo")}
         </Button>
         <Button
           variant="ghost"
           size="sm"
           onClick={() => void openDojo(true)}
           disabled={!hasUrl}
-          title="Open DefectDojo in your default web browser"
+          title={t("settings.integrations.openDojoBrowserTitle")}
         >
           <ExternalLink size={14} />
-          Open in browser
+          {t("common.openInBrowser")}
         </Button>
         {result && (
           <span
@@ -108,7 +108,7 @@ export function IntegrationsTab({ value, onChange }: { value: Cfg; onChange: (ne
         )}
       </div>
       <p className="text-text-muted" style={{ fontSize: "11px" }}>
-        Test uses the last <strong>saved</strong> settings -- save your changes first.
+        {t("settings.testNotePre")}<strong>{t("settings.testSaved")}</strong>{t("settings.testNotePost")}
       </p>
     </div>
   );

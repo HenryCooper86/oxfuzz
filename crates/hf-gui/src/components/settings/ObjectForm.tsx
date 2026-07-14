@@ -12,6 +12,7 @@ import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
 import { EmptyState } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
+import { useI18n } from "../../i18n";
 
 type Cfg = Record<string, unknown>;
 
@@ -30,6 +31,7 @@ function isPrimitiveArray(v: unknown): v is unknown[] {
 }
 
 function Field({ label, value, onSet }: { label: string; value: unknown; onSet: (v: unknown) => void }) {
+  const { t } = useI18n();
   if (typeof value === "boolean") {
     return (
       <SettingsItem title={label}>
@@ -48,7 +50,7 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
   }
   if (isPrimitiveArray(value)) {
     return (
-      <SettingsItem title={label} description="Comma-separated list.">
+      <SettingsItem title={label} description={t("settings.objectForm.commaSeparated")}>
         <div style={{ width: 260 }}>
           <Input
             mono
@@ -63,7 +65,7 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
   // (with a hint to edit in RAW) instead of rendering a useless "[object Object]".
   if (typeof value === "object" && value !== null) {
     return (
-      <SettingsItem title={label} description="Nested config — edit in RAW.">
+      <SettingsItem title={label} description={t("settings.objectForm.nestedConfig")}>
         <span className="text-xs text-text-muted font-mono">{Array.isArray(value) ? "[…]" : "{…}"}</span>
       </SettingsItem>
     );
@@ -79,6 +81,7 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
 }
 
 export function ObjectForm({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const entries = Object.entries(value);
   const scalars = entries.filter(([, v]) => !isPlainObject(v));
   const tables = entries.filter(([, v]) => isPlainObject(v)) as [string, Cfg][];
@@ -87,8 +90,8 @@ export function ObjectForm({ value, onChange }: { value: Cfg; onChange: (next: C
     return (
       <EmptyState
         icon={<SlidersHorizontal size={20} />}
-        title="Empty configuration"
-        hint="This section has no fields yet. Switch to RAW to add them."
+        title={t("settings.objectForm.emptyTitle")}
+        hint={t("settings.objectForm.emptyHint")}
       />
     );
   }
@@ -104,7 +107,7 @@ export function ObjectForm({ value, onChange }: { value: Cfg; onChange: (next: C
   return (
     <div>
       {scalars.length > 0 && (
-        <SettingsGroup title="Settings">
+        <SettingsGroup title={t("settings.objectForm.settings")}>
           {scalars.map(([key, v]) => (
             <Field key={key} label={humanize(key)} value={v} onSet={(nv) => setKey(key, nv)} />
           ))}

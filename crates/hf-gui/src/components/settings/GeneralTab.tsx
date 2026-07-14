@@ -44,7 +44,7 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
   async function copy(value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      toast({ title: "Copied to clipboard", variant: "success" });
+      toast({ title: t("settings.general.copiedToClipboard"), variant: "success" });
     } catch {
       /* ignore */
     }
@@ -52,16 +52,16 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
 
   return (
     <div className="flex flex-col" style={{ animation: "fadeIn 0.2s ease" }}>
-      <SettingsGroup title="Paths">
-        <SettingsItem title="Config Directory" stacked>
+      <SettingsGroup title={t("settings.general.paths")}>
+        <SettingsItem title={t("settings.general.configDir")} stacked>
           <PathField value={configPath} onCopy={() => copy(configPath)} />
         </SettingsItem>
-        <SettingsItem title="Data Directory" stacked>
+        <SettingsItem title={t("settings.general.dataDir")} stacked>
           <PathField value={dataPath} onCopy={() => copy(dataPath)} />
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Appearance">
+      <SettingsGroup title={t("settings.general.appearance")}>
         <SettingsItem title={t("settings.language")}>
           <Select
             value={locale}
@@ -70,18 +70,18 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
             className="w-[140px]"
           />
         </SettingsItem>
-        <SettingsItem title="Theme">
+        <SettingsItem title={t("settings.general.theme")}>
           <Select
             value={theme}
             onChange={(v) => setTheme(v === "light" ? "light" : "dark")}
             options={[
-              { value: "dark", label: "Dark" },
-              { value: "light", label: "Light" },
+              { value: "dark", label: t("settings.general.themeDark") },
+              { value: "light", label: t("settings.general.themeLight") },
             ]}
             className="w-[140px]"
           />
         </SettingsItem>
-        <SettingsItem title="Font Size">
+        <SettingsItem title={t("settings.general.fontSize")}>
           <div className="flex items-center gap-3">
             <input
               type="range"
@@ -97,29 +97,29 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
           </div>
         </SettingsItem>
         <SettingsItem
-          title="Custom window decorations"
-          description="Hide the native titlebar and render an Apple-style layered chrome. Recommended on macOS."
+          title={t("settings.general.customDecorations")}
+          description={t("settings.general.customDecorationsDesc")}
         >
           <Switch checked={customDecorations} onChange={setCustomDecorations} />
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Behavior">
+      <SettingsGroup title={t("settings.general.behavior")}>
         <SettingsItem
-          title="Send message on Enter"
-          description="When enabled, press Enter to send and Shift+Enter for a newline. When off, use Cmd/Ctrl+Enter to send."
+          title={t("settings.general.sendOnEnter")}
+          description={t("settings.general.sendOnEnterDesc")}
         >
           <Switch checked={sendOnEnter} onChange={setSendOnEnter} />
         </SettingsItem>
       </SettingsGroup>
 
       <SettingsGroup
-        title="Sandbox"
-        description="The Docker sandbox is built and run for this architecture. Choose the one matching your fuzzing target's ABI; a non-host arch runs under emulation (qemu)."
+        title={t("settings.general.sandbox")}
+        description={t("settings.general.sandboxDesc")}
       >
         <SettingsItem
-          title="Architecture"
-          description="linux/arm64 (Apple Silicon native) or linux/amd64 (x86_64). Changing this rebuilds the sandbox image."
+          title={t("settings.general.arch")}
+          description={t("settings.general.archDesc")}
         >
           <Select
             value={sandboxArch}
@@ -134,13 +134,13 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
       </SettingsGroup>
 
       <SettingsGroup
-        title="Setup"
-        description="Re-run the initial setup wizard to reconfigure providers, runtime, engines, and guardrails."
+        title={t("settings.general.setup")}
+        description={t("settings.general.setupDesc")}
       >
-        <SettingsItem title="Setup Wizard">
+        <SettingsItem title={t("settings.general.setupWizard")}>
           <Button variant="outline" onClick={onRunWizard}>
             <Wand2 size={14} />
-            Run Setup Wizard
+            {t("settings.general.runWizard")}
           </Button>
         </SettingsItem>
       </SettingsGroup>
@@ -149,10 +149,11 @@ export function GeneralTab({ onRunWizard }: { onRunWizard?: () => void }) {
 }
 
 function PathField({ value, onCopy }: { value: string; onCopy: () => void }) {
+  const { t } = useI18n();
   return (
     <div className="relative flex items-center w-full">
       <Input mono readOnly value={value} title={value} className="pr-9 text-text-secondary select-all" />
-      <Button variant="icon" size="sm" className="absolute right-1" onClick={onCopy} title="Copy path" aria-label="Copy path">
+      <Button variant="icon" size="sm" className="absolute right-1" onClick={onCopy} title={t("settings.general.copyPath")} aria-label={t("settings.general.copyPath")}>
         <Copy size={13} />
       </Button>
     </div>

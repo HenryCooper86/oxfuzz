@@ -5,6 +5,7 @@ import { X, Download, Copy, Check, ChevronDown } from "lucide-react";
 import { Button } from "./ui";
 import { Mermaid } from "./Mermaid";
 import { useListboxNav } from "../hooks/useListboxNav";
+import { useI18n } from "../i18n";
 
 /**
  * Extract the language + text from a react-markdown `code` node so fenced
@@ -39,6 +40,7 @@ export function ReportPreview({
   onExport: (format: string) => void;
   formats: string[];
 }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const { triggerRef, menuRef, onMenuKey, onTriggerKey } = useListboxNav(exportOpen, () => setExportOpen(false));
@@ -75,11 +77,11 @@ export function ReportPreview({
           className="flex items-center justify-between border-b border-solid border-border"
           style={{ padding: "var(--space-md)" }}
         >
-          <span className="text-sm font-semibold">Fuzzing Report</span>
+          <span className="text-sm font-semibold">{t("reportPreview.title")}</span>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={copy} title="Copy Markdown">
+            <Button variant="outline" size="sm" onClick={copy} title={t("reportPreview.copyMarkdown")}>
               {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? "Copied" : "Copy"}
+              {copied ? t("common.copied") : t("common.copy")}
             </Button>
             <div className="relative">
               <Button
@@ -90,10 +92,10 @@ export function ReportPreview({
                 onKeyDown={(e) => onTriggerKey(e, () => setExportOpen(true))}
                 aria-haspopup="listbox"
                 aria-expanded={exportOpen}
-                title="Export the report"
+                title={t("reportPreview.exportTitle")}
               >
                 <Download size={14} />
-                Export
+                {t("common.export")}
                 <ChevronDown size={13} style={{ opacity: 0.7 }} />
               </Button>
               {exportOpen && (
@@ -127,7 +129,7 @@ export function ReportPreview({
                 </>
               )}
             </div>
-            <button onClick={onClose} className="hf-action-btn" title="Close" aria-label="Close">
+            <button onClick={onClose} className="hf-action-btn" title={t("common.close")} aria-label={t("common.close")}>
               <X size={16} />
             </button>
           </div>

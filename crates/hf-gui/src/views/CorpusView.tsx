@@ -6,9 +6,11 @@ import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
 import type { CorpusEntry } from "../types";
 import { Button, ViewHeader } from "../components/ui";
+import { useI18n } from "../i18n";
 import { Database, Plus, Scissors, Sprout, Sparkles } from "lucide-react";
 
 export function CorpusView({ embedded = false }: { embedded?: boolean }) {
+  const { t } = useI18n();
   const { activeProject } = useProject();
   const confirm = useConfirm();
   // The corpus belongs to a specific target's workspace -- the one seeded during
@@ -33,7 +35,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
   const action = useCallback(
     async (op: string) => {
       if (op === "corpus_prune") {
-        if (!(await confirm({ title: "Prune corpus", message: "Prune removes redundant-coverage entries from the corpus. Continue?", confirmLabel: "Prune" }))) {
+        if (!(await confirm({ title: t("corpus.pruneConfirmTitle"), message: t("corpus.pruneConfirmMessage"), confirmLabel: t("corpus.prune") }))) {
           return;
         }
       }
@@ -48,9 +50,9 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
         await refreshList(project);
         // Confirm the mutation happened (previously seed/grow/prune refreshed
         // silently, leaving the user unsure whether anything changed).
-        if (op === "corpus_seed") setNotice("Corpus seeded.");
-        else if (op === "corpus_grow") setNotice("Corpus grown from the latest run.");
-        else if (op === "corpus_prune") setNotice("Corpus pruned of redundant entries.");
+        if (op === "corpus_seed") setNotice(t("corpus.seeded"));
+        else if (op === "corpus_grow") setNotice(t("corpus.grown"));
+        else if (op === "corpus_prune") setNotice(t("corpus.pruned"));
       } catch (e) {
         // Surface the failure instead of blanking the table (which reads as
         // "empty corpus" and hides the real error).
@@ -59,7 +61,7 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
         setLoading(null);
       }
     },
-    [activeProject, target, refreshList, confirm],
+    [activeProject, target, refreshList, confirm, t],
   );
 
   // AI seed generation: the LLM (or heuristic fallback) synthesizes valid inputs
@@ -75,14 +77,14 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
         { project, target, lang: lang || "c", count: 12 },
       );
       const n = res?.seeds?.length ?? 0;
-      setNotice(`Generated ${n} AI seed${n === 1 ? "" : "s"}.`);
+      setNotice(t("corpus.generatedSeeds", { n }));
       await refreshList(project);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(null);
     }
-  }, [activeProject, target, lang, refreshList]);
+  }, [activeProject, target, lang, refreshList, t]);
 
   // Auto-load the corpus for the current target so it reflects what the flow
   // actually used (seeds + fuzzer-grown inputs), without a manual List click.
@@ -125,16 +127,16 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
           <span />
         ) : (
           <ViewHeader
-            title="Corpus Management"
-            description="Seed, grow, prune, and inspect the fuzzing corpus."
+            title={t("corpus.title")}
+            description={t("corpus.description")}
           />
         )}
         <div className="flex gap-2">
-          <ActionButton icon={<Sparkles size={14} />} label="Generate with AI" loading={loading === "generate_seeds_llm"} disabled={!target} onClick={generateAi} />
-          <ActionButton icon={<Plus size={14} />} label="Seed" loading={loading === "corpus_seed"} disabled={!target} onClick={() => action("corpus_seed")} />
-          <ActionButton icon={<Sprout size={14} />} label="Grow" loading={loading === "corpus_grow"} disabled={!target} onClick={() => action("corpus_grow")} />
-          <ActionButton icon={<Scissors size={14} />} label="Prune" loading={loading === "corpus_prune"} disabled={!target} onClick={() => action("corpus_prune")} />
-          <ActionButton icon={<Database size={14} />} label="List" loading={loading === "corpus_list"} disabled={!target} onClick={() => action("corpus_list")} />
+          <ActionButton icon={<Sparkles size={14} />} label={t("corpus.generateWithAi")} loading={loading === "generate_seeds_llm"} disabled={!target} onClick={generateAi} />
+          <ActionButton icon={<Plus size={14} />} label={t("corpus.seed")} loading={loading === "corpus_seed"} disabled={!target} onClick={() => action("corpus_seed")} />
+          <ActionButton icon={<Sprout size={14} />} label={t("corpus.grow")} loading={loading === "corpus_grow"} disabled={!target} onClick={() => action("corpus_grow")} />
+          <ActionButton icon={<Scissors size={14} />} label={t("corpus.prune")} loading={loading === "corpus_prune"} disabled={!target} onClick={() => action("corpus_prune")} />
+          <ActionButton icon={<Database size={14} />} label={t("corpus.list")} loading={loading === "corpus_list"} disabled={!target} onClick={() => action("corpus_list")} />
         </div>
       </div>
 
@@ -161,17 +163,17 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
           {target ? (
             <>
               <p className="text-sm text-text-muted">
-                Corpus for <span style={{ fontFamily: "var(--font-mono)" }}>{target}</span> is empty.
+                {t("corpus.emptyForBefore")}<span style={{ fontFamily: "var(--font-mono)" }}>{target}</span>{t("corpus.emptyForAfter")}
               </p>
               <p className="text-xs text-text-muted mt-1">
-                Click "Seed" for default inputs, or run the fuzzer — it grows the corpus as it finds new coverage.
+                {t("corpus.emptyHint")}
               </p>
             </>
           ) : (
             <>
-              <p className="text-sm text-text-muted">No target selected.</p>
+              <p className="text-sm text-text-muted">{t("corpus.noTargetSelected")}</p>
               <p className="text-xs text-text-muted mt-1">
-                Pick a target in Harness (or run the flow) to view and manage its corpus.
+                {t("corpus.noTargetHint")}
               </p>
             </>
           )}
@@ -184,16 +186,16 @@ export function CorpusView({ embedded = false }: { embedded?: boolean }) {
             <thead>
               <tr className="border-b border-border">
                 <th className="text-left text-xs text-text-muted uppercase px-3 py-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-                  File
+                  {t("corpus.colFile")}
                 </th>
                 <th className="text-left text-xs text-text-muted uppercase px-3 py-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
                   SHA256
                 </th>
                 <th className="text-left text-xs text-text-muted uppercase px-3 py-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-                  Source
+                  {t("corpus.colSource")}
                 </th>
                 <th className="text-right text-xs text-text-muted uppercase px-3 py-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-                  Size
+                  {t("corpus.colSize")}
                 </th>
                 <th className="px-3 py-2" />
               </tr>

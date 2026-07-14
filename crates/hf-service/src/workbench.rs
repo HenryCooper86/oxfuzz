@@ -27,6 +27,10 @@ pub struct WorkbenchTotals {
     pub runs: usize,
     pub active_runs: usize,
     pub crashes: usize,
+    /// Crashes that have not yet been triaged (no drafted bug report). Readiness
+    /// and next-actions key on this, not `crashes`, so a fully-triaged project
+    /// stops reporting "triage required" -- matching the Fuzzing Workflow.
+    pub crashes_needing_triage: usize,
     pub corpus_entries: usize,
 }
 
@@ -262,6 +266,7 @@ pub async fn dashboard(
         runs: filtered_runs.len(),
         active_runs,
         crashes: crash_reviews.len(),
+        crashes_needing_triage: crash_reviews.iter().filter(|c| !c.has_bug_report).count(),
         corpus_entries: corpus_entry_count,
     };
     let readiness = readiness_summary(&totals, true);
@@ -572,11 +577,15 @@ fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
             }
         ));
     }
-    if totals.crashes > 0 {
+    if totals.crashes_needing_triage > 0 {
         actions.push(format!(
-            "Export or assign {} crash{} for triage.",
-            totals.crashes,
-            if totals.crashes == 1 { "" } else { "es" }
+            "Triage {} crash{} from the latest run.",
+            totals.crashes_needing_triage,
+            if totals.crashes_needing_triage == 1 {
+                ""
+            } else {
+                "es"
+            }
         ));
     }
     if totals.runs == 0 && totals.targets > 0 {
@@ -617,11 +626,11 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
     if totals.harnesses > 0 && totals.harnesses_needing_review == 0 && totals.runs == 0 {
         blockers.push("No fuzzing campaign history exists yet.".to_owned());
     }
-    if totals.crashes > 0 {
+    if totals.crashes_needing_triage > 0 {
         blockers.push(format!(
-            "{} crash{} need triage or issue export.",
-            totals.crashes,
-            plural_suffix(totals.crashes),
+            "{} crash{} still need triage.",
+            totals.crashes_needing_triage,
+            plural_suffix(totals.crashes_needing_triage),
         ));
     }
 
@@ -663,11 +672,11 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
             "Harness review required",
             "Approve generated harnesses before full fuzzing campaigns.",
         )
-    } else if totals.crashes > 0 {
+    } else if totals.crashes_needing_triage > 0 {
         (
             "triage_required",
             "Crash triage required",
-            "Triage crashes and export issue drafts before expanding campaign scope.",
+            "Triage the new crashes before expanding campaign scope.",
         )
     } else if totals.active_runs > 0 {
         (
