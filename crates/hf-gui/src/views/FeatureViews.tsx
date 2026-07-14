@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
+import { useI18n } from "../i18n";
 import { useConfirm } from "../providers/ConfirmContext";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
@@ -186,6 +187,7 @@ function draftFrom(a: AgentDefinition, opts: { duplicate?: boolean } = {}): Agen
 }
 
 export function AgentsView() {
+  const { t } = useI18n();
   const confirm = useConfirm();
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
@@ -243,25 +245,25 @@ export function AgentsView() {
     const name = draft.name.trim();
     const id = draft.isNew ? slugify(draft.id.trim() || name) : draft.id;
     if (!name) {
-      setError("Name is required.");
+      setError(t("agents.errNameRequired"));
       return;
     }
     if (!draft.system_prompt.trim()) {
-      setError("System prompt is required.");
+      setError(t("agents.errSystemPromptRequired"));
       return;
     }
     if (!isSafeSlug(id)) {
-      setError("Id must be a safe slug (lowercase letters, digits, '-' or '_').");
+      setError(t("agents.errIdSlug"));
       return;
     }
     let temperature: number | null = null;
     if (draft.temperature.trim() !== "") {
-      const t = Number(draft.temperature);
-      if (Number.isNaN(t)) {
-        setError("Temperature must be a number or empty.");
+      const temp = Number(draft.temperature);
+      if (Number.isNaN(temp)) {
+        setError(t("agents.errTemperature"));
         return;
       }
-      temperature = t;
+      temperature = temp;
     }
     const def = {
       id,
@@ -295,9 +297,9 @@ export function AgentsView() {
   async function del(a: AgentDefinition) {
     const builtIn = a.trust_tier === "built-in";
     const prompt = builtIn
-      ? `Reset built-in agent "${a.name}" to its shipped version?`
-      : `Delete agent "${a.name}"?`;
-    if (!(await confirm({ title: builtIn ? "Reset to shipped version" : "Delete", message: prompt, danger: !builtIn, confirmLabel: builtIn ? "Reset" : "Delete" }))) return;
+      ? t("agents.resetConfirm", { name: a.name })
+      : t("agents.deleteConfirm", { name: a.name });
+    if (!(await confirm({ title: builtIn ? t("agents.resetTitle") : t("common.delete"), message: prompt, danger: !builtIn, confirmLabel: builtIn ? t("common.reset") : t("common.delete") }))) return;
     try {
       await getTransport().invoke("delete_agent", { id: a.id });
       reload();
@@ -308,21 +310,21 @@ export function AgentsView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Agents" description="Fuzzing agents that drive the runtime — their role, tools, and system prompt. Built-ins ship with hobot_fuzz; add your own." />
+      <ViewHeader title={t("agents.title")} description={t("agents.description")} />
 
       {info && (
         <div className="grid grid-cols-3 gap-3">
-          <Tile icon={<Bot size={16} />} label="Model" value={info.model} />
-          <Tile icon={<Activity size={16} />} label="Provider" value={info.provider_type || "—"} />
-          <Tile icon={<Shield size={16} />} label="Guardrails" value={info.guardrails} />
+          <Tile icon={<Bot size={16} />} label={t("agents.tileModel")} value={info.model} />
+          <Tile icon={<Activity size={16} />} label={t("agents.tileProvider")} value={info.provider_type || "—"} />
+          <Tile icon={<Shield size={16} />} label={t("agents.tileGuardrails")} value={info.guardrails} />
         </div>
       )}
 
       <div className="flex items-center justify-between mt-1">
         <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
-          Agents ({agents.length})
+          {t("agents.countLabel", { n: agents.length })}
         </span>
-        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>New agent</PrimaryBtn>}
+        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>{t("agents.new")}</PrimaryBtn>}
       </div>
 
       {error && !draft && <ErrorBanner message={error} />}
@@ -343,7 +345,7 @@ export function AgentsView() {
       ) : (
         <div className="flex flex-col gap-2">
           {agents.length === 0 && (
-            <EmptyState icon={<Bot size={20} />} hint="No agents found. Click 'New agent' to author a fuzzing agent." />
+            <EmptyState icon={<Bot size={20} />} hint={t("agents.empty")} />
           )}
           {agents.map((a) => (
             <AgentRow key={a.id} agent={a} onEdit={() => startEdit(a)} onDuplicate={() => startDuplicate(a)} onDelete={() => del(a)} />
@@ -355,6 +357,7 @@ export function AgentsView() {
 }
 
 function AgentRow({ agent, onEdit, onDuplicate, onDelete }: { agent: AgentDefinition; onEdit: () => void; onDuplicate: () => void; onDelete: () => void }) {
+  const { t } = useI18n();
   const builtIn = agent.trust_tier === "built-in";
   return (
     <div className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
@@ -365,22 +368,22 @@ function AgentRow({ agent, onEdit, onDuplicate, onDelete }: { agent: AgentDefini
         <span className="text-sm font-medium flex items-center gap-2">
           {agent.name}
           <span className="text-xs px-1.5 py-0.5 rounded-sm" style={builtIn ? { background: "var(--accent-subtle)", color: "var(--accent)" } : { background: "var(--surface-active)", color: "var(--text-muted)" }}>
-            {builtIn ? "Built-in" : "Custom"}
+            {builtIn ? t("agents.builtIn") : t("agents.custom")}
           </span>
         </span>
         <span className="text-xs text-text-secondary mt-0.5">{agent.description}</span>
         <span className="text-xs text-text-muted font-mono mt-1">
-          {agent.role} · {agent.autonomy} · {agent.allowed_tools.length ? agent.allowed_tools.join(", ") : "no tools"}
-          {agent.skills.length > 0 && ` · ${agent.skills.length} skill${agent.skills.length === 1 ? "" : "s"}`}
+          {agent.role} · {agent.autonomy} · {agent.allowed_tools.length ? agent.allowed_tools.join(", ") : t("agents.noTools")}
+          {agent.skills.length > 0 && ` · ${t("agents.skillsCount", { n: agent.skills.length })}`}
         </span>
       </div>
       <div className="flex items-center shrink-0">
-        <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title="Edit" />
-        <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title="Duplicate into a new agent" />
+        <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title={t("common.edit")} />
+        <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title={t("agents.duplicateTitle")} />
         {builtIn ? (
-          <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title="Reset to shipped version" />
+          <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title={t("agents.resetTitle")} />
         ) : (
-          <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title="Delete" />
+          <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title={t("common.delete")} />
         )}
       </div>
     </div>
@@ -410,13 +413,14 @@ function AgentEditor({
   onCancel: () => void;
   onSave: () => void;
 }) {
+  const { t } = useI18n();
   // For a new agent, the id auto-derives from the name unless the user edits it.
   const derivedId = draft.isNew ? slugify(draft.id.trim() || draft.name) : draft.id;
   return (
     <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
       {error && <ErrorBanner message={error} />}
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Name">
+        <Field label={t("agents.fieldName")}>
           <Input
             mono
             value={draft.name}
@@ -427,7 +431,7 @@ function AgentEditor({
             }}
           />
         </Field>
-        <Field label="Id" hint={draft.isNew ? "auto from name; editable" : "locked"}>
+        <Field label={t("agents.fieldId")} hint={draft.isNew ? t("agents.fieldIdHintNew") : t("agents.fieldHintLocked")}>
           <Input
             mono
             value={derivedId}
@@ -438,12 +442,12 @@ function AgentEditor({
         </Field>
       </div>
 
-      <Field label="Description">
-        <Input mono value={draft.description} placeholder="What this agent does" onChange={(e) => onField("description", e.target.value)} />
+      <Field label={t("agents.fieldDescription")}>
+        <Input mono value={draft.description} placeholder={t("agents.fieldDescriptionPlaceholder")} onChange={(e) => onField("description", e.target.value)} />
       </Field>
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Role">
+        <Field label={t("agents.fieldRole")}>
           <Select
             mono
             className="w-full"
@@ -452,7 +456,7 @@ function AgentEditor({
             options={ROLES.map((r) => ({ value: r, label: r }))}
           />
         </Field>
-        <Field label="Autonomy">
+        <Field label={t("agents.fieldAutonomy")}>
           <Select
             mono
             className="w-full"
@@ -463,19 +467,19 @@ function AgentEditor({
         </Field>
       </div>
 
-      <Field label="System prompt" hint="the agent's instructions">
+      <Field label={t("agents.fieldSystemPrompt")} hint={t("agents.fieldSystemPromptHint")}>
         <Textarea
           mono
           rows={14}
           value={draft.system_prompt}
-          placeholder="You are a fuzzing agent. Your job is to…"
+          placeholder={t("agents.fieldSystemPromptPlaceholder")}
           onChange={(e) => onField("system_prompt", e.target.value)}
         />
       </Field>
 
-      <Field label="Allowed tools" hint="what this agent may call">
+      <Field label={t("agents.fieldAllowedTools")} hint={t("agents.fieldAllowedToolsHint")}>
         {tools.length === 0 ? (
-          <span className="text-xs text-text-muted">No tools available.</span>
+          <span className="text-xs text-text-muted">{t("agents.noToolsAvailable")}</span>
         ) : (
           <div className="grid grid-cols-2 gap-1.5">
             {tools.map((t) => {
@@ -502,9 +506,9 @@ function AgentEditor({
         )}
       </Field>
 
-      <Field label="Skills" hint="playbooks injected when the agent references them">
+      <Field label={t("agents.fieldSkills")} hint={t("agents.fieldSkillsHint")}>
         {skills.length === 0 ? (
-          <span className="text-xs text-text-muted">No skills available.</span>
+          <span className="text-xs text-text-muted">{t("agents.noSkillsAvailable")}</span>
         ) : (
           <div className="grid grid-cols-2 gap-1.5">
             {skills.map((s) => {
@@ -532,20 +536,20 @@ function AgentEditor({
       </Field>
 
       <div className="grid grid-cols-3 gap-3">
-        <Field label="Model tags" hint="comma-separated">
+        <Field label={t("agents.fieldModelTags")} hint={t("agents.fieldModelTagsHint")}>
           <Input mono value={draft.model_tags} placeholder="reasoning, code" onChange={(e) => onField("model_tags", e.target.value)} />
         </Field>
-        <Field label="Temperature" hint="optional">
-          <Input mono value={draft.temperature} placeholder="(default)" onChange={(e) => onField("temperature", e.target.value)} />
+        <Field label={t("agents.fieldTemperature")} hint={t("agents.fieldTemperatureHint")}>
+          <Input mono value={draft.temperature} placeholder={t("agents.fieldTemperaturePlaceholder")} onChange={(e) => onField("temperature", e.target.value)} />
         </Field>
-        <Field label="Max iterations" hint="1-50">
+        <Field label={t("agents.fieldMaxIterations")} hint={t("agents.fieldMaxIterationsHint")}>
           <Input mono type="number" min={1} max={50} value={draft.max_iterations} onChange={(e) => onField("max_iterations", Number(e.target.value) || 1)} />
         </Field>
       </div>
 
       <div className="flex gap-2 justify-end">
-        <GhostBtn onClick={onCancel} icon={<X size={13} />}>Cancel</GhostBtn>
-        <PrimaryBtn onClick={onSave} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>Save</PrimaryBtn>
+        <GhostBtn onClick={onCancel} icon={<X size={13} />}>{t("common.cancel")}</GhostBtn>
+        <PrimaryBtn onClick={onSave} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>{t("common.save")}</PrimaryBtn>
       </div>
     </div>
   );
@@ -599,6 +603,7 @@ function skillDraftFrom(s: SkillDefinition, opts: { duplicate?: boolean } = {}):
 }
 
 export function SkillsView() {
+  const { t } = useI18n();
   const confirm = useConfirm();
   const [skills, setSkills] = useState<SkillDefinition[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -632,7 +637,7 @@ export function SkillsView() {
     try {
       const s = await getTransport().invoke<SkillDefinition | null>("read_skill", { name });
       if (!s) {
-        setError(`Skill "${name}" not found.`);
+        setError(t("skills.errNotFound", { name }));
         return;
       }
       setDraft(skillDraftFrom(s));
@@ -648,11 +653,11 @@ export function SkillsView() {
     if (!draft) return;
     const name = draft.isNew ? slugify(draft.name.trim()) : draft.name;
     if (!name) {
-      setError("Skill name is required.");
+      setError(t("skills.errNameRequired"));
       return;
     }
     if (draft.isNew && !isSafeSlug(name)) {
-      setError("Name must be a safe slug (lowercase letters, digits, '-' or '_').");
+      setError(t("skills.errNameSlug"));
       return;
     }
     setBusy(true);
@@ -676,9 +681,9 @@ export function SkillsView() {
   async function del(s: SkillDefinition) {
     const builtIn = s.trust_tier === "built-in";
     const prompt = builtIn
-      ? `Reset built-in skill "${s.name}" to its shipped version?`
-      : `Delete skill "${s.name}"?`;
-    if (!(await confirm({ title: builtIn ? "Reset to shipped version" : "Delete", message: prompt, danger: !builtIn, confirmLabel: builtIn ? "Reset" : "Delete" }))) return;
+      ? t("skills.resetConfirm", { name: s.name })
+      : t("skills.deleteConfirm", { name: s.name });
+    if (!(await confirm({ title: builtIn ? t("agents.resetTitle") : t("common.delete"), message: prompt, danger: !builtIn, confirmLabel: builtIn ? t("common.reset") : t("common.delete") }))) return;
     try {
       await getTransport().invoke("delete_skill", { name: s.name });
       reload();
@@ -689,13 +694,13 @@ export function SkillsView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <ViewHeader title="Skills" description="Reusable playbooks injected into an agent's context when the agent references them. Built-ins ship with hobot_fuzz; add your own." />
+      <ViewHeader title={t("skills.title")} description={t("skills.description")} />
 
       <div className="flex items-center justify-between mt-1">
         <span className="text-xs text-text-muted uppercase" style={{ letterSpacing: "0.08em" }}>
-          Skills ({skills.length})
+          {t("skills.countLabel", { n: skills.length })}
         </span>
-        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>New skill</PrimaryBtn>}
+        {!draft && <PrimaryBtn onClick={startNew} icon={<Plus size={13} />}>{t("skills.new")}</PrimaryBtn>}
       </div>
 
       {error && !draft && <ErrorBanner message={error} />}
@@ -704,32 +709,32 @@ export function SkillsView() {
         <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
           {error && <ErrorBanner message={error} />}
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Name" hint={draft.isNew ? "letters, digits, -, _" : "locked"}>
+            <Field label={t("skills.fieldName")} hint={draft.isNew ? t("skills.fieldNameHintNew") : t("skills.fieldHintLocked")}>
               <Input mono value={draft.name} disabled={!draft.isNew} placeholder="my-skill" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             </Field>
-            <Field label="Version">
+            <Field label={t("skills.fieldVersion")}>
               <Input mono value={draft.version} placeholder="0.1.0" onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
             </Field>
           </div>
-          <Field label="Description">
-            <Input mono value={draft.description} placeholder="What this skill does" onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+          <Field label={t("skills.fieldDescription")}>
+            <Input mono value={draft.description} placeholder={t("skills.fieldDescriptionPlaceholder")} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
           </Field>
-          <Field label="Domain" hint="comma-separated tags">
+          <Field label={t("skills.fieldDomain")} hint={t("skills.fieldDomainHint")}>
             <Input mono value={draft.domain} placeholder="fuzzing, harness-generation" onChange={(e) => setDraft({ ...draft, domain: e.target.value })} />
           </Field>
-          <Field label="Body (root.md)" hint="the playbook injected into the agent's context">
+          <Field label={t("skills.fieldBody")} hint={t("skills.fieldBodyHint")}>
             <Textarea mono rows={16} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
           </Field>
           <div className="flex gap-2 justify-end">
-            <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>Cancel</GhostBtn>
-            <PrimaryBtn onClick={save} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>Save</PrimaryBtn>
+            <GhostBtn onClick={() => { setDraft(null); setError(null); }} icon={<X size={13} />}>{t("common.cancel")}</GhostBtn>
+            <PrimaryBtn onClick={save} disabled={busy} icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}>{t("common.save")}</PrimaryBtn>
           </div>
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          {!loaded && <LoadingState label="Loading skills…" />}
+          {!loaded && <LoadingState label={t("skills.loading")} />}
           {loaded && skills.length === 0 && (
-            <EmptyState icon={<Puzzle size={20} />} hint="No skills yet. Click 'New skill' to author a reusable playbook." />
+            <EmptyState icon={<Puzzle size={20} />} hint={t("skills.empty")} />
           )}
           {skills.map((s) => (
             <SkillRow key={s.name} skill={s} onEdit={() => startEdit(s.name)} onDuplicate={() => startDuplicate(s)} onDelete={() => del(s)} />
@@ -741,6 +746,7 @@ export function SkillsView() {
 }
 
 function SkillRow({ skill, onEdit, onDuplicate, onDelete }: { skill: SkillDefinition; onEdit: () => void; onDuplicate: () => void; onDelete: () => void }) {
+  const { t } = useI18n();
   const builtIn = skill.trust_tier === "built-in";
   return (
     <div className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
@@ -752,7 +758,7 @@ function SkillRow({ skill, onEdit, onDuplicate, onDelete }: { skill: SkillDefini
           {skill.name}
           <span className="text-xs text-text-muted font-mono">v{skill.version}</span>
           <span className="text-xs px-1.5 py-0.5 rounded-sm" style={builtIn ? { background: "var(--accent-subtle)", color: "var(--accent)" } : { background: "var(--surface-active)", color: "var(--text-muted)" }}>
-            {builtIn ? "Built-in" : "Custom"}
+            {builtIn ? t("agents.builtIn") : t("agents.custom")}
           </span>
         </span>
         <span className="text-xs text-text-secondary mt-0.5">{skill.description}</span>
@@ -767,12 +773,12 @@ function SkillRow({ skill, onEdit, onDuplicate, onDelete }: { skill: SkillDefini
         )}
       </div>
       <div className="flex items-center shrink-0">
-        <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title="Edit" />
-        <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title="Duplicate into a new skill" />
+        <IconBtn onClick={onEdit} icon={<Pencil size={14} />} title={t("common.edit")} />
+        <IconBtn onClick={onDuplicate} icon={<Copy size={14} />} title={t("skills.duplicateTitle")} />
         {builtIn ? (
-          <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title="Reset to shipped version" />
+          <IconBtn onClick={onDelete} icon={<RotateCcw size={14} />} title={t("agents.resetTitle")} />
         ) : (
-          <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title="Delete" />
+          <IconBtn onClick={onDelete} icon={<Trash2 size={14} />} danger title={t("common.delete")} />
         )}
       </div>
     </div>
@@ -824,6 +830,7 @@ interface KnowledgeStats {
 
 // BM25 search over the active project's source, backed by hf-knowledge.
 function KnowledgeBaseSearch() {
+  const { t } = useI18n();
   const { activeProject } = useProject();
   const [stats, setStats] = useState<KnowledgeStats | null>(null);
   const [indexing, setIndexing] = useState(false);
@@ -837,7 +844,7 @@ function KnowledgeBaseSearch() {
   // sandbox and add it to this project's knowledge base.
   async function ingest() {
     if (!activeProject || ingesting) return;
-    const file = await pickFile("Select a document to ingest (PDF, Office, HTML, ...)");
+    const file = await pickFile(t("knowledge.ingestPickTitle"));
     if (!file) return;
     setIngesting(true);
     setHits(null);
@@ -847,7 +854,7 @@ function KnowledgeBaseSearch() {
     } catch (e) {
       // Previously swallowed -- an ingest failure (missing markitdown, bad path
       // in browser mode, etc.) looked identical to "nothing happened".
-      setError(`Add document failed: ${String(e)}`);
+      setError(t("knowledge.addDocFailed", { error: String(e) }));
     } finally {
       setIngesting(false);
     }
@@ -862,7 +869,7 @@ function KnowledgeBaseSearch() {
       setStats(await getTransport().invoke<KnowledgeStats>("knowledge_index", { project: activeProject }));
     } catch (e) {
       setStats(null);
-      setError(`Index failed: ${String(e)}`);
+      setError(t("knowledge.indexFailed", { error: String(e) }));
     } finally {
       setIndexing(false);
     }
@@ -876,7 +883,7 @@ function KnowledgeBaseSearch() {
       setHits(await getTransport().invoke<KnowledgeHit[]>("knowledge_search", { project: activeProject, query, limit: 10 }));
     } catch (e) {
       setHits(null);
-      setError(`Search failed: ${String(e)}`);
+      setError(t("knowledge.searchFailed", { error: String(e) }));
     } finally {
       setSearching(false);
     }
@@ -887,10 +894,10 @@ function KnowledgeBaseSearch() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Database size={14} style={{ color: "var(--accent)" }} />
-          <span className="text-sm font-medium">Knowledge Base</span>
+          <span className="text-sm font-medium">{t("knowledge.baseTitle")}</span>
           {stats && (
             <span className="text-xs text-text-muted">
-              indexed {stats.files} files · {stats.chunks} chunks
+              {t("knowledge.indexStats", { files: stats.files, chunks: stats.chunks })}
             </span>
           )}
         </div>
@@ -898,11 +905,11 @@ function KnowledgeBaseSearch() {
           <button
             onClick={ingest}
             disabled={ingesting || !activeProject}
-            title="Convert a document (PDF/Office/HTML) to Markdown and index it"
+            title={t("knowledge.addDocTitle")}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
           >
             {ingesting ? <Loader2 size={13} className="animate-spin" /> : <FilePlus size={13} />}
-            {ingesting ? "Ingesting…" : "Add document"}
+            {ingesting ? t("knowledge.ingesting") : t("knowledge.addDoc")}
           </button>
           <button
             onClick={index}
@@ -910,16 +917,16 @@ function KnowledgeBaseSearch() {
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-55"
           >
             {indexing ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
-            {indexing ? "Indexing…" : "Index project"}
+            {indexing ? t("knowledge.indexing") : t("knowledge.indexProject")}
           </button>
         </div>
       </div>
       <p className="text-xs text-text-muted">
-        BM25 search over this project's source and ingested documents (specs, RFCs). Index or add a document, then search.
+        {t("knowledge.baseHelp")}
       </p>
       {!activeProject && (
         <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
-          Select a project first — the knowledge base is scoped to the active project.
+          {t("knowledge.selectProjectFirst")}
         </p>
       )}
       {error && (
@@ -935,7 +942,7 @@ function KnowledgeBaseSearch() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void search()}
-          placeholder={stats ? "Search the codebase…" : "Index the project to enable search"}
+          placeholder={stats ? t("knowledge.searchPlaceholder") : t("knowledge.searchPlaceholderNoIndex")}
           disabled={!stats}
           className="flex-1 disabled:opacity-55"
         />
@@ -946,17 +953,17 @@ function KnowledgeBaseSearch() {
           style={{ background: "var(--accent)", color: "var(--accent-contrast)" }}
         >
           {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-          Search
+          {t("common.search")}
         </button>
       </div>
-      {hits && hits.length === 0 && <p className="text-xs text-text-muted">No matches.</p>}
+      {hits && hits.length === 0 && <p className="text-xs text-text-muted">{t("knowledge.noMatches")}</p>}
       {hits && hits.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {hits.map((h, i) => (
             <div key={i} className="rounded-md" style={{ padding: "var(--space-sm)", background: "var(--surface-code)" }}>
               <div className="flex items-center justify-between">
                 <span className="text-xs font-mono truncate" style={{ color: "var(--accent)" }}>{h.file}</span>
-                <span className="text-xs text-text-muted shrink-0">score {h.score.toFixed(2)}</span>
+                <span className="text-xs text-text-muted shrink-0">{t("knowledge.score", { score: h.score.toFixed(2) })}</span>
               </div>
               <pre className="text-xs text-text-secondary mt-1 whitespace-pre-wrap font-mono" style={{ margin: 0 }}>{h.snippet}</pre>
             </div>
@@ -968,6 +975,7 @@ function KnowledgeBaseSearch() {
 }
 
 export function KnowledgeView() {
+  const { t } = useI18n();
   const confirm = useConfirm();
   const [data, setData] = useState<KnowledgeSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -987,10 +995,10 @@ export function KnowledgeView() {
       (data?.targets.length ?? 0) + (data?.runs.length ?? 0) + (data?.crashes.length ?? 0);
     if (
       !(await confirm({
-        title: "Clear all learned knowledge",
-        message: `${total} entries (targets, runs, crashes) across every project, plus generated harnesses and corpus. Configuration is not affected. This cannot be undone.`,
+        title: t("knowledge.clearTitle"),
+        message: t("knowledge.clearMessage", { total }),
         danger: true,
-        confirmLabel: "Clear",
+        confirmLabel: t("common.clear"),
       }))
     ) {
       return;
@@ -1026,24 +1034,24 @@ export function KnowledgeView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-center justify-between">
-        <ViewHeader title="Knowledge" description="What hobot_fuzz has learned about your projects — discovered targets, fuzz runs, and crashes found." />
+        <ViewHeader title={t("knowledge.title")} description={t("knowledge.description")} />
         <div className="shrink-0 flex items-center gap-2">
           <button
             onClick={load}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-surface-primary text-text-secondary hover:bg-surface-hover hover:text-text-primary"
           >
             {loading ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
-            Refresh
+            {t("common.refresh")}
           </button>
           <button
             onClick={() => void clear()}
             disabled={clearing || !!empty || !data?.db_configured}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-solid bg-surface-primary transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
             style={{ borderColor: "var(--border)", color: "var(--error)" }}
-            title="Delete all discovered targets, runs, and crashes"
+            title={t("knowledge.clearBtnTitle")}
           >
             {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-            Clear
+            {t("common.clear")}
           </button>
         </div>
       </div>
@@ -1051,27 +1059,27 @@ export function KnowledgeView() {
       <KnowledgeBaseSearch />
 
       {data && !data.db_configured && (
-        <EmptyState icon={<BookOpen size={20} />} hint="No database configured (HF_DB_PATH). Run `hobot-fuzz init` or run a campaign to start accumulating knowledge." />
+        <EmptyState icon={<BookOpen size={20} />} hint={t("knowledge.emptyNoDb")} />
       )}
       {empty && data?.db_configured && (
-        <EmptyState icon={<BookOpen size={20} />} hint="Nothing learned yet. Discover targets and run a fuzz campaign — what hobot_fuzz finds is recorded here." />
+        <EmptyState icon={<BookOpen size={20} />} hint={t("knowledge.emptyNothing")} />
       )}
 
       {data && !empty && (
         <>
-          <KnowledgeSection title="Targets" count={data.targets.length} icon={<Crosshair size={14} />}>
-            {data.targets.slice(0, 40).map((t, i) => (
-              <Row key={i} left={t.symbol} mid={`${t.kind} · fit ${t.fit_score.toFixed(2)}`} right={`${shortProject(t.project)} · ${t.location.split("/").pop()}`} />
+          <KnowledgeSection title={t("knowledge.sectionTargets")} count={data.targets.length} icon={<Crosshair size={14} />}>
+            {data.targets.slice(0, 40).map((tg, i) => (
+              <Row key={i} left={tg.symbol} mid={`${tg.kind} · ${t("knowledge.fit", { score: tg.fit_score.toFixed(2) })}`} right={`${shortProject(tg.project)} · ${tg.location.split("/").pop()}`} />
             ))}
           </KnowledgeSection>
 
-          <KnowledgeSection title="Runs" count={data.runs.length} icon={<Play size={14} />}>
+          <KnowledgeSection title={t("knowledge.sectionRuns")} count={data.runs.length} icon={<Play size={14} />}>
             {data.runs.slice(0, 40).map((r) => (
               <Row key={r.id} left={r.engine} mid={r.status} right={`${shortProject(r.project)} · ${new Date(r.started_at).toLocaleString()}`} />
             ))}
           </KnowledgeSection>
 
-          <KnowledgeSection title="Crashes" count={data.crashes.length} icon={<Bug size={14} />}>
+          <KnowledgeSection title={t("knowledge.sectionCrashes")} count={data.crashes.length} icon={<Bug size={14} />}>
             {data.crashes.slice(0, 40).map((c, i) => (
               <Row key={i} left={c.kind} mid={c.summary.length > 80 ? c.summary.slice(0, 80) + "…" : c.summary} right={c.signature ? c.signature.slice(0, 12) : ""} badge={c.severity ? <SeverityBadge severity={c.severity} /> : undefined} danger />
             ))}
@@ -1160,6 +1168,7 @@ const EXEC_STATUS_COLOR: Record<string, string> = {
 };
 
 export function AutomationView() {
+  const { t } = useI18n();
   const confirm = useConfirm();
   const { activeProject, recentProjects, addRecent } = useProject();
   const { target: contextTarget } = useTarget();
@@ -1275,14 +1284,14 @@ export function AutomationView() {
   // with a clear message rather than failing opaquely on the backend.
   function validateTrigger(): string | null {
     const v = triggerValue.trim();
-    if (!v) return "Enter a trigger value.";
+    if (!v) return t("automation.errTriggerEmpty");
     if (triggerKind === "interval") {
       const n = Number(v);
-      if (!Number.isFinite(n) || n < 10) return "Interval must be a number of seconds >= 10.";
+      if (!Number.isFinite(n) || n < 10) return t("automation.errInterval");
     } else if (triggerKind === "cron") {
-      if (v.split(/\s+/).length < 5) return "Cron must have 5 fields, e.g. 0 2 * * *.";
+      if (v.split(/\s+/).length < 5) return t("automation.errCron");
     } else if (triggerKind === "once") {
-      if (Number.isNaN(Date.parse(v))) return "Once must be an RFC3339 timestamp, e.g. 2026-07-01T02:00:00Z.";
+      if (Number.isNaN(Date.parse(v))) return t("automation.errOnce");
     }
     return null;
   }
@@ -1326,10 +1335,10 @@ export function AutomationView() {
   async function clearHistory() {
     if (
       !(await confirm({
-        title: "Clear run history",
-        message: "Delete every recorded scheduled-campaign run? The campaigns themselves stay.",
+        title: t("automation.clearHistoryTitle"),
+        message: t("automation.clearHistoryMessage"),
         danger: true,
-        confirmLabel: "Clear",
+        confirmLabel: t("common.clear"),
       }))
     )
       return;
@@ -1342,7 +1351,7 @@ export function AutomationView() {
     }
   }
   async function remove(id: string) {
-    if (!(await confirm({ title: "Delete campaign", message: "Delete this scheduled campaign? This cannot be undone.", danger: true, confirmLabel: "Delete" }))) return;
+    if (!(await confirm({ title: t("automation.deleteCampaignTitle"), message: t("automation.deleteCampaignMessage"), danger: true, confirmLabel: t("common.delete") }))) return;
     setError(null);
     try {
       setCampaigns(await getTransport().invoke<CampaignView[]>("schedule_delete", { id }));
@@ -1361,17 +1370,17 @@ export function AutomationView() {
 
   const placeholder =
     triggerKind === "interval"
-      ? "seconds, e.g. 3600"
+      ? t("automation.triggerPlaceholderInterval")
       : triggerKind === "cron"
-        ? "cron, e.g. 0 2 * * *"
-        : "RFC3339, e.g. 2026-07-01T02:00:00Z";
+        ? t("automation.triggerPlaceholderCron")
+        : t("automation.triggerPlaceholderOnce");
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-start justify-between gap-3 flex-wrap">
-        <ViewHeader title="Automation" description="Fuzz a whole project on autopilot: pick a folder, and a campaign rotates through its promoted targets on a schedule — headless, in the background, across restarts." />
-        <label className="text-xs text-text-muted flex items-center gap-1.5 shrink-0" title="How many campaigns may fuzz at once">
-          Max concurrent
+        <ViewHeader title={t("automation.title")} description={t("automation.description")} />
+        <label className="text-xs text-text-muted flex items-center gap-1.5 shrink-0" title={t("automation.maxConcurrentTitle")}>
+          {t("automation.maxConcurrent")}
           <Input mono type="number" min={1} max={16} value={concurrency}
             onChange={(e) => void applyConcurrency(Number(e.target.value) || 1)}
             className="w-14" />
@@ -1380,18 +1389,18 @@ export function AutomationView() {
 
       {/* New campaign form */}
       <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
-        <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>New Campaign</div>
+        <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("automation.newCampaign")}</div>
 
         {/* Project: a folder the campaign owns, independent of the open project. */}
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => void chooseFolder()} className="shrink-0">
             <FolderOpen size={13} />
-            Choose folder
+            {t("automation.chooseFolder")}
           </Button>
           <Select
             value={project}
             onChange={setProject}
-            placeholder="No project chosen"
+            placeholder={t("automation.noProjectChosen")}
             options={projects.map((p) => ({ value: p, label: shortProject(p) }))}
             className="flex-1 min-w-[180px]"
           />
@@ -1403,27 +1412,27 @@ export function AutomationView() {
             value={scopeAll ? "all" : "one"}
             onChange={(v) => setScopeAll(v === "all")}
             options={[
-              { value: "all", label: "All promoted targets" },
-              { value: "one", label: "Single target" },
+              { value: "all", label: t("automation.scopeAll") },
+              { value: "one", label: t("automation.scopeOne") },
             ]}
           />
           {scopeAll ? (
             <span className="text-xs text-text-secondary inline-flex items-center gap-1.5">
               <Layers size={13} />
               {choices === null
-                ? "Finding promoted targets…"
+                ? t("automation.findingTargets")
                 : promotedCount > 0
-                  ? `Rotates through ${promotedCount} promoted target${promotedCount === 1 ? "" : "s"}, priority-first.`
-                  : "No promoted target yet."}
+                  ? t("automation.rotatesThrough", { n: promotedCount })
+                  : t("automation.noPromotedTarget")}
             </span>
           ) : (
             <Select
               value={selected ? `${selected.target}::${selected.engine}` : ""}
               onChange={setPicked}
-              placeholder={choices === null ? "Loading targets…" : "No promoted harness"}
-              options={(choices ?? []).map((t) => ({
-                value: `${t.target}::${t.engine}`,
-                label: `${t.target} · ${t.engine} · ${t.language}`,
+              placeholder={choices === null ? t("automation.loadingTargets") : t("automation.noPromotedHarness")}
+              options={(choices ?? []).map((tgt) => ({
+                value: `${tgt.target}::${tgt.engine}`,
+                label: `${tgt.target} · ${tgt.engine} · ${tgt.language}`,
               }))}
               className="flex-1 min-w-[180px]"
             />
@@ -1432,11 +1441,11 @@ export function AutomationView() {
 
         {!canSave && project && choices !== null && promotedCount === 0 && (
           <div className="text-xs text-text-secondary">
-            This project has no promoted harness yet. A campaign only runs a harness a human has smoke-tested and promoted (Harness), so there is nothing to schedule yet.
+            {t("automation.noPromotedHarnessHelp")}
           </div>
         )}
         {!project && (
-          <div className="text-xs text-text-secondary">Choose a project folder to begin.</div>
+          <div className="text-xs text-text-secondary">{t("automation.chooseFolderToBegin")}</div>
         )}
 
         {/* Trigger + per-run duration. */}
@@ -1445,15 +1454,15 @@ export function AutomationView() {
             value={triggerKind}
             onChange={(v) => setTriggerKind(v as typeof triggerKind)}
             options={[
-              { value: "interval", label: "Interval" },
-              { value: "cron", label: "Cron" },
-              { value: "once", label: "Once" },
+              { value: "interval", label: t("automation.triggerInterval") },
+              { value: "cron", label: t("automation.triggerCron") },
+              { value: "once", label: t("automation.triggerOnce") },
             ]}
           />
           <Input mono value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={placeholder}
             className="flex-1 min-w-[180px]" />
           <label className="text-xs text-text-muted flex items-center gap-1">
-            run
+            {t("automation.runLabel")}
             <Input mono type="number" min={10} value={duration} onChange={(e) => setDuration(Math.max(10, Number(e.target.value) || 60))}
               className="w-16" />
             s
@@ -1462,29 +1471,29 @@ export function AutomationView() {
 
         {/* Budget (optional): stop after N runs or M minutes of fuzzing. */}
         <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
-          <span>Budget</span>
+          <span>{t("automation.budget")}</span>
           <label className="flex items-center gap-1">
             <Input mono type="number" min={1} value={maxRuns} placeholder="∞" onChange={(e) => setMaxRuns(e.target.value)} className="w-16" />
-            runs
+            {t("automation.runsUnit")}
           </label>
-          <span>or</span>
+          <span>{t("automation.or")}</span>
           <label className="flex items-center gap-1">
             <Input mono type="number" min={1} value={maxMinutes} placeholder="∞" onChange={(e) => setMaxMinutes(e.target.value)} className="w-16" />
-            min total
+            {t("automation.minTotal")}
           </label>
-          <span className="opacity-70">— blank = unbounded</span>
+          <span className="opacity-70">{t("automation.blankUnbounded")}</span>
           <div className="flex-1" />
           <Button variant="primary" size="sm" onClick={save} loading={busy}
             disabled={!canSave || busy || !triggerValue.trim()} className="shrink-0">
             {!busy && <Plus size={13} />}
-            Schedule
+            {t("automation.schedule")}
           </Button>
         </div>
         {error && <span className="text-xs" style={{ color: "var(--error)" }}>{error}</span>}
       </div>
 
       {campaigns.length === 0 && (
-        <EmptyState icon={<Zap size={20} />} hint="No scheduled campaigns yet. Choose a project folder, pick a scope and trigger, and Schedule it to fuzz on autopilot." />
+        <EmptyState icon={<Zap size={20} />} hint={t("automation.emptyCampaigns")} />
       )}
 
       <div className="flex flex-col gap-2">
@@ -1493,18 +1502,18 @@ export function AutomationView() {
             <div className="flex flex-col min-w-0 flex-1">
               <span className="text-sm font-medium truncate">{c.name}</span>
               <span className="text-xs text-text-muted font-mono">
-                {c.trigger} · {c.target ?? `all targets`} · {c.engine || c.lang} · {c.duration_secs}s
-                {c.max_runs != null ? ` · ${c.runs_done}/${c.max_runs} runs` : c.max_total_secs != null ? ` · ${c.secs_done}/${c.max_total_secs}s` : c.runs_done > 0 ? ` · ${c.runs_done} runs` : ""}
-                {c.last_fire ? ` · last ${new Date(c.last_fire).toLocaleString()}` : " · never run"}
+                {c.trigger} · {c.target ?? t("automation.allTargets")} · {c.engine || c.lang} · {c.duration_secs}s
+                {c.max_runs != null ? ` · ${c.runs_done}/${c.max_runs} ${t("automation.runsUnit")}` : c.max_total_secs != null ? ` · ${c.secs_done}/${c.max_total_secs}s` : c.runs_done > 0 ? ` · ${c.runs_done} ${t("automation.runsUnit")}` : ""}
+                {c.last_fire ? ` · ${t("automation.lastFire", { time: new Date(c.last_fire).toLocaleString() })}` : ` · ${t("automation.neverRun")}`}
               </span>
             </div>
             <Button variant={c.enabled ? "outline" : "primary"} size="sm"
               onClick={() => toggle(c.id, !c.enabled)}
-              title={c.enabled ? "Pause this campaign" : "Resume this campaign"}>
+              title={c.enabled ? t("automation.pauseTitle") : t("automation.resumeTitle")}>
               {c.enabled ? <Square size={13} /> : <Play size={13} />}
-              {c.enabled ? "Pause" : "Resume"}
+              {c.enabled ? t("common.pause") : t("common.resume")}
             </Button>
-            <IconButton danger onClick={() => remove(c.id)} title="Delete campaign" aria-label="Delete campaign">
+            <IconButton danger onClick={() => remove(c.id)} title={t("automation.deleteCampaignTitle")} aria-label={t("automation.deleteCampaignTitle")}>
               <Trash2 size={14} />
             </IconButton>
           </div>
@@ -1519,11 +1528,11 @@ export function AutomationView() {
         <div className="surface-card flex flex-col" style={{ padding: "var(--space-md)" }}>
           <div className="flex items-center justify-between mb-2">
             <div className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-              Recent Runs
+              {t("automation.recentRuns")}
             </div>
-            <Button variant="ghost" size="sm" onClick={() => void clearHistory()} title="Clear run history">
+            <Button variant="ghost" size="sm" onClick={() => void clearHistory()} title={t("automation.clearHistoryTitle")}>
               <Trash2 size={12} />
-              Clear
+              {t("common.clear")}
             </Button>
           </div>
           <div className="flex flex-col">

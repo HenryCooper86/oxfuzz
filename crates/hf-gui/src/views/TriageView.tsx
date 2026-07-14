@@ -7,6 +7,7 @@ import type { Crash } from "../types";
 import { Button, ViewHeader, SeverityBadge } from "../components/ui";
 import { Bug, ChevronRight, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
+import { useI18n } from "../i18n";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
 // when the user opens a report, keeping it out of the initial bundle.
@@ -15,6 +16,7 @@ const ReportPreview = lazy(() =>
 );
 
 export function TriageView({ embedded = false }: { embedded?: boolean }) {
+  const { t } = useI18n();
   const { activeProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   // The target + crash count from the most recent run, so triage scans the
@@ -97,7 +99,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     try {
       const md = await getTransport().invoke<string>("generate_report", reportArgs());
       if (!md) {
-        setReportMsg("Report generation is only available in the desktop app.");
+        setReportMsg(t("triage.reportDesktopOnly"));
         return;
       }
       setReportMd(md);
@@ -109,13 +111,13 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         content: md,
       });
       emitDataChanged();
-      setReportMsg("AI report composed and saved to Workbench reports.");
+      setReportMsg(t("triage.reportComposed"));
     } catch (e) {
-      setReportMsg(`Report failed: ${e}`);
+      setReportMsg(t("triage.reportFailed", { error: String(e) }));
     } finally {
       setReporting(false);
     }
-  }, [reportArgs, lastTarget, activeProject]);
+  }, [reportArgs, lastTarget, activeProject, t]);
 
   // Export the composed report in a chosen format. Desktop opens a native save
   // dialog (md/html/pdf/docx); web falls back to a Markdown blob download.
@@ -129,18 +131,18 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             target: lastTarget,
             format,
           });
-          if (saved) setReportMsg(`Saved ${format.toUpperCase()} to ${saved}`);
+          if (saved) setReportMsg(t("triage.reportSaved", { format: format.toUpperCase(), path: saved }));
         } else if (format === "md" && reportMd) {
           browserDownload(reportMd);
-          setReportMsg("Report downloaded.");
+          setReportMsg(t("triage.reportDownloaded"));
         } else {
-          setReportMsg(`${format.toUpperCase()} export is only available in the desktop app.`);
+          setReportMsg(t("triage.exportDesktopOnly", { format: format.toUpperCase() }));
         }
       } catch (e) {
-        setReportMsg(`Export failed: ${e}`);
+        setReportMsg(t("triage.exportFailed", { error: String(e) }));
       }
     },
-    [activeProject, lastTarget, reportMd, browserDownload],
+    [activeProject, lastTarget, reportMd, browserDownload, t],
   );
 
   // Push the triaged crashes to DefectDojo as findings (import/reimport-scan).
@@ -154,14 +156,18 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       );
       const where = outcome.url ? ` (${outcome.url})` : "";
       setReportMsg(
-        `Pushed ${outcome.findings_pushed} finding(s) to DefectDojo${outcome.reimported ? " (reimport)" : ""}${where}.`,
+        t("triage.pushed", {
+          n: outcome.findings_pushed,
+          reimport: outcome.reimported ? t("triage.reimportSuffix") : "",
+          where,
+        }),
       );
     } catch (e) {
-      setReportMsg(`DefectDojo push failed: ${e}`);
+      setReportMsg(t("triage.pushFailed", { error: String(e) }));
     } finally {
       setPushing(false);
     }
-  }, [activeProject, lastTarget]);
+  }, [activeProject, lastTarget, t]);
 
   // Auto-triage + auto-report: once a run completes with crashes, ingest + dedup
   // them and (per the workflow) compose an AI report and save it to the
@@ -187,8 +193,8 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           <span />
         ) : (
           <ViewHeader
-            title="Crash Triage"
-            description="Ingest, classify, and deduplicate crash artifacts from fuzz runs."
+            title={t("triage.title")}
+            description={t("triage.description")}
           />
         )}
         <div className="flex items-center gap-2">
@@ -201,10 +207,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             onClick={() => void composeAndSaveReport()}
             disabled={reporting || !lastTarget}
             loading={reporting}
-            title="Compose an AI report, save it to the Workbench, and preview it"
+            title={t("triage.composeReportTooltip")}
           >
             {!reporting && <FileText size={14} />}
-            {reporting ? "Composing..." : "Compose Report"}
+            {reporting ? t("triage.composing") : t("triage.composeReport")}
           </Button>
           {crashes.length > 0 && (
             <Button
@@ -213,10 +219,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
               onClick={() => void pushToDefectDojo()}
               disabled={pushing}
               loading={pushing}
-              title="Push these triaged crashes to DefectDojo as findings (configure in Settings > Integrations)"
+              title={t("triage.pushTooltip")}
             >
               {!pushing && <Share2 size={14} />}
-              {pushing ? "Pushing..." : "Push to DefectDojo"}
+              {pushing ? t("triage.pushing") : t("triage.pushToDefectDojo")}
             </Button>
           )}
           <Button
@@ -226,14 +232,14 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             loading={loading}
             title={
               isKernelRun
-                ? "Kernel crashes are collected by syzkaller, not per-target triage"
+                ? t("triage.scanTooltipKernel")
                 : lastTarget
-                  ? "Scan the last run's output for crashes"
-                  : "Run a fuzz campaign first"
+                  ? t("triage.scanTooltipReady")
+                  : t("triage.scanTooltipNoTarget")
             }
           >
             {!loading && <Bug size={14} />}
-            {loading ? "Scanning..." : "Scan for Crashes"}
+            {loading ? t("triage.scanning") : t("triage.scanForCrashes")}
           </Button>
         </div>
       </div>
@@ -249,7 +255,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           className="surface-card text-xs"
           style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--danger, #e5484d)", borderColor: "var(--danger, #e5484d)" }}
         >
-          Scan failed: {triageError}
+          {t("triage.scanFailed", { error: triageError })}
         </div>
       )}
 
@@ -260,10 +266,9 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           className="surface-card text-sm"
           style={{ padding: "var(--space-md)", borderLeft: `3px solid ${summary.crashes > 0 ? "var(--error)" : "var(--success)"}` }}
         >
-          Kernel (syzkaller) campaign reported <strong>{summary.crashes}</strong> crash
-          {summary.crashes === 1 ? "" : "es"}. Kernel crashes are collected in the syzkaller
-          workspace (reproducers + logs under the run&apos;s workdir), not the per-target triage
-          path, so per-target scanning does not apply here.
+          {t("triage.kernelReportedPrefix")} <strong>{summary.crashes}</strong>{" "}
+          {summary.crashes === 1 ? t("triage.crash") : t("triage.crashes")}
+          {t("triage.kernelExplanation")}
         </div>
       )}
 
@@ -275,15 +280,17 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         >
           {ranWithCrashes ? (
             <>
-              Last run{lastTarget ? ` on ${lastTarget}` : ""} reported{" "}
-              <strong>{summary.crashes}</strong> crash{summary.crashes === 1 ? "" : "es"} — ingesting
-              and deduplicating automatically. Use Scan to re-run.
+              {lastTarget
+                ? t("triage.lastRunReportedOn", { target: lastTarget })
+                : t("triage.lastRunReported")}{" "}
+              <strong>{summary.crashes}</strong>{" "}
+              {summary.crashes === 1 ? t("triage.crash") : t("triage.crashes")}
+              {t("triage.lastRunIngesting")}
             </>
+          ) : lastTarget ? (
+            t("triage.lastRunNoneOn", { target: lastTarget })
           ) : (
-            <>
-              Last run{lastTarget ? ` on ${lastTarget}` : ""} found no crashes — nothing to triage. This
-              stage was skipped.
-            </>
+            t("triage.lastRunNone")
           )}
         </div>
       )}
@@ -294,11 +301,11 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           style={{ padding: "var(--space-xl) var(--space-md)", textAlign: "center" }}
         >
           <Bug size={32} className="text-text-muted mb-3" style={{ opacity: 0.4 }} />
-          <p className="text-sm text-text-muted">No crash artifacts ingested yet.</p>
+          <p className="text-sm text-text-muted">{t("triage.noCrashesIngested")}</p>
           <p className="text-xs text-text-muted mt-1">
             {lastTarget
-              ? `Scan the output of the last run on "${lastTarget}".`
-              : "Run a fuzz campaign first, then scan the output directory."}
+              ? t("triage.hintScanLastRun", { target: lastTarget })
+              : t("triage.hintRunFirst")}
           </p>
         </div>
       )}
@@ -349,6 +356,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
 }
 
 function CrashDetail({ crash }: { crash: Crash }) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
@@ -366,7 +374,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
       {crash.casr && (
         <div className="border-t border-border pt-3">
           <div className="text-xs text-text-muted uppercase mb-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            CASR Analysis
+            {t("triage.casrAnalysis")}
           </div>
           <div className="flex flex-wrap items-center gap-2 mb-2">
             <SeverityBadge severity={crash.casr.severity} title={crash.casr.severity_short || crash.casr.severity} />
@@ -377,7 +385,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
               <span className="text-xs text-text-muted font-mono">@ {crash.casr.crashline}</span>
             )}
             {crash.casr.cluster != null && (
-              <span className="text-xs text-text-muted">cluster {crash.casr.cluster}</span>
+              <span className="text-xs text-text-muted">{t("triage.cluster", { n: crash.casr.cluster })}</span>
             )}
           </div>
           {crash.casr.stack.length > 0 && (
@@ -390,7 +398,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
       {crash.stack_signature && (
         <div>
           <div className="text-xs text-text-muted uppercase mb-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            Stack Signature
+            {t("triage.stackSignature")}
           </div>
           <code className="text-xs text-text-secondary block font-mono p-2 rounded-md" style={{ background: "var(--surface-code)" }}>
             {crash.stack_signature.slice(0, 32)}...
@@ -400,7 +408,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
       {crash.bug_report && (
         <div className="border-t border-border pt-3 mt-2">
           <div className="text-xs text-text-muted uppercase mb-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            Draft Bug Report
+            {t("triage.draftBugReport")}
           </div>
           <p className="text-sm font-medium text-accent mb-1">{crash.bug_report.title}</p>
           <p className="text-xs text-text-secondary mb-2">{crash.bug_report.summary}</p>
@@ -412,7 +420,7 @@ function CrashDetail({ crash }: { crash: Crash }) {
                 color: "var(--text-secondary)",
               }}
             >
-              Severity: {crash.bug_report.severity_guess}
+              {t("triage.severity", { value: crash.bug_report.severity_guess })}
             </span>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
+import { useI18n } from "../i18n";
 import { useProject } from "../providers/ProjectContext";
 import { ViewHeader, EmptyState, Button } from "../components/ui";
 import { RotateCcw, AlertTriangle, ScrollText } from "lucide-react";
@@ -28,6 +29,7 @@ function fmtTime(ts: string): string {
 // (applied) or flagged (notify-only). Persisted in the store, so it survives
 // restarts (unlike the run-journal WAL, which is compacted).
 export function AuditView() {
+  const { t } = useI18n();
   const { activeProject } = useProject();
   const [scope, setScope] = useState<"all" | "project">(activeProject ? "project" : "all");
   const [events, setEvents] = useState<AutoRevertEvent[]>([]);
@@ -63,16 +65,16 @@ export function AuditView() {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <ViewHeader
-          title="Policy Audit"
-          description="Every time the auto-revert policy fired under comparable run conditions: the last-good revision was restored or flagged."
+          title={t("audit.title")}
+          description={t("audit.description")}
         />
         {activeProject && (
           <div className="flex items-center gap-1 text-xs">
             <Button variant={scope === "project" ? "primary" : "outline"} size="sm" onClick={() => setScope("project")}>
-              This project
+              {t("audit.thisProject")}
             </Button>
             <Button variant={scope === "all" ? "primary" : "outline"} size="sm" onClick={() => setScope("all")}>
-              All projects
+              {t("audit.allProjects")}
             </Button>
           </div>
         )}
@@ -84,10 +86,10 @@ export function AuditView() {
           style={{ padding: "var(--space-sm) var(--space-md)", borderColor: "var(--error)" }}
         >
           <span className="text-xs min-w-0 truncate" style={{ color: "var(--error)" }}>
-            Failed to load the audit trail: {error}
+            {t("audit.loadError", { error })}
           </span>
           <Button variant="outline" size="sm" onClick={() => void load()}>
-            Retry
+            {t("common.retry")}
           </Button>
         </div>
       )}
@@ -95,24 +97,24 @@ export function AuditView() {
       {events.length > 0 && (
         <div className="flex items-center gap-4 text-xs text-text-muted">
           <span>
-            {events.length} firing{events.length === 1 ? "" : "s"}
+            {t("audit.firings", { n: events.length })}
           </span>
           <span className="inline-flex items-center gap-1" style={{ color: "var(--accent)" }}>
-            <RotateCcw size={12} /> {applied} reverted
+            <RotateCcw size={12} /> {t("audit.revertedCount", { n: applied })}
           </span>
           <span className="inline-flex items-center gap-1" style={{ color: "var(--warning, var(--accent))" }}>
-            <AlertTriangle size={12} /> {flagged} flagged
+            <AlertTriangle size={12} /> {t("audit.flaggedCount", { n: flagged })}
           </span>
         </div>
       )}
 
       {loading ? (
-        <div className="text-xs text-text-muted">Loading…</div>
+        <div className="text-xs text-text-muted">{t("audit.loading")}</div>
       ) : events.length === 0 ? (
         <EmptyState
           icon={<ScrollText size={28} />}
-          title="No policy events yet"
-          hint="When the auto-revert policy fires on a coverage regression, each occurrence is recorded here."
+          title={t("audit.emptyTitle")}
+          hint={t("audit.emptyHint")}
         />
       ) : (
         <div className="flex flex-col gap-1.5">
@@ -140,12 +142,12 @@ export function AuditView() {
                       className="text-xs rounded-full"
                       style={{ padding: "0 8px", border: `1px solid ${color}`, color }}
                     >
-                      {e.reverted ? "Reverted" : "Flagged"}
+                      {e.reverted ? t("audit.revertedBadge") : t("audit.flaggedBadge")}
                     </span>
                   </div>
                   <span className="text-xs text-text-secondary" style={{ lineHeight: 1.5 }}>
-                    Coverage dropped {e.drop_pct.toFixed(1)}% ({e.regressed_edges} &lt; {e.previous_edges} edges).{" "}
-                    Harness <code>{e.from_rev.slice(0, 8)}</code> {e.reverted ? "→ restored comparable baseline" : "→ comparable last-good"}{" "}
+                    {t("audit.coverageDropped", { pct: e.drop_pct.toFixed(1), regressed: e.regressed_edges, previous: e.previous_edges })}{" "}
+                    {t("audit.harnessPrefix")}<code>{e.from_rev.slice(0, 8)}</code> {e.reverted ? t("audit.restoredBaseline") : t("audit.comparableLastGood")}{" "}
                     <code>{e.to_rev.slice(0, 8)}</code>.
                   </span>
                 </div>

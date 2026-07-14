@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useI18n } from "../i18n";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { usePipeline } from "../providers/PipelineContext";
@@ -56,6 +57,7 @@ export function HarnessView({
   // ("2.1"..."2.5") instead of a competing 1-5 that collides with the outer 3/4.
   stepPrefix?: string;
 }) {
+  const { t } = useI18n();
   const { activeProject } = useProject();
   const { markDone } = usePipeline();
   const { target: selectedTarget, setTarget: setSelectedTarget, engine, setEngine, lang, setLang, setCompiled } = useTarget();
@@ -308,8 +310,8 @@ export function HarnessView({
       {!embedded && (
         <>
           <ViewHeader
-            title="Harness Generation"
-            description="Generate, sandbox-compile, smoke-qualify, review, and explicitly approve campaign harnesses."
+            title={t("title.harness")}
+            description={t("harness.description")}
           />
 
           {/* Project selection */}
@@ -334,7 +336,7 @@ export function HarnessView({
           className="surface-card text-xs"
           style={{ padding: "var(--space-sm) var(--space-md)", color: "var(--danger, #e5484d)", borderColor: "var(--danger, #e5484d)" }}
         >
-          Discovery failed: {discoverError}
+          {t("harness.discoveryFailed", { error: discoverError })}
         </div>
       )}
 
@@ -346,13 +348,13 @@ export function HarnessView({
           <div className="flex items-center gap-2">
             <Archive size={16} className="text-text-muted" />
             <span className="text-sm font-medium text-text-primary flex-1">
-              Existing harness for <code style={{ color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{existing.target_symbol}</code>
+              {t("harness.existingHarnessFor")} <code style={{ color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{existing.target_symbol}</code>
             </span>
             <span
               className="text-xs px-2 py-0.5 rounded-sm"
               style={{ background: "var(--surface-active)", border: "1px solid var(--border)" }}
             >
-              {existing.engine} · {existing.status}{existing.smoke_passed ? " · smoke ok" : ""}
+              {existing.engine} · {existing.status}{existing.smoke_passed ? ` · ${t("harness.smokeOk")}` : ""}
             </span>
           </div>
           {existing.source_preview && (
@@ -364,7 +366,7 @@ export function HarnessView({
             </pre>
           )}
           <p className="text-xs text-text-muted mt-2">
-            Generated previously. Use "Generate" to produce a fresh, editable harness, or proceed to Run.
+            {t("harness.generatedPreviously")}
           </p>
         </div>
       )}
@@ -373,7 +375,7 @@ export function HarnessView({
       {inventory && inventory.candidates.length > 0 && (
         <div className="flex flex-wrap gap-3 items-end">
           <div className="flex flex-col gap-1 flex-1 min-w-0" style={{ minWidth: 180 }}>
-            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Target</label>
+            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.target")}</label>
             <Select
               mono
               value={selectedTarget}
@@ -393,11 +395,11 @@ export function HarnessView({
               }}
               options={[...inventory.candidates]
                 .sort((a, b) => b.fit_score - a.fit_score)
-                .map((c) => ({ value: c.symbol, label: `${c.symbol} (fit: ${c.fit_score.toFixed(2)})` }))}
+                .map((c) => ({ value: c.symbol, label: `${c.symbol} (${t("harness.fit")}: ${c.fit_score.toFixed(2)})` }))}
             />
           </div>
           <div className="flex flex-col gap-1 w-40">
-            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Engine</label>
+            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.engine")}</label>
             <Select
               value={engine}
               onChange={(v) => setEngine(v)}
@@ -410,7 +412,7 @@ export function HarnessView({
             />
           </div>
           <div className="flex flex-col gap-1 w-32">
-            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Language</label>
+            <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.language")}</label>
             <Select
               value={lang}
               onChange={(v) => {
@@ -430,10 +432,10 @@ export function HarnessView({
             variant="primary"
             onClick={runAll}
             disabled={!selectedTarget || harnessStatus === "loading"}
-            title="Draft, compile, smoke-test, and seed. Review & Approve stays a deliberate final step."
+            title={t("harness.buildSmokeTitle")}
           >
             <Sparkles size={14} />
-            Build &amp; Smoke-Test
+            {t("harness.buildSmokeTest")}
           </Button>
         </div>
       )}
@@ -445,11 +447,11 @@ export function HarnessView({
           <Step
             number={1}
             prefix={stepPrefix}
-            title="Generate Harness"
+            title={t("harness.stepGenerateTitle")}
             errorText={harnessError}
             icon={<FileCode size={16} />}
             status={harnessStatus}
-            actionLabel="Generate"
+            actionLabel={t("common.generate")}
             actionClick={() => generateHarness(selectedTarget)}
           >
             {harness && (
@@ -460,10 +462,10 @@ export function HarnessView({
                       variant="outline"
                       size="sm"
                       onClick={() => setShowDiff((d) => !d)}
-                      title="Show what regeneration changed vs the previous harness"
+                      title={t("harness.diffTitle")}
                     >
                       <GitCompare size={12} />
-                      {showDiff ? "Hide diff" : "Diff vs previous"}
+                      {showDiff ? t("harness.hideDiff") : t("harness.diffVsPrevious")}
                     </Button>
                   </div>
                 )}
@@ -494,8 +496,8 @@ export function HarnessView({
                   )}
                 </div>
                 <div className="flex gap-2 mt-2 text-xs text-text-muted">
-                  <span>Compiler: <code style={{ color: "var(--accent)" }}>{harness.build_cmd.compiler}</code></span>
-                  <span>Flags: <code style={{ color: "var(--text-secondary)" }}>{harness.build_cmd.args.join(" ")}</code></span>
+                  <span>{t("harness.compilerLabel")}: <code style={{ color: "var(--accent)" }}>{harness.build_cmd.compiler}</code></span>
+                  <span>{t("harness.flagsLabel")}: <code style={{ color: "var(--text-secondary)" }}>{harness.build_cmd.args.join(" ")}</code></span>
                 </div>
               </div>
             )}
@@ -505,10 +507,10 @@ export function HarnessView({
           <Step
             number={2}
             prefix={stepPrefix}
-            title="Compile in Sandbox"
+            title={t("harness.stepCompileTitle")}
             icon={<Terminal size={16} />}
             status={compileStatus}
-            actionLabel="Compile"
+            actionLabel={t("harness.compile")}
             actionClick={() => compileHarness()}
             disabled={!harness}
           >
@@ -530,10 +532,10 @@ export function HarnessView({
           <Step
             number={3}
             prefix={stepPrefix}
-            title="Smoke Qualification"
+            title={t("harness.stepSmokeTitle")}
             icon={<Crosshair size={16} />}
             status={smokeStatus}
-            actionLabel="Run Smoke Test"
+            actionLabel={t("harness.runSmokeTest")}
             actionClick={smokeHarness}
             disabled={compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed"))}
           >
@@ -546,10 +548,10 @@ export function HarnessView({
                 )}
                 <span style={{ color: smokeResult.passed ? "var(--success)" : "var(--error)" }}>
                   {smokeResult.error
-                    ? `Smoke test failed: ${smokeResult.error}`
+                    ? t("harness.smokeFailed", { error: smokeResult.error })
                     : smokeResult.passed
-                    ? `Clean smoke run: ${Math.round(smokeResult.execs_per_sec).toLocaleString()} execs/sec.`
-                    : `Smoke found ${smokeResult.crashes} crash(es); triage before approval.`}
+                    ? t("harness.smokeClean", { rate: Math.round(smokeResult.execs_per_sec).toLocaleString() })
+                    : t("harness.smokeCrashes", { n: smokeResult.crashes })}
                 </span>
               </div>
             )}
@@ -562,10 +564,10 @@ export function HarnessView({
           <Step
             number={4}
             prefix={stepPrefix}
-            title="Review and Approve"
+            title={t("harness.stepApproveTitle")}
             icon={<CheckCircle2 size={16} />}
             status={promotionStatus}
-            actionLabel={smokeCrashed ? "Approve with Known Findings" : "Approve for Campaigns"}
+            actionLabel={smokeCrashed ? t("harness.approveWithFindings") : t("harness.approveForCampaigns")}
             actionClick={smokeCrashed ? promoteWithFindings : promoteHarness}
             disabled={
               promotionStatus === "done" ||
@@ -573,13 +575,11 @@ export function HarnessView({
             }
           >
             <p className="mt-2 text-xs text-text-secondary">
-              Approval binds this exact source, engine, target, and smoke evidence. Regenerating or recompiling creates a new revision that must be approved again.
+              {t("harness.approvalBinds")}
             </p>
             {smokeCrashed && promotionStatus !== "done" && (
               <p className="mt-1 text-xs" style={{ color: "var(--warning)" }}>
-                Smoke surfaced {smokeResult?.crashes} crash(es). Approving here records{" "}
-                {smokeResult?.crashes === 1 ? "it" : "them"} as a known finding and promotes the
-                harness; triage the crash from the Run / Triage step afterward.
+                {t("harness.approveFindingsNotice", { n: smokeResult?.crashes ?? 0 })}
               </p>
             )}
             {promotionResult && (
@@ -600,16 +600,16 @@ export function HarnessView({
           <Step
             number={5}
             prefix={stepPrefix}
-            title="Generate Seed Corpus"
+            title={t("harness.stepSeedsTitle")}
             errorText={seedError}
             icon={<Database size={16} />}
             status={seedStatus}
-            actionLabel="Generate Seeds"
+            actionLabel={t("harness.generateSeeds")}
             actionClick={generateSeeds}
           >
             {seeds && (
               <div className="mt-2">
-                <div className="text-xs text-text-secondary mb-1">{seeds.length} seed(s) generated for "{selectedTarget}":</div>
+                <div className="text-xs text-text-secondary mb-1">{t("harness.seedsGenerated", { n: seeds.length, target: selectedTarget })}</div>
                 <div className="flex flex-wrap gap-1">
                   {seeds.map((s, i) => (
                     <span
@@ -633,9 +633,9 @@ export function HarnessView({
             >
               <CheckCircle2 size={20} style={{ color: "var(--success)" }} />
               <div className="flex-1">
-                <span className="text-sm font-medium text-text-primary">Harness ready to fuzz</span>
+                <span className="text-sm font-medium text-text-primary">{t("harness.readyToFuzz")}</span>
                 <p className="text-xs text-text-secondary mt-0.5">
-                  Switch to the Run panel to start fuzzing {selectedTarget} with {engine}.
+                  {t("harness.readyToFuzzHint", { target: selectedTarget, engine })}
                 </p>
               </div>
               <ArrowRight size={16} className="text-text-muted" />
@@ -648,7 +648,7 @@ export function HarnessView({
       {!inventory && !project && (
         <EmptyState
           icon={<Crosshair size={20} />}
-          hint="Select a project folder to discover fuzzing targets."
+          hint={t("harness.emptyHint")}
         />
       )}
     </div>

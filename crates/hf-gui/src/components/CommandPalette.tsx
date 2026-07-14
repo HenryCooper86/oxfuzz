@@ -81,7 +81,7 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label={t("palette.ariaLabel")}
         className="surface-card flex flex-col overflow-hidden"
         style={{ width: "min(560px, 92vw)", padding: 0, boxShadow: "var(--shadow-lg)", animation: "dialogContentIn 0.14s ease" }}
         onClick={(e) => e.stopPropagation()}
@@ -108,15 +108,15 @@ export function CommandPalette({ onNavigate }: { onNavigate: (view: ViewType) =>
               setQuery(e.target.value);
               setActive(0);
             }}
-            placeholder="Jump to..."
+            placeholder={t("palette.placeholder")}
             className="flex-1 bg-transparent outline-none text-sm text-text-primary"
             style={{ border: "none" }}
           />
-          <kbd className="text-xs text-text-muted">esc</kbd>
+          <kbd className="text-xs text-text-muted">{t("palette.esc")}</kbd>
         </div>
         <div className="overflow-auto" style={{ maxHeight: "50vh" }}>
           {items.length === 0 ? (
-            <div className="text-xs text-text-muted" style={{ padding: "12px 14px" }}>No matches.</div>
+            <div className="text-xs text-text-muted" style={{ padding: "12px 14px" }}>{t("palette.noMatches")}</div>
           ) : (
             items.map((item, i) => (
               <button

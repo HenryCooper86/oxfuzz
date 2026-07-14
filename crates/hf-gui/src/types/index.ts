@@ -148,6 +148,8 @@ export interface WorkbenchTotals {
   runs: number;
   active_runs: number;
   crashes: number;
+  /** Crashes with no drafted bug report yet -- what "triage required" keys on. */
+  crashes_needing_triage: number;
   corpus_entries: number;
 }
 

@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { getTransport } from "../lib";
+import { useI18n } from "../i18n";
 
 interface InterruptedRun {
   run_id: string;
@@ -17,6 +18,7 @@ interface InterruptedRun {
 const shortPath = (p: string) => p.split("/").filter(Boolean).pop() || p;
 
 export function RecoveryBanner() {
+  const { t } = useI18n();
   const [runs, setRuns] = useState<InterruptedRun[]>([]);
 
   useEffect(() => {
@@ -48,9 +50,9 @@ export function RecoveryBanner() {
       <div className="flex items-center gap-2 mb-1">
         <AlertTriangle size={14} style={{ color: "#d97706" }} />
         <span className="text-xs font-semibold" style={{ color: "#d97706" }}>
-          {runs.length} interrupted {runs.length === 1 ? "run" : "runs"} recovered
+          {runs.length === 1 ? t("recovery.recoveredOne") : t("recovery.recoveredMany", { n: runs.length })}
         </span>
-        <span className="text-xs text-text-muted">— stopped by a crash or quit. Crashes and corpus on disk are intact; re-run from the Run view, or dismiss.</span>
+        <span className="text-xs text-text-muted">{t("recovery.detail")}</span>
       </div>
       <div className="flex flex-col gap-1 mt-1">
         {runs.map((r) => (
@@ -59,14 +61,14 @@ export function RecoveryBanner() {
               {shortPath(r.project)} / {r.target}
             </span>
             <span className="text-text-muted font-mono">{r.engine}</span>
-            <span className="text-text-muted">· started {new Date(r.started_at * 1000).toLocaleString()}</span>
+            <span className="text-text-muted">· {t("recovery.started")} {new Date(r.started_at * 1000).toLocaleString()}</span>
             <button
               onClick={() => dismiss(r.run_id)}
               className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-sm text-text-muted hover:text-text-primary hover:bg-surface-hover"
-              title="Dismiss"
+              title={t("recovery.dismiss")}
             >
               <X size={12} />
-              Dismiss
+              {t("recovery.dismiss")}
             </button>
           </div>
         ))}

@@ -65,9 +65,10 @@ const SECTIONS: Section[] = [
 type Cfg = Record<string, unknown>;
 
 function FormRawToggle({ mode, onChange }: { mode: "form" | "raw"; onChange: (m: "form" | "raw") => void }) {
+  const { t } = useI18n();
   return (
     <div className="flex items-center gap-2 select-none" style={{ fontSize: "11px", letterSpacing: "0.06em" }}>
-      <span style={{ color: mode === "form" ? "var(--accent)" : "var(--text-muted)", fontWeight: 600 }}>FORM</span>
+      <span style={{ color: mode === "form" ? "var(--accent)" : "var(--text-muted)", fontWeight: 600 }}>{t("settings.form")}</span>
       <button
         onClick={() => onChange(mode === "form" ? "raw" : "form")}
         className="relative outline-none"
@@ -79,7 +80,7 @@ function FormRawToggle({ mode, onChange }: { mode: "form" | "raw"; onChange: (m:
           background: "var(--surface-tertiary)",
           cursor: "pointer",
         }}
-        aria-label="Toggle form or raw editor"
+        aria-label={t("settings.toggleFormRaw")}
       >
         <span
           style={{
@@ -94,7 +95,7 @@ function FormRawToggle({ mode, onChange }: { mode: "form" | "raw"; onChange: (m:
           }}
         />
       </button>
-      <span style={{ color: mode === "raw" ? "var(--accent)" : "var(--text-muted)", fontWeight: 600 }}>RAW</span>
+      <span style={{ color: mode === "raw" ? "var(--accent)" : "var(--text-muted)", fontWeight: 600 }}>{t("settings.raw")}</span>
     </div>
   );
 }
@@ -141,12 +142,12 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         }
         setDirty(false);
       } catch (e) {
-        toast({ title: "Failed to load config", description: String(e), variant: "error" });
+        toast({ title: t("settings.loadFailed"), description: String(e), variant: "error" });
       } finally {
         setLoading(false);
       }
     },
-    [toast],
+    [toast, t],
   );
 
   // Reload whenever the selected section changes (mode is reset to FORM by the
@@ -189,7 +190,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
       }
       setMode(m);
     } catch (e) {
-      toast({ title: "Conversion failed", description: String(e), variant: "error" });
+      toast({ title: t("settings.conversionFailed"), description: String(e), variant: "error" });
     }
   }
 
@@ -200,7 +201,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
 
   async function selectSection(id: SectionId) {
     if (id === active) return;
-    if (dirty && !(await confirm({ title: "Discard unsaved changes?", message: "You have unsaved settings changes.", danger: true, confirmLabel: "Discard" }))) return;
+    if (dirty && !(await confirm({ title: t("settings.discardTitle"), message: t("settings.discardMessage"), danger: true, confirmLabel: t("settings.discardConfirm") }))) return;
     setMode("form");
     setActive(id);
   }
@@ -217,10 +218,10 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         const content = mode === "raw" ? raw : await serializeValue(value);
         await T.invoke("write_config", { name: section.config, content });
       }
-      toast({ title: "Settings saved", description: `${section.label} configuration written`, variant: "success" });
+      toast({ title: t("settings.saved"), description: t("settings.savedDesc", { section: t(`settings.tab.${section.id}`) }), variant: "success" });
       await load(section);
     } catch (e) {
-      toast({ title: "Save failed", description: String(e), variant: "error" });
+      toast({ title: t("settings.saveFailed"), description: String(e), variant: "error" });
     } finally {
       setSaving(false);
     }

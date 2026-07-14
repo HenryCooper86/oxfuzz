@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { FileCode, ListChecks, Repeat, Crosshair as TargetIcon } from "lucide-react";
 import { getTransport } from "../../lib";
+import { useI18n } from "../../i18n";
 import { usePipeline } from "../../providers/PipelineContext";
 import { useProject } from "../../providers/ProjectContext";
 import { useTarget } from "../../providers/TargetContext";
@@ -20,6 +21,7 @@ interface ArtifactSummary {
 }
 
 export function InfoPanel() {
+  const { t } = useI18n();
   const { coreStages } = usePipeline();
   const { activeProject } = useProject();
   const { target, engine } = useTarget();
@@ -32,7 +34,7 @@ export function InfoPanel() {
     skipped: s.skipped,
   }));
 
-  const currentLabel = coreStages.find((s) => s.current)?.label ?? "All stages complete";
+  const currentLabel = coreStages.find((s) => s.current)?.label ?? t("info.allStagesComplete");
   const activeTarget = lastTarget || target;
   const activeEngine = lastEngine || engine;
 
@@ -62,29 +64,29 @@ export function InfoPanel() {
     <div className="flex flex-col h-full" style={{ background: "var(--surface-secondary)" }}>
       <div className="flex items-center gap-2 p-2 border-b border-border">
         <TargetIcon size={14} style={{ color: "var(--accent)" }} />
-        <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>Campaign Info</span>
+        <span className="text-xs font-semibold uppercase text-text-muted" style={{ letterSpacing: "0.08em" }}>{t("info.campaignInfo")}</span>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-3">
         {/* Generated Artifacts -- live counts for the active target */}
         <div>
           <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            <FileCode size={11} /> Artifacts
+            <FileCode size={11} /> {t("info.artifacts")}
           </div>
           {artifacts ? (
             <div className="surface-card p-2 flex flex-col gap-1">
               <div className="flex justify-between text-xs">
-                <span className="text-text-muted">Harness</span>
+                <span className="text-text-muted">{t("info.harness")}</span>
                 <span style={{ color: artifacts.harness_built ? "var(--success)" : "var(--text-muted)" }}>
-                  {artifacts.harness_built ? "compiled" : "not built"}
+                  {artifacts.harness_built ? t("info.compiled") : t("info.notBuilt")}
                 </span>
               </div>
               <div className="flex justify-between text-xs">
-                <span className="text-text-muted">Corpus inputs</span>
+                <span className="text-text-muted">{t("info.corpusInputs")}</span>
                 <span className="text-text-primary">{artifacts.corpus_count}</span>
               </div>
               <div className="flex justify-between text-xs">
-                <span className="text-text-muted">Crash inputs</span>
+                <span className="text-text-muted">{t("info.crashInputs")}</span>
                 <span style={{ color: artifacts.crash_count > 0 ? "var(--error)" : "var(--text-primary)" }}>
                   {artifacts.crash_count}
                 </span>
@@ -92,7 +94,7 @@ export function InfoPanel() {
             </div>
           ) : (
             <div className="text-xs text-text-muted py-1">
-              Pick a project and target to see artifacts.
+              {t("info.pickProject")}
             </div>
           )}
         </div>
@@ -100,7 +102,7 @@ export function InfoPanel() {
         {/* Campaign Plan */}
         <div>
           <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            <ListChecks size={11} /> Campaign Plan
+            <ListChecks size={11} /> {t("info.campaignPlan")}
           </div>
           {planSteps.map((s, i) => (
             <div key={i} className="flex items-center gap-2 py-1 text-xs">
@@ -119,7 +121,7 @@ export function InfoPanel() {
               <span style={{ color: s.done ? "var(--text-primary)" : "var(--text-muted)", textDecoration: s.done && !s.skipped ? "line-through" : "none" }}>
                 {s.label}
               </span>
-              {s.skipped && <span className="text-text-muted" style={{ fontSize: "10px" }}>(skipped)</span>}
+              {s.skipped && <span className="text-text-muted" style={{ fontSize: "10px" }}>{t("info.skipped")}</span>}
             </div>
           ))}
         </div>
@@ -127,19 +129,19 @@ export function InfoPanel() {
         {/* Iteration Loop */}
         <div>
           <div className="text-xs text-text-muted uppercase mb-1 flex items-center gap-1" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
-            <Repeat size={11} /> Iteration Loop
+            <Repeat size={11} /> {t("info.iterationLoop")}
           </div>
           <div className="surface-card p-2 text-xs">
             <div className="flex justify-between mb-1">
-              <span className="text-text-muted">Phase:</span>
-              <span className="text-accent">{running ? "Run fuzzer" : currentLabel}</span>
+              <span className="text-text-muted">{t("info.phase")}</span>
+              <span className="text-accent">{running ? t("stage.run") : currentLabel}</span>
             </div>
             <div className="flex justify-between mb-1">
-              <span className="text-text-muted">Engine:</span>
+              <span className="text-text-muted">{t("info.engine")}</span>
               <span className="text-text-primary font-mono">{activeEngine || "—"}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-text-muted">Target:</span>
+              <span className="text-text-muted">{t("info.target")}</span>
               <span className="text-text-primary font-mono">{activeTarget || "—"}</span>
             </div>
           </div>

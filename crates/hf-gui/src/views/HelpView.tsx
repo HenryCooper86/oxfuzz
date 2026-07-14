@@ -6,7 +6,9 @@ import { Button, ViewHeader } from "../components/ui";
 import { Mermaid } from "../components/Mermaid";
 import { codeInfo } from "../components/ReportPreview";
 import { openExternal } from "../lib";
+import { useI18n } from "../i18n";
 import { HELP_GROUPS, HELP_SECTIONS, type HelpSection } from "./help/helpContent";
+import { HELP_GROUPS_ZH, HELP_SECTIONS_ZH } from "./help/helpContent.zh";
 
 const REPO_URL = "https://github.com/hobot/hobot_fuzz";
 const GUIDE_URL = "https://github.com/hobot/hobot_fuzz/blob/main/docs/guides/GETTING_STARTED.md";
@@ -28,12 +30,17 @@ function matches(section: HelpSection, query: string): boolean {
  * report preview, so it needs no backend and works in both desktop and web modes.
  */
 export function HelpView() {
+  const { locale } = useI18n();
+  const zh = locale === "zh";
+  const L = (en: string, cn: string) => (zh ? cn : en);
+  const sections = zh ? HELP_SECTIONS_ZH : HELP_SECTIONS;
+  const groupDefs = zh ? HELP_GROUPS_ZH : HELP_GROUPS;
   const [query, setQuery] = useState("");
-  const [activeId, setActiveId] = useState<string>(HELP_SECTIONS[0].id);
+  const [activeId, setActiveId] = useState<string>(sections[0].id);
 
   const visible = useMemo(
-    () => HELP_SECTIONS.filter((s) => matches(s, query)),
-    [query],
+    () => sections.filter((s) => matches(s, query)),
+    [sections, query],
   );
 
   // Keep a valid selection: if the search hides the active section, fall back to
@@ -41,7 +48,7 @@ export function HelpView() {
   const active =
     visible.find((s) => s.id === activeId) ?? visible[0] ?? null;
 
-  const groups = HELP_GROUPS.map((g) => ({
+  const groups = groupDefs.map((g) => ({
     ...g,
     sections: visible.filter((s) => s.group === g.id),
   })).filter((g) => g.sections.length > 0);
@@ -50,14 +57,17 @@ export function HelpView() {
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <ViewHeader
-          title="Help & Documentation"
-          description="How to use the hobot_fuzz desktop app, screen by screen. Everything here works offline."
+          title={L("Help & Documentation", "帮助与文档")}
+          description={L(
+            "How to use the hobot_fuzz desktop app, screen by screen. Everything here works offline.",
+            "如何逐屏使用 hobot_fuzz 桌面应用。此处内容均可离线查看。",
+          )}
         />
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void openExternal(GUIDE_URL)} title="Open the getting-started guide">
-            <LifeBuoy size={14} /> Getting Started
+          <Button variant="outline" size="sm" onClick={() => void openExternal(GUIDE_URL)} title={L("Open the getting-started guide", "打开入门指南")}>
+            <LifeBuoy size={14} /> {L("Getting Started", "入门")}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void openExternal(REPO_URL)} title="Open the GitHub repository">
+          <Button variant="outline" size="sm" onClick={() => void openExternal(REPO_URL)} title={L("Open the GitHub repository", "打开 GitHub 仓库")}>
             <Github size={14} /> GitHub
           </Button>
         </div>
@@ -68,22 +78,22 @@ export function HelpView() {
         <nav
           className="surface-card flex flex-col gap-2 shrink-0"
           style={{ width: 260, padding: "var(--space-md)", position: "sticky", top: 0, maxHeight: "calc(100vh - 160px)", overflow: "auto" }}
-          aria-label="Documentation sections"
+          aria-label={L("Documentation sections", "文档章节")}
         >
           <div className="flex items-center gap-2 rounded-md" style={{ padding: "6px 8px", background: "var(--surface-secondary)", border: "1px solid var(--border)" }}>
             <Search size={14} className="text-text-muted shrink-0" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search the docs..."
+              placeholder={L("Search the docs...", "搜索文档…")}
               className="flex-1 bg-transparent outline-none text-sm text-text-primary min-w-0"
               style={{ border: "none" }}
-              aria-label="Search documentation"
+              aria-label={L("Search documentation", "搜索文档")}
             />
           </div>
 
           {groups.length === 0 ? (
-            <p className="text-xs text-text-muted" style={{ padding: "8px 4px" }}>No topics match "{query}".</p>
+            <p className="text-xs text-text-muted" style={{ padding: "8px 4px" }}>{L(`No topics match "${query}".`, `没有匹配“${query}”的主题。`)}</p>
           ) : (
             groups.map((group) => (
               <div key={group.id} className="flex flex-col gap-0.5">
@@ -136,19 +146,19 @@ export function HelpView() {
               {active.body}
             </ReactMarkdown>
           ) : (
-            <p className="text-sm text-text-muted">Select a topic to read it here.</p>
+            <p className="text-sm text-text-muted">{L("Select a topic to read it here.", "选择一个主题以在此阅读。")}</p>
           )}
           <div className="flex items-center gap-3 mt-6 pt-4" style={{ borderTop: "1px solid var(--border)" }}>
             <BookOpen size={14} className="text-text-muted" />
             <span className="text-xs text-text-muted">
-              Looking for the deep-dive design docs? See the{" "}
+              {L("Looking for the deep-dive design docs? See the ", "想查看深入的设计文档？请访问")}
               <button
                 onClick={() => void openExternal(REPO_URL)}
                 style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer" }}
               >
-                project repository
+                {L("project repository", "项目仓库")}
               </button>
-              .
+              {L(".", "。")}
             </span>
           </div>
         </section>

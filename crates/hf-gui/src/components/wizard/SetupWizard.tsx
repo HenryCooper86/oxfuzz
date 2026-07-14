@@ -10,6 +10,7 @@ import { Badge } from "../ui/Badge";
 import { Separator } from "../ui/Separator";
 import { useToast } from "../ui/Toast";
 import { getTransport } from "../../lib";
+import { useI18n } from "../../i18n";
 import { normalizeProvider, type Provider } from "../settings/providerTypes";
 
 type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
@@ -38,6 +39,7 @@ const STEPS: { id: Step; label: string; icon: ReactNode }[] = [
 ];
 
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
+  const { t } = useI18n();
   const { toast } = useToast();
   const [step, setStep] = useState<Step>("welcome");
   const [saving, setSaving] = useState(false);
@@ -96,8 +98,8 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         }));
       } catch (e) {
         toast({
-          title: "Saved provider, but sandbox/guardrails settings did not persist",
-          description: `${e} -- adjust them later under Settings.`,
+          title: t("wizard.partialSaveTitle"),
+          description: t("wizard.partialSaveDesc", { error: String(e) }),
           variant: "error",
         });
       }
@@ -107,7 +109,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       localStorage.setItem("hf_setup_completed", "true");
       onComplete();
     } catch (e) {
-      toast({ title: "Setup save failed", description: String(e), variant: "error" });
+      toast({ title: t("wizard.saveFailed"), description: String(e), variant: "error" });
       setSaving(false);
     }
   }
@@ -132,8 +134,8 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
             <Crosshair size={20} style={{ color: "var(--accent)" }} />
           </div>
           <div>
-            <h1 className="text-base font-semibold">hobot_fuzz Setup</h1>
-            <p className="text-xs text-text-secondary">Configure your AI fuzzing agent</p>
+            <h1 className="text-base font-semibold">{t("wizard.title")}</h1>
+            <p className="text-xs text-text-secondary">{t("wizard.subtitle")}</p>
           </div>
         </div>
 
@@ -165,63 +167,62 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         <div className="flex-1 overflow-y-auto">
           {step === "welcome" && (
             <div className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold">Welcome to hobot_fuzz</h2>
+              <h2 className="text-sm font-semibold">{t("welcome.title")}</h2>
               <p className="text-xs text-text-secondary leading-relaxed">
-                hobot_fuzz is an AI fuzzing agent that discovers targets, writes harnesses, and drives
-                fuzzing engines (AFL++, honggfuzz, libFuzzer) in a sandboxed environment.
+                {t("wizard.welcomeP1")}
               </p>
               <p className="text-xs text-text-secondary leading-relaxed">
-                This wizard will guide you through 4 configuration steps to get started safely.
+                {t("wizard.welcomeP2")}
               </p>
               <Separator />
               <div className="flex flex-col gap-1 text-xs text-text-muted">
-                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> Discover fuzzing targets in C/C++ projects</span>
-                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> Generate and compile harnesses in a sandbox</span>
-                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> Run AFL++, honggfuzz, or libFuzzer</span>
-                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> Triage crashes and draft bug reports</span>
+                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> {t("wizard.feat1")}</span>
+                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> {t("wizard.feat2")}</span>
+                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> {t("wizard.feat3")}</span>
+                <span className="flex items-center gap-2"><Crosshair size={12} style={{ color: "var(--accent)" }} /> {t("wizard.feat4")}</span>
               </div>
             </div>
           )}
 
           {step === "providers" && (
             <div className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold">LLM Provider</h2>
-              <p className="text-xs text-text-secondary">Configure the LLM backend for harness generation and crash triage.</p>
+              <h2 className="text-sm font-semibold">{t("wizard.providerTitle")}</h2>
+              <p className="text-xs text-text-secondary">{t("wizard.providerDesc")}</p>
               <div className="flex flex-col gap-2">
                 <div>
-                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>API Key</label>
+                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("wizard.apiKey")}</label>
                   <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." />
                 </div>
                 <div>
-                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Model</label>
+                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("wizard.model")}</label>
                   <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="gpt-4o" mono />
                 </div>
                 <div>
-                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>Base URL</label>
+                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("wizard.baseUrl")}</label>
                   <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" mono />
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant="warning">Required</Badge>
-                <span className="text-xs text-text-muted">An LLM provider is needed for harness generation.</span>
+                <Badge variant="warning">{t("wizard.required")}</Badge>
+                <span className="text-xs text-text-muted">{t("wizard.providerRequired")}</span>
               </div>
             </div>
           )}
 
           {step === "runtime" && (
             <div className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold">Sandbox Configuration</h2>
-              <p className="text-xs text-text-secondary">All harness builds and fuzz runs execute in a Docker sandbox for safety.</p>
+              <h2 className="text-sm font-semibold">{t("wizard.sandboxTitle")}</h2>
+              <p className="text-xs text-text-secondary">{t("wizard.sandboxDesc")}</p>
               <div className="flex items-center justify-between p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
                 <div>
-                  <span className="text-xs text-text-primary">Use Docker sandbox</span>
-                  <p className="text-xs text-text-muted mt-0.5">Recommended: isolates untrusted harness execution.</p>
+                  <span className="text-xs text-text-primary">{t("wizard.useDocker")}</span>
+                  <p className="text-xs text-text-muted mt-0.5">{t("wizard.useDockerDesc")}</p>
                 </div>
                 <Switch checked={useDocker} onChange={setUseDocker} />
               </div>
               {useDocker && (
                 <div className="text-xs text-text-muted p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
-                  Build the sandbox image with: <code style={{ color: "var(--accent)" }}>./scripts/build-sandbox.sh</code>
+                  {t("wizard.buildImage")} <code style={{ color: "var(--accent)" }}>./scripts/build-sandbox.sh</code>
                 </div>
               )}
             </div>
@@ -229,19 +230,19 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
 
           {step === "guardrails" && (
             <div className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold">Safety Guardrails</h2>
-              <p className="text-xs text-text-secondary">Human-in-the-loop approval gates for safety-first fuzzing.</p>
+              <h2 className="text-sm font-semibold">{t("wizard.guardrailsTitle")}</h2>
+              <p className="text-xs text-text-secondary">{t("wizard.guardrailsDesc")}</p>
               <div className="flex items-center justify-between p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
                 <div>
-                  <span className="text-xs text-text-primary">Approve harness compilation</span>
-                  <p className="text-xs text-text-muted mt-0.5">Review generated harness source before compiling.</p>
+                  <span className="text-xs text-text-primary">{t("wizard.approveHarness")}</span>
+                  <p className="text-xs text-text-muted mt-0.5">{t("wizard.approveHarnessDesc")}</p>
                 </div>
                 <Switch checked={requireHarnessApproval} onChange={setRequireHarnessApproval} />
               </div>
               <div className="flex items-center justify-between p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
                 <div>
-                  <span className="text-xs text-text-primary">Approve fuzzer execution</span>
-                  <p className="text-xs text-text-muted mt-0.5">Confirm before starting a fuzz run.</p>
+                  <span className="text-xs text-text-primary">{t("wizard.approveRun")}</span>
+                  <p className="text-xs text-text-muted mt-0.5">{t("wizard.approveRunDesc")}</p>
                 </div>
                 <Switch checked={requireRunApproval} onChange={setRequireRunApproval} />
               </div>
@@ -250,12 +251,12 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
 
           {step === "storage" && (
             <div className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold">Storage</h2>
-              <p className="text-xs text-text-secondary">Where to store run data, corpora, and crash artifacts.</p>
+              <h2 className="text-sm font-semibold">{t("wizard.storageTitle")}</h2>
+              <p className="text-xs text-text-secondary">{t("wizard.storageDesc")}</p>
               <div className="text-xs text-text-muted p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
-                <div className="flex justify-between mb-1"><span>Database:</span><code style={{ color: "var(--accent)" }}>data/hobot_fuzz.db</code></div>
-                <div className="flex justify-between mb-1"><span>Transcripts:</span><code style={{ color: "var(--accent)" }}>data/transcripts/</code></div>
-                <div className="flex justify-between"><span>Workspace:</span><code style={{ color: "var(--accent)" }}>/tmp/hobot_fuzz_workspace/</code></div>
+                <div className="flex justify-between mb-1"><span>{t("wizard.dbLabel")}</span><code style={{ color: "var(--accent)" }}>data/hobot_fuzz.db</code></div>
+                <div className="flex justify-between mb-1"><span>{t("wizard.transcriptsLabel")}</span><code style={{ color: "var(--accent)" }}>data/transcripts/</code></div>
+                <div className="flex justify-between"><span>{t("wizard.workspaceLabel")}</span><code style={{ color: "var(--accent)" }}>/tmp/hobot_fuzz_workspace/</code></div>
               </div>
             </div>
           )}
@@ -265,9 +266,9 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
               <div className="flex items-center justify-center rounded-full" style={{ width: "56px", height: "56px", background: "rgba(111,207,151,0.15)", border: "1px solid var(--success)" }}>
                 <CheckCircle2 size={28} style={{ color: "var(--success)" }} />
               </div>
-              <h2 className="text-sm font-semibold">Setup Complete!</h2>
+              <h2 className="text-sm font-semibold">{t("wizard.completeTitle")}</h2>
               <p className="text-xs text-text-secondary max-w-xs">
-                hobot_fuzz is ready. Start by discovering targets in a project, or ask the AI assistant for help.
+                {t("wizard.completeDesc")}
               </p>
             </div>
           )}
@@ -277,19 +278,19 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         <Separator />
         <div className="flex items-center justify-between pt-3">
           <Button variant="ghost" size="sm" onClick={prev} disabled={stepIdx === 0}>
-            <ArrowLeft size={14} /> Back
+            <ArrowLeft size={14} /> {t("common.back")}
           </Button>
           <div className="flex gap-2">
             {stepIdx < STEPS.length - 1 && step !== "welcome" && (
-              <Button variant="ghost" size="sm" onClick={onComplete}>Skip</Button>
+              <Button variant="ghost" size="sm" onClick={onComplete}>{t("wizard.skip")}</Button>
             )}
             {stepIdx < STEPS.length - 1 ? (
               <Button variant="primary" size="sm" onClick={next}>
-                Next <ArrowRight size={14} />
+                {t("common.next")} <ArrowRight size={14} />
               </Button>
             ) : (
               <Button variant="primary" size="sm" onClick={finish} disabled={saving}>
-                {saving ? "Saving…" : "Get Started"} <CheckCircle2 size={14} />
+                {saving ? t("wizard.saving") : t("wizard.getStarted")} <CheckCircle2 size={14} />
               </Button>
             )}
           </div>

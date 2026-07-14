@@ -6,11 +6,13 @@ import { Input } from "../ui/Input";
 import { Badge } from "../ui/Badge";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { Shield, ShieldAlert, ShieldCheck } from "lucide-react";
+import { useI18n } from "../../i18n";
 
 type PermissionMode = "strict" | "auto" | "manual";
 type Cfg = Record<string, unknown>;
 
 export function GuardrailsTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const mode = ((value.permission_mode as string) ?? "strict") as PermissionMode;
   const hitlThreshold = (value.hitl_threshold as number) ?? 0.6;
   const maxIdenticalCalls = (value.max_identical_calls as number) ?? 3;
@@ -32,13 +34,13 @@ export function GuardrailsTab({ value, onChange }: { value: Cfg; onChange: (next
 
   return (
     <div>
-      <SettingsGroup title="Permission Mode" description="Human-in-the-loop approval policy for safety-first fuzzing. Generated harnesses are untrusted code and require approval before execution.">
+      <SettingsGroup title={t("settings.guardrails.permissionMode")} description={t("settings.guardrails.permissionModeDesc")}>
         <div style={{ padding: "10px 14px" }}>
         <div className="flex gap-2">
           {([
-            { id: "strict", label: "Strict (recommended)", icon: Shield, desc: "HITL on all high-risk actions" },
-            { id: "auto", label: "Auto", icon: ShieldCheck, desc: "No HITL -- automated fuzzing" },
-            { id: "manual", label: "Manual", icon: ShieldAlert, desc: "HITL on every action" },
+            { id: "strict", label: t("settings.guardrails.strict"), icon: Shield, desc: t("settings.guardrails.strictDesc") },
+            { id: "auto", label: t("settings.guardrails.auto"), icon: ShieldCheck, desc: t("settings.guardrails.autoDesc") },
+            { id: "manual", label: t("settings.guardrails.manual"), icon: ShieldAlert, desc: t("settings.guardrails.manualDesc") },
           ] as const).map((m) => (
             <button
               key={m.id}
@@ -61,40 +63,40 @@ export function GuardrailsTab({ value, onChange }: { value: Cfg; onChange: (next
         </div>
       </SettingsGroup>
 
-      <SettingsGroup title="HITL Approval Gates">
-        <SettingsItem title="Harness compilation" description="Require approval before compiling a generated harness in the sandbox.">
+      <SettingsGroup title={t("settings.guardrails.approvalGates")}>
+        <SettingsItem title={t("settings.guardrails.harnessGate")} description={t("settings.guardrails.harnessGateDesc")}>
           <Switch checked={requireHarnessApproval} onChange={(v) => patchGates({ harness: v })} />
         </SettingsItem>
-        <SettingsItem title="Fuzzer execution" description="Require approval before starting a fuzz run.">
+        <SettingsItem title={t("settings.guardrails.runGate")} description={t("settings.guardrails.runGateDesc")}>
           <Switch checked={requireRunApproval} onChange={(v) => patchGates({ run: v })} />
         </SettingsItem>
-        <SettingsItem title="Bug report publication" description="Require approval before publishing a drafted bug report.">
+        <SettingsItem title={t("settings.guardrails.bugReportGate")} description={t("settings.guardrails.bugReportGateDesc")}>
           <Switch checked={requireBugReportApproval} onChange={(v) => patchGates({ bug_report: v })} />
         </SettingsItem>
       </SettingsGroup>
 
-      <SettingsGroup title="Risk Scoring">
-        <SettingsItem title="HITL Threshold">
+      <SettingsGroup title={t("settings.guardrails.riskScoring")}>
+        <SettingsItem title={t("settings.guardrails.hitlThreshold")}>
           <div style={{ width: 120 }}>
             <Input type="number" step="0.1" min="0" max="1" value={hitlThreshold} onChange={(e) => patch({ hitl_threshold: parseFloat(e.target.value) || 0.6 })} />
           </div>
         </SettingsItem>
         <div className="settings-item" style={{ padding: "10px 14px" }}>
           <div className="flex gap-2 items-center flex-wrap">
-            <Badge variant="success">Low risk</Badge>
-            <Badge variant="warning">Medium risk</Badge>
-            <Badge variant="error">High risk</Badge>
-            <span className="text-xs text-text-muted">Actions scoring above {hitlThreshold} require HITL approval.</span>
+            <Badge variant="success">{t("settings.guardrails.lowRisk")}</Badge>
+            <Badge variant="warning">{t("settings.guardrails.mediumRisk")}</Badge>
+            <Badge variant="error">{t("settings.guardrails.highRisk")}</Badge>
+            <span className="text-xs text-text-muted">{t("settings.guardrails.thresholdNote", { threshold: hitlThreshold })}</span>
           </div>
         </div>
       </SettingsGroup>
 
-      <SettingsGroup title="Loop Detection">
-        <SettingsItem title="Enable loop detection" description="Detect and block repeated identical tool calls to prevent infinite loops.">
+      <SettingsGroup title={t("settings.guardrails.loopDetection")}>
+        <SettingsItem title={t("settings.guardrails.enableLoopDetection")} description={t("settings.guardrails.enableLoopDetectionDesc")}>
           <Switch checked={loopDetection} onChange={(v) => patch({ max_identical_calls: v ? 3 : 0 })} />
         </SettingsItem>
         {loopDetection && (
-          <SettingsItem title="Max identical calls">
+          <SettingsItem title={t("settings.guardrails.maxIdenticalCalls")}>
             <div style={{ width: 120 }}>
               <Input type="number" value={maxIdenticalCalls} onChange={(e) => patch({ max_identical_calls: parseInt(e.target.value) || 3 })} />
             </div>

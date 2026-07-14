@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
+import { useI18n } from "../../i18n";
 
 // The shared "this failed to load" placeholder -- the error-colored sibling of
 // EmptyState/LoadingState, so failures look the same everywhere (an error
 // circle, a title, the message, and an optional retry action) instead of each
 // view hand-rolling its own error card.
 export function ErrorState({
-  title = "Something went wrong",
+  title,
   message,
   action,
 }: {
@@ -14,6 +15,8 @@ export function ErrorState({
   message: string;
   action?: ReactNode;
 }) {
+  const { t } = useI18n();
+  const heading = title ?? t("ui.errorTitle");
   return (
     <div
       className="surface-card flex flex-col items-center justify-center text-center"
@@ -31,7 +34,7 @@ export function ErrorState({
       >
         <AlertTriangle size={20} />
       </div>
-      <p className="text-sm font-medium text-text-primary mb-1">{title}</p>
+      <p className="text-sm font-medium text-text-primary mb-1">{heading}</p>
       <p
         className="text-xs text-text-muted max-w-sm font-mono"
         style={{ lineHeight: 1.5, wordBreak: "break-word" }}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { getTransport } from "../lib";
 import type { SystemStatus } from "../types";
+import { useI18n } from "../i18n";
 
 // A persistent, actionable banner shown in the Docker-dependent views (Harness,
 // Run) when the sandbox can't execute -- so a first-run user learns *why* a
@@ -9,6 +10,7 @@ import type { SystemStatus } from "../types";
 // harness build and fuzz run goes through the sandbox (AGENTS.md 2.12), so with
 // Docker down or the image missing nothing can proceed.
 export function SandboxBanner() {
+  const { t } = useI18n();
   const [status, setStatus] = useState<SystemStatus | null>(null);
 
   useEffect(() => {
@@ -32,10 +34,8 @@ export function SandboxBanner() {
   if (!status || (status.docker && status.sandbox_image)) return null;
 
   const dockerDown = !status.docker;
-  const title = dockerDown ? "Docker isn't running" : "Fuzzing sandbox image not built";
-  const detail = dockerDown
-    ? "Every harness build and fuzz run executes inside the Docker sandbox. Start Docker Desktop (or your Docker daemon), then retry."
-    : "The sandbox image is missing. Build it with ./rebuild-sandbox-image.command (the desktop build script builds it too), then retry.";
+  const title = dockerDown ? t("sandbox.dockerDownTitle") : t("sandbox.imageMissingTitle");
+  const detail = dockerDown ? t("sandbox.dockerDownDetail") : t("sandbox.imageMissingDetail");
 
   return (
     <div

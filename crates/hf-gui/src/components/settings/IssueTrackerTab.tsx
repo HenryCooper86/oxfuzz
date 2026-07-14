@@ -8,12 +8,14 @@
 import { useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { getTransport, openExternal } from "../../lib";
+import { useI18n } from "../../i18n";
 import { Button } from "../ui/Button";
 import { ObjectForm } from "./ObjectForm";
 
 type Cfg = Record<string, unknown>;
 
 export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+  const { t } = useI18n();
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -22,7 +24,7 @@ export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (ne
   const host = typeof value.host === "string" ? value.host.trim() : "";
   const configured = (provider === "github" || provider === "gitlab") && repo.length > 0;
 
-  const providerLabel = provider === "github" ? "GitHub" : provider === "gitlab" ? "GitLab" : "the tracker";
+  const providerLabel = provider === "github" ? "GitHub" : provider === "gitlab" ? "GitLab" : t("settings.issuetracker.theTracker");
   const defaultHost = provider === "github" ? "https://github.com" : "https://gitlab.com";
   const repoUrl = configured ? `${(host || defaultHost).replace(/\/$/, "")}/${repo.replace(/^\/|\/$/g, "")}` : "";
 
@@ -31,7 +33,7 @@ export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (ne
     setResult(null);
     try {
       await getTransport().invoke("issue_tracker_test_connection");
-      setResult({ ok: true, msg: `Authenticated with ${providerLabel} successfully.` });
+      setResult({ ok: true, msg: t("settings.issuetracker.authenticated", { provider: providerLabel }) });
     } catch (e) {
       setResult({ ok: false, msg: String(e) });
     } finally {
@@ -43,20 +45,16 @@ export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (ne
     <div className="flex flex-col gap-4">
       <div className="text-text-secondary" style={{ fontSize: "13px", lineHeight: 1.6 }}>
         <p>
-          File triaged crashes as issues in the <strong>fuzzed project's</strong> repository. Choose
-          a <code>provider</code> (<code>github</code> or <code>gitlab</code>) and set{" "}
-          <code>repo</code> to the target — GitHub <code>owner/repo</code> or GitLab{" "}
-          <code>group/project</code>. Leave <code>host</code> blank for the public site, or set it for
-          GitHub Enterprise / self-hosted GitLab.
+          {t("settings.issuetracker.p1a")}<strong>{t("settings.issuetracker.fuzzedProject")}</strong>{t("settings.issuetracker.p1b")}
+          <code>provider</code>{t("settings.issuetracker.p1c")}<code>github</code>{t("settings.issuetracker.p1d")}<code>gitlab</code>{t("settings.issuetracker.p1e")}
+          <code>repo</code>{t("settings.issuetracker.p1f")}<code>owner/repo</code>{t("settings.issuetracker.p1g")}
+          <code>group/project</code>{t("settings.issuetracker.p1h")}<code>host</code>{t("settings.issuetracker.p1i")}
         </p>
         <p style={{ marginTop: 8 }}>
-          Auth is a <strong>Personal Access Token</strong> — paste it into <code>api_token</code>{" "}
-          (stored with your desktop settings, like a provider key) or set <code>api_token_env</code>{" "}
-          to the NAME of an environment variable holding it (preferred for CLI/CI). It needs the{" "}
-          <code>repo</code> / Issues:write scope on GitHub, or the <code>api</code> scope on GitLab.
-          There is no password field: GitHub and GitLab authenticate the API with tokens, and{" "}
-          <code>username</code> is for attribution only. With a token, crashes are filed directly and
-          you are linked to the issue; without one, a prefilled new-issue page opens in your browser.
+          {t("settings.issuetracker.p2a")}<strong>{t("settings.issuetracker.pat")}</strong>{t("settings.issuetracker.p2b")}<code>api_token</code>
+          {t("settings.issuetracker.p2c")}<code>api_token_env</code>
+          {t("settings.issuetracker.p2d")}<code>repo</code>{t("settings.issuetracker.p2e")}<code>api</code>{t("settings.issuetracker.p2f")}
+          <code>username</code>{t("settings.issuetracker.p2g")}
         </p>
       </div>
 
@@ -70,17 +68,17 @@ export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (ne
           loading={testing}
           disabled={testing}
         >
-          Test connection
+          {t("settings.testConnection")}
         </Button>
         <Button
           variant="ghost"
           size="sm"
           onClick={() => void openExternal(repoUrl)}
           disabled={!configured}
-          title={configured ? "Open the target repository in your browser" : "Set provider + repo first"}
+          title={configured ? t("settings.issuetracker.openRepoTitle") : t("settings.issuetracker.setProviderFirst")}
         >
           <ExternalLink size={14} />
-          Open repository
+          {t("settings.issuetracker.openRepo")}
         </Button>
         {result && (
           <span
@@ -95,7 +93,7 @@ export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (ne
         )}
       </div>
       <p className="text-text-muted" style={{ fontSize: "11px" }}>
-        Test uses the last <strong>saved</strong> settings -- save your changes first.
+        {t("settings.testNotePre")}<strong>{t("settings.testSaved")}</strong>{t("settings.testNotePost")}
       </p>
     </div>
   );
