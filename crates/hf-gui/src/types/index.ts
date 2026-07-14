@@ -200,12 +200,20 @@ export interface CrashReviewItem {
   has_bug_report: boolean;
 }
 
+/** A localizable readiness/next-action note: a stable code plus a count. */
+export interface ReadinessNote {
+  code: string;
+  count: number;
+}
+
 export interface WorkbenchReadiness {
   state: string;
   score: number;
   headline: string;
   detail: string;
   blockers: string[];
+  /** Localizable form of `blockers`, parallel to it (same order and length). */
+  blocker_items: ReadinessNote[];
 }
 
 export interface WorkbenchDashboard {
@@ -218,6 +226,8 @@ export interface WorkbenchDashboard {
   crash_reviews: CrashReviewItem[];
   readiness: WorkbenchReadiness;
   next_actions: string[];
+  /** Localizable form of `next_actions`, parallel to it (same order/length). */
+  next_action_items: ReadinessNote[];
 }
 
 export interface IssueExport {
