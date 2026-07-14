@@ -34,6 +34,17 @@ pub struct WorkbenchTotals {
     pub corpus_entries: usize,
 }
 
+/// A structured readiness / next-action note: a stable `code` (for localizing
+/// in presentation layers) plus an optional `count`. The English prose in
+/// `WorkbenchReadiness.blockers` and `WorkbenchDashboard.next_actions` stays
+/// authoritative for non-localized consumers (CLI, REST); the notes let the GUI
+/// translate the same message without string-matching English.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadinessNote {
+    pub code: String,
+    pub count: usize,
+}
+
 /// Service-owned readiness summary for the current workbench scope.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkbenchReadiness {
@@ -42,6 +53,9 @@ pub struct WorkbenchReadiness {
     pub headline: String,
     pub detail: String,
     pub blockers: Vec<String>,
+    /// Localizable form of `blockers`, parallel to it (same order and length):
+    /// each entry pairs a stable `code` with an optional `count`.
+    pub blocker_items: Vec<ReadinessNote>,
 }
 
 /// One recent fuzz run row for the dashboard.
@@ -111,6 +125,9 @@ pub struct WorkbenchDashboard {
     pub crash_reviews: Vec<CrashReviewItem>,
     pub readiness: WorkbenchReadiness,
     pub next_actions: Vec<String>,
+    /// Localizable form of `next_actions`, parallel to it (same order and
+    /// length): each entry pairs a stable `code` with an optional `count`.
+    pub next_action_items: Vec<ReadinessNote>,
 }
 
 /// A human-reviewable issue draft for one crash, targeting the configured
@@ -146,6 +163,7 @@ pub async fn dashboard(
             project_filter,
             active_target,
             "Initialize persistence to start tracking team fuzzing work.",
+            "init_persistence",
         );
     };
 
@@ -159,6 +177,7 @@ pub async fn dashboard(
             None,
             active_target,
             "Select a project to view its fuzzing workbench.",
+            "select_project",
         );
     }
 
@@ -282,6 +301,7 @@ pub async fn dashboard(
         .map(target_view)
         .collect();
     let next_actions = next_actions(&totals);
+    let next_action_items = next_action_notes(&totals);
 
     WorkbenchDashboard {
         active_project: project_filter,
@@ -293,6 +313,7 @@ pub async fn dashboard(
         crash_reviews,
         readiness,
         next_actions,
+        next_action_items,
     }
 }
 
@@ -427,6 +448,7 @@ fn empty_dashboard(
     active_project: Option<String>,
     active_target: Option<&str>,
     next_action: &str,
+    next_action_code: &str,
 ) -> WorkbenchDashboard {
     WorkbenchDashboard {
         active_project,
@@ -438,6 +460,10 @@ fn empty_dashboard(
         crash_reviews: Vec::new(),
         readiness: readiness_summary(&WorkbenchTotals::default(), false),
         next_actions: vec![next_action.to_owned()],
+        next_action_items: vec![ReadinessNote {
+            code: next_action_code.to_owned(),
+            count: 0,
+        }],
     }
 }
 
@@ -597,24 +623,76 @@ fn next_actions(totals: &WorkbenchTotals) -> Vec<String> {
     actions
 }
 
+/// Localizable form of [`next_actions`], kept parallel to it (same conditions,
+/// order, and length) so presentation layers can translate each line.
+fn next_action_notes(totals: &WorkbenchTotals) -> Vec<ReadinessNote> {
+    let mut items = Vec::new();
+    if totals.targets == 0 {
+        items.push(ReadinessNote {
+            code: "run_discovery".to_owned(),
+            count: 0,
+        });
+    }
+    if totals.harnesses_needing_review > 0 {
+        items.push(ReadinessNote {
+            code: "review_harnesses".to_owned(),
+            count: totals.harnesses_needing_review,
+        });
+    }
+    if totals.crashes_needing_triage > 0 {
+        items.push(ReadinessNote {
+            code: "triage_crashes".to_owned(),
+            count: totals.crashes_needing_triage,
+        });
+    }
+    if totals.runs == 0 && totals.targets > 0 {
+        items.push(ReadinessNote {
+            code: "smoke_campaign".to_owned(),
+            count: 0,
+        });
+    }
+    if items.is_empty() {
+        items.push(ReadinessNote {
+            code: "none".to_owned(),
+            count: 0,
+        });
+    }
+    items
+}
+
 fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> WorkbenchReadiness {
     if !store_configured {
         return WorkbenchReadiness {
-            state: "setup_required".to_owned(),
+            state: "persistence_required".to_owned(),
             score: 0,
             headline: "Persistence setup required".to_owned(),
             detail: "Initialize persistence before tracking targets, harnesses, runs, and crashes."
                 .to_owned(),
             blockers: vec!["Persistence is not initialized.".to_owned()],
+            blocker_items: vec![ReadinessNote {
+                code: "persistence".to_owned(),
+                count: 0,
+            }],
         };
     }
 
+    // `blockers` (English prose) and `blocker_items` (localizable codes) are
+    // built together so they stay parallel: same conditions, order, and length.
     let mut blockers = Vec::new();
+    let mut blocker_items = Vec::new();
     if totals.targets == 0 {
         blockers.push("No fuzzing targets discovered.".to_owned());
+        blocker_items.push(ReadinessNote {
+            code: "no_targets".to_owned(),
+            count: 0,
+        });
     }
     if totals.targets > 0 && totals.harnesses == 0 {
         blockers.push("No generated harnesses exist for discovered targets.".to_owned());
+        blocker_items.push(ReadinessNote {
+            code: "no_harnesses".to_owned(),
+            count: 0,
+        });
     }
     if totals.harnesses_needing_review > 0 {
         blockers.push(format!(
@@ -622,9 +700,17 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
             totals.harnesses_needing_review,
             plural_suffix(totals.harnesses_needing_review),
         ));
+        blocker_items.push(ReadinessNote {
+            code: "harnesses_need_review".to_owned(),
+            count: totals.harnesses_needing_review,
+        });
     }
     if totals.harnesses > 0 && totals.harnesses_needing_review == 0 && totals.runs == 0 {
         blockers.push("No fuzzing campaign history exists yet.".to_owned());
+        blocker_items.push(ReadinessNote {
+            code: "no_runs".to_owned(),
+            count: 0,
+        });
     }
     if totals.crashes_needing_triage > 0 {
         blockers.push(format!(
@@ -632,6 +718,10 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
             totals.crashes_needing_triage,
             plural_suffix(totals.crashes_needing_triage),
         ));
+        blocker_items.push(ReadinessNote {
+            code: "crashes_need_triage".to_owned(),
+            count: totals.crashes_needing_triage,
+        });
     }
 
     let mut score = 10_u16;
@@ -704,6 +794,7 @@ fn readiness_summary(totals: &WorkbenchTotals, store_configured: bool) -> Workbe
         headline: headline.to_owned(),
         detail: detail.to_owned(),
         blockers,
+        blocker_items,
     }
 }
 

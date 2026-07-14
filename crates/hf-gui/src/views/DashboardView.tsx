@@ -30,13 +30,14 @@ import { useConfirm } from "../providers/ConfirmContext";
 import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
 import { useProject } from "../providers/ProjectContext";
 import { useTarget } from "../providers/TargetContext";
-import { useI18n } from "../i18n";
+import { useI18n, type TParams } from "../i18n";
 import type {
   CrashReviewItem,
   CreatedIssue,
   DefectDojoStatus,
   IssueExport,
   HarnessReviewItem,
+  ReadinessNote,
   ReportDraft,
   SystemStatus,
   WorkbenchDashboard,
@@ -45,6 +46,19 @@ import type {
   WorkbenchTarget,
   ViewType,
 } from "../types";
+
+type TFn = (key: string, params?: TParams) => string;
+
+/**
+ * Localize `key`, falling back to `fallback` when the active locale has no entry
+ * for it (t() returns the key itself on a miss). This lets English keep the
+ * backend's authoritative readiness/next-action prose -- including its correct
+ * singular/plural forms -- while Chinese renders from the dictionary by code.
+ */
+function loc(t: TFn, key: string, fallback: string, params?: TParams): string {
+  const out = t(key, params);
+  return out === key ? fallback : out;
+}
 
 // Dashboard-specific surfaces only. Crashes, harnesses, targets, and knowledge
 // each have a canonical standalone view (Artifacts, Harness, Discover,
@@ -103,8 +117,10 @@ function emptyDashboard(project: string | null, target: string | null): Workbenc
       headline: "Discovery needed",
       detail: "Run target discovery before creating harnesses or campaigns.",
       blockers: ["No fuzzing targets discovered."],
+      blocker_items: [{ code: "no_targets", count: 0 }],
     },
     next_actions: ["Run target discovery on an internal project."],
+    next_action_items: [{ code: "run_discovery", count: 0 }],
   };
 }
 
@@ -531,7 +547,7 @@ function OverviewTab({
       <MetricGrid dashboard={dashboard} />
       <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))" }}>
         <section className="flex flex-col gap-4 min-w-0">
-          <NextActions actions={dashboard.next_actions} onReport={onReport} />
+          <NextActions actions={dashboard.next_actions} items={dashboard.next_action_items} onReport={onReport} />
           <HarnessQueue items={dashboard.harness_reviews} onOpen={onNavigate && (() => onNavigate("harness"))} />
           <RecentRuns runs={dashboard.recent_runs} onOpen={onNavigate && (() => onNavigate("runs"))} />
         </section>
@@ -548,16 +564,26 @@ function ReadinessSummary({ readiness }: { readiness: WorkbenchReadiness }) {
   const { t } = useI18n();
   const isReady = readiness.state === "ready" || readiness.state === "active";
   const tone = isReady ? "ok" : "warn";
+  const headline = loc(t, `readiness.state.${readiness.state}.headline`, readiness.headline);
+  const detail = loc(t, `readiness.state.${readiness.state}.detail`, readiness.detail);
+  const badge = loc(t, `readiness.state.${readiness.state}.badge`, readiness.state.replace(/_/g, " "));
+  // Render the localizable notes when present, falling back to the parallel
+  // English prose (same order/length) per line for the English locale.
+  const blockers = readiness.blocker_items.length
+    ? readiness.blocker_items.map((item, i) =>
+        loc(t, `readiness.blocker.${item.code}`, readiness.blockers[i] ?? item.code, { n: item.count }),
+      )
+    : readiness.blockers;
   return (
     <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <SectionHeader icon={<ShieldCheck size={15} />} title={t("dashboard.operationalReadiness")} />
-          <h2 className="mt-2 text-lg font-semibold text-text-primary">{readiness.headline}</h2>
-          <p className="mt-1 text-sm text-text-secondary">{readiness.detail}</p>
+          <h2 className="mt-2 text-lg font-semibold text-text-primary">{headline}</h2>
+          <p className="mt-1 text-sm text-text-secondary">{detail}</p>
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge value={readiness.state.replace(/_/g, " ")} tone={tone} />
+          <StatusBadge value={badge} tone={tone} />
           <span className="text-sm font-semibold" style={{ color: isReady ? "var(--success)" : "var(--warning)" }}>
             {readiness.score}%
           </span>
@@ -572,9 +598,9 @@ function ReadinessSummary({ readiness }: { readiness: WorkbenchReadiness }) {
           }}
         />
       </div>
-      {readiness.blockers.length > 0 ? (
+      {blockers.length > 0 ? (
         <div className="flex flex-col gap-1">
-          {readiness.blockers.slice(0, 4).map((blocker) => (
+          {blockers.slice(0, 4).map((blocker) => (
             <div key={blocker} className="flex items-start gap-2 text-xs text-text-secondary">
               <AlertTriangle size={13} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 1 }} />
               <span>{blocker}</span>
@@ -1163,8 +1189,13 @@ function Metric({ icon, label, value, detail, accent }: { icon: React.ReactNode;
   );
 }
 
-function NextActions({ actions, onReport }: { actions: string[]; onReport: () => void }) {
+function NextActions({ actions, items, onReport }: { actions: string[]; items: ReadinessNote[]; onReport: () => void }) {
   const { t } = useI18n();
+  // Localize from the parallel notes when present; English falls back to the
+  // backend prose line-for-line (correct singular/plural preserved).
+  const lines = items.length
+    ? items.map((item, i) => loc(t, `readiness.action.${item.code}`, actions[i] ?? item.code, { n: item.count }))
+    : actions;
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
       <div className="flex items-center justify-between gap-3">
@@ -1175,7 +1206,7 @@ function NextActions({ actions, onReport }: { actions: string[]; onReport: () =>
         </Button>
       </div>
       <div className="flex flex-col gap-2 mt-3">
-        {actions.map((action) => (
+        {lines.map((action) => (
           <div key={action} className="flex items-start gap-2 text-sm text-text-secondary">
             <span className="mt-1 rounded-full" style={{ width: 6, height: 6, background: "var(--accent)", flexShrink: 0 }} />
             <span>{action}</span>
