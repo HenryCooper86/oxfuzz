@@ -237,7 +237,7 @@ hobot-fuzz triage /path/to/project --target parse_value
 | `session list\|history\|new\|... ` | Manage chat sessions and their checkpoints. |
 | `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
-| `serve --port 8081` | Start the REST + SSE API (`hf-web`). |
+| `serve --host 127.0.0.1 --port 8081` | Start the REST + SSE API (`hf-web`). Non-loopback hosts require `HF_WEB_TOKEN`. |
 | `tui <project>` | Terminal UI. |
 
 Engines: `afl++`, `honggfuzz`, `libfuzzer`, `clusterfuzzlite`, `syzkaller`.
@@ -258,8 +258,13 @@ See `config/*.example.toml` for the full reference. Key files:
 - `guardrails.toml` -- Permission model, loop detection, risk scoring.
 - `agents/*.toml` -- Sub-agent definitions (discovery, harness, triage).
 
-The REST API is **fail-closed**: set `HF_WEB_TOKEN` to require a bearer token, or
-`HF_WEB_TOKEN_OPTIONAL=1` for unauthenticated local-dev access.
+The REST API binds to loopback by default and is **fail-closed**: set
+`HF_WEB_TOKEN` to require a bearer token, or `HF_WEB_TOKEN_OPTIONAL=1` for
+unauthenticated local development. A non-loopback `--host` is rejected unless a
+token is configured. Browser origins are an exact allowlist in
+`HF_WEB_CORS_ORIGINS`; project paths must be below `HF_WEB_PROJECT_ROOTS`. A
+local web build sends the bearer value from `VITE_API_TOKEN` (set it to the same
+value as `HF_WEB_TOKEN`).
 
 ---
 

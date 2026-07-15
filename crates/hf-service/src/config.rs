@@ -477,6 +477,45 @@ pub fn get_providers() -> Vec<ProviderConfig> {
         .unwrap_or_default()
 }
 
+fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderConfig]) {
+    let existing: std::collections::HashMap<_, _> = existing
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+    for provider in incoming {
+        let Some(prior) = existing.get(provider.id.as_str()) else {
+            continue;
+        };
+        if provider.api_key.as_deref().is_none_or(str::is_empty) {
+            provider.api_key.clone_from(&prior.api_key);
+        }
+        if provider.api_key_env.as_deref().is_none_or(str::is_empty) {
+            provider.api_key_env.clone_from(&prior.api_key_env);
+        }
+        for (name, value) in &prior.headers {
+            provider
+                .headers
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+}
+
+/// Persist provider edits from a redacted presentation DTO without erasing
+/// existing credentials or secret headers omitted by that DTO.
+///
+/// Trusted local presentations that need to clear a credential explicitly use
+/// [`set_providers`] instead. An explicit non-empty incoming secret replaces the
+/// existing value.
+///
+/// # Errors
+/// Returns an error when the provider config cannot be written.
+pub fn set_providers_preserving_secrets(providers: &[ProviderConfig]) -> Result<(), String> {
+    let mut merged = providers.to_vec();
+    merge_provider_secrets(&mut merged, &get_providers());
+    set_providers(&merged)
+}
+
 /// Quote/escape a value as a TOML basic string.
 fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -750,6 +789,38 @@ cpus = 2\n";
         let toml = json_to_toml(&v).expect("null fields should be stripped, not error");
         assert!(toml.contains("id = \"p\""));
         assert!(!toml.contains("api_key_env"), "null keys must be dropped");
+    }
+
+    #[test]
+    fn browser_provider_updates_preserve_opaque_secrets() {
+        let parse = |raw: &str| {
+            toml::from_str::<hf_provider::ProviderPoolConfig>(raw)
+                .unwrap()
+                .providers
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let existing = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai\"\nmodel = \"old\"\napi_key = \"secret\"\napi_key_env = \"HF_PROVIDER_KEY\"\n[providers.headers]\nX-Secret = \"hidden\"\n",
+        )];
+        let mut incoming = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai\"\nmodel = \"new\"\napi_key = \"\"\napi_key_env = \"\"\n[providers.headers]\nX-Public = \"new\"\n",
+        )];
+
+        merge_provider_secrets(&mut incoming, &existing);
+
+        assert_eq!(incoming[0].model, "new");
+        assert_eq!(incoming[0].api_key.as_deref(), Some("secret"));
+        assert_eq!(incoming[0].api_key_env.as_deref(), Some("HF_PROVIDER_KEY"));
+        assert_eq!(
+            incoming[0].headers.get("X-Secret").map(String::as_str),
+            Some("hidden")
+        );
+        assert_eq!(
+            incoming[0].headers.get("X-Public").map(String::as_str),
+            Some("new")
+        );
     }
 
     #[test]
