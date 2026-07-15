@@ -14,6 +14,8 @@ use hf_core::target::{
 use hf_service::ServiceContainer;
 use sha2::{Digest, Sha256};
 
+static WORKSPACE: std::sync::Once = std::sync::Once::new();
+
 #[derive(Clone, Copy)]
 enum MinimizeOutcome {
     Success,
@@ -114,7 +116,7 @@ impl RuntimeAdapter for MinimizeRuntime {
 }
 
 struct Fixture {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     project: PathBuf,
     target: TargetCandidate,
     run: hf_storage::RunRecord,
@@ -124,7 +126,6 @@ struct Fixture {
 
 async fn fixture(name: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    static WORKSPACE: std::sync::Once = std::sync::Once::new();
     WORKSPACE.call_once(|| {
         std::env::set_var(
             "HF_WORKSPACE_DIR",
@@ -216,7 +217,7 @@ async fn fixture(name: &str) -> Fixture {
     store.insert_run(&run).await.unwrap();
 
     Fixture {
-        _root: root,
+        root,
         project,
         target,
         run,
@@ -309,7 +310,7 @@ async fn triage_rejects_symlinked_minimization_output_directory() {
         .join(fixture.run.id.to_string())
         .join("triage");
     std::fs::create_dir_all(&triage_dir).unwrap();
-    let outside = fixture._root.path().join("outside-minimized");
+    let outside = fixture.root.path().join("outside-minimized");
     std::fs::create_dir(&outside).unwrap();
     symlink(&outside, triage_dir.join("minimized")).unwrap();
 
