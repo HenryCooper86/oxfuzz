@@ -1020,12 +1020,15 @@ impl Store {
             .collect()
     }
 
-    /// List every persisted crash across all runs, newest-first by id order.
+    /// List every persisted crash across all runs, newest insertion first.
+    ///
+    /// [`Crash`] has no creation timestamp, so the table's stable `SQLite`
+    /// insertion order is the persisted chronology for this cross-run view.
     ///
     /// # Errors
     /// Returns an error on a SQL failure or malformed stored data.
     pub async fn list_all_crashes(&self) -> Result<Vec<Crash>, StorageError> {
-        let rows = sqlx::query("SELECT data_json FROM crashes")
+        let rows = sqlx::query("SELECT data_json FROM crashes ORDER BY rowid DESC")
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(|r| json_col(r, "data_json")).collect()
@@ -1060,13 +1063,91 @@ impl Store {
         Ok(())
     }
 
+    /// Retain only the newest `keep` historical executions for one schedule.
+    ///
+    /// Recency is ordered by `triggered_at`, with the execution id as a
+    /// deterministic tie-breaker. Pending/running executions and executions
+    /// that started within the rolling hourly-admission window are protected
+    /// from history pruning. The protection keeps UI retention independent
+    /// from live execution state and restart-safe hourly rate limiting.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn prune_schedule_executions(
+        &self,
+        schedule_id: &str,
+        keep: usize,
+    ) -> Result<u64, StorageError> {
+        let admission_cutoff = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let result = sqlx::query(
+            "DELETE FROM schedule_executions
+             WHERE schedule_id = ?1
+               AND status NOT IN ('pending', 'running')
+               AND NOT CASE
+                   WHEN json_valid(data_json)
+                   THEN COALESCE(
+                       julianday(json_extract(data_json, '$.started_at')) >= julianday(?3),
+                       FALSE
+                   )
+                   ELSE FALSE
+               END
+               AND id NOT IN (
+                   SELECT id FROM schedule_executions
+                   WHERE schedule_id = ?1
+                   ORDER BY triggered_at DESC, id DESC
+                   LIMIT ?2
+               )",
+        )
+        .bind(schedule_id)
+        .bind(i64::try_from(keep).unwrap_or(i64::MAX))
+        .bind(admission_cutoff)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Count execution starts for one schedule at or after an RFC 3339 cutoff.
+    ///
+    /// The actual `started_at` value is read from the serialized execution,
+    /// rather than approximated with its earlier trigger time. Skipped and
+    /// pending records have no start and do not consume a rate-limit slot.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or an invalid negative aggregate.
+    pub async fn count_schedule_executions_since(
+        &self,
+        schedule_id: &str,
+        since: &str,
+    ) -> Result<u64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schedule_executions
+             WHERE schedule_id = ?1
+               AND status NOT IN ('pending', 'skipped')
+               AND CASE
+                   WHEN json_valid(data_json)
+                   THEN COALESCE(
+                       julianday(json_extract(data_json, '$.started_at')) >= julianday(?2),
+                       FALSE
+                   )
+                   ELSE FALSE
+               END",
+        )
+        .bind(schedule_id)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| StorageError::InvalidData("negative schedule execution count".to_owned()))
+    }
+
     /// The most recent persisted executions (their `data_json`), newest first.
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn list_schedule_executions(&self, limit: i64) -> Result<Vec<String>, StorageError> {
         let rows = sqlx::query(
-            "SELECT data_json FROM schedule_executions ORDER BY triggered_at DESC LIMIT ?1",
+            "SELECT data_json FROM schedule_executions
+             ORDER BY triggered_at DESC, id DESC LIMIT ?1",
         )
         .bind(limit)
         .fetch_all(&self.pool)

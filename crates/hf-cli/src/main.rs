@@ -339,7 +339,7 @@ fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
 
 async fn cmd_export(project: Option<PathBuf>, output: PathBuf) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
-    let bundle = container.export_project_data(project.as_deref()).await;
+    let bundle = container.export_project_data(project.as_deref()).await?;
     let json = serde_json::to_string_pretty(&bundle)?;
     std::fs::write(&output, json)?;
     println!("Exported evidence bundle to {}", output.display());
@@ -448,17 +448,17 @@ fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
 /// Start a campaign scheduler for a one-shot CLI operation. Background ticking
 /// stops when the process exits; persisted schedules live under the user data
 /// dir (shared with the GUI and web server).
-async fn start_scheduler() -> hf_service::scheduler::CampaignScheduler {
+async fn start_scheduler() -> anyhow::Result<hf_service::scheduler::CampaignScheduler> {
     let container = ServiceContainer::bootstrap().await;
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
-    hf_service::scheduler::CampaignScheduler::start(container, store_path, None).await
+    Ok(hf_service::scheduler::CampaignScheduler::try_start(container, store_path, None).await?)
 }
 
 async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
-    let scheduler = start_scheduler().await;
+    let scheduler = start_scheduler().await?;
     match op {
         ScheduleOp::List => {
-            let views = scheduler.list_views().await;
+            let views = scheduler.list_views().await?;
             if views.is_empty() {
                 println!("No scheduled campaigns.");
             }
@@ -485,7 +485,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             }
         }
         ScheduleOp::History { limit } => {
-            for e in scheduler.recent_executions(limit).await {
+            for e in scheduler.recent_executions(limit).await? {
                 println!(
                     "{}  {}  {}  {}",
                     e.triggered_at, e.campaign, e.status, e.summary
@@ -517,11 +517,11 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
                 max_total_secs,
                 schedule_id: String::new(),
             };
-            scheduler.create(&name, &params, trigger).await;
+            scheduler.try_create(&name, &params, trigger).await?;
             println!("Created schedule '{name}'.");
         }
         ScheduleOp::Delete { id } => {
-            let msg = if scheduler.remove(&id).await {
+            let msg = if scheduler.try_remove(&id).await? {
                 "Deleted."
             } else {
                 "No such schedule."
@@ -529,7 +529,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             println!("{msg}");
         }
         ScheduleOp::Enable { id } => {
-            let msg = if scheduler.set_enabled(&id, true).await {
+            let msg = if scheduler.try_set_enabled(&id, true).await? {
                 "Enabled."
             } else {
                 "No such schedule."
@@ -537,7 +537,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             println!("{msg}");
         }
         ScheduleOp::Disable { id } => {
-            let msg = if scheduler.set_enabled(&id, false).await {
+            let msg = if scheduler.try_set_enabled(&id, false).await? {
                 "Disabled."
             } else {
                 "No such schedule."
@@ -878,48 +878,44 @@ async fn cmd_ci(
     let engine_kind = parse_engine(engine)?;
     let _lang = parse_lang(lang)?;
     let duration_secs = parse_duration(duration)?;
-    // CI is a non-interactive, deliberately-automated run. Set permissive
-    // guardrails for this process so the high-risk run/triage steps proceed
-    // without an interactive approval (safe-by-default still applies elsewhere).
-    if std::env::var_os("HF_GUARDRAILS").is_none() {
-        std::env::set_var("HF_GUARDRAILS", "permissive");
-    }
     let container = ServiceContainer::bootstrap().await;
 
     println!("[ci] requiring a previously smoke-qualified and promoted harness for {target}...");
-    if let Err(e) = container.generate_seeds(&project, target).await {
-        eprintln!("[ci] warning: seed generation failed: {e}");
-    }
-
     println!("[ci] fuzzing {target} for {duration_secs}s...");
     let on_progress = |p: FuzzProgress| {
         if let FuzzProgress::CrashesFound(_) = p {
             println!("[ci] >> crash found");
         }
     };
-    container
-        .run_fuzzer(&project, target, engine_kind, duration_secs, &on_progress)
+    let outcome = container
+        .run_ci_gate(
+            hf_service::sarif::CiGateRequest {
+                project: &project,
+                target,
+                engine: engine_kind,
+                duration_secs,
+            },
+            &on_progress,
+        )
         .await?;
-
-    println!("[ci] triaging...");
-    let crashes = container.triage(&project, target).await?;
+    if let Some(warning) = &outcome.seed_warning {
+        eprintln!("[ci] warning: seed generation failed: {warning}");
+    }
 
     // Always emit SARIF (even with zero results) so code scanning can clear
     // stale alerts when a bug is fixed.
-    let doc = container.export_sarif(&project, target).await?;
-    std::fs::write(sarif, &doc)?;
+    std::fs::write(sarif, &outcome.sarif)?;
     println!("[ci] SARIF written to {}", sarif.display());
 
-    if crashes.is_empty() {
+    if outcome.passed() {
         println!("[ci] PASS: no crashes found.");
         Ok(())
     } else {
-        eprintln!("[ci] FAIL: {} crash(es) found.", crashes.len());
-        for c in &crashes {
-            eprintln!("[ci]   {:?}: {}", c.kind, c.summary);
+        eprintln!("[ci] FAIL: {} crash(es) found.", outcome.findings.len());
+        for finding in &outcome.findings {
+            eprintln!("[ci]   {}: {}", finding.kind, finding.summary);
         }
-        // Non-zero exit gates the PR; SARIF was already written + can be uploaded.
-        std::process::exit(1);
+        anyhow::bail!("CI fuzzing gate found crashing inputs")
     }
 }
 
@@ -1163,7 +1159,7 @@ async fn main() -> anyhow::Result<()> {
             let security = hf_web::WebSecurityConfig::from_env();
             let addr = std::net::SocketAddr::new(host, port);
             hf_web::validate_bind_addr(addr, security.token_configured())?;
-            let app = hf_web::build_bootstrapped_with_security(security).await;
+            let app = hf_web::build_bootstrapped_with_security(security).await?;
             println!("hobot-fuzz web server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;

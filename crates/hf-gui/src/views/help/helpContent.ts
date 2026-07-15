@@ -305,8 +305,9 @@ or "(not built)". Warnings link straight to the Harness screen to fix it. A
 Syzkaller kernel campaign instead needs a project plus kernel artifacts (bzImage,
 rootfs, SSH key, manager.cfg).
 
-**Web mode:** fuzzing is desktop-only; the browser build shows "Fuzzing is not
-available in web mode."
+**Web mode:** harness-based user-space runs use the authenticated REST/SSE
+transport, including exact-run progress, status, and cancellation. Syzkaller is
+desktop-only because it launches local kernel/VM artifacts and may use KVM.
 
 **What it shows:** live stat cards (edges covered, crashes, execs/sec), a
 post-run summary, coverage-stall / auto-revert notices, and a streaming log.
@@ -598,8 +599,8 @@ Common messages and what they mean.
   start it and build the sandbox image automatically.
 - **"Fuzzing sandbox image not built"** -- the image is still building or failed;
   give it a few minutes on first launch.
-- **"Fuzzing is not available in web mode"** -- runs are desktop-only; use the
-  native app.
+- **"Syzkaller is not available in web mode"** -- kernel/VM campaigns require
+  the trusted local desktop workflow; user-space fuzz runs remain available.
 
 ## Provider / AI
 

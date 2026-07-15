@@ -86,8 +86,36 @@ the scheduler-wide semaphore bounds active workflow execution.
 
 The scheduler retains every spawned workflow task. `stop` first stops trigger
 production and queue consumption, then aborts and joins active campaign tasks and
-reconciles their execution records from `Running` to `Failed`. The service-level
+reconciles their execution records from `Running` to `Cancelled`. The service-level
 `CampaignScheduler::stop` exposes this lifecycle boundary.
+
+## Schedule policy enforcement
+
+`SchedulerConfig` is resolved by `hf-service` at scheduler startup. Its global
+execution cap bounds active dispatches, its history limit applies per schedule
+(zero means unlimited), and its missed-fire/concurrency defaults are materialized
+when a schedule omits an override. Per-schedule policies are enforced before a
+workflow starts:
+
+- `allow` permits overlapping executions;
+- `skip_if_running` records a visible skipped execution;
+- `queue` preserves trigger order and serializes the schedule;
+- `cancel_previous` cancels and records the displaced execution before starting
+  the newer one;
+- `max_executions_per_hour` is a rolling one-hour admission limit over started
+  executions; policy skips do not consume it.
+
+Queued work remains `Pending` until it owns both its per-schedule queue position
+and a global execution slot. Pending/running rows and started rows still needed
+by the rolling-hour limit are protected from history pruning; the configured
+display-history cap is restored as those rows finish or age out.
+
+Cron values may be created as `CRON_TZ=<IANA zone> <five-field expression>`.
+The zone is validated at creation, persisted in `TriggerConfig`, and used by
+normal evaluation and recovery. Recovery advances through actual cron calendar
+occurrences, so month boundaries and daylight-saving transitions are not
+approximated as fixed UTC intervals. Legacy unknown zones remain fail-safe UTC
+with an operator warning.
 
 ## Layering (AGENTS.md 2.9 -- all logic in hf-service)
 

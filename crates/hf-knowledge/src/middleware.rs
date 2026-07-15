@@ -278,12 +278,11 @@ impl<T: Tokenizer> InjectKnowledge<T> {
             results.retain(|r| r.relevance >= self.config.min_relevance);
         }
 
-        // Deduplicate by (document_id, chunk_level, l1_section) to avoid
-        // injecting identical or overlapping content. Unlike the previous
-        // per-document dedup, this allows multiple sections from the same
-        // document to appear in results -- important now that L0/L1 chunks
-        // are first-class indexed objects.
-        let mut seen_chunks: std::collections::HashSet<(String, String, Option<usize>)> =
+        // Deduplicate repeated search hits by their complete stable chunk
+        // identity. `l1_section_index` is optional alignment metadata and is
+        // not populated by the ordinary L2 chunker, so it cannot identify a
+        // chunk without collapsing unrelated sections.
+        let mut seen_chunks: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
 
         // When metadata is available and a document already has its *structured
@@ -305,13 +304,7 @@ impl<T: Tokenizer> InjectKnowledge<T> {
             let doc_id = &result.chunk.document_id;
             let metadata = self.entry_metadata.get(doc_id);
 
-            // Build a dedup key from (doc_id, level, l1_section_index).
-            let level_tag = format!("{:?}", result.chunk.level);
-            let dedup_key = (
-                doc_id.clone(),
-                level_tag,
-                result.chunk.metadata.l1_section_index,
-            );
+            let dedup_key = (doc_id.clone(), result.chunk.id.clone());
             if !seen_chunks.insert(dedup_key) {
                 continue;
             }
@@ -674,6 +667,49 @@ mod tests {
             7,
             "caller-provided limit should control retrieval candidate count"
         );
+    }
+
+    #[test]
+    fn context_dedup_keeps_distinct_chunks_without_l1_alignment() {
+        let retrieval_config = RetrievalConfig {
+            min_similarity_threshold: 0.0,
+            enable_dedup: false,
+            ..Default::default()
+        };
+        let mut retriever = HybridRetriever::with_config(SimpleTokenizer::new(), retrieval_config);
+        for (id, section, suffix) in [("c1", 0, "alpha"), ("c2", 1, "beta")] {
+            retriever.index(Chunk {
+                id: id.to_owned(),
+                document_id: "doc-shared".to_owned(),
+                level: ChunkLevel::L2,
+                content: format!("Rust ownership safety {suffix}"),
+                token_estimate: 6,
+                metadata: ChunkMetadata {
+                    source: "test".to_owned(),
+                    domain: "rust".to_owned(),
+                    title: "Rust Ownership".to_owned(),
+                    section_index: section,
+                    l1_section_index: None,
+                    ..Default::default()
+                },
+            });
+        }
+        let config = InjectKnowledgeConfig {
+            token_budget: 1_000,
+            max_chunks: 10,
+            min_relevance: 0.0,
+            context_window: 0,
+            ..Default::default()
+        };
+        let middleware = InjectKnowledge::with_config(retriever, config);
+
+        let items = middleware.retrieve_for_context("Rust ownership safety", None, None);
+        let ids = items
+            .iter()
+            .map(|item| item.chunk_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(ids, std::collections::HashSet::from(["c1", "c2"]));
     }
 
     #[test]

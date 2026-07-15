@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use tracing::instrument;
 
 use hf_core::provider::{
-    ChatRequest, ChatResponse, ChatStreamResponse, LlmProvider, ProviderError, ProviderPool,
-    ProviderStatus, RouteRequest,
+    ChatRequest, ChatResponse, ChatStreamResponse, LlmProvider, ProviderError, ProviderMetadata,
+    ProviderPool, ProviderStatus, RouteRequest,
 };
 use hf_core::types::ProviderId;
 
@@ -48,6 +48,44 @@ struct ProviderEntry {
     /// permit are held (via the stream wrapper) until the stream is fully
     /// consumed or dropped, then released together.
     active_requests: Arc<AtomicUsize>,
+}
+
+/// Delegating provider whose metadata includes operator-configured pricing.
+///
+/// Backend constructors intentionally know nothing about deployment-specific
+/// prices. Keeping the override at the pool boundary gives routing and metrics
+/// the same effective metadata without duplicating cost arguments across every
+/// provider implementation.
+struct ConfiguredMetadataProvider {
+    inner: Arc<dyn LlmProvider>,
+    metadata: ProviderMetadata,
+}
+
+impl ConfiguredMetadataProvider {
+    fn new(inner: Arc<dyn LlmProvider>, cost_in: f64, cost_out: f64) -> Self {
+        let mut metadata = inner.metadata().clone();
+        metadata.cost_per_1k_input = cost_in;
+        metadata.cost_per_1k_output = cost_out;
+        Self { inner, metadata }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ConfiguredMetadataProvider {
+    async fn chat_completion(&self, request: &ChatRequest) -> Result<ChatResponse, ProviderError> {
+        self.inner.chat_completion(request).await
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ChatStreamResponse, ProviderError> {
+        self.inner.chat_completion_stream(request).await
+    }
+
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
 }
 
 impl std::fmt::Debug for ProviderPoolImpl {
@@ -313,8 +351,12 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
             }
         };
 
-        if let Some(p) = provider {
-            providers.push(p);
+        if let Some(provider) = provider {
+            providers.push(Arc::new(ConfiguredMetadataProvider::new(
+                provider,
+                cfg.cost_per_1k_input,
+                cfg.cost_per_1k_output,
+            )));
         }
     }
 
@@ -928,6 +970,21 @@ mod tests {
             }],
             ..test_config()
         }
+    }
+
+    #[test]
+    fn configured_costs_reach_provider_metadata() {
+        let mut config = provider_config_with_temperature("priced", None);
+        config.providers[0].api_key = Some("test-key".to_owned());
+        config.providers[0].cost_per_1k_input = 0.125;
+        config.providers[0].cost_per_1k_output = 0.75;
+
+        let pool = ProviderPoolImpl::from_config(&config).expect("provider config should build");
+        let metadata = pool.list_metadata();
+
+        assert_eq!(metadata.len(), 1);
+        assert!((metadata[0].cost_per_1k_input - 0.125).abs() < f64::EPSILON);
+        assert!((metadata[0].cost_per_1k_output - 0.75).abs() < f64::EPSILON);
     }
 
     fn test_request() -> ChatRequest {

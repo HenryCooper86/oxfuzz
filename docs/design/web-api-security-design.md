@@ -51,16 +51,39 @@ not changed; their trusted local presentation can continue to show local paths.
 
 ## 5. Run Control and Events
 
-Run status and cancellation use service-owned run UUIDs. The web layer never
-invents an execution id and never aborts a task as a substitute for cooperative
-runtime cancellation. Starting a run remains unavailable until `hf-service`
-can reserve and return the durable run id before execution; the route fails
-explicitly instead of reporting a fake or uncorrelated id.
+Run status, start, and cancellation use service-owned run UUIDs. The web layer
+never invents an execution id and never aborts a task as a substitute for
+cooperative runtime cancellation. `POST /runs/start` validates the approved
+project boundary, delegates reservation and launch to `hf-service`, and returns
+`202 Accepted` only after the run row and recovery journal entry are durable and
+the cancellation token is registered. Execution continues in a service-owned
+task, so disconnecting the HTTP request does not orphan or implicitly cancel the
+campaign. Status and cancellation resolve the durable row through service APIs;
+missing and inactive runs remain distinct transport outcomes.
+
+The network run-control surface is intentionally limited to harness-backed
+user-space engines. Syzkaller remains a trusted-local Tauri workflow because it
+accepts kernel, rootfs, SSH-key, and manager-config artifacts and may request
+KVM device access; exposing that launch contract remotely would expand the web
+threat model beyond approved project paths. Browser mode reports that boundary
+explicitly. The REST API likewise exposes exact-id cancellation instead of a
+blanket `cancel_all_runs` operation, preventing one client from stopping an
+unrelated operator's campaign.
 
 SSE uses a bounded broadcast channel. Oversized events are rejected before
 enqueueing. A slow subscriber receives a `stream:lagged` event with the number
-of dropped messages, then continues from the channel's current position. Run
-events carry the service-owned run id whenever one exists.
+of dropped messages, then continues from the channel's current position. The
+web transport exposes only channels with production producers: run progress,
+run lifecycle, and stream lag. Run progress and lifecycle events always carry
+the service-owned run id. The service emits `running` before execution and
+exactly one terminal lifecycle event (`done`, `failed`, or `cancelled`) after
+the background task returns.
+
+Every `ClassifiedError` crosses the HTTP boundary through one mapping:
+validation is `400`, harness/engine execution rejection is `422`, provider
+failure is `502`, sandbox unavailability is `503`, timeout is `504`, and
+storage/internal failure is `500`. Handlers do not choose a different status
+for the same service error category.
 
 ## 6. Validation
 
@@ -68,7 +91,8 @@ events carry the service-owned run id whenever one exists.
 - Router tests cover exact-origin preflight, unauthorized responses, and
   redacted config/path DTOs.
 - Filesystem tests cover outside-root and symlink escape rejection.
-- Run-route tests cover invalid ids, missing/inactive runs, explicit start
-  unavailability, event-size bounds, and lag notification. Service tests cover
-  exact cooperative cancellation of active UUIDs.
+- Run-route tests cover invalid ids, mapped preflight failures,
+  missing/inactive runs, event-size bounds, and lag notification. Service tests
+  prove a background start returns a queryable durable UUID before mocked
+  execution, then exact cooperative cancellation reaches a terminal row.
 - `hf-web` depends only on `hf-service`, never on domain/runtime crates.

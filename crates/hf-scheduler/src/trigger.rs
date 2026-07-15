@@ -17,6 +17,12 @@ pub struct FiredTrigger {
     pub fired_at: DateTime<Utc>,
     /// The type of trigger that fired.
     pub trigger_type: TriggerType,
+    /// Whether this trigger was reconstructed from persisted schedule state.
+    ///
+    /// Recovery backfills are always queued so a default `skip_if_running`
+    /// policy cannot silently discard missed occurrences.
+    #[serde(default)]
+    pub is_recovery: bool,
 }
 
 /// Discriminant for trigger types (used in context injection).
@@ -90,6 +96,7 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
             schedule_id: schedule.id.clone(),
             fired_at: now,
             trigger_type,
+            is_recovery: false,
         })
     } else {
         None

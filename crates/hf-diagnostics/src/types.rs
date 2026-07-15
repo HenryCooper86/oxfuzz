@@ -1,4 +1,4 @@
-//! Core diagnostic types for trace storage, cost tracking, and replay.
+//! Core diagnostic types for trace, observation, score, and cost storage.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -55,19 +55,6 @@ pub struct Trace {
     pub tool_duration_ms: u64,
     /// Replay context for debugging (system prompt, history, tool defs).
     pub replay_context: Option<serde_json::Value>,
-}
-
-/// Context captured for trace replay and debugging.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplayContext {
-    /// The system prompt used for this trace.
-    pub system_prompt: String,
-    /// Conversation history at the time of the trace.
-    pub conversation_history: Vec<serde_json::Value>,
-    /// Tool definitions available during this trace.
-    pub tool_definitions: Vec<serde_json::Value>,
-    /// Configuration snapshot at the time of the trace.
-    pub config_snapshot: serde_json::Value,
 }
 
 impl Trace {
@@ -309,26 +296,6 @@ impl Score {
     }
 }
 
-// ─── Cost Record ──────────────────────────────────────────────
-
-/// Aggregated cost record for a time window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CostRecord {
-    pub model: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_usd: f64,
-}
-
-/// Daily cost summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DailyCostSummary {
-    pub date: chrono::NaiveDate,
-    pub total_cost_usd: f64,
-    pub total_traces: u64,
-    pub by_model: Vec<CostRecord>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,22 +388,6 @@ mod tests {
         trace.fail();
         assert!(trace.total_duration_ms.is_some());
         assert_eq!(trace.status, TraceStatus::Failed);
-    }
-
-    #[test]
-    fn test_replay_context_serialization() {
-        let ctx = ReplayContext {
-            system_prompt: "You are a helpful assistant.".into(),
-            conversation_history: vec![serde_json::json!({"role": "user", "content": "hi"})],
-            tool_definitions: vec![serde_json::json!({"name": "search"})],
-            config_snapshot: serde_json::json!({"model": "gpt-4"}),
-        };
-
-        let json = serde_json::to_string(&ctx).unwrap();
-        let deserialized: ReplayContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.system_prompt, "You are a helpful assistant.");
-        assert_eq!(deserialized.conversation_history.len(), 1);
-        assert_eq!(deserialized.tool_definitions.len(), 1);
     }
 
     #[test]

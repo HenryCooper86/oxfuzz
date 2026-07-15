@@ -1218,10 +1218,7 @@ mod tests {
             },
             Arc::new(hf_storage::JsonlTranscriptStore::new(&tp)),
             Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(&tp)),
-            SessionConfig {
-                max_depth: 2,
-                ..Default::default()
-            },
+            SessionConfig { max_depth: 2 },
         );
 
         let root = mgr

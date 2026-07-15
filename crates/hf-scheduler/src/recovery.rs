@@ -27,9 +27,20 @@ pub struct RecoveryResult {
 pub(crate) struct RecoveryBatch {
     pub(crate) schedule_id: String,
     pub(crate) first_fire: DateTime<Utc>,
-    pub(crate) interval: Duration,
+    cadence: RecoveryCadence,
     pub(crate) count: u64,
     pub(crate) trigger_type: TriggerType,
+}
+
+/// How to advance a compact recovery batch without assuming cron occurrences
+/// have fixed UTC spacing across month boundaries or daylight-saving changes.
+#[derive(Debug, Clone)]
+enum RecoveryCadence {
+    Fixed(Duration),
+    Cron {
+        expression: String,
+        timezone: String,
+    },
 }
 
 impl RecoveryBatch {
@@ -37,9 +48,21 @@ impl RecoveryBatch {
         Self {
             schedule_id: schedule.id.clone(),
             first_fire: at,
-            interval: Duration::zero(),
+            cadence: RecoveryCadence::Fixed(Duration::zero()),
             count: 1,
             trigger_type: trigger_type(schedule),
+        }
+    }
+
+    pub(crate) fn next_fire(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        match &self.cadence {
+            RecoveryCadence::Fixed(interval) => after.checked_add_signed(*interval),
+            RecoveryCadence::Cron {
+                expression,
+                timezone,
+            } => crate::cron::CronSchedule::new(expression)
+                .with_timezone(timezone)
+                .next_fire(after),
         }
     }
 }
@@ -82,22 +105,12 @@ pub(crate) fn recover_missed(store: &ScheduleStore, now: DateTime<Utc>) -> Recov
             continue;
         };
 
-        let Some(interval) = compute_interval(schedule, now) else {
+        let Some((first_fire, cadence, missed_count, latest_due)) =
+            missed_occurrences(schedule, last_fire, now)
+        else {
             continue;
         };
-        if interval <= Duration::zero() {
-            continue;
-        }
-
-        let elapsed = now - last_fire;
-        if elapsed <= interval {
-            continue;
-        }
-
-        let interval_secs = interval.num_seconds();
-        let missed_count = u64::try_from(elapsed.num_seconds() / interval_secs).unwrap_or(1);
-        let latest_due = add_intervals(last_fire, interval, missed_count).unwrap_or(now);
-        match schedule.policies.missed_policy {
+        match schedule.policies.effective_missed_policy() {
             MissedPolicy::Skip => {
                 info!(schedule_id = %schedule.id, "Missed schedule, advancing (policy=skip)");
                 plan.result.skipped.push(schedule.id.clone());
@@ -123,8 +136,8 @@ pub(crate) fn recover_missed(store: &ScheduleStore, now: DateTime<Utc>) -> Recov
                 );
                 plan.batches.push(RecoveryBatch {
                     schedule_id: schedule.id.clone(),
-                    first_fire: last_fire + interval,
-                    interval,
+                    first_fire,
+                    cadence,
                     count: missed_count,
                     trigger_type: trigger_type(schedule),
                 });
@@ -146,7 +159,9 @@ fn plan_never_fired(schedule: &Schedule, now: DateTime<Utc>, plan: &mut Recovery
     match &schedule.trigger {
         TriggerConfig::Event { .. } => return,
         TriggerConfig::OneTime { at } if *at > now => return,
-        TriggerConfig::OneTime { .. } if schedule.policies.missed_policy == MissedPolicy::Skip => {
+        TriggerConfig::OneTime { .. }
+            if schedule.policies.effective_missed_policy() == MissedPolicy::Skip =>
+        {
             plan.result.skipped.push(schedule.id.clone());
         }
         _ => {
@@ -167,24 +182,62 @@ fn add_intervals(start: DateTime<Utc>, interval: Duration, count: u64) -> Option
     start.checked_add_signed(Duration::seconds(seconds))
 }
 
-/// Compute the effective interval for a schedule (for recovery purposes).
-fn compute_interval(schedule: &Schedule, now: DateTime<Utc>) -> Option<Duration> {
+fn missed_occurrences(
+    schedule: &Schedule,
+    last_fire: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, RecoveryCadence, u64, DateTime<Utc>)> {
     match &schedule.trigger {
-        TriggerConfig::Interval { interval_secs } => Some(Duration::seconds(
-            i64::try_from(*interval_secs).unwrap_or(i64::MAX),
-        )),
+        TriggerConfig::Interval { interval_secs } => {
+            let interval = Duration::seconds(i64::try_from(*interval_secs).unwrap_or(i64::MAX));
+            if interval <= Duration::zero() {
+                return None;
+            }
+            let elapsed = now - last_fire;
+            if elapsed < interval {
+                return None;
+            }
+            let missed_count =
+                u64::try_from(elapsed.num_seconds() / interval.num_seconds()).ok()?;
+            if missed_count == 0 {
+                return None;
+            }
+            let first_fire = last_fire.checked_add_signed(interval)?;
+            let latest_due = add_intervals(last_fire, interval, missed_count)?;
+            Some((
+                first_fire,
+                RecoveryCadence::Fixed(interval),
+                missed_count,
+                latest_due,
+            ))
+        }
         TriggerConfig::Cron {
             expression,
             timezone,
         } => {
-            // Recovery keeps the established fixed-spacing representation for a
-            // compact batch, but derives it from this schedule's timezone and the
-            // supplied recovery clock rather than wall-clock `Utc::now()`.
             let cron = crate::cron::CronSchedule::new(expression).with_timezone(timezone);
-            let base = now - Duration::days(1);
-            let first = cron.next_fire(base)?;
-            let second = cron.next_fire(first)?;
-            Some(second - first)
+            let first_fire = cron.next_fire(last_fire)?;
+            if first_fire > now {
+                return None;
+            }
+            let mut latest_due = first_fire;
+            let mut missed_count = 1_u64;
+            while let Some(next) = cron.next_fire(latest_due) {
+                if next <= latest_due || next > now {
+                    break;
+                }
+                latest_due = next;
+                missed_count = missed_count.saturating_add(1);
+            }
+            Some((
+                first_fire,
+                RecoveryCadence::Cron {
+                    expression: expression.clone(),
+                    timezone: timezone.clone(),
+                },
+                missed_count,
+                latest_due,
+            ))
         }
         TriggerConfig::OneTime { .. } | TriggerConfig::Event { .. } => None,
     }
@@ -205,6 +258,7 @@ pub(crate) fn trigger_at(batch: &RecoveryBatch, at: DateTime<Utc>) -> FiredTrigg
         schedule_id: batch.schedule_id.clone(),
         fired_at: at,
         trigger_type: batch.trigger_type,
+        is_recovery: true,
     }
 }
 
@@ -217,8 +271,8 @@ mod tests {
     fn interval_schedule(id: &str, interval_secs: u64, policy: MissedPolicy) -> Schedule {
         Schedule::new(id, id, TriggerConfig::Interval { interval_secs }, "wf").with_policies(
             SchedulePolicies {
-                missed_policy: policy,
-                concurrency_policy: ConcurrencyPolicy::default(),
+                missed_policy: Some(policy),
+                concurrency_policy: Some(ConcurrencyPolicy::default()),
                 max_executions_per_hour: 0,
             },
         )
@@ -263,6 +317,47 @@ mod tests {
         assert_eq!(plan.trigger_count(), 150);
         assert_eq!(plan.result.backfilled, [("s1".to_owned(), 150)]);
         assert_eq!(plan.advances[0].last_fire, now);
+    }
+
+    #[test]
+    fn cron_backfill_iterates_calendar_occurrences_in_configured_timezone() {
+        let mut store = ScheduleStore::new();
+        let mut schedule = Schedule::new(
+            "monthly",
+            "monthly",
+            TriggerConfig::Cron {
+                expression: "0 9 1 * *".to_owned(),
+                timezone: "Asia/Shanghai".to_owned(),
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Backfill),
+            concurrency_policy: Some(ConcurrencyPolicy::Queue),
+            max_executions_per_hour: 0,
+        });
+        schedule.last_fire = Some(
+            DateTime::parse_from_rfc3339("2026-01-01T01:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        store.register(schedule);
+        let now = DateTime::parse_from_rfc3339("2026-04-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let plan = recover_missed(&store, now);
+
+        assert_eq!(plan.trigger_count(), 3);
+        assert_eq!(plan.result.backfilled, [("monthly".to_owned(), 3)]);
+        let batch = &plan.batches[0];
+        assert_eq!(batch.first_fire.to_rfc3339(), "2026-02-01T01:00:00+00:00");
+        let march = batch.next_fire(batch.first_fire).unwrap();
+        assert_eq!(march.to_rfc3339(), "2026-03-01T01:00:00+00:00");
+        assert_eq!(
+            plan.advances[0].last_fire.to_rfc3339(),
+            "2026-04-01T01:00:00+00:00"
+        );
     }
 
     #[test]

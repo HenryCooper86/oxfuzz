@@ -154,17 +154,17 @@ pub async fn dashboard(
     store: Option<&Store>,
     active_project: Option<&Path>,
     active_target: Option<&str>,
-) -> WorkbenchDashboard {
+) -> Result<WorkbenchDashboard, ClassifiedError> {
     let project_filter = active_project.map(path_key);
     let project_filter_ref = project_filter.as_deref();
 
     let Some(store) = store else {
-        return empty_dashboard(
+        return Ok(empty_dashboard(
             project_filter,
             active_target,
             "Initialize persistence to start tracking team fuzzing work.",
             "init_persistence",
-        );
+        ));
     };
 
     // With a store but no project selected, the workbench has no scope: return
@@ -173,24 +173,36 @@ pub async fn dashboard(
     // selected" while tabs still listed unrelated targets/harnesses/crashes. The
     // intentional cross-project view lives in the Artifacts screen.
     if project_filter_ref.is_none() {
-        return empty_dashboard(
+        return Ok(empty_dashboard(
             None,
             active_target,
             "Select a project to view its fuzzing workbench.",
             "select_project",
-        );
+        ));
     }
 
-    let targets = store.list_all_targets().await.unwrap_or_default();
+    let targets = store
+        .list_all_targets()
+        .await
+        .map_err(ClassifiedError::from)?;
     let runs = store
         .list_runs(project_filter_ref)
         .await
-        .unwrap_or_default();
-    let harnesses = store.list_all_harnesses().await.unwrap_or_default();
+        .map_err(ClassifiedError::from)?;
+    let harnesses = store
+        .list_all_harnesses()
+        .await
+        .map_err(ClassifiedError::from)?;
     let harness_to_target: HashMap<Uuid, Uuid> =
         harnesses.iter().map(|h| (h.id, h.target_id)).collect();
-    let crashes = store.list_all_crashes().await.unwrap_or_default();
-    let corpus_entries = store.list_all_corpus_entries().await.unwrap_or_default();
+    let crashes = store
+        .list_all_crashes()
+        .await
+        .map_err(ClassifiedError::from)?;
+    let corpus_entries = store
+        .list_all_corpus_entries()
+        .await
+        .map_err(ClassifiedError::from)?;
 
     let project_scoped_targets: Vec<TargetCandidate> = targets
         .iter()
@@ -265,7 +277,7 @@ pub async fn dashboard(
             count += store
                 .list_corpus_entries(target.id)
                 .await
-                .unwrap_or_default()
+                .map_err(ClassifiedError::from)?
                 .len();
         }
         count
@@ -303,7 +315,7 @@ pub async fn dashboard(
     let next_actions = next_actions(&totals);
     let next_action_items = next_action_notes(&totals);
 
-    WorkbenchDashboard {
+    Ok(WorkbenchDashboard {
         active_project: project_filter,
         active_target: active_target.map(str::to_owned),
         totals,
@@ -314,7 +326,7 @@ pub async fn dashboard(
         readiness,
         next_actions,
         next_action_items,
-    }
+    })
 }
 
 /// List reviewable harnesses only.
@@ -322,10 +334,10 @@ pub async fn harness_review_queue(
     store: Option<&Store>,
     active_project: Option<&Path>,
     active_target: Option<&str>,
-) -> Vec<HarnessReviewItem> {
-    dashboard(store, active_project, active_target)
-        .await
-        .harness_reviews
+) -> Result<Vec<HarnessReviewItem>, ClassifiedError> {
+    Ok(dashboard(store, active_project, active_target)
+        .await?
+        .harness_reviews)
 }
 
 /// Build an issue draft for a persisted crash, targeting the configured issue
@@ -350,7 +362,10 @@ pub async fn issue_export(
         .into_iter()
         .find(|c| c.id.to_string() == crash_id)
         .ok_or_else(|| ClassifiedError::Validation(format!("crash not found: {crash_id}")))?;
-    let targets = store.list_all_targets().await.unwrap_or_default();
+    let targets = store
+        .list_all_targets()
+        .await
+        .map_err(ClassifiedError::from)?;
     let target = targets.iter().find(|t| t.id == crash.target_id);
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);
@@ -436,7 +451,10 @@ pub async fn file_issue(
         .into_iter()
         .find(|c| c.id.to_string() == crash_id)
         .ok_or_else(|| ClassifiedError::Validation(format!("crash not found: {crash_id}")))?;
-    let targets = store.list_all_targets().await.unwrap_or_default();
+    let targets = store
+        .list_all_targets()
+        .await
+        .map_err(ClassifiedError::from)?;
     let target = targets.iter().find(|t| t.id == crash.target_id);
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);

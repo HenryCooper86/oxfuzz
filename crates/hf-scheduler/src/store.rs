@@ -35,14 +35,38 @@ fn default_tz() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SchedulePolicies {
     /// How to handle missed fires (e.g., during downtime).
-    #[serde(default)]
-    pub missed_policy: MissedPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed_policy: Option<MissedPolicy>,
     /// Behaviour when a trigger fires while the previous execution is still running.
-    #[serde(default)]
-    pub concurrency_policy: ConcurrencyPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_policy: Option<ConcurrencyPolicy>,
     /// Maximum number of executions allowed per hour (0 = unlimited).
     #[serde(default)]
     pub max_executions_per_hour: u32,
+}
+
+impl SchedulePolicies {
+    /// Fill absent per-schedule policies from scheduler-wide defaults.
+    pub fn resolve_defaults(
+        &mut self,
+        missed_policy: MissedPolicy,
+        concurrency_policy: ConcurrencyPolicy,
+    ) {
+        self.missed_policy.get_or_insert(missed_policy);
+        self.concurrency_policy.get_or_insert(concurrency_policy);
+    }
+
+    /// Effective missed-fire policy after scheduler registration.
+    #[must_use]
+    pub fn effective_missed_policy(&self) -> MissedPolicy {
+        self.missed_policy.unwrap_or_default()
+    }
+
+    /// Effective same-schedule concurrency policy after scheduler registration.
+    #[must_use]
+    pub fn effective_concurrency_policy(&self) -> ConcurrencyPolicy {
+        self.concurrency_policy.unwrap_or_default()
+    }
 }
 
 /// A schedule definition.
@@ -301,17 +325,17 @@ mod tests {
             "wf",
         )
         .with_policies(SchedulePolicies {
-            missed_policy: MissedPolicy::CatchUp,
-            concurrency_policy: ConcurrencyPolicy::Queue,
+            missed_policy: Some(MissedPolicy::CatchUp),
+            concurrency_policy: Some(ConcurrencyPolicy::Queue),
             max_executions_per_hour: 5,
         })
         .with_description("A test schedule")
         .with_tags(vec!["test".into(), "daily".into()]);
 
-        assert_eq!(schedule.policies.missed_policy, MissedPolicy::CatchUp);
+        assert_eq!(schedule.policies.missed_policy, Some(MissedPolicy::CatchUp));
         assert_eq!(
             schedule.policies.concurrency_policy,
-            ConcurrencyPolicy::Queue
+            Some(ConcurrencyPolicy::Queue)
         );
         assert_eq!(schedule.policies.max_executions_per_hour, 5);
         assert_eq!(schedule.description, "A test schedule");
