@@ -448,17 +448,17 @@ fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
 /// Start a campaign scheduler for a one-shot CLI operation. Background ticking
 /// stops when the process exits; persisted schedules live under the user data
 /// dir (shared with the GUI and web server).
-async fn start_scheduler() -> hf_service::scheduler::CampaignScheduler {
+async fn start_scheduler() -> anyhow::Result<hf_service::scheduler::CampaignScheduler> {
     let container = ServiceContainer::bootstrap().await;
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
-    hf_service::scheduler::CampaignScheduler::start(container, store_path, None).await
+    Ok(hf_service::scheduler::CampaignScheduler::try_start(container, store_path, None).await?)
 }
 
 async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
-    let scheduler = start_scheduler().await;
+    let scheduler = start_scheduler().await?;
     match op {
         ScheduleOp::List => {
-            let views = scheduler.list_views().await;
+            let views = scheduler.list_views().await?;
             if views.is_empty() {
                 println!("No scheduled campaigns.");
             }
@@ -485,7 +485,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             }
         }
         ScheduleOp::History { limit } => {
-            for e in scheduler.recent_executions(limit).await {
+            for e in scheduler.recent_executions(limit).await? {
                 println!(
                     "{}  {}  {}  {}",
                     e.triggered_at, e.campaign, e.status, e.summary
@@ -517,11 +517,11 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
                 max_total_secs,
                 schedule_id: String::new(),
             };
-            scheduler.create(&name, &params, trigger).await;
+            scheduler.try_create(&name, &params, trigger).await?;
             println!("Created schedule '{name}'.");
         }
         ScheduleOp::Delete { id } => {
-            let msg = if scheduler.remove(&id).await {
+            let msg = if scheduler.try_remove(&id).await? {
                 "Deleted."
             } else {
                 "No such schedule."
@@ -529,7 +529,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             println!("{msg}");
         }
         ScheduleOp::Enable { id } => {
-            let msg = if scheduler.set_enabled(&id, true).await {
+            let msg = if scheduler.try_set_enabled(&id, true).await? {
                 "Enabled."
             } else {
                 "No such schedule."
@@ -537,7 +537,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
             println!("{msg}");
         }
         ScheduleOp::Disable { id } => {
-            let msg = if scheduler.set_enabled(&id, false).await {
+            let msg = if scheduler.try_set_enabled(&id, false).await? {
                 "Disabled."
             } else {
                 "No such schedule."
@@ -1159,7 +1159,7 @@ async fn main() -> anyhow::Result<()> {
             let security = hf_web::WebSecurityConfig::from_env();
             let addr = std::net::SocketAddr::new(host, port);
             hf_web::validate_bind_addr(addr, security.token_configured())?;
-            let app = hf_web::build_bootstrapped_with_security(security).await;
+            let app = hf_web::build_bootstrapped_with_security(security).await?;
             println!("hobot-fuzz web server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;

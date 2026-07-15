@@ -150,8 +150,6 @@ pub enum SseEvent {
     },
     /// `run:status` -- one run changed lifecycle state.
     RunStatus { run_id: String, status: String },
-    /// `docker:status` -- Docker daemon / sandbox image build progress.
-    DockerStatus { message: String },
     /// `stream:lagged` -- this subscriber fell behind the bounded channel.
     StreamLagged { dropped: u64 },
 }
@@ -161,7 +159,6 @@ impl SseEvent {
         match self {
             SseEvent::RunProgress { .. } => "run:progress",
             SseEvent::RunStatus { .. } => "run:status",
-            SseEvent::DockerStatus { .. } => "docker:status",
             SseEvent::StreamLagged { .. } => "stream:lagged",
         }
     }
@@ -192,7 +189,9 @@ fn map_err<E: std::fmt::Display>(
     }
 }
 
-fn classified_api_error(error: ClassifiedError) -> ApiError {
+fn classified_api_error(error: impl Into<ClassifiedError>) -> ApiError {
+    let error = error.into();
+    let message = error.to_string();
     let status = match &error {
         ClassifiedError::Validation(_) => StatusCode::BAD_REQUEST,
         ClassifiedError::Harness(_) | ClassifiedError::Engine(_) => {
@@ -205,10 +204,18 @@ fn classified_api_error(error: ClassifiedError) -> ApiError {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     };
+    (status, Json(ErrorResponse { error: message }))
+}
+
+fn scheduler_api_error(error: hf_service::scheduler::CampaignSchedulerError) -> ApiError {
+    classified_api_error(error)
+}
+
+fn missing_schedule_error(id: &str) -> ApiError {
     (
-        status,
+        StatusCode::NOT_FOUND,
         Json(ErrorResponse {
-            error: error.to_string(),
+            error: format!("no scheduled campaign with id '{id}'"),
         }),
     )
 }
@@ -226,7 +233,11 @@ pub fn build() -> Router {
 /// Build the application router from the canonical
 /// [`ServiceContainer::bootstrap`]: Docker runtime, env-configured LLM provider
 /// pool, and `HF_DB_PATH` persistence -- the same container the CLI and GUI use.
-pub async fn build_bootstrapped() -> Router {
+///
+/// # Errors
+/// Returns a scheduler-state error when persisted campaign definitions or
+/// execution history cannot be loaded safely.
+pub async fn build_bootstrapped() -> Result<Router, hf_service::scheduler::CampaignSchedulerError> {
     build_bootstrapped_with_security(WebSecurityConfig::from_env()).await
 }
 
@@ -234,16 +245,26 @@ pub async fn build_bootstrapped() -> Router {
 ///
 /// The CLI uses this after validating its bind address, ensuring the socket
 /// check and router authentication use the exact same immutable policy.
-pub async fn build_bootstrapped_with_security(security: WebSecurityConfig) -> Router {
+///
+/// # Errors
+/// Returns a scheduler-state error when persisted campaign definitions or
+/// execution history cannot be loaded safely.
+pub async fn build_bootstrapped_with_security(
+    security: WebSecurityConfig,
+) -> Result<Router, hf_service::scheduler::CampaignSchedulerError> {
     let container = ServiceContainer::bootstrap().await;
     // Start the campaign scheduler so headless schedules fire and the schedule
     // endpoints are live (mirrors the desktop shell). Schedules persist under
     // the user data dir so they survive restarts.
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
     let scheduler = std::sync::Arc::new(
-        hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path, None).await,
+        hf_service::scheduler::CampaignScheduler::try_start(container.clone(), store_path, None)
+            .await?,
     );
-    build_with_state_and_security(AppState::new(container).with_scheduler(scheduler), security)
+    Ok(build_with_state_and_security(
+        AppState::new(container).with_scheduler(scheduler),
+        security,
+    ))
 }
 
 /// Build the router with a given `AppState` (for testing or custom containers).
@@ -706,6 +727,12 @@ async fn run_start(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let project = approved_project(&state, &req.project)?;
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    if engine == EngineKind::Syzkaller {
+        return Err(classified_api_error(ClassifiedError::Validation(
+            "Syzkaller requires the trusted local desktop workflow for kernel and VM artifacts"
+                .to_owned(),
+        )));
+    }
     let progress_state = state.clone();
     let on_progress = std::sync::Arc::new(move |run_id: uuid::Uuid, progress: FuzzProgress| {
         let (kind, data) = match progress {
@@ -1704,12 +1731,12 @@ async fn knowledge_search(
 // Endpoints degrade to empty results when no scheduler is attached (e.g. a
 // bare test state).
 
-async fn schedule_list(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn schedule_list(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let views = match &state.scheduler {
-        Some(scheduler) => scheduler.list_views().await,
+        Some(scheduler) => scheduler.list_views().await.map_err(scheduler_api_error)?,
         None => Vec::new(),
     };
-    Json(public_value(views))
+    Ok(Json(public_value(views)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1721,19 +1748,23 @@ struct HistoryQuery {
 async fn schedule_history(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
-) -> Json<serde_json::Value> {
+) -> ApiResult<serde_json::Value> {
     let views = match &state.scheduler {
-        Some(scheduler) => scheduler.recent_executions(q.limit.unwrap_or(20)).await,
+        Some(scheduler) => scheduler
+            .recent_executions(q.limit.unwrap_or(20))
+            .await
+            .map_err(scheduler_api_error)?,
         None => Vec::new(),
     };
-    Json(public_value(views))
+    Ok(Json(public_value(views)))
 }
 
-async fn schedule_history_clear(State(state): State<AppState>) -> Json<u64> {
-    match &state.scheduler {
-        Some(s) => Json(s.clear_history().await),
-        None => Json(0),
-    }
+async fn schedule_history_clear(State(state): State<AppState>) -> ApiResult<u64> {
+    let cleared = match &state.scheduler {
+        Some(s) => s.clear_history().await.map_err(scheduler_api_error)?,
+        None => 0,
+    };
+    Ok(Json(cleared))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1802,8 +1833,12 @@ async fn schedule_create(
         max_total_secs: req.max_total_secs,
         schedule_id: String::new(),
     };
-    scheduler.create(&req.name, &params, trigger).await;
-    Ok(Json(public_value(scheduler.list_views().await)))
+    scheduler
+        .try_create(&req.name, &params, trigger)
+        .await
+        .map_err(scheduler_api_error)?;
+    let views = scheduler.list_views().await.map_err(scheduler_api_error)?;
+    Ok(Json(public_value(views)))
 }
 
 async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> {
@@ -1818,27 +1853,32 @@ struct ConcurrencyRequest {
 async fn schedule_concurrency_set(
     State(state): State<AppState>,
     Json(req): Json<ConcurrencyRequest>,
-) -> Json<usize> {
-    match &state.scheduler {
+) -> ApiResult<usize> {
+    let max_concurrent = match &state.scheduler {
         Some(s) => {
-            s.set_max_concurrent(req.max_concurrent);
-            Json(s.max_concurrent())
+            s.try_set_max_concurrent(req.max_concurrent)
+                .map_err(scheduler_api_error)?;
+            s.max_concurrent()
         }
-        None => Json(0),
-    }
+        None => 0,
+    };
+    Ok(Json(max_concurrent))
 }
 
 async fn schedule_delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    match &state.scheduler {
+) -> ApiResult<serde_json::Value> {
+    let views = match &state.scheduler {
         Some(s) => {
-            s.remove(&id).await;
-            Json(public_value(s.list_views().await))
+            if !s.try_remove(&id).await.map_err(scheduler_api_error)? {
+                return Err(missing_schedule_error(&id));
+            }
+            s.list_views().await.map_err(scheduler_api_error)?
         }
-        None => Json(serde_json::json!([])),
-    }
+        None => Vec::new(),
+    };
+    Ok(Json(public_value(views)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1850,14 +1890,21 @@ async fn schedule_set_enabled(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SetEnabledRequest>,
-) -> Json<serde_json::Value> {
-    match &state.scheduler {
+) -> ApiResult<serde_json::Value> {
+    let views = match &state.scheduler {
         Some(s) => {
-            s.set_enabled(&id, req.enabled).await;
-            Json(public_value(s.list_views().await))
+            if !s
+                .try_set_enabled(&id, req.enabled)
+                .await
+                .map_err(scheduler_api_error)?
+            {
+                return Err(missing_schedule_error(&id));
+            }
+            s.list_views().await.map_err(scheduler_api_error)?
         }
-        None => Json(serde_json::json!([])),
-    }
+        None => Vec::new(),
+    };
+    Ok(Json(public_value(views)))
 }
 
 // -- Config endpoints ------------------------------------------------------
