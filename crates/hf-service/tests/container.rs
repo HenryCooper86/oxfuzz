@@ -61,6 +61,9 @@ fn stored_harness(target_id: uuid::Uuid, symbol: &str) -> hf_core::harness::Harn
             execs_per_sec: 10.0,
             crashes: 0,
             passed: true,
+            source_sha256: None,
+            binary_sha256: None,
+            run_id: None,
         }),
     }
 }
@@ -108,7 +111,10 @@ fn stored_crash(run_id: uuid::Uuid, target_id: uuid::Uuid, marker: &str) -> hf_c
 
 /// A runtime whose streamed command blocks until the run is cancelled, so a
 /// test can observe and drive the cancellation path deterministically.
-struct BlockingRuntime;
+#[derive(Default)]
+struct BlockingRuntime {
+    sandbox_options: std::sync::Mutex<Vec<hf_core::runtime::SandboxOptions>>,
+}
 
 #[async_trait::async_trait]
 impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
@@ -123,6 +129,7 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
             stdout: "DONE exec/s: 64".to_owned(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
         })
     }
 
@@ -141,7 +148,22 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
             stdout: String::new(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Cancelled,
         })
+    }
+
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        self.sandbox_options.lock().unwrap().push(opts.clone());
+        self.run_command_streaming(cmd, cwd, limits, cancel, on_line)
+            .await
     }
 
     async fn write_file(
@@ -186,9 +208,9 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
             .await
             .expect("connect store"),
     );
-    let container = Arc::new(
-        ServiceContainer::new(Arc::new(BlockingRuntime), None).with_store(Arc::clone(&store)),
-    );
+    let runtime = Arc::new(BlockingRuntime::default());
+    let container =
+        Arc::new(ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&store)));
     container
         .harness_compile(
             "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
@@ -249,10 +271,36 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
         .expect("task join")
         .expect("run_fuzzer ok");
     assert_eq!(summary.crashes, 0);
+    assert_eq!(
+        summary.termination,
+        hf_core::runtime::CommandTermination::Cancelled
+    );
     assert!(container.active_run_ids().is_empty(), "registry cleaned up");
 
     let run = store.get_run(run_id).await.unwrap().expect("run persisted");
     assert_eq!(run.status, hf_storage::RunStatus::Cancelled);
+    assert_eq!(run.harness_rev.as_deref().map(str::len), Some(64));
+    assert_eq!(run.binary_rev.as_deref().map(str::len), Some(64));
+    assert_eq!(
+        run.evidence_dir.as_deref(),
+        Some(format!("runs/{run_id}/out").as_str())
+    );
+    assert!(workspace.join(run.evidence_dir.unwrap()).is_dir());
+    assert!(workspace
+        .join(format!("runs/{run_id}/input/harness"))
+        .is_file());
+
+    let profiles = runtime.sandbox_options.lock().unwrap();
+    let profile = profiles.last().expect("full run sandbox profile captured");
+    assert!(profile.workspace_read_only);
+    assert!(profile
+        .extra_mounts
+        .iter()
+        .any(|mount| mount.container_path == "/work/corpus"));
+    assert!(profile
+        .extra_mounts
+        .iter()
+        .any(|mount| mount.container_path == format!("/work/runs/{run_id}/out")));
 
     let _ = fs::remove_dir_all(&workspace);
 }
@@ -473,6 +521,84 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
 }
 
 #[tokio::test]
+async fn deleting_a_terminal_run_removes_its_exact_evidence_directory() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("delete-run-project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let target = stored_target(&project, "parse_delete");
+    let harness = stored_harness(target.id, &target.symbol);
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+    store.upsert_harness(&harness).await.unwrap();
+    let mut run = stored_run(&project, harness.id, chrono::Utc::now());
+    run.evidence_dir = Some(
+        std::path::PathBuf::from("runs")
+            .join(run.id.to_string())
+            .join("out")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    store.insert_run(&run).await.unwrap();
+    let root = hf_service::workspace_dir(&project, &target.symbol)
+        .join("runs")
+        .join(run.id.to_string());
+    std::fs::create_dir_all(root.join("out")).unwrap();
+    std::fs::write(root.join("out/crash-1"), b"evidence").unwrap();
+
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+    container.delete_run(&run.id.to_string()).await.unwrap();
+
+    assert!(store.get_run(run.id).await.unwrap().is_none());
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn run_deletion_rejects_live_and_qualification_records() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("protected-run-project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("protected.db"))
+            .await
+            .unwrap(),
+    );
+    let target = stored_target(&project, "parse_protected");
+    let mut harness = stored_harness(target.id, &target.symbol);
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let mut live = stored_run(&project, harness.id, chrono::Utc::now());
+    live.status = hf_storage::RunStatus::Running;
+    store.insert_run(&live).await.unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+    assert!(container.delete_run(&live.id.to_string()).await.is_err());
+    assert!(store.get_run(live.id).await.unwrap().is_some());
+
+    let qualification = stored_run(&project, harness.id, chrono::Utc::now());
+    harness.smoke_run.as_mut().unwrap().run_id = Some(qualification.id);
+    store.upsert_harness(&harness).await.unwrap();
+    store.insert_run(&qualification).await.unwrap();
+    assert!(container
+        .delete_run(&qualification.id.to_string())
+        .await
+        .is_err());
+    assert!(store.get_run(qualification.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn verify_regressions_replays_stored_crash_inputs() {
     use std::fs;
     isolate_workspace();
@@ -489,15 +615,17 @@ async fn verify_regressions_replays_stored_crash_inputs() {
     fs::write(ws.join(format!("fuzz_{target}")), b"bin").unwrap();
     fs::write(out.join("crash-1"), b"boom").unwrap();
 
-    // Stub runtime can't actually reproduce, so replay yields no crash -> the
-    // crash is reported as fixed. (The real value is the replay plumbing.)
+    // Stub runtime cannot reproduce, so the replay is retained as inconclusive
+    // rather than being misreported as fixed.
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
     let results = container
         .verify_regressions(&project, target)
         .await
         .unwrap();
     assert_eq!(results.len(), 1, "the staged crash input is replayed");
+    assert!(!results[0].verified);
     assert!(!results[0].still_crashes);
+    assert!(results[0].summary.contains("inconclusive"));
     assert!(results[0].input.ends_with("crash-1"));
 
     // Without a compiled harness it errors clearly.
@@ -526,7 +654,8 @@ async fn artifact_summary_reports_on_disk_state() {
     assert_eq!(empty.corpus_count, 0);
     assert_eq!(empty.crash_count, 0);
 
-    // Lay down a harness binary, two corpus inputs, and a crash input.
+    // Lay down a harness binary, two corpus inputs, and both legacy and
+    // run-scoped crash evidence.
     let ws = hf_service::workspace_dir(&project, target);
     fs::create_dir_all(ws.join("corpus")).unwrap();
     fs::create_dir_all(ws.join("out")).unwrap();
@@ -534,11 +663,13 @@ async fn artifact_summary_reports_on_disk_state() {
     fs::write(ws.join("corpus").join("a"), b"a").unwrap();
     fs::write(ws.join("corpus").join("b"), b"b").unwrap();
     fs::write(ws.join("out").join("crash-1"), b"boom").unwrap();
+    fs::create_dir_all(ws.join("runs/run-a/out")).unwrap();
+    fs::write(ws.join("runs/run-a/out/crash-2"), b"boom again").unwrap();
 
     let s = container.artifact_summary(&project, target);
     assert!(s.harness_built, "harness detected");
     assert_eq!(s.corpus_count, 2);
-    assert_eq!(s.crash_count, 1);
+    assert_eq!(s.crash_count, 2);
 
     let _ = fs::remove_dir_all(&ws);
 }

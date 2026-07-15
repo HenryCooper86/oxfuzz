@@ -42,10 +42,12 @@ interface Summary {
   autoRevert?: AutoRevert | null;
 }
 type RunResult = {
+  run_id: string | null;
   edges: number;
   crashes: number;
   execs: number;
   exit_code: number | null;
+  termination: "completed" | "timed_out" | "cancelled";
   stagnation?: string | null;
   auto_revert?: AutoRevert | null;
 };
@@ -260,7 +262,13 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
             `[${now()}] Auto-revert: coverage dropped ${ar.drop_pct.toFixed(1)}% (${ar.regressed_edges} < ${ar.previous_edges} edges) after harness ${ar.from_rev.slice(0, 8)} -- ${tail}`,
           );
         }
-        appendLog(`[${now()}] Run complete (exit ${result.exit_code ?? "?"})`);
+        if (result.termination === "cancelled") {
+          appendLog(`[${now()}] Run cancelled; partial evidence retained for ${result.run_id ?? "the run"}.`);
+        } else if (result.termination === "timed_out") {
+          appendLog(`[${now()}] Run timed out; partial evidence retained for ${result.run_id ?? "the run"}.`);
+        } else {
+          appendLog(`[${now()}] Run complete (exit ${result.exit_code ?? "?"})`);
+        }
         return result.crashes;
       } catch (e) {
         appendLog(`error: ${e}`);

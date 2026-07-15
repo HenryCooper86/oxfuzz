@@ -44,6 +44,7 @@ impl hf_core::runtime::RuntimeAdapter for FlakyCompileRuntime {
                 "harness.c:2:5: error: implicit declaration of function 'frob'".to_owned()
             },
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
         })
     }
 

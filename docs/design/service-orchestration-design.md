@@ -44,6 +44,22 @@ identifier in its run configuration. Target-specific consumers resolve the run
 through `run.config.harness_id -> harness.target_id`; they never infer target
 ownership from whichever project run happened most recently.
 
+Before smoke or full execution, the service allocates the run id and its
+evidence directory. The run stores its kind (`smoke` or `campaign`), full source
+and binary SHA-256 digests, and a comparison-context digest covering the staged
+target sources, starting corpus, and sandbox image. Launch is rejected if
+either active artifact no longer matches the approved revision. Records that
+claim run-scoped evidence never fall back to mutable active paths: crash,
+corpus, coverage, export, and report flows verify the exact run directory and
+staged executable digest first. Only pre-migration records with no evidence
+metadata may use the legacy flat paths.
+
+Run deletion is also evidence-aware. Running records and runs referenced by a
+harness qualification cannot be deleted, and successful deletion removes only
+the validated, run-owned directory. A cancelled campaign stops orchestration
+immediately and is never reported to schedulers or presentation layers as a
+successful iteration.
+
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist
 before the service loads model context or retains a per-session turn lock. Raw
@@ -78,11 +94,18 @@ instead of silently switching to frontend-only history.
 
 ### 4.2 Coverage Regression Rollback
 
-Automatic harness rollback is evidence-gated. A completed run may be compared
-only with an earlier successful run for the same target whose engine, requested
-duration, memory/CPU limits, sanitizer, corpus location, environment, and engine
-arguments match. Cross-engine, cross-budget, failed, cancelled, unattributed,
-and legacy runs without configuration are not rollback baselines.
+Automatic harness rollback is evidence-gated. A completed campaign run may be
+compared only with an earlier successful campaign for the same target whose
+engine, requested duration, memory/CPU limits, sanitizer, corpus location,
+environment, engine arguments, and comparison-context digest match. Smoke
+qualification, cross-engine, cross-budget, failed, cancelled, unattributed,
+same-revision, and legacy runs without complete provenance are not rollback
+baselines. Baseline search continues past ineligible or same-revision runs.
+
+Restoring a historical run reactivates the exact persisted source and staged
+binary only after both digests are verified against that run and its promoted
+harness qualification. It never recompiles historical text and transfers old
+qualification metadata onto different bytes.
 
 The active source revision is stored separately from language-specific compiler
 inputs and is committed only after a successful sandbox build. Failed builds may

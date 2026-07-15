@@ -8,20 +8,8 @@ use std::path::Path;
 use hf_core::coverage::CoverageReport;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
-use hf_core::runtime::RuntimeAdapter;
+use hf_core::runtime::{CommandTermination, RuntimeAdapter};
 use uuid::Uuid;
-
-use crate::progress::{parse_coverage, parse_progress, parse_syzkaller_progress};
-
-/// Collapse a finished run's stdout into final progress events, dispatching to
-/// the syzkaller-specific parser (absolute counters) when appropriate.
-fn final_progress(engine: EngineKind, combined: &str) -> Vec<FuzzProgress> {
-    if engine == EngineKind::Syzkaller {
-        parse_syzkaller_progress(combined)
-    } else {
-        parse_progress(combined)
-    }
-}
 
 /// Extra wall-clock seconds the sandbox is allowed beyond the fuzzer's own
 /// `-max_total_time`, covering corpus loading and sanitizer shutdown.
@@ -31,11 +19,75 @@ const SANDBOX_TIMEOUT_HEADROOM_SECS: u64 = 60;
 /// explicit duration, so the fuzzer always gets a self-limit and exits cleanly
 /// within the sandbox window rather than being killed at the wall-clock cap.
 const DEFAULT_RUN_SECS: u64 = 3600;
+#[derive(Default)]
+struct ProgressAggregate {
+    first_edges: Option<u64>,
+    peak_edges: u64,
+    peak_execs: f64,
+    crashes: u64,
+}
+
+impl ProgressAggregate {
+    fn observe_event(&mut self, event: &FuzzProgress) {
+        match event {
+            FuzzProgress::EdgesCovered(edges) => {
+                self.first_edges.get_or_insert(*edges);
+                self.peak_edges = self.peak_edges.max(*edges);
+            }
+            FuzzProgress::ExecsPerSec(execs) => self.peak_execs = self.peak_execs.max(*execs),
+            // Generic engine logs often emit several lines for one finding
+            // (sanitizer, SUMMARY, artifact path). Preserve the durable fact
+            // that at least one finding occurred; the service counts distinct
+            // run-owned artifact files for the exact total.
+            FuzzProgress::CrashesFound(_) => self.crashes = self.crashes.max(1),
+            FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
+        }
+    }
+
+    fn observe_syzkaller(&mut self, cover: u64, crashes: u64) {
+        self.first_edges.get_or_insert(cover);
+        self.peak_edges = self.peak_edges.max(cover);
+        self.crashes = self.crashes.max(crashes);
+    }
+
+    fn progress(&self, done: bool) -> Vec<FuzzProgress> {
+        let mut progress = Vec::new();
+        if self.peak_edges > 0 {
+            progress.push(FuzzProgress::EdgesCovered(self.peak_edges));
+        }
+        if self.peak_execs > 0.0 {
+            progress.push(FuzzProgress::ExecsPerSec(self.peak_execs));
+        }
+        if self.crashes > 0 {
+            progress.push(FuzzProgress::CrashesFound(
+                u32::try_from(self.crashes).unwrap_or(u32::MAX),
+            ));
+        }
+        if done {
+            progress.push(FuzzProgress::Done);
+        }
+        progress
+    }
+
+    fn coverage(&self, run_id: Uuid) -> CoverageReport {
+        CoverageReport {
+            run_id,
+            edges: self.peak_edges,
+            blocks: 0,
+            delta_edges: self.peak_edges.cast_signed()
+                - self.first_edges.unwrap_or(0).cast_signed(),
+            stagnation_secs: 0,
+            new_edges_files: Vec::new(),
+        }
+    }
+}
 
 /// The result of a fuzz run.
 pub struct RunResult {
     pub progress: Vec<FuzzProgress>,
     pub coverage: CoverageReport,
+    /// The runtime-owned reason the command stopped.
+    pub termination: CommandTermination,
 }
 
 /// An engine-agnostic runner that executes fuzz commands via a
@@ -108,6 +160,39 @@ impl EngineRunner {
         cancel: &tokio_util::sync::CancellationToken,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunResult, ClassifiedError> {
+        self.run_streaming_opts(
+            engine,
+            cfg,
+            binary,
+            corpus,
+            out,
+            rt,
+            workspace,
+            &hf_core::runtime::SandboxOptions::default(),
+            cancel,
+            on_progress,
+        )
+        .await
+    }
+
+    /// Run a fuzz campaign with an explicit sandbox mount/profile contract.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the engine is unsupported, the runtime is
+    /// force-stopped, or a completed engine process reports an invalid exit.
+    pub async fn run_streaming_opts(
+        &self,
+        engine: EngineKind,
+        cfg: &FuzzRunConfig,
+        binary: &str,
+        corpus: &str,
+        out: &str,
+        rt: &dyn RuntimeAdapter,
+        workspace: &Path,
+        sandbox: &hf_core::runtime::SandboxOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<RunResult, ClassifiedError> {
         // A run with no explicit duration would otherwise get no self-limit
         // flag (`-max_total_time`/`-V`/`--run_time`) from the adapter and run
         // forever, only to be killed at the sandbox wall-clock cap -- and a
@@ -144,14 +229,17 @@ impl EngineRunner {
         // (which would miscount each `crashes N` token as a fresh finding).
         let is_syzkaller = engine == EngineKind::Syzkaller;
         let syz_crashes = std::sync::atomic::AtomicU64::new(0);
+        let aggregate = std::sync::Mutex::new(ProgressAggregate::default());
+        let saw_line = std::sync::atomic::AtomicBool::new(false);
+        let saw_completion = std::sync::atomic::AtomicBool::new(false);
 
-        // Accumulate the full output for the final coverage/validation pass
-        // while forwarding each line live.
-        let combined = std::sync::Mutex::new(String::new());
         let on_line = |line: &str| {
-            if let Ok(mut buf) = combined.lock() {
-                buf.push_str(line);
-                buf.push('\n');
+            use std::sync::atomic::Ordering::Relaxed;
+
+            saw_line.store(true, Relaxed);
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("done") || lower.contains("summary") || lower.contains("finished") {
+                saw_completion.store(true, Relaxed);
             }
             on_progress(FuzzProgress::LogLine(line.to_owned()));
             if is_syzkaller {
@@ -160,8 +248,11 @@ impl EngineRunner {
                 if let Some((cover, _executed, crashes)) =
                     crate::progress::parse_syzkaller_status(line)
                 {
+                    if let Ok(mut aggregate) = aggregate.lock() {
+                        aggregate.observe_syzkaller(cover, crashes);
+                    }
                     on_progress(FuzzProgress::EdgesCovered(cover));
-                    let prev = syz_crashes.swap(crashes, std::sync::atomic::Ordering::Relaxed);
+                    let prev = syz_crashes.swap(crashes, Relaxed);
                     for _ in prev..crashes {
                         on_progress(FuzzProgress::CrashesFound(1));
                     }
@@ -169,28 +260,45 @@ impl EngineRunner {
                 return;
             }
             for event in crate::progress::parse_progress_events(line) {
+                if let Ok(mut aggregate) = aggregate.lock() {
+                    aggregate.observe_event(&event);
+                }
                 on_progress(event);
             }
         };
         let result = rt
-            .run_command_streaming(&args, workspace, &limits, cancel, &on_line)
+            .run_command_streaming_opts(&args, workspace, &limits, sandbox, cancel, &on_line)
             .await?;
 
-        // A cancelled run stops wherever the user interrupted it; its exit code
-        // is meaningless, so skip validation and return the partial results.
-        if cancel.is_cancelled() {
-            let run_id = Uuid::new_v4();
-            let combined = combined.into_inner().unwrap_or_default();
-            let progress = final_progress(engine, &combined);
-            let coverage = parse_coverage(&combined, run_id);
-            on_progress(FuzzProgress::Done);
-            return Ok(RunResult { progress, coverage });
+        if !saw_line.load(std::sync::atomic::Ordering::Relaxed) {
+            for line in result.stdout.lines().chain(result.stderr.lines()) {
+                on_line(line);
+            }
         }
+        let aggregate = aggregate
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let mut combined = combined.into_inner().unwrap_or_default();
-        if combined.trim().is_empty() {
-            // A runtime that did not stream anything still returns captured I/O.
-            combined = format!("{}\n{}", result.stdout, result.stderr);
+        // The runtime's typed terminal outcome is authoritative. A token can be
+        // cancelled just after a process exits, and a forced stop has no useful
+        // exit code, so inferring either state from those values is racy.
+        match result.termination {
+            CommandTermination::Cancelled => {
+                let run_id = Uuid::new_v4();
+                let progress = aggregate.progress(false);
+                let coverage = aggregate.coverage(run_id);
+                return Ok(RunResult {
+                    progress,
+                    coverage,
+                    termination: CommandTermination::Cancelled,
+                });
+            }
+            CommandTermination::TimedOut => {
+                return Err(ClassifiedError::Engine(
+                    "fuzz run exceeded the sandbox wall-clock limit".to_owned(),
+                ));
+            }
+            CommandTermination::Completed => {}
         }
 
         // libFuzzer exit codes: 0 = clean exit, 77 = crash/leak found,
@@ -200,8 +308,7 @@ impl EngineRunner {
         let is_valid_outcome = result.exit_code == 0
             || result.exit_code == 77
             || result.exit_code == 76
-            || combined.contains("DONE")
-            || combined.contains("SUMMARY");
+            || saw_completion.load(std::sync::atomic::Ordering::Relaxed);
         if !is_valid_outcome {
             return Err(ClassifiedError::Engine(format!(
                 "fuzz run exited {} : {}",
@@ -210,9 +317,13 @@ impl EngineRunner {
             )));
         }
         let run_id = Uuid::new_v4();
-        let progress = final_progress(engine, &combined);
-        let coverage = parse_coverage(&combined, run_id);
+        let progress = aggregate.progress(true);
+        let coverage = aggregate.coverage(run_id);
         on_progress(FuzzProgress::Done);
-        Ok(RunResult { progress, coverage })
+        Ok(RunResult {
+            progress,
+            coverage,
+            termination: CommandTermination::Completed,
+        })
     }
 }
