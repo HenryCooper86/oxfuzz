@@ -157,10 +157,12 @@ async fn create_session_without_db_returns_null() {
 }
 
 #[tokio::test]
-async fn chat_history_without_db_returns_empty_array() {
+async fn chat_history_without_db_reports_persistence_error() {
     let (status, json) = post_json("/chat/history", serde_json::json!({"session_id": "s1"})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json.as_array().map(Vec::len), Some(0));
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(json["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("chat persistence")));
 }
 
 #[tokio::test]

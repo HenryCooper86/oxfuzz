@@ -850,11 +850,10 @@ pub struct ServiceContainer {
     /// A turn registers via [`Self::track_agent`] and is removed when the
     /// returned guard drops. Shared across clones of this container.
     active_agents: Arc<std::sync::Mutex<Vec<String>>>,
-    /// Per-session locks serializing chat turns on the same session. A turn is a
-    /// read-modify-write over the transcript (read history, run the turn, append
-    /// user+assistant + checkpoint); two concurrent turns on one session would
-    /// otherwise interleave appends and mint duplicate checkpoint turn numbers.
-    /// Different sessions still run concurrently. Shared across clones.
+    /// Per-session locks serializing every chat read-modify-write operation.
+    /// Turns, rollback, branching, and deletion share this lock so transcript,
+    /// metadata, and checkpoint mutations cannot interleave. Different
+    /// sessions still run concurrently. Shared across clones.
     session_turn_locks: Arc<
         std::sync::Mutex<
             std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
@@ -891,7 +890,7 @@ fn build_cost_map() -> std::collections::HashMap<String, (f64, f64)> {
 /// Build the `hf-session` managers over a database store: the [`SessionManager`]
 /// (`SQLite` session tree + `JSONL` display/context transcripts) and a
 /// [`ChatCheckpointManager`] sharing the same stores for turn-level rollback
-/// (checkpoints are in-memory -- a session-lifetime undo buffer).
+/// (checkpoints are persisted in `SQLite` so undo survives restarts).
 ///
 /// [`SessionManager`]: hf_session::SessionManager
 /// [`ChatCheckpointManager`]: hf_session::ChatCheckpointManager
@@ -932,6 +931,10 @@ fn build_session_managers(
         session_store,
     ));
     (manager, checkpoints)
+}
+
+fn chat_storage_error(context: &str, error: impl std::fmt::Display) -> ClassifiedError {
+    ClassifiedError::Storage(format!("{context}: {error}"))
 }
 
 impl ServiceContainer {
@@ -1008,38 +1011,106 @@ impl ServiceContainer {
     }
 
     /// Create a turn checkpoint recording the transcript length before this
-    /// turn (so a later rollback restores the pre-turn state). Best-effort.
+    /// turn (so a later rollback restores the pre-turn state).
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the session is unknown, persistence is not
+    /// configured, or the checkpoint cannot be saved.
     pub async fn chat_create_checkpoint(
         &self,
         session: &hf_core::types::SessionId,
         message_count_before: u32,
-    ) {
-        if let Some(manager) = &self.checkpoint_manager {
-            let turn = manager.current_turn(session).await.unwrap_or(0) + 1;
-            if let Err(e) = manager
-                .create_checkpoint(
-                    session,
-                    turn,
-                    message_count_before,
-                    Uuid::new_v4().to_string(),
-                )
-                .await
-            {
-                tracing::warn!("chat checkpoint create failed: {e}");
-            }
-        }
+    ) -> Result<(), ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.create_chat_checkpoint_unlocked(session, message_count_before)
+            .await
     }
 
-    /// Roll back the most recent chat turn, truncating the transcript. Returns
-    /// the number of messages removed (0 if nothing to roll back).
-    pub async fn chat_rollback_last(&self, session: &hf_core::types::SessionId) -> usize {
-        if let Some(manager) = &self.checkpoint_manager {
-            match manager.rollback_last(session).await {
-                Ok(result) => return result.messages_removed,
-                Err(e) => tracing::warn!("chat rollback failed: {e}"),
-            }
+    async fn create_chat_checkpoint_unlocked(
+        &self,
+        session: &hf_core::types::SessionId,
+        message_count_before: u32,
+    ) -> Result<(), ClassifiedError> {
+        let manager = self.chat_checkpoint_manager()?;
+        let turn = manager
+            .current_turn(session)
+            .await
+            .map_err(|error| chat_storage_error("read current chat turn", error))?
+            .saturating_add(1);
+        manager
+            .create_checkpoint(
+                session,
+                turn,
+                message_count_before,
+                Uuid::new_v4().to_string(),
+            )
+            .await
+            .map_err(|error| chat_storage_error("create chat checkpoint", error))?;
+        Ok(())
+    }
+
+    pub(crate) async fn persist_chat_turn_unlocked(
+        &self,
+        session: &hf_core::types::SessionId,
+        messages: &[hf_core::types::Message],
+    ) -> Result<(), ClassifiedError> {
+        let sessions = self.chat_session_manager()?;
+        let checkpoints = self.chat_checkpoint_manager()?;
+        let snapshot = sessions
+            .snapshot_transcripts(session)
+            .await
+            .map_err(|error| chat_storage_error("snapshot chat transcript", error))?;
+        let message_count_before = snapshot.context_count();
+        let turn = checkpoints
+            .current_turn(session)
+            .await
+            .map_err(|error| chat_storage_error("read current chat turn", error))?
+            .saturating_add(1);
+
+        sessions
+            .append_messages(session, messages)
+            .await
+            .map_err(|error| chat_storage_error("append chat turn", error))?;
+        if let Err(error) = checkpoints
+            .create_checkpoint(
+                session,
+                turn,
+                u32::try_from(message_count_before).unwrap_or(u32::MAX),
+                Uuid::new_v4().to_string(),
+            )
+            .await
+        {
+            let compensation = sessions
+                .restore_transcript_snapshot(session, &snapshot)
+                .await;
+            let detail = match compensation {
+                Ok(()) => format!(
+                    "create chat checkpoint failed and transcript was rolled back: {error}"
+                ),
+                Err(rollback) => format!(
+                    "create chat checkpoint failed: {error}; transcript compensation failed: {rollback}"
+                ),
+            };
+            return Err(ClassifiedError::Storage(detail));
         }
-        0
+        Ok(())
+    }
+
+    /// Roll back the most recent chat turn, truncating the transcript.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the session/checkpoint is unavailable or
+    /// any transcript, metadata, or checkpoint mutation fails.
+    pub async fn chat_rollback_last(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<usize, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.chat_checkpoint_manager()?
+            .rollback_last(session)
+            .await
+            .map(|result| result.messages_removed)
+            .map_err(|error| chat_storage_error("rollback last chat turn", error))
     }
 
     /// List the (still-valid) per-turn checkpoints for a session, each with a
@@ -1047,25 +1118,27 @@ impl ServiceContainer {
     pub async fn chat_checkpoints(
         &self,
         session: &hf_core::types::SessionId,
-    ) -> Vec<crate::checkpoints::CheckpointView> {
-        let (Some(checkpoints), Some(sessions)) = (&self.checkpoint_manager, &self.session_manager)
-        else {
-            return Vec::new();
-        };
+    ) -> Result<Vec<crate::checkpoints::CheckpointView>, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        let checkpoints = self.chat_checkpoint_manager()?;
+        let sessions = self.chat_session_manager()?;
         let list = checkpoints
             .list_checkpoints(session)
             .await
-            .unwrap_or_default();
-        let transcript = sessions.read_transcript(session).await.unwrap_or_default();
+            .map_err(|error| chat_storage_error("list chat checkpoints", error))?;
+        let transcript = sessions
+            .read_transcript(session)
+            .await
+            .map_err(|error| chat_storage_error("read chat checkpoint previews", error))?;
         let mut valid: Vec<_> = list.into_iter().filter(|c| !c.invalidated).collect();
         // Present turns oldest-first for the picker, regardless of the store's
         // list ordering (the trait returns them newest-first).
         valid.sort_by_key(|c| c.turn_number);
-        valid
+        Ok(valid
             .into_iter()
             .map(|c| {
                 let preview = transcript
-                    .get(c.message_count_before as usize)
+                    .get(usize::try_from(c.message_count_before).unwrap_or(usize::MAX))
                     .map(|m| m.content.chars().take(80).collect())
                     .unwrap_or_default();
                 crate::checkpoints::CheckpointView {
@@ -1075,7 +1148,7 @@ impl ServiceContainer {
                     preview,
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Roll back to a specific checkpoint (removing that turn and everything
@@ -1084,14 +1157,13 @@ impl ServiceContainer {
         &self,
         session: &hf_core::types::SessionId,
         checkpoint_id: &str,
-    ) -> usize {
-        if let Some(manager) = &self.checkpoint_manager {
-            match manager.rollback_to(session, checkpoint_id).await {
-                Ok(result) => return result.messages_removed,
-                Err(e) => tracing::warn!("chat rollback_to failed: {e}"),
-            }
-        }
-        0
+    ) -> Result<usize, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.chat_checkpoint_manager()?
+            .rollback_to(session, checkpoint_id)
+            .await
+            .map(|result| result.messages_removed)
+            .map_err(|error| chat_storage_error("rollback chat to checkpoint", error))
     }
 
     /// Fork a conversation: create a branch session off `parent`, copying the
@@ -1102,39 +1174,46 @@ impl ServiceContainer {
         parent: &hf_core::types::SessionId,
         fork_message_count: u32,
         title: Option<String>,
-    ) -> Option<String> {
-        let sessions = self.session_manager.as_ref()?;
-        let branch = sessions.branch(parent, title).await.ok()?;
-        let parent_transcript = sessions.read_transcript(parent).await.unwrap_or_default();
-        for message in parent_transcript
-            .into_iter()
-            .take(fork_message_count as usize)
-        {
-            if let Err(e) = sessions.append_message(&branch.id, &message).await {
-                tracing::warn!("branch copy failed: {e}");
-            }
+    ) -> Result<String, ClassifiedError> {
+        if fork_message_count == 0 {
+            return Err(ClassifiedError::Validation(
+                "cannot branch an empty conversation".to_owned(),
+            ));
         }
-        Some(branch.id.0)
+        let _guard = self.chat_session_guard(parent).await?;
+        let message_index =
+            usize::try_from(fork_message_count.saturating_sub(1)).unwrap_or(usize::MAX);
+        self.chat_session_manager()?
+            .fork_session(parent, message_index, title)
+            .await
+            .map(|branch| branch.id.0)
+            .map_err(|error| chat_storage_error("branch chat session", error))
     }
 
-    /// The context transcript (LLM-facing messages) of a session, for loading a
-    /// branch into the chat view.
+    /// The canonical display transcript of a session, for loading a branch into
+    /// the chat view.
     pub async fn chat_history(
         &self,
         session: &hf_core::types::SessionId,
-    ) -> Vec<hf_core::types::Message> {
-        match &self.session_manager {
-            Some(sessions) => sessions.read_transcript(session).await.unwrap_or_default(),
-            None => Vec::new(),
-        }
+    ) -> Result<Vec<hf_core::types::Message>, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.chat_session_manager()?
+            .read_display_transcript(session)
+            .await
+            .map_err(|error| chat_storage_error("read chat history", error))
     }
 
     /// Create a new top-level chat session, returning its id, or `None` when no
     /// database is configured. Shared by every presentation layer so session
     /// creation behaves identically (AGENTS.md 2.9).
-    pub async fn create_chat_session(&self, title: Option<String>) -> Option<String> {
-        let manager = self.session_manager.as_ref()?;
-        manager
+    pub async fn create_chat_session(
+        &self,
+        title: Option<String>,
+    ) -> Result<Option<String>, ClassifiedError> {
+        let Some(manager) = self.session_manager.as_ref() else {
+            return Ok(None);
+        };
+        let id = manager
             .create_session(hf_core::session::CreateSessionOptions {
                 parent_id: None,
                 session_type: hf_core::session::SessionType::Main,
@@ -1142,18 +1221,27 @@ impl ServiceContainer {
                 title: title.or_else(|| Some("Chat".to_owned())),
             })
             .await
-            .ok()
             .map(|node| node.id.0)
+            .map_err(|error| chat_storage_error("create chat session", error))?;
+        Ok(Some(id))
     }
 
     /// Delete a chat session and its transcript (used by the "clear history"
     /// action). No-op when no session store is configured. Returns whether a
     /// deletion was performed.
-    pub async fn delete_chat_session(&self, session: &hf_core::types::SessionId) -> bool {
+    pub async fn delete_chat_session(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<bool, ClassifiedError> {
         let Some(manager) = self.session_manager.as_ref() else {
-            return false;
+            return Ok(false);
         };
-        manager.delete_session(session).await.is_ok()
+        let _guard = self.chat_session_guard(session).await?;
+        manager
+            .delete_session(session)
+            .await
+            .map_err(|error| chat_storage_error("delete chat session", error))?;
+        Ok(true)
     }
 
     /// All sessions in the same conversation tree as `session` (the main session
@@ -1161,21 +1249,24 @@ impl ServiceContainer {
     pub async fn chat_branches(
         &self,
         session: &hf_core::types::SessionId,
-    ) -> Vec<crate::checkpoints::BranchView> {
+    ) -> Result<Vec<crate::checkpoints::BranchView>, ClassifiedError> {
         use hf_core::session::{SessionFilter, SessionType};
-        let Some(sessions) = &self.session_manager else {
-            return Vec::new();
-        };
-        let Ok(node) = sessions.get_session(session).await else {
-            return Vec::new();
-        };
+        let _guard = self.chat_session_guard(session).await?;
+        let sessions = self.chat_session_manager()?;
+        let node = sessions
+            .get_session(session)
+            .await
+            .map_err(|error| chat_storage_error("read chat session tree", error))?;
         let filter = SessionFilter {
             root_id: Some(node.root_id.clone()),
             ..SessionFilter::default()
         };
-        let mut nodes = sessions.list_sessions(&filter).await.unwrap_or_default();
+        let mut nodes = sessions
+            .list_sessions(&filter)
+            .await
+            .map_err(|error| chat_storage_error("list chat session tree", error))?;
         nodes.sort_by_key(|n| (n.depth, n.created_at));
-        nodes
+        Ok(nodes
             .into_iter()
             .map(|n| {
                 let is_main = n.session_type == SessionType::Main;
@@ -1194,7 +1285,53 @@ impl ServiceContainer {
                     active,
                 }
             })
-            .collect()
+            .collect())
+    }
+
+    async fn validate_chat_session(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<(), ClassifiedError> {
+        let node = self
+            .chat_session_manager()?
+            .get_session(session)
+            .await
+            .map_err(|_| {
+                ClassifiedError::Validation("unknown or invalid chat session".to_owned())
+            })?;
+        if node.state != hf_core::session::SessionState::Active {
+            return Err(ClassifiedError::Validation(
+                "chat session is not active".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn chat_session_guard(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, ClassifiedError> {
+        // Validate before adding an entry to the lock map so arbitrary ids do
+        // not retain mutexes. Validate again after acquisition to close the
+        // race with a deletion that was already waiting on the same lock.
+        self.validate_chat_session(session).await?;
+        let guard = self.session_turn_lock(session).lock_owned().await;
+        self.validate_chat_session(session).await?;
+        Ok(guard)
+    }
+
+    fn chat_session_manager(&self) -> Result<&Arc<hf_session::SessionManager>, ClassifiedError> {
+        self.session_manager.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("chat persistence is not configured".to_owned())
+        })
+    }
+
+    fn chat_checkpoint_manager(
+        &self,
+    ) -> Result<&Arc<hf_session::ChatCheckpointManager>, ClassifiedError> {
+        self.checkpoint_manager.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("chat checkpoints are not configured".to_owned())
+        })
     }
 
     /// The conversation session manager (if a database is configured): the
@@ -1204,9 +1341,9 @@ impl ServiceContainer {
         self.session_manager.as_ref()
     }
 
-    /// The lock serializing chat turns on `session`, creating it on first use.
-    /// Held for the whole turn so concurrent turns on one session run one at a
-    /// time; distinct sessions take distinct locks and are unaffected.
+    /// The lock serializing persistent chat operations on `session`, creating
+    /// it on first use. Distinct sessions take distinct locks and are
+    /// unaffected.
     #[must_use]
     pub fn session_turn_lock(
         &self,
