@@ -25,7 +25,6 @@ members = [
     "crates/hf-coverage",
     "crates/hf-service",
     "crates/hf-agent",
-    "crates/hf-bot",
     "crates/hf-web",
     "crates/hf-cli",
     "crates/hf-test-utils",
@@ -160,7 +159,6 @@ hf-corpus = { path = "crates/hf-corpus" }
 hf-coverage = { path = "crates/hf-coverage" }
 hf-service = { path = "crates/hf-service" }
 hf-agent = { path = "crates/hf-agent" }
-hf-bot = { path = "crates/hf-bot" }
 hf-web = { path = "crates/hf-web" }
 hf-cli = { path = "crates/hf-cli" }
 hf-test-utils = { path = "crates/hf-test-utils" }

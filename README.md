@@ -350,7 +350,6 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-coverage` | Coverage delta tracking, stagnation detection. |
 | `hf-service` | Business logic orchestrating all of the above (`ServiceContainer`). |
 | `hf-agent` | Service-agnostic reason/act loop and delegation behind the `AgentBackend` port. |
-| `hf-bot` | Chat adapters (scaffold). |
 | `hf-web` | REST API + SSE streaming. |
 | `hf-cli` | CLI + TUI. |
 | `hf-gui` | Tauri v2 + React 19 desktop app. |
