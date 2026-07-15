@@ -36,4 +36,5 @@ Mandatory gates (user must approve):
 - Before a full `FuzzRun` (after smoke).
 - Before publishing / filing a bug report.
 - Before writing a harness into the target project (vs. `fuzz_workspace/`).
-- Before any action with risk score >= threshold (see `guardrails.toml`).
+- Before any action that the service-owned guardrail policy classifies as
+  requiring approval. Guardrail policy is not currently user-editable.

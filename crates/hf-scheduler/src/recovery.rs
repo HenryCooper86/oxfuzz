@@ -7,98 +7,181 @@ use crate::config::MissedPolicy;
 use crate::store::{Schedule, ScheduleStore, TriggerConfig};
 use crate::trigger::{FiredTrigger, TriggerType};
 
-/// Result of the recovery process.
+/// Result summary of the recovery planning process.
 #[derive(Debug, Default)]
 pub struct RecoveryResult {
     /// Schedules that were caught up (fired once).
     pub caught_up: Vec<String>,
-    /// Schedules that were skipped.
+    /// Schedules whose missed occurrences were skipped.
     pub skipped: Vec<String>,
-    /// Schedules that were backfilled (multiple fires).
-    pub backfilled: Vec<(String, usize)>,
+    /// Schedules that were backfilled and their complete occurrence counts.
+    pub backfilled: Vec<(String, u64)>,
 }
 
-/// Recover missed schedule fires.
+/// A compact batch of recovery triggers.
 ///
-/// For each enabled schedule with a `last_fire` time, compute whether fires
-/// were missed (`last_fire` + interval < now). Apply the schedule's `missed_policy`.
+/// Backfills stay compact even after a long outage. The manager expands each
+/// batch lazily into its bounded trigger channel, so recovery is lossless
+/// without allocating one object or task per missed occurrence up front.
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryBatch {
+    pub(crate) schedule_id: String,
+    pub(crate) first_fire: DateTime<Utc>,
+    pub(crate) interval: Duration,
+    pub(crate) count: u64,
+    pub(crate) trigger_type: TriggerType,
+}
+
+impl RecoveryBatch {
+    fn single(schedule: &Schedule, at: DateTime<Utc>) -> Self {
+        Self {
+            schedule_id: schedule.id.clone(),
+            first_fire: at,
+            interval: Duration::zero(),
+            count: 1,
+            trigger_type: trigger_type(schedule),
+        }
+    }
+}
+
+/// A durable cursor advancement applied before the normal evaluator starts.
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryAdvance {
+    pub(crate) schedule_id: String,
+    pub(crate) last_fire: DateTime<Utc>,
+}
+
+/// Recovery work split into compact dispatch batches and cursor advances.
+#[derive(Debug, Default)]
+pub(crate) struct RecoveryPlan {
+    pub(crate) batches: Vec<RecoveryBatch>,
+    pub(crate) advances: Vec<RecoveryAdvance>,
+    pub(crate) result: RecoveryResult,
+}
+
+impl RecoveryPlan {
+    pub(crate) fn trigger_count(&self) -> u64 {
+        self.batches
+            .iter()
+            .fold(0, |total, batch| total.saturating_add(batch.count))
+    }
+}
+
+/// Plan missed schedule recovery.
 ///
-/// Returns a list of `FiredTrigger` events to be dispatched and a summary.
-pub fn recover_missed(
-    store: &ScheduleStore,
-    now: DateTime<Utc>,
-) -> (Vec<FiredTrigger>, RecoveryResult) {
-    let mut triggers = Vec::new();
-    let mut result = RecoveryResult::default();
+/// `Skip` produces only a cursor advance. `CatchUp` produces one trigger.
+/// `Backfill` produces a compact batch containing every missed occurrence.
+/// Event schedules are never synthesized, and future one-time schedules remain
+/// pending.
+pub(crate) fn recover_missed(store: &ScheduleStore, now: DateTime<Utc>) -> RecoveryPlan {
+    let mut plan = RecoveryPlan::default();
 
     for schedule in store.list_enabled() {
         let Some(last_fire) = schedule.last_fire else {
-            // Never fired — treat as needing a single fire.
-            debug!(schedule_id = %schedule.id, "Never fired, firing now");
-            triggers.push(make_trigger(schedule, now));
-            result.caught_up.push(schedule.id.clone());
+            plan_never_fired(schedule, now, &mut plan);
             continue;
         };
 
-        let Some(interval) = compute_interval(schedule) else {
-            continue; // OneTime or Event — skip recovery.
+        let Some(interval) = compute_interval(schedule, now) else {
+            continue;
         };
-
-        if interval.is_zero() {
+        if interval <= Duration::zero() {
             continue;
         }
 
         let elapsed = now - last_fire;
         if elapsed <= interval {
-            // Not missed.
             continue;
         }
 
-        let policy = &schedule.policies.missed_policy;
-        match policy {
+        let interval_secs = interval.num_seconds();
+        let missed_count = u64::try_from(elapsed.num_seconds() / interval_secs).unwrap_or(1);
+        let latest_due = add_intervals(last_fire, interval, missed_count).unwrap_or(now);
+        match schedule.policies.missed_policy {
             MissedPolicy::Skip => {
-                info!(schedule_id = %schedule.id, "Missed schedule, skipping (policy=skip)");
-                result.skipped.push(schedule.id.clone());
+                info!(schedule_id = %schedule.id, "Missed schedule, advancing (policy=skip)");
+                plan.result.skipped.push(schedule.id.clone());
+                plan.advances.push(RecoveryAdvance {
+                    schedule_id: schedule.id.clone(),
+                    last_fire: latest_due,
+                });
             }
             MissedPolicy::CatchUp => {
                 info!(schedule_id = %schedule.id, "Missed schedule, catching up (policy=catch_up)");
-                triggers.push(make_trigger(schedule, now));
-                result.caught_up.push(schedule.id.clone());
+                plan.batches.push(RecoveryBatch::single(schedule, now));
+                plan.result.caught_up.push(schedule.id.clone());
+                plan.advances.push(RecoveryAdvance {
+                    schedule_id: schedule.id.clone(),
+                    last_fire: now,
+                });
             }
             MissedPolicy::Backfill => {
-                let missed_count =
-                    usize::try_from((elapsed.num_seconds() / interval.num_seconds()).max(1))
-                        .unwrap_or(1);
-                // Cap backfill to a reasonable limit.
-                let capped = missed_count.min(100);
                 info!(
                     schedule_id = %schedule.id,
-                    missed_count = capped,
-                    "Missed schedule, backfilling (policy=backfill)"
+                    missed_count,
+                    "Missed schedule, queueing lossless backfill"
                 );
-                for i in 0..capped {
-                    let fire_time = last_fire + interval * (i32::try_from(i).unwrap_or(0) + 1);
-                    triggers.push(make_trigger(schedule, fire_time));
-                }
-                result.backfilled.push((schedule.id.clone(), capped));
+                plan.batches.push(RecoveryBatch {
+                    schedule_id: schedule.id.clone(),
+                    first_fire: last_fire + interval,
+                    interval,
+                    count: missed_count,
+                    trigger_type: trigger_type(schedule),
+                });
+                plan.result
+                    .backfilled
+                    .push((schedule.id.clone(), missed_count));
+                plan.advances.push(RecoveryAdvance {
+                    schedule_id: schedule.id.clone(),
+                    last_fire: latest_due,
+                });
             }
         }
     }
 
-    (triggers, result)
+    plan
+}
+
+fn plan_never_fired(schedule: &Schedule, now: DateTime<Utc>, plan: &mut RecoveryPlan) {
+    match &schedule.trigger {
+        TriggerConfig::Event { .. } => return,
+        TriggerConfig::OneTime { at } if *at > now => return,
+        TriggerConfig::OneTime { .. } if schedule.policies.missed_policy == MissedPolicy::Skip => {
+            plan.result.skipped.push(schedule.id.clone());
+        }
+        _ => {
+            debug!(schedule_id = %schedule.id, "Never fired, firing once now");
+            plan.batches.push(RecoveryBatch::single(schedule, now));
+            plan.result.caught_up.push(schedule.id.clone());
+        }
+    }
+    plan.advances.push(RecoveryAdvance {
+        schedule_id: schedule.id.clone(),
+        last_fire: now,
+    });
+}
+
+fn add_intervals(start: DateTime<Utc>, interval: Duration, count: u64) -> Option<DateTime<Utc>> {
+    let count = i64::try_from(count).ok()?;
+    let seconds = interval.num_seconds().checked_mul(count)?;
+    start.checked_add_signed(Duration::seconds(seconds))
 }
 
 /// Compute the effective interval for a schedule (for recovery purposes).
-fn compute_interval(schedule: &Schedule) -> Option<Duration> {
+fn compute_interval(schedule: &Schedule, now: DateTime<Utc>) -> Option<Duration> {
     match &schedule.trigger {
         TriggerConfig::Interval { interval_secs } => Some(Duration::seconds(
             i64::try_from(*interval_secs).unwrap_or(i64::MAX),
         )),
-        TriggerConfig::Cron { expression, .. } => {
-            // Approximate interval by computing two consecutive next-fires.
-            use crate::cron::CronSchedule;
-            let cron = CronSchedule::new(expression);
-            let base = Utc::now() - Duration::days(1);
+        TriggerConfig::Cron {
+            expression,
+            timezone,
+        } => {
+            // Recovery keeps the established fixed-spacing representation for a
+            // compact batch, but derives it from this schedule's timezone and the
+            // supplied recovery clock rather than wall-clock `Utc::now()`.
+            let cron = crate::cron::CronSchedule::new(expression).with_timezone(timezone);
+            let base = now - Duration::days(1);
             let first = cron.next_fire(base)?;
             let second = cron.next_fire(first)?;
             Some(second - first)
@@ -107,18 +190,21 @@ fn compute_interval(schedule: &Schedule) -> Option<Duration> {
     }
 }
 
-/// Helper to create a fired trigger.
-fn make_trigger(schedule: &Schedule, at: DateTime<Utc>) -> FiredTrigger {
-    let trigger_type = match &schedule.trigger {
+fn trigger_type(schedule: &Schedule) -> TriggerType {
+    match &schedule.trigger {
         TriggerConfig::Cron { .. } => TriggerType::Cron,
         TriggerConfig::Interval { .. } => TriggerType::Interval,
         TriggerConfig::OneTime { .. } => TriggerType::OneTime,
         TriggerConfig::Event { .. } => TriggerType::Event,
-    };
+    }
+}
+
+/// Expand one compact batch item into a trigger.
+pub(crate) fn trigger_at(batch: &RecoveryBatch, at: DateTime<Utc>) -> FiredTrigger {
     FiredTrigger {
-        schedule_id: schedule.id.clone(),
+        schedule_id: batch.schedule_id.clone(),
         fired_at: at,
-        trigger_type,
+        trigger_type: batch.trigger_type,
     }
 }
 
@@ -139,106 +225,93 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_skip() {
+    fn recovery_skip_advances_without_a_trigger() {
         let mut store = ScheduleStore::new();
-        let mut s = interval_schedule("s1", 60, MissedPolicy::Skip);
-        s.last_fire = Some(Utc::now() - Duration::minutes(5));
-        store.register(s);
-
-        let (triggers, result) = recover_missed(&store, Utc::now());
-        assert!(triggers.is_empty());
-        assert_eq!(result.skipped.len(), 1);
-    }
-
-    #[test]
-    fn test_recovery_catch_up() {
-        let mut store = ScheduleStore::new();
-        let mut s = interval_schedule("s1", 60, MissedPolicy::CatchUp);
-        s.last_fire = Some(Utc::now() - Duration::minutes(5));
-        store.register(s);
-
-        let (triggers, result) = recover_missed(&store, Utc::now());
-        assert_eq!(triggers.len(), 1);
-        assert_eq!(result.caught_up.len(), 1);
-    }
-
-    #[test]
-    fn test_recovery_backfill() {
-        let mut store = ScheduleStore::new();
-        let mut s = interval_schedule("s1", 60, MissedPolicy::Backfill);
-        s.last_fire = Some(Utc::now() - Duration::minutes(5));
-        store.register(s);
-
-        let (triggers, result) = recover_missed(&store, Utc::now());
-        // 5 minutes / 1 minute interval = 5 missed fires.
-        assert_eq!(triggers.len(), 5);
-        assert_eq!(result.backfilled.len(), 1);
-        assert_eq!(result.backfilled[0].1, 5);
-    }
-
-    #[test]
-    fn test_recovery_not_missed() {
-        let mut store = ScheduleStore::new();
-        let mut s = interval_schedule("s1", 3600, MissedPolicy::CatchUp);
-        s.last_fire = Some(Utc::now() - Duration::seconds(10));
-        store.register(s);
-
-        let (triggers, result) = recover_missed(&store, Utc::now());
-        assert!(triggers.is_empty());
-        assert!(result.caught_up.is_empty());
-    }
-
-    #[test]
-    fn test_recovery_never_fired() {
-        let mut store = ScheduleStore::new();
-        let s = interval_schedule("s1", 60, MissedPolicy::Skip);
-        // last_fire = None → should fire once.
-        store.register(s);
-
-        let (triggers, result) = recover_missed(&store, Utc::now());
-        assert_eq!(triggers.len(), 1);
-        assert_eq!(result.caught_up.len(), 1);
-    }
-
-    #[test]
-    fn recovered_schedule_does_not_double_fire_on_first_eval() {
-        // A never-fired schedule: recovery fires it once. The manager then marks
-        // last_fire before the eval loop's immediate first tick; that tick must
-        // NOT fire it a second time.
-        let mut store = ScheduleStore::new();
-        store.register(interval_schedule("s1", 60, MissedPolicy::CatchUp));
+        let mut schedule = interval_schedule("s1", 60, MissedPolicy::Skip);
         let now = Utc::now();
+        schedule.last_fire = Some(now - Duration::minutes(5));
+        store.register(schedule);
 
-        let (triggers, _) = recover_missed(&store, now);
-        assert_eq!(
-            triggers.len(),
-            1,
-            "recovery should fire the never-fired schedule once"
-        );
-
-        // Mirror the manager: record last_fire for each recovered schedule.
-        for t in &triggers {
-            store.update_last_fire(&t.schedule_id, now);
-        }
-
-        let enabled: Vec<_> = store.list_enabled().into_iter().cloned().collect();
-        let fired = crate::trigger::evaluate_all(&enabled, now);
-        assert!(
-            fired.is_empty(),
-            "schedule double-fired right after recovery"
-        );
+        let plan = recover_missed(&store, now);
+        assert_eq!(plan.trigger_count(), 0);
+        assert_eq!(plan.result.skipped, ["s1"]);
+        assert_eq!(plan.advances.len(), 1);
+        assert_eq!(plan.advances[0].last_fire, now);
     }
 
     #[test]
-    fn test_recovery_disabled_schedule_skipped() {
+    fn recovery_catch_up_emits_one_trigger() {
         let mut store = ScheduleStore::new();
-        let mut s = interval_schedule("s1", 60, MissedPolicy::CatchUp);
-        s.last_fire = Some(Utc::now() - Duration::minutes(5));
-        s.enabled = false;
-        store.register(s);
+        let mut schedule = interval_schedule("s1", 60, MissedPolicy::CatchUp);
+        schedule.last_fire = Some(Utc::now() - Duration::minutes(5));
+        store.register(schedule);
 
-        let (triggers, _result) = recover_missed(&store, Utc::now());
-        // Disabled schedules not in list_enabled().
-        assert!(triggers.is_empty());
+        let plan = recover_missed(&store, Utc::now());
+        assert_eq!(plan.trigger_count(), 1);
+        assert_eq!(plan.result.caught_up.len(), 1);
+    }
+
+    #[test]
+    fn recovery_backfill_is_not_truncated() {
+        let mut store = ScheduleStore::new();
+        let mut schedule = interval_schedule("s1", 60, MissedPolicy::Backfill);
+        let now = Utc::now();
+        schedule.last_fire = Some(now - Duration::minutes(150));
+        store.register(schedule);
+
+        let plan = recover_missed(&store, now);
+        assert_eq!(plan.trigger_count(), 150);
+        assert_eq!(plan.result.backfilled, [("s1".to_owned(), 150)]);
+        assert_eq!(plan.advances[0].last_fire, now);
+    }
+
+    #[test]
+    fn recovery_not_missed() {
+        let mut store = ScheduleStore::new();
+        let mut schedule = interval_schedule("s1", 3600, MissedPolicy::CatchUp);
+        schedule.last_fire = Some(Utc::now() - Duration::seconds(10));
+        store.register(schedule);
+
+        let plan = recover_missed(&store, Utc::now());
+        assert_eq!(plan.trigger_count(), 0);
+        assert!(plan.result.caught_up.is_empty());
+    }
+
+    #[test]
+    fn never_fired_interval_runs_once_but_event_and_future_onetime_do_not() {
+        let mut store = ScheduleStore::new();
+        store.register(interval_schedule("interval", 60, MissedPolicy::CatchUp));
+        store.register(Schedule::new(
+            "event",
+            "event",
+            TriggerConfig::Event {
+                event_type: "push".to_owned(),
+                debounce_secs: 0,
+            },
+            "wf",
+        ));
+        store.register(Schedule::new(
+            "future",
+            "future",
+            TriggerConfig::OneTime {
+                at: Utc::now() + Duration::hours(1),
+            },
+            "wf",
+        ));
+
+        let plan = recover_missed(&store, Utc::now());
+        assert_eq!(plan.trigger_count(), 1);
+        assert_eq!(plan.batches[0].schedule_id, "interval");
+    }
+
+    #[test]
+    fn disabled_schedule_is_not_recovered() {
+        let mut store = ScheduleStore::new();
+        let mut schedule = interval_schedule("s1", 60, MissedPolicy::CatchUp);
+        schedule.last_fire = Some(Utc::now() - Duration::minutes(5));
+        schedule.enabled = false;
+        store.register(schedule);
+
+        assert_eq!(recover_missed(&store, Utc::now()).trigger_count(), 0);
     }
 }

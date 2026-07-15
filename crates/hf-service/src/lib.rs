@@ -26,12 +26,14 @@ pub mod report_store;
 pub mod sarif;
 pub mod scheduler;
 pub mod system;
+mod syzkaller;
 pub mod workbench;
 
 pub use hf_agent::{
     AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
 };
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
+pub use hf_core::runtime::CommandTermination;
 pub use hf_core::target::{TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, Role, SessionId};
 pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};

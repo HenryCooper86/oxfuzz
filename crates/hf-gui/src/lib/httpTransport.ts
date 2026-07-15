@@ -3,7 +3,13 @@
 import type { Transport, UnlistenFn } from "./transport";
 import { SseAdapter } from "./sseAdapter";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8081";
+const DEFAULT_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8081";
+const DEFAULT_API_TOKEN = import.meta.env.VITE_API_TOKEN;
+
+interface HttpTransportOptions {
+  baseUrl?: string;
+  token?: string;
+}
 
 const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   discover: { method: "POST", path: "/discover" },
@@ -19,6 +25,8 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
+  run_status: { method: "GET", path: "/runs/{run_id}/status" },
+  cancel_run_by_id: { method: "POST", path: "/runs/{run_id}/cancel" },
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },
   project_auto_revert_overrides: { method: "GET", path: "/projects/auto-revert/all" },
   effective_auto_revert_policy: { method: "POST", path: "/projects/auto-revert/effective" },
@@ -88,6 +96,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   get_providers: { method: "GET", path: "/config/providers" },
   set_providers: { method: "POST", path: "/config/providers" },
   provider_statuses: { method: "GET", path: "/providers/status" },
+  diagnostics_cost_summary: { method: "GET", path: "/diagnostics/cost" },
   app_paths: { method: "GET", path: "/system/paths" },
   host_arch: { method: "GET", path: "/system/arch" },
   knowledge_index: { method: "POST", path: "/knowledge/index" },
@@ -129,28 +138,31 @@ function toWebArgs(args?: Record<string, unknown>): Record<string, unknown> | un
  * the JSON body otherwise.
  */
 function buildRequest(
+  baseUrl: string,
   endpoint: { method: string; path: string },
   args?: Record<string, unknown>,
 ): { url: string; body: Record<string, unknown> } {
-  const rest: Record<string, unknown> = { ...(args ?? {}) };
+  const rest: Record<string, unknown> = { ...(toWebArgs(args) ?? {}) };
   const path = endpoint.path.replace(/\{(\w+)\}/g, (_, key: string) => {
     const value = rest[key];
     delete rest[key];
     return encodeURIComponent(String(value ?? ""));
   });
-  const body = toWebArgs(rest) ?? {};
-  if (endpoint.method !== "GET") return { url: `${BASE_URL}${path}`, body };
+  const body = rest;
+  if (endpoint.method !== "GET") return { url: `${baseUrl}${path}`, body };
 
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(body)) {
     if (value !== undefined && value !== null) query.append(key, String(value));
   }
   const suffix = query.toString();
-  return { url: `${BASE_URL}${path}${suffix ? `?${suffix}` : ""}`, body };
+  return { url: `${baseUrl}${path}${suffix ? `?${suffix}` : ""}`, body };
 }
 
-export function createHttpTransport(): Transport {
-  const sse = new SseAdapter(BASE_URL);
+export function createHttpTransport(options: HttpTransportOptions = {}): Transport {
+  const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
+  const token = options.token ?? DEFAULT_API_TOKEN;
+  const sse = new SseAdapter(baseUrl, token);
   return {
     async invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T> {
       const endpoint = COMMAND_MAP[command];
@@ -183,10 +195,13 @@ export function createHttpTransport(): Transport {
         // already `.catch()` this and degrade to an empty/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
-      const { url, body } = buildRequest(endpoint, args);
+      const { url, body } = buildRequest(baseUrl, endpoint, args);
+      const headers: Record<string, string> = {};
+      if (endpoint.method !== "GET") headers["content-type"] = "application/json";
+      if (token) headers.authorization = `Bearer ${token}`;
       const response = await fetch(url, {
         method: endpoint.method,
-        headers: { "content-type": "application/json" },
+        headers,
         body: endpoint.method === "GET" ? undefined : JSON.stringify(body),
       });
       if (!response.ok) {

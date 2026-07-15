@@ -179,13 +179,14 @@ hobot-fuzz init
 hobot-fuzz init --non-interactive --provider openai
 ```
 
-This scaffolds the configuration tree (`config/*.toml`, `.env`) and creates the
-database.
+This materializes the supported `config/*.example.toml` templates and creates
+the database. Environment overrides remain explicit in `.env.example`; `init`
+does not create or modify `.env`.
 
 ### 2. Configure at least one LLM provider
 
 Copy `config/providers.example.toml` to `config/providers.toml` and fill it in,
-then set the matching key in `.env`:
+then export the matching key in the environment that launches `hobot-fuzz`:
 
 ```toml
 [[providers]]
@@ -195,6 +196,10 @@ model = "gpt-4o"
 tags = ["reasoning", "general"]
 api_key_env = "OPENAI_API_KEY"
 ```
+
+`.env.example` is a variable reference, not an automatically loaded file. If
+you keep local values in `.env`, export them before launching the process (for
+example, `set -a; source .env; set +a` in a POSIX shell).
 
 ### 3. Run a campaign
 
@@ -237,7 +242,7 @@ hobot-fuzz triage /path/to/project --target parse_value
 | `session list\|history\|new\|... ` | Manage chat sessions and their checkpoints. |
 | `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
-| `serve --port 8081` | Start the REST + SSE API (`hf-web`). |
+| `serve --host 127.0.0.1 --port 8081` | Start the REST + SSE API (`hf-web`). Non-loopback hosts require `HF_WEB_TOKEN`. |
 | `tui <project>` | Terminal UI. |
 
 Engines: `afl++`, `honggfuzz`, `libfuzzer`, `clusterfuzzlite`, `syzkaller`.
@@ -250,16 +255,29 @@ desktop app; drive campaigns there rather than over REST.
 
 ## Configuration Reference
 
-See `config/*.example.toml` for the full reference. Key files:
+Only settings consumed by the production service are exposed as editable
+configuration:
 
 - `providers.toml` -- LLM provider pool (routing tags, failover, freeze/thaw).
-- `engines.toml` -- Fuzzing engine registry and defaults.
-- `runtime.toml` -- Sandbox (Docker or native) and resource limits.
-- `guardrails.toml` -- Permission model, loop detection, risk scoring.
+- `hobot-fuzz.toml` -- coverage-stagnation and coverage-regression policy.
+- `defectdojo.toml` -- DefectDojo connection and lifecycle settings.
+- `issue_tracker.toml` -- GitHub/GitLab crash issue integration.
 - `agents/*.toml` -- Sub-agent definitions (discovery, harness, triage).
 
-The REST API is **fail-closed**: set `HF_WEB_TOKEN` to require a bearer token, or
-`HF_WEB_TOKEN_OPTIONAL=1` for unauthenticated local-dev access.
+Sandbox, engine, storage, session, and tool-registry policy currently use
+service-owned safe defaults rather than editable TOML. Runtime locations are
+overridden with documented environment variables such as `HF_WORKSPACE_DIR`,
+`HF_DB_PATH`, and `HF_CONFIG_DIR`; see `.env.example`. Unsupported legacy
+section files are rejected by the config API instead of being accepted as
+apparently editable settings.
+
+The REST API binds to loopback by default and is **fail-closed**: set
+`HF_WEB_TOKEN` to require a bearer token, or `HF_WEB_TOKEN_OPTIONAL=1` for
+unauthenticated local development. A non-loopback `--host` is rejected unless a
+token is configured. Browser origins are an exact allowlist in
+`HF_WEB_CORS_ORIGINS`; project paths must be below `HF_WEB_PROJECT_ROOTS`. A
+local web build sends the bearer value from `VITE_API_TOKEN` (set it to the same
+value as `HF_WEB_TOKEN`).
 
 ---
 
@@ -313,7 +331,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-session` | Session tree, parent/child delegation, compaction. |
 | `hf-context` | Token-budget-aware prompt assembly pipeline. |
 | `hf-hooks` | Middleware chain, event bus. |
-| `hf-tools` | Tool registry: `ShellExec`, `FileRead`/`Write`, `ProjectScan`, `HarnessBuild`, `FuzzRun`, `CrashMinimize`. |
+| `hf-tools` | Tool registry and validation with project-scoped `FileRead`, `Glob`, and `Grep`; the agent adds service-backed `KnowledgeSearch`. |
 | `hf-mcp` | Model Context Protocol client/server. |
 | `hf-skills` | Skill registry, versioning, experience capture. |
 | `hf-prompt` | Prompt templates for discovery, harness, triage. |
@@ -323,16 +341,14 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-knowledge` | Full-text (BM25) retrieval over project source and ingested documents; optional vector search behind the `vector_qdrant` feature. |
 | `hf-diagnostics` | Span-based tracing, cost intelligence, run metrics. |
 | `hf-guardrails` | Permission model, loop detection, risk scoring. |
-| `hf-journal` | WAL-based run journaling for interrupted-run recovery. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, reachability. |
 | `hf-harness` | Harness generation, compile validation, smoke fuzz. |
 | `hf-engine` | `EngineAdapter` adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller. |
 | `hf-crash` | Crash ingestion, dedup, minimization, bug-report drafting. |
 | `hf-corpus` | Corpus management: seed, grow, prune, merge. |
 | `hf-coverage` | Coverage delta tracking, stagnation detection. |
-| `hf-service` | Business logic orchestrating all of the above (`ServiceContainer`). |
+| `hf-service` | Business logic orchestrating all of the above, including durable run recovery (`ServiceContainer`). |
 | `hf-agent` | Service-agnostic reason/act loop and delegation behind the `AgentBackend` port. |
-| `hf-bot` | Chat adapters (scaffold). |
 | `hf-web` | REST API + SSE streaming. |
 | `hf-cli` | CLI + TUI. |
 | `hf-gui` | Tauri v2 + React 19 desktop app. |

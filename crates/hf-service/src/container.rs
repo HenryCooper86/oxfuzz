@@ -7,7 +7,7 @@
 //! (AGENTS.md 2.12).
 
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -19,9 +19,12 @@ use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
 use hf_guardrails::{Action, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
-use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, Store};
+use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, Store};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const MAX_RUN_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RUN_OUTPUT_ENTRIES: usize = 100_000;
 
 /// Runs that reached a terminal state may own crash artifacts. Failed and
 /// cancelled campaigns can produce valid partial evidence before stopping.
@@ -101,6 +104,985 @@ fn document_staging_dir(project: &Path, import_id: Uuid) -> PathBuf {
         .join(import_id.to_string())
 }
 
+/// Workspace-relative output directory owned by one fuzz or smoke run.
+fn run_output_relative(run_id: Uuid) -> PathBuf {
+    PathBuf::from("runs").join(run_id.to_string()).join("out")
+}
+
+/// Create or resolve a service-owned directory below `workspace` without
+/// following symlinks left by an earlier untrusted sandbox execution.
+fn ensure_workspace_directory(
+    workspace: &Path,
+    relative: &Path,
+) -> Result<PathBuf, ClassifiedError> {
+    let workspace_metadata = std::fs::symlink_metadata(workspace).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "inspect workspace directory {}: {e}",
+            workspace.display()
+        ))
+    })?;
+    if !workspace_metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace is not a regular directory: {}",
+            workspace.display()
+        )));
+    }
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace directory path is unsafe: {}",
+            relative.display()
+        )));
+    }
+
+    let root = std::fs::canonicalize(workspace).map_err(|e| {
+        ClassifiedError::Validation(format!("resolve workspace {}: {e}", workspace.display()))
+    })?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            unreachable!("relative path was validated above")
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "workspace directory is not a regular directory: {}",
+                    current.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|e| {
+                    ClassifiedError::Internal(format!(
+                        "create workspace directory {}: {e}",
+                        current.display()
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "inspect workspace directory {}: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    let resolved = std::fs::canonicalize(&current).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace directory {}: {e}",
+            current.display()
+        ))
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace directory escaped {}: {}",
+            root.display(),
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Resolve an existing regular directory below a workspace without accepting
+/// symlinks in any component.
+fn resolve_workspace_directory(
+    workspace: &Path,
+    relative: &Path,
+) -> Result<PathBuf, ClassifiedError> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace directory path is unsafe: {}",
+            relative.display()
+        )));
+    }
+    let root = std::fs::canonicalize(workspace).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            unreachable!("relative path was validated above")
+        };
+        current.push(name);
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect workspace directory {}: {error}",
+                current.display()
+            ))
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(ClassifiedError::Validation(format!(
+                "workspace directory is not a regular directory: {}",
+                current.display()
+            )));
+        }
+    }
+    let resolved = std::fs::canonicalize(&current).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace directory {}: {error}",
+            current.display()
+        ))
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace directory escaped {}: {}",
+            root.display(),
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Immutable inputs and writable evidence location prepared for one run.
+struct RunArtifacts {
+    binary_host: PathBuf,
+    source_host: PathBuf,
+    corpus_host: PathBuf,
+    corpus_relative: PathBuf,
+    binary_container: String,
+    corpus_container: String,
+    output_host: PathBuf,
+    output_container: String,
+    output_relative: PathBuf,
+    source_sha256: String,
+    binary_sha256: String,
+}
+
+/// Compute a full SHA-256 digest without loading a potentially large binary in
+/// memory.
+fn sha256_file(path: &Path) -> Result<String, ClassifiedError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        ClassifiedError::Validation(format!("read run artifact {}: {e}", path.display()))
+    })?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).map_err(|e| {
+            ClassifiedError::Validation(format!("hash run artifact {}: {e}", path.display()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Move a persisted live-corpus file out of view before its database row is
+/// deleted. The caller can atomically restore the returned path if the database
+/// mutation fails.
+fn quarantine_corpus_entry(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<Option<PathBuf>, ClassifiedError> {
+    let root = workspace_root();
+    let relative = path.strip_prefix(&root).map_err(|_| {
+        ClassifiedError::Validation(format!(
+            "persisted corpus path is outside the managed workspace: {}",
+            path.display()
+        ))
+    })?;
+    if relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "persisted corpus path is unsafe: {}",
+            path.display()
+        )));
+    }
+    let parent_relative = relative.parent().ok_or_else(|| {
+        ClassifiedError::Validation(format!(
+            "persisted corpus path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    let parent = resolve_workspace_directory(&root, parent_relative)?;
+    if parent.file_name().and_then(|name| name.to_str()) != Some("corpus") {
+        return Err(ClassifiedError::Validation(format!(
+            "persisted corpus path is not in a retained corpus directory: {}",
+            path.display()
+        )));
+    }
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ClassifiedError::Validation(format!(
+                "inspect persisted corpus entry {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if !metadata.file_type().is_file()
+        || metadata.len() > hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "persisted corpus entry is not a bounded regular file: {}",
+            path.display()
+        )));
+    }
+
+    let quarantined = parent.join(format!(".hobot-fuzz-delete-{}", Uuid::new_v4()));
+    std::fs::rename(path, &quarantined).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "quarantine corpus entry {}: {error}",
+            path.display()
+        ))
+    })?;
+    let quarantined_metadata = std::fs::symlink_metadata(&quarantined);
+    let actual_sha256 = match quarantined_metadata {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.len() <= hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes =>
+        {
+            sha256_file(&quarantined)
+        }
+        Ok(_) => Err(ClassifiedError::Validation(
+            "quarantined corpus entry is not a bounded regular file".to_owned(),
+        )),
+        Err(error) => Err(ClassifiedError::Validation(format!(
+            "inspect quarantined corpus entry: {error}"
+        ))),
+    };
+    let actual_sha256 = match actual_sha256 {
+        Ok(actual_sha256) => actual_sha256,
+        Err(error) => {
+            let restore = std::fs::rename(&quarantined, path);
+            let suffix = restore.err().map_or_else(String::new, |restore_error| {
+                format!("; restore failed: {restore_error}")
+            });
+            return Err(ClassifiedError::Validation(format!("{error}{suffix}")));
+        }
+    };
+    if actual_sha256 != expected_sha256 {
+        let restore = std::fs::rename(&quarantined, path);
+        let suffix = restore
+            .err()
+            .map_or_else(String::new, |error| format!("; restore failed: {error}"));
+        return Err(ClassifiedError::Validation(format!(
+            "persisted corpus content no longer matches {expected_sha256}{suffix}"
+        )));
+    }
+    Ok(Some(quarantined))
+}
+
+/// Digest the immutable comparison context for a coverage run: staged target
+/// sources, the starting corpus, and the exact sandbox image identifier.
+///
+/// The walk is deliberately limited to build inputs staged by
+/// `copy_project_sources` plus the corpus. Symlinks and unexpectedly large
+/// trees fail closed so an untrusted workspace cannot turn regression
+/// bookkeeping into an unbounded host traversal.
+fn run_context_digest(workspace: &Path) -> Result<String, ClassifiedError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    const MAX_FILES: usize = 100_000;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        recursive: bool,
+        paths: &mut Vec<PathBuf>,
+    ) -> Result<(), ClassifiedError> {
+        if !directory.exists() {
+            return Ok(());
+        }
+        let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect comparison context {}: {error}",
+                directory.display()
+            ))
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(ClassifiedError::Validation(format!(
+                "comparison context contains a non-directory component: {}",
+                directory.display()
+            )));
+        }
+        let mut entries = std::fs::read_dir(directory)
+            .map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "read comparison context {}: {error}",
+                    directory.display()
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                ClassifiedError::Validation(format!("read comparison context entry: {error}"))
+            })?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "inspect comparison context {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if kind.is_symlink() {
+                return Err(ClassifiedError::Validation(format!(
+                    "comparison context contains a symlink: {}",
+                    path.display()
+                )));
+            }
+            if kind.is_dir() {
+                if recursive {
+                    collect(root, &path, true, paths)?;
+                }
+            } else if kind.is_file() {
+                paths.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+        Ok(())
+    }
+
+    let mut relative_paths = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(workspace) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let extension = path.extension().and_then(|value| value.to_str());
+            let is_source = matches!(extension, Some("c" | "h" | "cc" | "cpp" | "cxx" | "hpp"))
+                && !name.starts_with("harness.");
+            if is_source || matches!(name.as_ref(), "Cargo.toml" | "Cargo.lock") {
+                relative_paths.push(PathBuf::from(name.as_ref()));
+            }
+        }
+    }
+    collect(workspace, &workspace.join("src"), true, &mut relative_paths)?;
+    collect(
+        workspace,
+        &workspace.join("corpus"),
+        false,
+        &mut relative_paths,
+    )?;
+    relative_paths.sort();
+    relative_paths.dedup();
+    if relative_paths.len() > MAX_FILES {
+        return Err(ClassifiedError::Validation(format!(
+            "comparison context exceeds {MAX_FILES} files"
+        )));
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(b"hobot-fuzz-run-context-v1\0");
+    digest.update(SANDBOX_IMAGE.as_bytes());
+    digest.update(b"\0");
+    let mut total_bytes = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    for relative in relative_paths {
+        let path = workspace.join(&relative);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect comparison input {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(ClassifiedError::Validation(format!(
+                "comparison input is not a regular file: {}",
+                path.display()
+            )));
+        }
+        total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
+            ClassifiedError::Validation("comparison context size overflow".to_owned())
+        })?;
+        if total_bytes > MAX_BYTES {
+            return Err(ClassifiedError::Validation(format!(
+                "comparison context exceeds {MAX_BYTES} bytes"
+            )));
+        }
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update(b"\0");
+        let mut file = std::fs::File::open(&path).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "read comparison input {}: {error}",
+                path.display()
+            ))
+        })?;
+        loop {
+            let read = file.read(&mut chunk).map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "hash comparison input {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&chunk[..read]);
+        }
+        digest.update(b"\0");
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Copy the exact approved source/binary into a run-owned input directory and
+/// create its isolated output directory. The primary workspace is mounted
+/// read-only during execution, so these staged inputs cannot be rewritten by
+/// the engine.
+fn stage_run_artifacts(
+    workspace: &Path,
+    run_id: Uuid,
+    source: &str,
+    binary: &Path,
+) -> Result<RunArtifacts, ClassifiedError> {
+    if !is_regular_file(binary) {
+        return Err(ClassifiedError::Validation(format!(
+            "approved harness binary is not a regular workspace file: {}",
+            binary.display()
+        )));
+    }
+    let workspace_root = std::fs::canonicalize(workspace).map_err(|e| {
+        ClassifiedError::Validation(format!("resolve workspace {}: {e}", workspace.display()))
+    })?;
+    let approved_binary = std::fs::canonicalize(binary).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "resolve approved harness binary {}: {e}",
+            binary.display()
+        ))
+    })?;
+    if !approved_binary.starts_with(&workspace_root) {
+        return Err(ClassifiedError::Validation(format!(
+            "approved harness binary resolves outside workspace: {}",
+            binary.display()
+        )));
+    }
+    let runs_dir = ensure_workspace_directory(workspace, Path::new("runs"))?;
+    let run_root = runs_dir.join(run_id.to_string());
+    std::fs::create_dir(&run_root).map_err(|e| {
+        ClassifiedError::Internal(format!(
+            "create unique run directory {}: {e}",
+            run_root.display()
+        ))
+    })?;
+    let input_dir = run_root.join("input");
+    let corpus_relative = PathBuf::from("runs")
+        .join(run_id.to_string())
+        .join("corpus");
+    let corpus_host = workspace.join(&corpus_relative);
+    let output_relative = run_output_relative(run_id);
+    let output_host = workspace.join(&output_relative);
+    std::fs::create_dir(&input_dir)
+        .map_err(|e| ClassifiedError::Internal(format!("create run input directory: {e}")))?;
+    std::fs::create_dir(&corpus_host)
+        .map_err(|e| ClassifiedError::Internal(format!("create run corpus directory: {e}")))?;
+    std::fs::create_dir(&output_host)
+        .map_err(|e| ClassifiedError::Internal(format!("create run output directory: {e}")))?;
+
+    let binary_host = input_dir.join("harness");
+    std::fs::copy(&approved_binary, &binary_host).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "stage approved harness binary {}: {e}",
+            binary.display()
+        ))
+    })?;
+    let source_host = input_dir.join("harness.source");
+    std::fs::write(&source_host, source)
+        .map_err(|e| ClassifiedError::Internal(format!("stage approved harness source: {e}")))?;
+
+    let live_corpus = ensure_workspace_directory(workspace, Path::new("corpus"))?;
+    hf_corpus::snapshot(&live_corpus, &corpus_host)?;
+
+    let source_sha256 = sha256_file(&source_host)?;
+    let binary_sha256 = sha256_file(&binary_host)?;
+    let run_container_root = format!("/work/runs/{run_id}");
+    Ok(RunArtifacts {
+        binary_host,
+        source_host,
+        corpus_host,
+        corpus_relative,
+        binary_container: format!("{run_container_root}/input/harness"),
+        corpus_container: format!("{run_container_root}/corpus"),
+        output_host,
+        output_container: format!("{run_container_root}/out"),
+        output_relative,
+        source_sha256,
+        binary_sha256,
+    })
+}
+
+/// Fail closed if a staged source/binary changed between approval and launch.
+fn verify_run_artifacts(artifacts: &RunArtifacts) -> Result<(), ClassifiedError> {
+    let source = sha256_file(&artifacts.source_host)?;
+    if source != artifacts.source_sha256 {
+        return Err(ClassifiedError::Validation(
+            "approved harness source digest changed before launch".to_owned(),
+        ));
+    }
+    let binary = sha256_file(&artifacts.binary_host)?;
+    if binary != artifacts.binary_sha256 {
+        return Err(ClassifiedError::Validation(
+            "approved harness binary digest changed before launch".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return whether a run-owned output tree remains within its retained-evidence
+/// budget. Symlinks, special files, excessive entry counts, and metadata/read
+/// failures all fail closed.
+fn run_output_within_budget(
+    root: &Path,
+    max_bytes: u64,
+    max_entries: usize,
+    max_file_bytes: u64,
+) -> bool {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total_bytes = 0_u64;
+    let mut entries = 0usize;
+    while let Some(directory) = pending.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&directory) else {
+            return false;
+        };
+        if !metadata.file_type().is_dir() {
+            return false;
+        }
+        let Ok(children) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        for child in children {
+            let Ok(child) = child else {
+                return false;
+            };
+            entries += 1;
+            if entries > max_entries {
+                return false;
+            }
+            let path = child.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                return false;
+            };
+            if metadata.file_type().is_dir() {
+                pending.push(path);
+            } else if metadata.file_type().is_file() {
+                if metadata.len() > max_file_bytes {
+                    return false;
+                }
+                let Some(next) = total_bytes.checked_add(metadata.len()) else {
+                    return false;
+                };
+                total_bytes = next;
+                if total_bytes > max_bytes {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+async fn monitor_run_output(
+    output: PathBuf,
+    corpus: PathBuf,
+    max_output_file_bytes: u64,
+    run_cancel: CancellationToken,
+    stop: CancellationToken,
+    exceeded: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            _ = interval.tick() => {
+                let path = output.clone();
+                let corpus_path = corpus.clone();
+                let within = tokio::task::spawn_blocking(move || {
+                    run_output_within_budget(
+                        &path,
+                        MAX_RUN_OUTPUT_BYTES,
+                        MAX_RUN_OUTPUT_ENTRIES,
+                        max_output_file_bytes,
+                    ) && run_output_within_budget(
+                        &corpus_path,
+                        hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
+                        hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
+                        hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+                    )
+                })
+                .await
+                .unwrap_or(false);
+                if !within {
+                    exceeded.store(true, std::sync::atomic::Ordering::Release);
+                    run_cancel.cancel();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn run_artifacts_within_budget(artifacts: &RunArtifacts, max_output_file_bytes: u64) -> bool {
+    let output = artifacts.output_host.clone();
+    let corpus = artifacts.corpus_host.clone();
+    tokio::task::spawn_blocking(move || {
+        run_output_within_budget(
+            &output,
+            MAX_RUN_OUTPUT_BYTES,
+            MAX_RUN_OUTPUT_ENTRIES,
+            max_output_file_bytes,
+        ) && run_output_within_budget(
+            &corpus,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+        )
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn merge_run_discoveries(
+    engine: EngineKind,
+    artifacts: &RunArtifacts,
+    retained_corpus: &Path,
+) -> Result<hf_core::corpus::Corpus, ClassifiedError> {
+    let run_corpus = artifacts.corpus_host.clone();
+    let run_output = artifacts.output_host.clone();
+    let retained_corpus = retained_corpus.to_path_buf();
+    let (corpus, _) = tokio::task::spawn_blocking(move || {
+        if matches!(engine, EngineKind::AflPlusPlus | EngineKind::Honggfuzz) {
+            hf_corpus::grow(&run_corpus, &run_output)?;
+        }
+        hf_corpus::merge_snapshot(&retained_corpus, &run_corpus)
+    })
+    .await
+    .map_err(|error| ClassifiedError::Internal(format!("join corpus merge task: {error}")))??;
+    Ok(corpus)
+}
+
+struct TerminalRunMetrics {
+    edges: u64,
+    execs: f64,
+    crashes: u64,
+}
+
+fn retained_coverage_samples(
+    series: &std::sync::Mutex<Vec<(f64, u64, f64)>>,
+) -> Vec<CoverageSample> {
+    let raw = series
+        .lock()
+        .map(|samples| samples.clone())
+        .unwrap_or_default();
+    downsample(&raw, 150)
+        .into_iter()
+        .map(|(t, edges, execs)| CoverageSample { t, edges, execs })
+        .collect()
+}
+
+async fn persist_terminal_run_evidence(
+    store: &Store,
+    run_id: Uuid,
+    metrics: &TerminalRunMetrics,
+    series: &std::sync::Mutex<Vec<(f64, u64, f64)>>,
+) -> Result<(), ClassifiedError> {
+    store
+        .set_run_stats(run_id, metrics.edges, metrics.execs, metrics.crashes)
+        .await
+        .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+    let samples = retained_coverage_samples(series);
+    if !samples.is_empty() {
+        let json = serde_json::to_string(&samples).map_err(|error| {
+            ClassifiedError::Internal(format!("serialize run samples: {error}"))
+        })?;
+        store
+            .set_run_samples(run_id, &json)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+    }
+    Ok(())
+}
+
+async fn terminal_run_metrics(
+    engine: EngineKind,
+    artifacts: &RunArtifacts,
+    result: &hf_engine::runner::RunResult,
+) -> Result<TerminalRunMetrics, ClassifiedError> {
+    let mut edges = 0_u64;
+    let mut execs = 0.0_f64;
+    let mut finding_reported = false;
+    for progress in &result.progress {
+        match progress {
+            FuzzProgress::EdgesCovered(value) => edges = edges.max(*value),
+            FuzzProgress::ExecsPerSec(value) => execs = execs.max(*value),
+            FuzzProgress::CrashesFound(count) => finding_reported |= *count > 0,
+            FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
+        }
+    }
+
+    let mut terminal_afl_crashes = 0_u64;
+    if engine == EngineKind::AflPlusPlus {
+        let output = artifacts.output_host.clone();
+        if let Some(stats) = tokio::task::spawn_blocking(move || {
+            hf_engine::afl::read_fuzzer_stats(&output)
+                .map_err(|error| ClassifiedError::Validation(error.to_string()))
+        })
+        .await
+        .map_err(|error| {
+            ClassifiedError::Internal(format!("join AFL++ statistics task: {error}"))
+        })?? {
+            if let Some(value) = stats.edges_found {
+                edges = edges.max(value);
+            }
+            if let Some(value) = stats.execs_per_sec {
+                execs = execs.max(value);
+            }
+            terminal_afl_crashes = stats.saved_crashes.unwrap_or(0);
+        }
+    }
+    let artifact_crashes = collect_crash_inputs(engine, &artifacts.output_host).len() as u64;
+    Ok(TerminalRunMetrics {
+        edges,
+        execs,
+        crashes: artifact_crashes
+            .max(u64::from(finding_reported))
+            .max(terminal_afl_crashes),
+    })
+}
+
+/// Resolve the immutable source/binary pair proven by a persisted smoke run.
+fn qualification_evidence(harness: &Harness) -> Result<(Uuid, &str, &str), ClassifiedError> {
+    let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
+        ClassifiedError::Validation("harness has no persisted smoke qualification".to_owned())
+    })?;
+    let run_id = smoke.run_id.ok_or_else(|| {
+        ClassifiedError::Validation(
+            "harness qualification predates digest evidence; run smoke qualification again"
+                .to_owned(),
+        )
+    })?;
+    let source_sha256 = smoke.source_sha256.as_deref().ok_or_else(|| {
+        ClassifiedError::Validation(
+            "harness qualification has no source digest; run smoke qualification again".to_owned(),
+        )
+    })?;
+    let binary_sha256 = smoke.binary_sha256.as_deref().ok_or_else(|| {
+        ClassifiedError::Validation(
+            "harness qualification has no binary digest; run smoke qualification again".to_owned(),
+        )
+    })?;
+    Ok((run_id, source_sha256, binary_sha256))
+}
+
+/// Ensure the copy prepared for a run is the exact smoke-qualified pair.
+fn verify_staged_qualification(
+    harness: &Harness,
+    artifacts: &RunArtifacts,
+) -> Result<(), ClassifiedError> {
+    let (_, expected_source, expected_binary) = qualification_evidence(harness)?;
+    if artifacts.source_sha256 != expected_source {
+        return Err(ClassifiedError::Validation(
+            "active harness source digest does not match smoke qualification".to_owned(),
+        ));
+    }
+    if artifacts.binary_sha256 != expected_binary {
+        return Err(ClassifiedError::Validation(
+            "active harness binary digest does not match smoke qualification".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Hardened fuzzer profile: immutable primary workspace with only this run's
+/// disposable corpus snapshot and output directory overlaid writable.
+fn run_sandbox_options(artifacts: &RunArtifacts) -> hf_core::runtime::SandboxOptions {
+    hf_core::runtime::SandboxOptions {
+        extra_mounts: vec![
+            hf_core::runtime::SandboxMount::writable(
+                artifacts.corpus_host.clone(),
+                artifacts.corpus_container.clone(),
+            ),
+            hf_core::runtime::SandboxMount::writable(
+                artifacts.output_host.clone(),
+                artifacts.output_container.clone(),
+            ),
+        ],
+        workspace_read_only: true,
+        max_file_size_bytes: Some(64 * 1024 * 1024),
+        ..hf_core::runtime::SandboxOptions::default()
+    }
+}
+
+/// Hardened libFuzzer merge profile: the starting snapshot remains immutable
+/// and only the bounded, disposable merge result can be written.
+fn minimization_sandbox_options(artifacts: &RunArtifacts) -> hf_core::runtime::SandboxOptions {
+    hf_core::runtime::SandboxOptions {
+        extra_mounts: vec![
+            hf_core::runtime::SandboxMount::read_only(
+                artifacts.corpus_host.clone(),
+                artifacts.corpus_container.clone(),
+            ),
+            hf_core::runtime::SandboxMount::writable(
+                artifacts.output_host.clone(),
+                artifacts.output_container.clone(),
+            ),
+        ],
+        workspace_read_only: true,
+        max_file_size_bytes: Some(hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes),
+        ..hf_core::runtime::SandboxOptions::default()
+    }
+}
+
+fn minimization_failure_with_rollback(
+    corpus_dir: &Path,
+    snapshot_dir: &Path,
+    error: ClassifiedError,
+) -> ClassifiedError {
+    match hf_corpus::minimize(corpus_dir, snapshot_dir) {
+        Ok(_) => error,
+        Err(rollback_error) => ClassifiedError::Internal(format!(
+            "{error}; restoring the retained corpus snapshot also failed: {rollback_error}"
+        )),
+    }
+}
+
+/// Resolve a persisted run's output directory, retaining the legacy flat path
+/// as a read-only fallback for records created before run-scoped evidence.
+fn run_output_dir(workspace: &Path, run: &RunRecord) -> Result<PathBuf, ClassifiedError> {
+    let Some(recorded) = run.evidence_dir.as_deref() else {
+        return Ok(workspace.join("out"));
+    };
+    let expected = run_output_relative(run.id);
+    if Path::new(recorded) != expected {
+        return Err(ClassifiedError::Validation(format!(
+            "run {} has invalid evidence directory '{}' (expected '{}')",
+            run.id,
+            recorded,
+            expected.display()
+        )));
+    }
+    resolve_workspace_directory(workspace, &expected)
+}
+
+/// Resolve the exact staged executable for a run, with the active binary only
+/// as a compatibility fallback for legacy records.
+fn run_binary_path(
+    workspace: &Path,
+    run: &RunRecord,
+    target: &str,
+) -> Result<PathBuf, ClassifiedError> {
+    let (relative, expected_digest) = run.binary_rev.as_deref().map_or_else(
+        || (PathBuf::from(harness_binary_name(target)), None),
+        |digest| {
+            (
+                PathBuf::from("runs")
+                    .join(run.id.to_string())
+                    .join("input")
+                    .join("harness"),
+                Some(digest),
+            )
+        },
+    );
+    if relative.is_absolute()
+        || !relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "run {} binary path is unsafe",
+            run.id
+        )));
+    }
+    let root = std::fs::canonicalize(workspace).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    let candidate = root.join(&relative);
+    if !is_regular_file(&candidate) {
+        return Err(ClassifiedError::Validation(format!(
+            "run {} binary is missing or not a regular file: {}",
+            run.id,
+            candidate.display()
+        )));
+    }
+    let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve run binary {}: {error}",
+            candidate.display()
+        ))
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(ClassifiedError::Validation(format!(
+            "run {} binary resolves outside its workspace",
+            run.id
+        )));
+    }
+    if let Some(expected) = expected_digest {
+        let actual = sha256_file(&resolved)?;
+        if actual != expected {
+            return Err(ClassifiedError::Validation(format!(
+                "run {} binary digest does not match persisted evidence",
+                run.id
+            )));
+        }
+    }
+    Ok(resolved)
+}
+
+/// Resolve and verify the immutable harness source staged for a modern run.
+fn run_source_path(workspace: &Path, run: &RunRecord) -> Result<PathBuf, ClassifiedError> {
+    let expected_digest = run.harness_rev.as_deref().ok_or_else(|| {
+        ClassifiedError::Validation(format!("run {} predates immutable source evidence", run.id))
+    })?;
+    let root = std::fs::canonicalize(workspace).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    let source = root
+        .join("runs")
+        .join(run.id.to_string())
+        .join("input")
+        .join("harness.source");
+    if !is_regular_file(&source) {
+        return Err(ClassifiedError::Validation(format!(
+            "run {} source is missing or not a regular file: {}",
+            run.id,
+            source.display()
+        )));
+    }
+    let resolved = std::fs::canonicalize(&source).map_err(|error| {
+        ClassifiedError::Validation(format!("resolve run source {}: {error}", source.display()))
+    })?;
+    if !resolved.starts_with(&root) || sha256_file(&resolved)? != expected_digest {
+        return Err(ClassifiedError::Validation(format!(
+            "run {} source digest does not match persisted evidence",
+            run.id
+        )));
+    }
+    Ok(resolved)
+}
+
 /// Remove a sensitive staging directory even if the async import is aborted.
 struct StagingDirectoryGuard(PathBuf);
 
@@ -175,6 +1157,37 @@ fn sanitize_target(target: &str) -> PathBuf {
     } else {
         safe
     }
+}
+
+/// Stable single-component stem for target-derived artifact filenames.
+fn target_artifact_stem(target: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut safe: String = target
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let changed = safe != target || safe.is_empty() || safe.len() > 80;
+    if safe.is_empty() {
+        safe.push_str("default");
+    }
+    safe.truncate(64);
+    if changed {
+        let digest = format!("{:x}", Sha256::digest(target.as_bytes()));
+        safe.push('-');
+        safe.push_str(&digest[..8]);
+    }
+    safe
+}
+
+fn harness_binary_name(target: &str) -> String {
+    format!("fuzz_{}", target_artifact_stem(target))
 }
 
 // ---------------------------------------------------------------------------
@@ -264,44 +1277,15 @@ fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathB
     Some(dict_path)
 }
 
-/// Concatenate the target's C/C++ sources (excluding the generated harness)
-/// into a single, size-bounded string for root-cause analysis. Returns `None`
-/// when there are no sources to include.
-fn gather_source_context(workspace: &Path) -> Option<String> {
-    let mut out = String::new();
-    let entries = std::fs::read_dir(workspace).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
-            continue;
-        }
-        if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
-            continue;
-        }
-        if let Ok(src) = std::fs::read_to_string(&path) {
-            use std::fmt::Write as _;
-            if out.len() >= hf_crash::MAX_SOURCE_CONTEXT_CHARS {
-                break;
-            }
-            let _ = writeln!(out, "// {}", path.display());
-            out.push_str(&src);
-            out.push('\n');
-        }
-    }
-    if out.trim().is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
 /// Read the current harness source from a target workspace, trying the known
 /// per-language harness filenames. Returns `None` when none exists yet.
 fn read_current_harness_source(workspace: &Path) -> Option<String> {
-    if let Ok(src) = std::fs::read_to_string(workspace.join("harness.source")) {
-        if !src.trim().is_empty() {
-            return Some(src);
+    let canonical = workspace.join("harness.source");
+    if is_regular_file(&canonical) {
+        if let Ok(src) = std::fs::read_to_string(canonical) {
+            if !src.trim().is_empty() {
+                return Some(src);
+            }
         }
     }
     for name in [
@@ -312,9 +1296,12 @@ fn read_current_harness_source(workspace: &Path) -> Option<String> {
         "harness.rs",
         "harness.go",
     ] {
-        if let Ok(src) = std::fs::read_to_string(workspace.join(name)) {
-            if !src.trim().is_empty() {
-                return Some(src);
+        let path = workspace.join(name);
+        if is_regular_file(&path) {
+            if let Ok(src) = std::fs::read_to_string(path) {
+                if !src.trim().is_empty() {
+                    return Some(src);
+                }
             }
         }
     }
@@ -324,8 +1311,10 @@ fn read_current_harness_source(workspace: &Path) -> Option<String> {
 /// Read the persisted id of the harness revision that produced the active
 /// binary. Older workspaces predate this marker and are resolved by source.
 fn read_current_harness_id(workspace: &Path) -> Option<Uuid> {
-    std::fs::read_to_string(workspace.join("harness.active"))
-        .ok()
+    let path = workspace.join("harness.active");
+    is_regular_file(&path)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
         .and_then(|value| Uuid::parse_str(value.trim()).ok())
 }
 
@@ -373,6 +1362,54 @@ fn write_current_harness_id(workspace: &Path, id: Uuid) -> Result<(), Classified
         .map_err(|e| ClassifiedError::Internal(format!("write active harness id: {e}")))
 }
 
+/// Atomically reactivate an already-verified historical executable.
+fn write_current_harness_binary(
+    workspace: &Path,
+    target: &str,
+    source: &Path,
+) -> Result<PathBuf, ClassifiedError> {
+    if !is_regular_file(source) {
+        return Err(ClassifiedError::Validation(format!(
+            "historical harness binary is not a regular file: {}",
+            source.display()
+        )));
+    }
+    let destination = workspace.join(harness_binary_name(target));
+    if std::fs::symlink_metadata(&destination).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(ClassifiedError::Validation(format!(
+            "active harness destination is a symlink: {}",
+            destination.display()
+        )));
+    }
+    let temporary = workspace.join(format!("harness.restore.{}.tmp", Uuid::new_v4()));
+    std::fs::copy(source, &temporary).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "stage historical harness binary {}: {error}",
+            source.display()
+        ))
+    })?;
+    if let Err(first) = std::fs::rename(&temporary, &destination) {
+        if is_regular_file(&destination) {
+            std::fs::remove_file(&destination).map_err(|error| {
+                let _ = std::fs::remove_file(&temporary);
+                ClassifiedError::Internal(format!(
+                    "replace active harness after rename failed ({first}): {error}"
+                ))
+            })?;
+            std::fs::rename(&temporary, &destination).map_err(|error| {
+                let _ = std::fs::remove_file(&temporary);
+                ClassifiedError::Internal(format!("commit historical harness binary: {error}"))
+            })?;
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(ClassifiedError::Internal(format!(
+                "commit historical harness binary: {first}"
+            )));
+        }
+    }
+    Ok(destination)
+}
+
 /// Map a host path inside the workspace to its container path under `/work`
 /// (the mount point), falling back to `/work/out/<filename>`.
 fn container_input_path(workspace: &Path, host_path: &Path) -> String {
@@ -387,31 +1424,6 @@ fn container_input_path(workspace: &Path, host_path: &Path) -> String {
     )
 }
 
-/// Copy likely crash inputs from a fuzzer `out` dir into a clean staging dir,
-/// skipping coverage maps and sanitizer logs that engines interleave there.
-/// Returns the number of inputs staged.
-/// Extensions and name fragments that are engine bookkeeping, never crash
-/// inputs (coverage maps, logs, sanitizer dumps, fuzzer stats).
-fn is_crash_noise(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if ext == "cov" || ext == "log" {
-        return true;
-    }
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    name.contains("honggfuzz")
-        || name.contains("sanitizer")
-        || name.starts_with("hf.")
-        || name == "fuzzer_stats"
-}
-
 fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
@@ -420,28 +1432,18 @@ fn is_regular_directory(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
-fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
+fn stage_crash_inputs(engine: EngineKind, out_dir: &Path, staging: &Path) -> usize {
     if !is_regular_directory(out_dir)
         || std::fs::create_dir_all(staging).is_err()
         || !is_regular_directory(staging)
     {
         return 0;
     }
-    let Ok(entries) = std::fs::read_dir(out_dir) else {
-        return 0;
-    };
     let mut staged = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !is_regular_file(&path) {
-            continue;
-        }
+    for path in collect_crash_inputs(engine, out_dir) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if is_crash_noise(&path) {
-            continue;
-        }
         if std::fs::copy(&path, staging.join(name)).is_ok() {
             staged += 1;
         }
@@ -452,29 +1454,49 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
 /// Collect crash input file paths from a run output directory, skipping engine
 /// bookkeeping. Looks both at the top level (flat-output engines) and one level
 /// down under `<instance>/crashes/` (AFL++ output layout).
-fn collect_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
-    let mut inputs = Vec::new();
-    if !is_regular_directory(out_dir) {
+fn collect_crash_inputs(engine: EngineKind, out_dir: &Path) -> Vec<PathBuf> {
+    hf_crash::ingest_for_engine(out_dir, engine, Uuid::nil(), Uuid::nil()).map_or_else(
+        |error| {
+            tracing::warn!(path = %out_dir.display(), %error, "crash artifact scan failed");
+            Vec::new()
+        },
+        |result| {
+            if result.is_truncated() {
+                tracing::warn!(
+                    path = %out_dir.display(),
+                    artifact_limit_reached = result.artifact_limit_reached,
+                    report_limit_reached = result.report_limit_reached,
+                    "crash artifact scan reached a safety limit"
+                );
+            }
+            result
+                .crashes
+                .into_iter()
+                .map(|crash| crash.input_path)
+                .collect()
+        },
+    )
+}
+
+fn collect_legacy_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
+    hf_crash::ingest(out_dir, Uuid::nil(), Uuid::nil()).map_or_else(
+        |_| Vec::new(),
+        |crashes| crashes.into_iter().map(|crash| crash.input_path).collect(),
+    )
+}
+
+/// Collect legacy flat evidence plus every isolated run output for a target.
+fn collect_workspace_crash_inputs(workspace: &Path) -> Vec<PathBuf> {
+    let mut inputs = collect_legacy_crash_inputs(&workspace.join("out"));
+    let runs = workspace.join("runs");
+    if !is_regular_directory(&runs) {
         return inputs;
     }
-    let push_files = |dir: &Path, inputs: &mut Vec<PathBuf>| {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if is_regular_file(&path) && !is_crash_noise(&path) {
-                    inputs.push(path);
-                }
-            }
-        }
-    };
-    push_files(out_dir, &mut inputs);
-    // AFL++ nests crashes under out/<instance>/crashes/.
-    if let Ok(entries) = std::fs::read_dir(out_dir) {
+    if let Ok(entries) = std::fs::read_dir(runs) {
         for entry in entries.flatten() {
-            let instance = entry.path();
-            let crashes = instance.join("crashes");
-            if is_regular_directory(&instance) && is_regular_directory(&crashes) {
-                push_files(&crashes, &mut inputs);
+            let run = entry.path();
+            if is_regular_directory(&run) {
+                inputs.extend(collect_legacy_crash_inputs(&run.join("out")));
             }
         }
     }
@@ -484,6 +1506,7 @@ fn collect_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod crash_input_boundary_tests {
     use super::{collect_crash_inputs, stage_crash_inputs};
+    use hf_core::engine::EngineKind;
 
     #[cfg(unix)]
     #[test]
@@ -500,9 +1523,9 @@ mod crash_input_boundary_tests {
         std::fs::write(&outside, b"must not be staged").unwrap();
         symlink(&outside, out.join("crash-link")).unwrap();
 
-        let collected = collect_crash_inputs(&out);
+        let collected = collect_crash_inputs(EngineKind::LibFuzzer, &out);
         assert_eq!(collected, vec![out.join("crash-real")]);
-        assert_eq!(stage_crash_inputs(&out, &staging), 1);
+        assert_eq!(stage_crash_inputs(EngineKind::LibFuzzer, &out, &staging), 1);
         assert_eq!(
             std::fs::read(staging.join("crash-real")).unwrap(),
             b"real crash"
@@ -514,9 +1537,13 @@ mod crash_input_boundary_tests {
         std::fs::write(external_out.join("crash-secret"), b"outside").unwrap();
         let linked_out = root.path().join("linked-out");
         symlink(&external_out, &linked_out).unwrap();
-        assert!(collect_crash_inputs(&linked_out).is_empty());
+        assert!(collect_crash_inputs(EngineKind::LibFuzzer, &linked_out).is_empty());
         assert_eq!(
-            stage_crash_inputs(&linked_out, &root.path().join("linked-staging")),
+            stage_crash_inputs(
+                EngineKind::LibFuzzer,
+                &linked_out,
+                &root.path().join("linked-staging")
+            ),
             0
         );
     }
@@ -850,11 +1877,10 @@ pub struct ServiceContainer {
     /// A turn registers via [`Self::track_agent`] and is removed when the
     /// returned guard drops. Shared across clones of this container.
     active_agents: Arc<std::sync::Mutex<Vec<String>>>,
-    /// Per-session locks serializing chat turns on the same session. A turn is a
-    /// read-modify-write over the transcript (read history, run the turn, append
-    /// user+assistant + checkpoint); two concurrent turns on one session would
-    /// otherwise interleave appends and mint duplicate checkpoint turn numbers.
-    /// Different sessions still run concurrently. Shared across clones.
+    /// Per-session locks serializing every chat read-modify-write operation.
+    /// Turns, rollback, branching, and deletion share this lock so transcript,
+    /// metadata, and checkpoint mutations cannot interleave. Different
+    /// sessions still run concurrently. Shared across clones.
     session_turn_locks: Arc<
         std::sync::Mutex<
             std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
@@ -871,10 +1897,84 @@ struct ActiveRunGuard {
     run_id: Uuid,
 }
 
+fn ensure_run_journal_durable(
+    journal: &crate::recovery::RunJournal,
+) -> Result<(), ClassifiedError> {
+    journal.durability_error().map_or(Ok(()), |error| {
+        Err(ClassifiedError::Storage(format!(
+            "run recovery journal is degraded: {error}"
+        )))
+    })
+}
+
+fn close_run_journal(
+    journal: &crate::recovery::RunJournal,
+    run_id: Uuid,
+) -> Result<(), ClassifiedError> {
+    journal.close_run(run_id);
+    ensure_run_journal_durable(journal)
+}
+
 impl Drop for ActiveRunGuard {
     fn drop(&mut self) {
         if let Ok(mut runs) = self.active_runs.lock() {
             runs.remove(&self.run_id);
+        }
+    }
+}
+
+/// Last-resort lifecycle repair for an inserted run. If its async operation is
+/// aborted or returns through an unhandled error path, mark the row failed and
+/// close its recovery journal instead of leaving a permanent `Running` record.
+struct PersistedRunGuard {
+    store: Arc<Store>,
+    journal: Option<Arc<crate::recovery::RunJournal>>,
+    run_id: Uuid,
+    armed: bool,
+}
+
+impl PersistedRunGuard {
+    fn new(
+        store: Arc<Store>,
+        journal: Option<Arc<crate::recovery::RunJournal>>,
+        run_id: Uuid,
+    ) -> Self {
+        Self {
+            store,
+            journal,
+            run_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PersistedRunGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(journal) = &self.journal {
+            if let Err(error) = close_run_journal(journal, self.run_id) {
+                tracing::error!(run_id = %self.run_id, %error, "failed to close aborted run journal");
+            }
+        }
+        let store = Arc::clone(&self.store);
+        let run_id = self.run_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = store
+                    .set_run_status(run_id, RunStatus::Failed, Some(Utc::now()))
+                    .await
+                {
+                    tracing::error!(%run_id, %error, "failed to repair aborted run status");
+                }
+            });
+        } else {
+            tracing::error!(%run_id, "aborted run status could not be repaired without an async runtime");
         }
     }
 }
@@ -891,7 +1991,7 @@ fn build_cost_map() -> std::collections::HashMap<String, (f64, f64)> {
 /// Build the `hf-session` managers over a database store: the [`SessionManager`]
 /// (`SQLite` session tree + `JSONL` display/context transcripts) and a
 /// [`ChatCheckpointManager`] sharing the same stores for turn-level rollback
-/// (checkpoints are in-memory -- a session-lifetime undo buffer).
+/// (checkpoints are persisted in `SQLite` so undo survives restarts).
 ///
 /// [`SessionManager`]: hf_session::SessionManager
 /// [`ChatCheckpointManager`]: hf_session::ChatCheckpointManager
@@ -932,6 +2032,10 @@ fn build_session_managers(
         session_store,
     ));
     (manager, checkpoints)
+}
+
+fn chat_storage_error(context: &str, error: impl std::fmt::Display) -> ClassifiedError {
+    ClassifiedError::Storage(format!("{context}: {error}"))
 }
 
 impl ServiceContainer {
@@ -980,12 +2084,20 @@ impl ServiceContainer {
     }
 
     /// Dismiss an interrupted run from the recovery list.
-    pub fn dismiss_interrupted_run(&self, run_id: &str) {
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the recovery journal cannot durably
+    /// record the dismissal.
+    pub fn dismiss_interrupted_run(&self, run_id: &str) -> Result<(), ClassifiedError> {
+        ensure_run_journal_durable(&self.run_journal)?;
         self.run_journal.dismiss(run_id);
+        ensure_run_journal_durable(&self.run_journal)
     }
 
     /// Aggregated LLM cost/usage recorded this session.
-    pub async fn cost_summary(&self) -> crate::diagnostics::CostSummary {
+    pub async fn cost_summary(
+        &self,
+    ) -> Result<crate::diagnostics::CostSummary, crate::diagnostics::DiagnosticsError> {
         self.diagnostics.summary().await
     }
 
@@ -1008,38 +2120,106 @@ impl ServiceContainer {
     }
 
     /// Create a turn checkpoint recording the transcript length before this
-    /// turn (so a later rollback restores the pre-turn state). Best-effort.
+    /// turn (so a later rollback restores the pre-turn state).
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the session is unknown, persistence is not
+    /// configured, or the checkpoint cannot be saved.
     pub async fn chat_create_checkpoint(
         &self,
         session: &hf_core::types::SessionId,
         message_count_before: u32,
-    ) {
-        if let Some(manager) = &self.checkpoint_manager {
-            let turn = manager.current_turn(session).await.unwrap_or(0) + 1;
-            if let Err(e) = manager
-                .create_checkpoint(
-                    session,
-                    turn,
-                    message_count_before,
-                    Uuid::new_v4().to_string(),
-                )
-                .await
-            {
-                tracing::warn!("chat checkpoint create failed: {e}");
-            }
-        }
+    ) -> Result<(), ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.create_chat_checkpoint_unlocked(session, message_count_before)
+            .await
     }
 
-    /// Roll back the most recent chat turn, truncating the transcript. Returns
-    /// the number of messages removed (0 if nothing to roll back).
-    pub async fn chat_rollback_last(&self, session: &hf_core::types::SessionId) -> usize {
-        if let Some(manager) = &self.checkpoint_manager {
-            match manager.rollback_last(session).await {
-                Ok(result) => return result.messages_removed,
-                Err(e) => tracing::warn!("chat rollback failed: {e}"),
-            }
+    async fn create_chat_checkpoint_unlocked(
+        &self,
+        session: &hf_core::types::SessionId,
+        message_count_before: u32,
+    ) -> Result<(), ClassifiedError> {
+        let manager = self.chat_checkpoint_manager()?;
+        let turn = manager
+            .current_turn(session)
+            .await
+            .map_err(|error| chat_storage_error("read current chat turn", error))?
+            .saturating_add(1);
+        manager
+            .create_checkpoint(
+                session,
+                turn,
+                message_count_before,
+                Uuid::new_v4().to_string(),
+            )
+            .await
+            .map_err(|error| chat_storage_error("create chat checkpoint", error))?;
+        Ok(())
+    }
+
+    pub(crate) async fn persist_chat_turn_unlocked(
+        &self,
+        session: &hf_core::types::SessionId,
+        messages: &[hf_core::types::Message],
+    ) -> Result<(), ClassifiedError> {
+        let sessions = self.chat_session_manager()?;
+        let checkpoints = self.chat_checkpoint_manager()?;
+        let snapshot = sessions
+            .snapshot_transcripts(session)
+            .await
+            .map_err(|error| chat_storage_error("snapshot chat transcript", error))?;
+        let message_count_before = snapshot.context_count();
+        let turn = checkpoints
+            .current_turn(session)
+            .await
+            .map_err(|error| chat_storage_error("read current chat turn", error))?
+            .saturating_add(1);
+
+        sessions
+            .append_messages(session, messages)
+            .await
+            .map_err(|error| chat_storage_error("append chat turn", error))?;
+        if let Err(error) = checkpoints
+            .create_checkpoint(
+                session,
+                turn,
+                u32::try_from(message_count_before).unwrap_or(u32::MAX),
+                Uuid::new_v4().to_string(),
+            )
+            .await
+        {
+            let compensation = sessions
+                .restore_transcript_snapshot(session, &snapshot)
+                .await;
+            let detail = match compensation {
+                Ok(()) => format!(
+                    "create chat checkpoint failed and transcript was rolled back: {error}"
+                ),
+                Err(rollback) => format!(
+                    "create chat checkpoint failed: {error}; transcript compensation failed: {rollback}"
+                ),
+            };
+            return Err(ClassifiedError::Storage(detail));
         }
-        0
+        Ok(())
+    }
+
+    /// Roll back the most recent chat turn, truncating the transcript.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` when the session/checkpoint is unavailable or
+    /// any transcript, metadata, or checkpoint mutation fails.
+    pub async fn chat_rollback_last(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<usize, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.chat_checkpoint_manager()?
+            .rollback_last(session)
+            .await
+            .map(|result| result.messages_removed)
+            .map_err(|error| chat_storage_error("rollback last chat turn", error))
     }
 
     /// List the (still-valid) per-turn checkpoints for a session, each with a
@@ -1047,25 +2227,27 @@ impl ServiceContainer {
     pub async fn chat_checkpoints(
         &self,
         session: &hf_core::types::SessionId,
-    ) -> Vec<crate::checkpoints::CheckpointView> {
-        let (Some(checkpoints), Some(sessions)) = (&self.checkpoint_manager, &self.session_manager)
-        else {
-            return Vec::new();
-        };
+    ) -> Result<Vec<crate::checkpoints::CheckpointView>, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        let checkpoints = self.chat_checkpoint_manager()?;
+        let sessions = self.chat_session_manager()?;
         let list = checkpoints
             .list_checkpoints(session)
             .await
-            .unwrap_or_default();
-        let transcript = sessions.read_transcript(session).await.unwrap_or_default();
+            .map_err(|error| chat_storage_error("list chat checkpoints", error))?;
+        let transcript = sessions
+            .read_transcript(session)
+            .await
+            .map_err(|error| chat_storage_error("read chat checkpoint previews", error))?;
         let mut valid: Vec<_> = list.into_iter().filter(|c| !c.invalidated).collect();
         // Present turns oldest-first for the picker, regardless of the store's
         // list ordering (the trait returns them newest-first).
         valid.sort_by_key(|c| c.turn_number);
-        valid
+        Ok(valid
             .into_iter()
             .map(|c| {
                 let preview = transcript
-                    .get(c.message_count_before as usize)
+                    .get(usize::try_from(c.message_count_before).unwrap_or(usize::MAX))
                     .map(|m| m.content.chars().take(80).collect())
                     .unwrap_or_default();
                 crate::checkpoints::CheckpointView {
@@ -1075,7 +2257,7 @@ impl ServiceContainer {
                     preview,
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Roll back to a specific checkpoint (removing that turn and everything
@@ -1084,14 +2266,13 @@ impl ServiceContainer {
         &self,
         session: &hf_core::types::SessionId,
         checkpoint_id: &str,
-    ) -> usize {
-        if let Some(manager) = &self.checkpoint_manager {
-            match manager.rollback_to(session, checkpoint_id).await {
-                Ok(result) => return result.messages_removed,
-                Err(e) => tracing::warn!("chat rollback_to failed: {e}"),
-            }
-        }
-        0
+    ) -> Result<usize, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.chat_checkpoint_manager()?
+            .rollback_to(session, checkpoint_id)
+            .await
+            .map(|result| result.messages_removed)
+            .map_err(|error| chat_storage_error("rollback chat to checkpoint", error))
     }
 
     /// Fork a conversation: create a branch session off `parent`, copying the
@@ -1102,39 +2283,46 @@ impl ServiceContainer {
         parent: &hf_core::types::SessionId,
         fork_message_count: u32,
         title: Option<String>,
-    ) -> Option<String> {
-        let sessions = self.session_manager.as_ref()?;
-        let branch = sessions.branch(parent, title).await.ok()?;
-        let parent_transcript = sessions.read_transcript(parent).await.unwrap_or_default();
-        for message in parent_transcript
-            .into_iter()
-            .take(fork_message_count as usize)
-        {
-            if let Err(e) = sessions.append_message(&branch.id, &message).await {
-                tracing::warn!("branch copy failed: {e}");
-            }
+    ) -> Result<String, ClassifiedError> {
+        if fork_message_count == 0 {
+            return Err(ClassifiedError::Validation(
+                "cannot branch an empty conversation".to_owned(),
+            ));
         }
-        Some(branch.id.0)
+        let _guard = self.chat_session_guard(parent).await?;
+        let message_index =
+            usize::try_from(fork_message_count.saturating_sub(1)).unwrap_or(usize::MAX);
+        self.chat_session_manager()?
+            .fork_session(parent, message_index, title)
+            .await
+            .map(|branch| branch.id.0)
+            .map_err(|error| chat_storage_error("branch chat session", error))
     }
 
-    /// The context transcript (LLM-facing messages) of a session, for loading a
-    /// branch into the chat view.
+    /// The canonical display transcript of a session, for loading a branch into
+    /// the chat view.
     pub async fn chat_history(
         &self,
         session: &hf_core::types::SessionId,
-    ) -> Vec<hf_core::types::Message> {
-        match &self.session_manager {
-            Some(sessions) => sessions.read_transcript(session).await.unwrap_or_default(),
-            None => Vec::new(),
-        }
+    ) -> Result<Vec<hf_core::types::Message>, ClassifiedError> {
+        let _guard = self.chat_session_guard(session).await?;
+        self.chat_session_manager()?
+            .read_display_transcript(session)
+            .await
+            .map_err(|error| chat_storage_error("read chat history", error))
     }
 
     /// Create a new top-level chat session, returning its id, or `None` when no
     /// database is configured. Shared by every presentation layer so session
     /// creation behaves identically (AGENTS.md 2.9).
-    pub async fn create_chat_session(&self, title: Option<String>) -> Option<String> {
-        let manager = self.session_manager.as_ref()?;
-        manager
+    pub async fn create_chat_session(
+        &self,
+        title: Option<String>,
+    ) -> Result<Option<String>, ClassifiedError> {
+        let Some(manager) = self.session_manager.as_ref() else {
+            return Ok(None);
+        };
+        let id = manager
             .create_session(hf_core::session::CreateSessionOptions {
                 parent_id: None,
                 session_type: hf_core::session::SessionType::Main,
@@ -1142,18 +2330,27 @@ impl ServiceContainer {
                 title: title.or_else(|| Some("Chat".to_owned())),
             })
             .await
-            .ok()
             .map(|node| node.id.0)
+            .map_err(|error| chat_storage_error("create chat session", error))?;
+        Ok(Some(id))
     }
 
     /// Delete a chat session and its transcript (used by the "clear history"
     /// action). No-op when no session store is configured. Returns whether a
     /// deletion was performed.
-    pub async fn delete_chat_session(&self, session: &hf_core::types::SessionId) -> bool {
+    pub async fn delete_chat_session(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<bool, ClassifiedError> {
         let Some(manager) = self.session_manager.as_ref() else {
-            return false;
+            return Ok(false);
         };
-        manager.delete_session(session).await.is_ok()
+        let _guard = self.chat_session_guard(session).await?;
+        manager
+            .delete_session(session)
+            .await
+            .map_err(|error| chat_storage_error("delete chat session", error))?;
+        Ok(true)
     }
 
     /// All sessions in the same conversation tree as `session` (the main session
@@ -1161,21 +2358,24 @@ impl ServiceContainer {
     pub async fn chat_branches(
         &self,
         session: &hf_core::types::SessionId,
-    ) -> Vec<crate::checkpoints::BranchView> {
+    ) -> Result<Vec<crate::checkpoints::BranchView>, ClassifiedError> {
         use hf_core::session::{SessionFilter, SessionType};
-        let Some(sessions) = &self.session_manager else {
-            return Vec::new();
-        };
-        let Ok(node) = sessions.get_session(session).await else {
-            return Vec::new();
-        };
+        let _guard = self.chat_session_guard(session).await?;
+        let sessions = self.chat_session_manager()?;
+        let node = sessions
+            .get_session(session)
+            .await
+            .map_err(|error| chat_storage_error("read chat session tree", error))?;
         let filter = SessionFilter {
             root_id: Some(node.root_id.clone()),
             ..SessionFilter::default()
         };
-        let mut nodes = sessions.list_sessions(&filter).await.unwrap_or_default();
+        let mut nodes = sessions
+            .list_sessions(&filter)
+            .await
+            .map_err(|error| chat_storage_error("list chat session tree", error))?;
         nodes.sort_by_key(|n| (n.depth, n.created_at));
-        nodes
+        Ok(nodes
             .into_iter()
             .map(|n| {
                 let is_main = n.session_type == SessionType::Main;
@@ -1194,7 +2394,53 @@ impl ServiceContainer {
                     active,
                 }
             })
-            .collect()
+            .collect())
+    }
+
+    async fn validate_chat_session(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<(), ClassifiedError> {
+        let node = self
+            .chat_session_manager()?
+            .get_session(session)
+            .await
+            .map_err(|_| {
+                ClassifiedError::Validation("unknown or invalid chat session".to_owned())
+            })?;
+        if node.state != hf_core::session::SessionState::Active {
+            return Err(ClassifiedError::Validation(
+                "chat session is not active".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn chat_session_guard(
+        &self,
+        session: &hf_core::types::SessionId,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, ClassifiedError> {
+        // Validate before adding an entry to the lock map so arbitrary ids do
+        // not retain mutexes. Validate again after acquisition to close the
+        // race with a deletion that was already waiting on the same lock.
+        self.validate_chat_session(session).await?;
+        let guard = self.session_turn_lock(session).lock_owned().await;
+        self.validate_chat_session(session).await?;
+        Ok(guard)
+    }
+
+    fn chat_session_manager(&self) -> Result<&Arc<hf_session::SessionManager>, ClassifiedError> {
+        self.session_manager.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("chat persistence is not configured".to_owned())
+        })
+    }
+
+    fn chat_checkpoint_manager(
+        &self,
+    ) -> Result<&Arc<hf_session::ChatCheckpointManager>, ClassifiedError> {
+        self.checkpoint_manager.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("chat checkpoints are not configured".to_owned())
+        })
     }
 
     /// The conversation session manager (if a database is configured): the
@@ -1204,9 +2450,9 @@ impl ServiceContainer {
         self.session_manager.as_ref()
     }
 
-    /// The lock serializing chat turns on `session`, creating it on first use.
-    /// Held for the whole turn so concurrent turns on one session run one at a
-    /// time; distinct sessions take distinct locks and are unaffected.
+    /// The lock serializing persistent chat operations on `session`, creating
+    /// it on first use. Distinct sessions take distinct locks and are
+    /// unaffected.
     #[must_use]
     pub fn session_turn_lock(
         &self,
@@ -1251,13 +2497,15 @@ impl ServiceContainer {
     /// A live system snapshot for the Observability panel: per-provider health
     /// and usage, the agent pool, and runtime memory counters. Merges live
     /// provider stats (concurrency/requests/errors) with the provider config
-    /// (model/tags/limits) and cumulative diagnostics (tokens/cost by model).
+    /// (model/tags/limits) and session diagnostics (tokens/cost by model).
     /// `agents.available_slots` is left for the caller to fill from the agent
     /// registry.
-    pub async fn system_snapshot(&self) -> SystemSnapshot {
+    pub async fn system_snapshot(
+        &self,
+    ) -> Result<SystemSnapshot, crate::diagnostics::DiagnosticsError> {
         let statuses = self.provider_statuses().await;
         let configs = crate::config::get_providers();
-        let cost = self.diagnostics.summary().await;
+        let cost = self.diagnostics.summary().await?;
 
         let providers = statuses
             .into_iter()
@@ -1304,11 +2552,11 @@ impl ServiceContainer {
             crashes,
         };
 
-        SystemSnapshot {
+        Ok(SystemSnapshot {
             providers,
             agents: self.active_agent_pool(),
             memory,
-        }
+        })
     }
 
     /// A cheap snapshot of a target's on-disk artifacts (compiled harness,
@@ -1317,10 +2565,10 @@ impl ServiceContainer {
     #[must_use]
     pub fn artifact_summary(&self, project: &Path, target: &str) -> ArtifactSummary {
         let workspace = workspace_dir(project, target);
-        let harness_built = workspace.join(format!("fuzz_{target}")).exists();
+        let harness_built = workspace.join(harness_binary_name(target)).exists();
         let corpus_count =
             hf_corpus::list(&workspace.join("corpus")).map_or(0, |c| c.entries.len());
-        let crash_count = collect_crash_inputs(&workspace.join("out")).len();
+        let crash_count = collect_workspace_crash_inputs(&workspace).len();
         ArtifactSummary {
             harness_built,
             corpus_count,
@@ -1355,16 +2603,52 @@ impl ServiceContainer {
         Ok(())
     }
 
-    /// Delete a single corpus entry by its content hash.
+    /// Delete one exact persisted corpus entry and its managed file.
     ///
     /// # Errors
     /// Returns `ClassifiedError` on a storage failure.
-    pub async fn delete_corpus_entry(&self, sha256: &str) -> Result<(), ClassifiedError> {
-        if let Some(store) = self.store.as_ref() {
-            store
-                .delete_corpus_entry(sha256)
-                .await
-                .map_err(|e| ClassifiedError::Internal(format!("delete corpus entry: {e}")))?;
+    pub async fn delete_corpus_entry(
+        &self,
+        sha256: &str,
+        expected_path: &Path,
+    ) -> Result<(), ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let mut matches = store
+            .list_all_corpus_entries_with_targets()
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .into_iter()
+            .filter(|(_, entry)| entry.sha256 == sha256 && entry.path == expected_path);
+        let (target_id, entry) = matches.next().ok_or_else(|| {
+            ClassifiedError::Validation(format!("corpus entry not found: {sha256}"))
+        })?;
+        if matches.next().is_some() {
+            return Err(ClassifiedError::Validation(format!(
+                "corpus entry identity is ambiguous: {sha256} at {}",
+                expected_path.display()
+            )));
+        }
+
+        let quarantined = quarantine_corpus_entry(&entry.path, sha256)?;
+        if let Err(error) = store.delete_corpus_entry(target_id, sha256).await {
+            if let Some(quarantined) = quarantined {
+                std::fs::rename(&quarantined, &entry.path).map_err(|restore_error| {
+                    ClassifiedError::Internal(format!(
+                        "delete corpus entry failed: {error}; restore failed: {restore_error}"
+                    ))
+                })?;
+            }
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
+        if let Some(quarantined) = quarantined {
+            if let Err(error) = std::fs::remove_file(&quarantined) {
+                tracing::warn!(
+                    path = %quarantined.display(),
+                    "deleted corpus row but could not remove quarantined file: {error}"
+                );
+            }
         }
         Ok(())
     }
@@ -1388,11 +2672,34 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError` on a storage failure.
     pub async fn delete_run(&self, run_id: &str) -> Result<(), ClassifiedError> {
-        if let Some(store) = self.store.as_ref() {
-            store
-                .delete_run(run_id)
-                .await
-                .map_err(|e| ClassifiedError::Internal(format!("delete run: {e}")))?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let id = Uuid::parse_str(run_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad run id: {error}")))?;
+        let run = store
+            .get_run(id)
+            .await?
+            .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {id}")))?;
+        if !run_has_crash_evidence(run.status) || self.active_run_ids().contains(&id) {
+            return Err(ClassifiedError::Validation(format!(
+                "run {id} is still active and cannot be deleted"
+            )));
+        }
+        self.ensure_run_is_not_qualification(store, id).await?;
+        let evidence_root = self.run_evidence_root(store, &run).await?;
+        store
+            .delete_run(run_id)
+            .await
+            .map_err(|e| ClassifiedError::Internal(format!("delete run: {e}")))?;
+        if let Some(root) = evidence_root {
+            std::fs::remove_dir_all(&root).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "remove run evidence {}: {error}",
+                    root.display()
+                ))
+            })?;
         }
         Ok(())
     }
@@ -1402,13 +2709,120 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError` on a storage failure.
     pub async fn clear_all_runs(&self) -> Result<(), ClassifiedError> {
-        if let Some(store) = self.store.as_ref() {
-            store
-                .clear_all_runs()
-                .await
-                .map_err(|e| ClassifiedError::Internal(format!("clear runs: {e}")))?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let runs = store
+            .list_runs(None)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        if runs.iter().any(|run| {
+            !run_has_crash_evidence(run.status) || self.active_run_ids().contains(&run.id)
+        }) {
+            return Err(ClassifiedError::Validation(
+                "run history contains an active run and cannot be cleared".to_owned(),
+            ));
+        }
+        for run in &runs {
+            self.ensure_run_is_not_qualification(store, run.id).await?;
+        }
+        let mut evidence_roots = Vec::new();
+        for run in &runs {
+            if let Some(root) = self.run_evidence_root(store, run).await? {
+                evidence_roots.push(root);
+            }
+        }
+        store
+            .clear_all_runs()
+            .await
+            .map_err(|e| ClassifiedError::Internal(format!("clear runs: {e}")))?;
+        for root in evidence_roots {
+            std::fs::remove_dir_all(&root).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "remove run evidence {}: {error}",
+                    root.display()
+                ))
+            })?;
         }
         Ok(())
+    }
+
+    async fn ensure_run_is_not_qualification(
+        &self,
+        store: &Store,
+        run_id: Uuid,
+    ) -> Result<(), ClassifiedError> {
+        let referenced = store
+            .list_all_harnesses()
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .into_iter()
+            .any(|harness| {
+                harness.smoke_run.as_ref().and_then(|smoke| smoke.run_id) == Some(run_id)
+            });
+        if referenced {
+            return Err(ClassifiedError::Validation(format!(
+                "run {run_id} is retained harness qualification evidence"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn run_evidence_root(
+        &self,
+        store: &Store,
+        run: &RunRecord,
+    ) -> Result<Option<PathBuf>, ClassifiedError> {
+        let Some(recorded) = run.evidence_dir.as_deref() else {
+            return Ok(None);
+        };
+        let expected = run_output_relative(run.id);
+        if Path::new(recorded) != expected {
+            return Err(ClassifiedError::Validation(format!(
+                "run {} has invalid evidence directory '{}'",
+                run.id, recorded
+            )));
+        }
+        let harness_id = run
+            .config
+            .as_ref()
+            .map(|config| config.harness_id)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "run {} has evidence but no harness attribution",
+                    run.id
+                ))
+            })?;
+        let harness = store.get_harness(harness_id).await?.ok_or_else(|| {
+            ClassifiedError::Validation(format!("run {} evidence has no harness record", run.id))
+        })?;
+        let target = store
+            .list_all_targets()
+            .await?
+            .into_iter()
+            .find(|target| target.id == harness.target_id)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!("run {} evidence has no target record", run.id))
+            })?;
+        let workspace = workspace_dir(Path::new(&run.project_root), &target.symbol);
+        let relative_root = PathBuf::from("runs").join(run.id.to_string());
+        let candidate = workspace.join(&relative_root);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                resolve_workspace_directory(&workspace, &relative_root).map(Some)
+            }
+            Ok(_) => Err(ClassifiedError::Validation(format!(
+                "run {} evidence root is not a regular directory: {}",
+                run.id,
+                candidate.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ClassifiedError::Validation(format!(
+                "inspect run {} evidence root: {error}",
+                run.id
+            ))),
+        }
     }
 
     /// Run history for a project (or all projects when `None`), newest first,
@@ -1451,9 +2865,15 @@ impl ServiceContainer {
                 // Presentation layers use this opaque key to compare a run only
                 // with an experiment that has the same target, engine, budget,
                 // sanitizer, corpus, environment, and engine arguments.
-                let comparison_key = match (r.status, target_id, r.config.as_ref()) {
-                    (RunStatus::Done, Some(id), Some(cfg)) => {
-                        Some(auto_revert_comparison_key(id, cfg))
+                let comparison_key = match (
+                    r.status,
+                    r.kind,
+                    target_id,
+                    r.config.as_ref(),
+                    r.context_rev.as_deref(),
+                ) {
+                    (RunStatus::Done, RunKind::Campaign, Some(id), Some(cfg), Some(context)) => {
+                        Some(auto_revert_comparison_key(id, cfg, context))
                     }
                     _ => None,
                 };
@@ -1480,6 +2900,8 @@ impl ServiceContainer {
                     edges: r.edges,
                     execs: r.execs,
                     harness_rev: r.harness_rev,
+                    binary_rev: r.binary_rev,
+                    evidence_dir: r.evidence_dir,
                 }
             })
             .collect();
@@ -1519,14 +2941,12 @@ impl ServiceContainer {
             .unwrap_or_default()
     }
 
-    /// Restore the harness a run used and recompile it, so it becomes the
-    /// current harness for that target -- a one-click revert to an earlier (e.g.
-    /// last-good) revision. Everything (source, engine, target, language) is
-    /// resolved from the persisted run + harness records.
+    /// Restore the exact source and executable a run used, so that promoted
+    /// qualification becomes current again without recompiling different bytes.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` if the run/harness/source cannot be resolved or
-    /// the recompile fails.
+    /// Returns `ClassifiedError` if the run/harness/evidence cannot be resolved,
+    /// digest verification fails, or activation cannot be committed.
     pub async fn revert_harness_from_run(
         &self,
         run_id: &str,
@@ -1537,15 +2957,6 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
         let id = Uuid::parse_str(run_id)
             .map_err(|e| ClassifiedError::Validation(format!("bad run id: {e}")))?;
-        let source = store
-            .run_harness_source(id)
-            .await?
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                ClassifiedError::Validation(
-                    "no harness source was recorded for this run".to_owned(),
-                )
-            })?;
         let run = store
             .get_run(id)
             .await?
@@ -1566,22 +2977,87 @@ impl ServiceContainer {
                 ClassifiedError::Validation("the target for this run no longer exists".to_owned())
             })?;
         let project = std::path::PathBuf::from(&run.project_root);
-        let outcome = self
-            .harness_compile(source, &project, harness.engine, &symbol, harness.language)
-            .await?;
-        // A historical run can only reference a revision that passed the run
-        // gate. Reverting that exact recorded source is itself an explicit
-        // operator/configured-policy action, so preserve its qualification
-        // evidence on the newly compiled active record.
-        if harness.status == HarnessStatus::Promoted {
-            let mut restored = self
-                .active_harness(&project, &symbol, harness.engine)
-                .await?;
-            restored.status = HarnessStatus::Promoted;
-            restored.smoke_run = harness.smoke_run;
-            store.upsert_harness(&restored).await?;
+        if harness.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(
+                "only a promoted historical harness can be restored".to_owned(),
+            ));
         }
-        Ok(outcome)
+        let (qualification_run, expected_source, expected_binary) =
+            qualification_evidence(&harness)?;
+        if run.harness_rev.as_deref() != Some(expected_source)
+            || run.binary_rev.as_deref() != Some(expected_binary)
+        {
+            return Err(ClassifiedError::Validation(format!(
+                "run {id} does not contain the exact promoted qualification artifacts"
+            )));
+        }
+        if store.get_run(qualification_run).await?.is_none() {
+            return Err(ClassifiedError::Validation(
+                "the historical harness qualification run is missing".to_owned(),
+            ));
+        }
+
+        let workspace = workspace_dir(&project, &symbol);
+        let source_path = run_source_path(&workspace, &run)?;
+        let binary_path = run_binary_path(&workspace, &run, &symbol)?;
+        let source = std::fs::read_to_string(&source_path).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "read historical harness source {}: {error}",
+                source_path.display()
+            ))
+        })?;
+        if source != harness.source {
+            return Err(ClassifiedError::Validation(format!(
+                "run {id} source does not match its promoted harness record"
+            )));
+        }
+
+        self.guardrails.authorize(Action::CompileHarness).await?;
+        let active_binary = workspace.join(harness_binary_name(&symbol));
+        let backup = workspace.join(format!("harness.restore.{}.backup", Uuid::new_v4()));
+        let had_active_binary = is_regular_file(&active_binary);
+        if had_active_binary {
+            std::fs::copy(&active_binary, &backup).map_err(|error| {
+                ClassifiedError::Internal(format!("back up active harness binary: {error}"))
+            })?;
+        }
+        let old_source = std::fs::read(workspace.join("harness.source")).ok();
+        let old_id = std::fs::read(workspace.join("harness.active")).ok();
+
+        let activate = (|| -> Result<(), ClassifiedError> {
+            let restored = write_current_harness_binary(&workspace, &symbol, &binary_path)?;
+            if sha256_file(&restored)? != expected_binary {
+                return Err(ClassifiedError::Validation(
+                    "restored harness binary failed post-copy digest verification".to_owned(),
+                ));
+            }
+            write_current_harness_source(&workspace, &source)?;
+            write_current_harness_id(&workspace, harness.id)?;
+            Ok(())
+        })();
+        if let Err(error) = activate {
+            if had_active_binary {
+                let _ = std::fs::copy(&backup, &active_binary);
+            } else {
+                let _ = std::fs::remove_file(&active_binary);
+            }
+            if let Some(bytes) = old_source {
+                let _ = std::fs::write(workspace.join("harness.source"), bytes);
+            }
+            if let Some(bytes) = old_id {
+                let _ = std::fs::write(workspace.join("harness.active"), bytes);
+            }
+            let _ = std::fs::remove_file(&backup);
+            return Err(error);
+        }
+        let _ = std::fs::remove_file(&backup);
+        self.verify_harness_qualification(&project, &symbol, &harness)
+            .await?;
+        Ok(CompileOutcome {
+            status: HarnessStatus::Promoted,
+            binary_name: harness_binary_name(&symbol),
+            workspace,
+        })
     }
 
     /// The target a persisted run exercised, resolved through its harness
@@ -1709,9 +3185,10 @@ impl ServiceContainer {
     /// run's peak edge coverage dropped by at least the configured percentage
     /// versus a prior run with the same target, engine, budget, resources,
     /// sanitizer, corpus location, environment, and engine arguments. The
-    /// restore reuses [`Self::revert_harness_from_run`], so the recompile is
-    /// HITL-gated exactly like a manual revert -- a denied approval simply leaves
-    /// the harness unchanged. Returns the outcome only when the revert applied.
+    /// restore reuses [`Self::revert_harness_from_run`], so exact-artifact
+    /// activation is HITL-gated exactly like a manual revert -- a denied approval
+    /// simply leaves the harness unchanged. Returns the outcome only when the
+    /// revert applied.
     async fn maybe_auto_revert(
         &self,
         project: &Path,
@@ -1734,9 +3211,13 @@ impl ServiceContainer {
         runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
         let this_run = runs.iter().find(|r| r.id == this_run_id).cloned()?;
         let this_config = this_run.config.as_ref()?;
-        if this_run.status != RunStatus::Done {
+        if this_run.status != RunStatus::Done || this_run.kind != RunKind::Campaign {
             return None;
         }
+        let this_context = this_run
+            .context_rev
+            .as_deref()
+            .filter(|value| !value.is_empty())?;
         // Resolve the target through the run's persisted harness rather than
         // re-discovering it as C. This keeps C++, Rust, and future language runs
         // eligible for the same rollback policy.
@@ -1745,8 +3226,11 @@ impl ServiceContainer {
         for r in runs {
             if r.id == this_run_id
                 || r.status != RunStatus::Done
+                || r.kind != RunKind::Campaign
                 || r.edges.is_none()
                 || r.harness_rev.is_none()
+                || r.harness_rev.as_deref() == Some(this_rev)
+                || r.context_rev.as_deref() != Some(this_context)
             {
                 continue;
             }
@@ -1921,10 +3405,11 @@ impl ServiceContainer {
                     "workspace": workspace,
                     "active_harness_id": read_current_harness_id(&workspace),
                     "active_harness_source": read_current_harness_source(&workspace),
-                    "binary": workspace.join(format!("fuzz_{}", target.symbol)),
-                    "binary_present": workspace.join(format!("fuzz_{}", target.symbol)).is_file(),
+                    "binary": workspace.join(harness_binary_name(&target.symbol)),
+                    "binary_present": workspace.join(harness_binary_name(&target.symbol)).is_file(),
                     "corpus_dir": workspace.join("corpus"),
-                    "crash_dir": workspace.join("out"),
+                    "run_evidence_root": workspace.join("runs"),
+                    "legacy_crash_dir": workspace.join("out"),
                 })
             })
             .collect();
@@ -2094,7 +3579,7 @@ impl ServiceContainer {
         };
         let result = self.runtime.run_command(&cmd, &staging, &limits).await;
         drop(staging_guard);
-        let result = result?;
+        let result = result?.require_completed("document conversion")?;
         if result.exit_code != 0 || result.stdout.trim().is_empty() {
             return Err(ClassifiedError::Internal(format!(
                 "markitdown failed (exit {}): {}",
@@ -2622,15 +4107,88 @@ impl ServiceContainer {
             })
     }
 
-    /// Persist corpus entries for a target so the Corpus view and later runs
-    /// survive restarts (best-effort; a store failure only logs).
-    async fn persist_corpus(&self, target_id: Uuid, corpus: &hf_core::corpus::Corpus) {
-        let Some(store) = &self.store else { return };
-        for entry in &corpus.entries {
-            if let Err(e) = store.upsert_corpus_entry(target_id, entry).await {
-                tracing::warn!("failed to persist corpus entry {}: {e}", entry.sha256);
-            }
+    /// Verify that the active source/executable and the persisted smoke run all
+    /// describe the same immutable qualification evidence.
+    async fn verify_harness_qualification(
+        &self,
+        project: &Path,
+        target: &str,
+        harness: &Harness,
+    ) -> Result<(), ClassifiedError> {
+        let (qualification_run_id, expected_source, expected_binary) =
+            qualification_evidence(harness)?;
+        let workspace = workspace_dir(project, target);
+        let source_path = workspace.join("harness.source");
+        let binary_path = workspace.join(harness_binary_name(target));
+        if !is_regular_file(&source_path) || !is_regular_file(&binary_path) {
+            return Err(ClassifiedError::Validation(
+                "qualified harness artifacts are missing or are not regular files; compile and smoke again"
+                    .to_owned(),
+            ));
         }
+        if sha256_file(&source_path)? != expected_source {
+            return Err(ClassifiedError::Validation(
+                "active harness source digest does not match smoke qualification".to_owned(),
+            ));
+        }
+        if sha256_file(&binary_path)? != expected_binary {
+            return Err(ClassifiedError::Validation(
+                "active harness binary digest does not match smoke qualification".to_owned(),
+            ));
+        }
+
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation(
+                "harness qualification requires the persistent service store".to_owned(),
+            )
+        })?;
+        let run = store
+            .get_run(qualification_run_id)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+            .ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "smoke qualification run is missing; run smoke qualification again".to_owned(),
+                )
+            })?;
+        let same_harness = run
+            .config
+            .as_ref()
+            .is_some_and(|config| config.harness_id == harness.id);
+        if run.status != RunStatus::Done
+            || !same_harness
+            || run.harness_rev.as_deref() != Some(expected_source)
+            || run.binary_rev.as_deref() != Some(expected_binary)
+        {
+            return Err(ClassifiedError::Validation(
+                "smoke qualification evidence does not match the active harness digests".to_owned(),
+            ));
+        }
+        let recorded_source = store
+            .run_harness_source(qualification_run_id)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        if recorded_source.as_deref() != Some(harness.source.as_str()) {
+            return Err(ClassifiedError::Validation(
+                "smoke qualification source evidence does not match the active harness".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reconcile one target's persisted corpus with its exact on-disk state.
+    async fn persist_corpus(
+        &self,
+        target_id: Uuid,
+        corpus: &hf_core::corpus::Corpus,
+    ) -> Result<(), ClassifiedError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        store
+            .replace_corpus_entries(target_id, &corpus.entries)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))
     }
 
     /// Compile a harness in the sandbox via `hf-runtime`.
@@ -2656,7 +4214,7 @@ impl ServiceContainer {
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
 
-        let build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{target}"));
+        let build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
         let harness = Harness {
             id: Uuid::new_v4(),
             target_id: self.resolve_target_id(project, target, lang).await,
@@ -2777,8 +4335,9 @@ impl ServiceContainer {
         let mut last_diagnostics = String::new();
 
         loop {
-            let mut build_cmd = hf_harness::build_command(engine, lang, &format!("fuzz_{target}"));
-            build_cmd.output = PathBuf::from(format!("fuzz_{target}"));
+            let mut build_cmd =
+                hf_harness::build_command(engine, lang, &harness_binary_name(target));
+            build_cmd.output = PathBuf::from(harness_binary_name(target));
             let harness = Harness {
                 id: Uuid::new_v4(),
                 target_id: candidate.id,
@@ -2986,12 +4545,14 @@ impl ServiceContainer {
         let mut crashes = 0usize;
         let mut iterations = 0usize;
         let mut auto_reverts = 0usize;
+        let mut termination = hf_core::runtime::CommandTermination::Completed;
         let cap = max_iterations.max(1);
         while iterations < cap {
             iterations += 1;
             let summary = self
                 .run_fuzzer(project, &target, engine, duration_secs, &noop)
                 .await?;
+            termination = summary.termination;
             edges = edges.max(summary.edges);
             // A refine step between iterations can regress coverage; the policy
             // (armed via config) then restores the last-good harness, or, in
@@ -3000,10 +4561,19 @@ impl ServiceContainer {
                 auto_reverts += 1;
             }
 
-            let triaged = self.triage(project, &target).await.unwrap_or_default();
+            if termination == hf_core::runtime::CommandTermination::Cancelled {
+                break;
+            }
+
+            let triaged = self
+                .triage_run(project, &target, summary.run_id)
+                .await
+                .unwrap_or_default();
             crashes = triaged.len();
             // Feed any crash reproducers back into the corpus (close the loop).
-            let _ = self.corpus_absorb_crashes(project, &target).await;
+            let _ = self
+                .corpus_absorb_crashes_for_run(project, &target, summary.run_id)
+                .await;
 
             if crashes > 0 || iterations >= cap {
                 break;
@@ -3018,6 +4588,7 @@ impl ServiceContainer {
             edges,
             iterations,
             auto_reverts,
+            termination,
         })
     }
 
@@ -3043,55 +4614,148 @@ impl ServiceContainer {
                 harness.language
             )));
         }
-        if harness.status != HarnessStatus::Compiled && harness.status != HarnessStatus::SmokePassed
-        {
+        if !matches!(
+            harness.status,
+            HarnessStatus::Compiled | HarnessStatus::SmokePassed | HarnessStatus::Promoted
+        ) {
             return Err(ClassifiedError::Validation(format!(
                 "only a compiled harness can be smoke-qualified; active status is {:?}",
                 harness.status
             )));
         }
-        let smoked = hf_harness::smoke_fuzz(harness, self.runtime.as_ref(), &workspace).await?;
-        let summary = smoked
-            .smoke_run
-            .clone()
-            .ok_or_else(|| ClassifiedError::Harness("smoke run produced no summary".to_owned()))?;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness qualification requires the persistent service store".to_owned(),
             )
         })?;
-        // Smoke findings are real crash artifacts and must be triageable from
-        // the desktop workflow. Persist a completed, explicitly labelled run
-        // record so triage can associate the artifacts with this smoke pass
-        // instead of looking at an older campaign (or an empty run scope).
+        let binary_name = harness_binary_name(target);
+        let binary = workspace.join(&binary_name);
+        if !is_regular_file(&binary) {
+            return Err(ClassifiedError::Validation(format!(
+                "Compiled harness '{binary_name}' not found -- compile the harness first."
+            )));
+        }
+
+        // Allocate the run identity before execution so its immutable inputs and
+        // every finding are owned by one durable evidence directory.
         let mut smoke_record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
             Some(FuzzRunConfig {
-                harness_id: smoked.id,
+                harness_id: harness.id,
                 engine,
-                duration: Some(std::time::Duration::from_secs(summary.duration_secs)),
+                duration: Some(std::time::Duration::from_mins(1)),
                 max_mem_mb: 2048,
                 max_cpus: 1,
                 seed_corpus: Some(workspace.join("corpus")),
-                sanitizer: smoked.sanitizer,
+                sanitizer: harness.sanitizer,
                 env: Vec::new(),
                 extra_args: Vec::new(),
             }),
             Utc::now(),
         );
-        smoke_record.status = RunStatus::Done;
-        smoke_record.ended_at = Some(Utc::now());
-        smoke_record.execs = Some(summary.execs_per_sec);
-        smoke_record.crash_count = Some(u64::from(summary.crashes));
+        smoke_record.kind = RunKind::Smoke;
+        smoke_record.context_rev = Some(run_context_digest(&workspace)?);
+        let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
+        smoke_record.status = RunStatus::Running;
+        smoke_record.harness_rev = Some(artifacts.source_sha256.clone());
+        smoke_record.binary_rev = Some(artifacts.binary_sha256.clone());
+        smoke_record.evidence_dir = Some(artifacts.output_relative.to_string_lossy().into_owned());
+        if let Err(error) = store.insert_run(&smoke_record).await {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ = std::fs::remove_dir_all(run_root);
+            }
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
+        let mut persisted_run = PersistedRunGuard::new(Arc::clone(store), None, smoke_record.id);
+        if let Err(error) = store
+            .set_run_harness_source(smoke_record.id, &harness.source)
+            .await
+        {
+            let _ = store
+                .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
+
+        if let Err(error) = verify_run_artifacts(&artifacts) {
+            let _ = store
+                .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            return Err(error);
+        }
+        let mut staged_harness = harness;
+        staged_harness.build_cmd.output = artifacts.binary_host.clone();
+        let mut smoked = match hf_harness::smoke_fuzz_in_paths(
+            staged_harness,
+            self.runtime.as_ref(),
+            &workspace,
+            &artifacts.corpus_relative,
+            &artifacts.output_relative,
+        )
+        .await
+        {
+            Ok(smoked) => smoked,
+            Err(error) => {
+                let _ = store
+                    .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                    .await;
+                return Err(error);
+            }
+        };
+        if !run_output_within_budget(
+            &artifacts.output_host,
+            MAX_RUN_OUTPUT_BYTES,
+            MAX_RUN_OUTPUT_ENTRIES,
+            64 * 1024 * 1024,
+        ) || !run_output_within_budget(
+            &artifacts.corpus_host,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+        ) {
+            let _ = store
+                .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            return Err(ClassifiedError::Sandbox(
+                "smoke corpus/output exceeded its retained-evidence budget".to_owned(),
+            ));
+        }
+        let Some(summary) = smoked.smoke_run.as_mut() else {
+            let _ = store
+                .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            return Err(ClassifiedError::Harness(
+                "smoke run produced no summary".to_owned(),
+            ));
+        };
+        summary.source_sha256 = Some(artifacts.source_sha256.clone());
+        summary.binary_sha256 = Some(artifacts.binary_sha256.clone());
+        summary.run_id = Some(smoke_record.id);
+        let summary = summary.clone();
+        if let Err(error) = store
+            .set_run_stats(
+                smoke_record.id,
+                0,
+                summary.execs_per_sec,
+                u64::from(summary.crashes),
+            )
+            .await
+        {
+            let _ = store
+                .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
         store
-            .insert_run(&smoke_record)
+            .set_run_status(smoke_record.id, RunStatus::Done, Some(Utc::now()))
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
         store
             .upsert_harness(&smoked)
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        persisted_run.disarm();
         Ok(summary)
     }
 
@@ -3119,6 +4783,8 @@ impl ServiceContainer {
                 "harness '{target}' cannot be promoted until a crash-free smoke run passes"
             )));
         }
+        self.verify_harness_qualification(project, target, &harness)
+            .await?;
         harness.status = HarnessStatus::Promoted;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
@@ -3150,6 +4816,8 @@ impl ServiceContainer {
                 "known-findings approval requires at least one smoke crash".into(),
             ));
         }
+        self.verify_harness_qualification(project, target, &harness)
+            .await?;
         harness.status = HarnessStatus::Promoted;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
@@ -3169,32 +4837,42 @@ impl ServiceContainer {
     ///
     /// # Errors
     /// Returns `ClassifiedError` if files cannot be written.
-    pub fn generate_seeds(
+    pub async fn generate_seeds(
         &self,
         project: &Path,
         target: &str,
     ) -> Result<Vec<SeedEntry>, ClassifiedError> {
-        use sha2::{Digest, Sha256};
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        std::fs::create_dir_all(&corpus_dir)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
         let seeds = generate_target_seeds(target);
-        let mut entries = Vec::new();
-        for (data, name) in seeds {
-            let path = corpus_dir.join(&name);
-            std::fs::write(&path, &data)
-                .map_err(|e| ClassifiedError::Internal(format!("write seed: {e}")))?;
-            let mut hasher = Sha256::new();
-            hasher.update(&data);
-            let sha = format!("{:x}", hasher.finalize());
-            entries.push(SeedEntry {
-                name,
-                size: data.len(),
-                sha256: sha,
-            });
-        }
-        Ok(entries)
+        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
+        self.persist_corpus(target_id, &hf_corpus::list(&corpus_dir)?)
+            .await?;
+        corpus
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let name = entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        ClassifiedError::Internal(
+                            "generated seed path has no UTF-8 filename".to_owned(),
+                        )
+                    })?
+                    .to_owned();
+                let size = usize::try_from(entry.size).map_err(|_| {
+                    ClassifiedError::Validation("generated seed is too large".to_owned())
+                })?;
+                Ok(SeedEntry {
+                    name,
+                    size,
+                    sha256: entry.sha256,
+                })
+            })
+            .collect()
     }
 
     /// Generate a seed corpus for a target using the LLM (structural, format-
@@ -3212,7 +4890,6 @@ impl ServiceContainer {
         lang: TargetLanguage,
         count: usize,
     ) -> Result<Vec<SeedEntry>, ClassifiedError> {
-        use sha2::{Digest, Sha256};
         // Clamp the requested count to a sane range so no presentation layer can
         // ask the LLM for zero or an absurd number of seeds. Owning the bound
         // here keeps CLI, REST, and Tauri consistent (the clamp previously lived
@@ -3220,8 +4897,6 @@ impl ServiceContainer {
         let count = count.clamp(1, 64);
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        std::fs::create_dir_all(&corpus_dir)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
 
         // LLM seeds when a provider and the target candidate are available.
         let mut datas: Vec<Vec<u8>> = Vec::new();
@@ -3245,34 +4920,45 @@ impl ServiceContainer {
                 .collect();
         }
 
-        let mut entries = Vec::new();
+        let mut named_seeds = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (i, data) in datas.into_iter().enumerate() {
-            let mut hasher = Sha256::new();
-            hasher.update(&data);
-            let sha = format!("{:x}", hasher.finalize());
+            use sha2::{Digest as _, Sha256};
+            let sha = format!("{:x}", Sha256::digest(&data));
             if !seen.insert(sha.clone()) {
                 continue;
             }
             let name = format!("llmseed_{i}");
-            std::fs::write(corpus_dir.join(&name), &data)
-                .map_err(|e| ClassifiedError::Internal(format!("write seed: {e}")))?;
-            entries.push(SeedEntry {
-                name,
-                size: data.len(),
-                sha256: sha,
-            });
+            named_seeds.push((data, name));
         }
 
         // Make the AI seeds first-class, tracked corpus entries (parity with
         // corpus_seed/corpus_grow), so they show in the browse-all corpus view
         // and survive as persisted rows -- previously LLM seeds only landed on
         // disk. Listing the dir also folds in any pre-existing entries; the
-        // upsert is keyed on (target_id, sha256), so this stays idempotent.
+        // exact target reconciliation stays idempotent.
         let target_id = self.resolve_target_id(project, target, lang).await;
-        if let Ok(corpus) = hf_corpus::list(&corpus_dir) {
-            self.persist_corpus(target_id, &corpus).await;
-        }
+        let generated = hf_corpus::seed(target_id, &corpus_dir, named_seeds).await?;
+        let entries = generated
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let name = entry
+                    .path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                let size = usize::try_from(entry.size).map_err(|_| {
+                    ClassifiedError::Validation("generated seed is too large".to_owned())
+                })?;
+                Ok(SeedEntry {
+                    name,
+                    size,
+                    sha256: entry.sha256,
+                })
+            })
+            .collect::<Result<Vec<_>, ClassifiedError>>()?;
+        let corpus = hf_corpus::list(&corpus_dir)?;
+        self.persist_corpus(target_id, &corpus).await?;
         Ok(entries)
     }
 
@@ -3336,6 +5022,8 @@ impl ServiceContainer {
         duration_secs: u64,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
+        const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
+
         let qualified = self.active_harness(project, target, engine).await?;
         if qualified.status != HarnessStatus::Promoted {
             return Err(ClassifiedError::Validation(format!(
@@ -3343,33 +5031,30 @@ impl ServiceContainer {
                 qualified.status
             )));
         }
+        self.verify_harness_qualification(project, target, &qualified)
+            .await?;
         self.guardrails
             .authorize(Action::RunFuzzer {
                 engine: format!("{engine:?}"),
                 duration_secs,
             })
             .await?;
+        ensure_run_journal_durable(&self.run_journal)?;
         let workspace = workspace_dir(project, target);
-        let corpus_dir = workspace.join("corpus");
-        let out_dir = workspace.join("out");
-        std::fs::create_dir_all(&corpus_dir)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
-        std::fs::create_dir_all(&out_dir)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir out: {e}")))?;
+        let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
 
-        let bin = format!("fuzz_{target}");
+        let bin = harness_binary_name(target);
         let binary = workspace.join(&bin);
-        if !binary.exists() {
+        if !is_regular_file(&binary) {
             return Err(ClassifiedError::Validation(format!(
                 "Compiled harness '{bin}' not found -- compile the harness first."
             )));
         }
-        let binary_str = format!("/work/{bin}");
 
         // Build a dictionary from the target sources and point the engine at it.
         // A dictionary of the literals the target compares against is one of the
         // cheapest coverage multipliers; absent literals just yield no flag.
-        let dict_name = format!("{target}.dict");
+        let dict_name = "fuzzer.dict".to_owned();
         let extra_args = if build_workspace_dictionary(&workspace, &dict_name).is_some() {
             hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
         } else {
@@ -3390,44 +5075,66 @@ impl ServiceContainer {
             env: Vec::new(),
             extra_args,
         };
-        // The harness the run is about to use, plus a short content hash of it,
-        // so a coverage change in the run history can be attributed to -- and
-        // diffed against -- the harness revision that produced it.
-        let harness_source = Some(qualified.source.clone());
-        let harness_rev = harness_source.as_ref().map(|src| {
-            use sha2::{Digest, Sha256};
-            let mut h = Sha256::new();
-            h.update(src.as_bytes());
-            format!("{:x}", h.finalize())[..12].to_owned()
-        });
-        // Record the run so campaigns survive restarts (best-effort).
-        let mut run_record = self.store.as_ref().map(|_| {
-            let mut rec = RunRecord::new(
-                project.to_string_lossy().to_string(),
-                engine,
-                Some(run_cfg.clone()),
-                Utc::now(),
-            );
-            rec.status = RunStatus::Running;
-            rec
-        });
-        if let Some(rec) = run_record.as_mut() {
-            rec.harness_rev = harness_rev;
-        }
-        if let (Some(store), Some(rec)) = (&self.store, &run_record) {
-            if let Err(e) = store.insert_run(rec).await {
-                tracing::warn!("failed to record run start: {e}");
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
+        })?;
+        let mut run_record = RunRecord::new(
+            project.to_string_lossy().to_string(),
+            engine,
+            Some(run_cfg.clone()),
+            Utc::now(),
+        );
+        run_record.context_rev = Some(run_context_digest(&workspace)?);
+        let artifacts = stage_run_artifacts(&workspace, run_record.id, &qualified.source, &binary)?;
+        if let Err(error) = verify_staged_qualification(&qualified, &artifacts) {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ = std::fs::remove_dir_all(run_root);
             }
-            if let Some(src) = &harness_source {
-                if let Err(e) = store.set_run_harness_source(rec.id, src).await {
-                    tracing::warn!("failed to persist harness source: {e}");
-                }
-            }
+            return Err(error);
         }
-        // Journal the run as an open scope so an interrupted run (crash/quit
-        // mid-fuzz) is detected and offered for recovery on the next startup.
-        let run_id = run_record.as_ref().map_or_else(Uuid::new_v4, |rec| rec.id);
+        if let Err(error) = verify_run_artifacts(&artifacts) {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ = std::fs::remove_dir_all(run_root);
+            }
+            return Err(error);
+        }
+        let sandbox = run_sandbox_options(&artifacts);
+        run_record.status = RunStatus::Running;
+        run_record.harness_rev = Some(artifacts.source_sha256.clone());
+        run_record.binary_rev = Some(artifacts.binary_sha256.clone());
+        run_record.evidence_dir = Some(artifacts.output_relative.to_string_lossy().into_owned());
+        let run_id = run_record.id;
+        if let Err(error) = store.insert_run(&run_record).await {
+            if let Some(run_root) = artifacts.output_host.parent() {
+                let _ = std::fs::remove_dir_all(run_root);
+            }
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
         self.run_journal.open_run(run_id, project, target, engine);
+        if let Err(error) = ensure_run_journal_durable(&self.run_journal) {
+            store
+                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await
+                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
+            return Err(error);
+        }
+        let mut persisted_run = PersistedRunGuard::new(
+            Arc::clone(store),
+            Some(Arc::clone(&self.run_journal)),
+            run_id,
+        );
+        if let Err(error) = store
+            .set_run_harness_source(run_record.id, &qualified.source)
+            .await
+        {
+            let failure_recorded = store
+                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            if failure_recorded.is_ok() {
+                self.run_journal.close_run(run_id);
+            }
+            return Err(ClassifiedError::Storage(error.to_string()));
+        }
 
         // Register a cancellation token so `cancel_run(run_id)` can stop this
         // run cooperatively. `ActiveRunGuard` removes it again when this scope
@@ -3445,9 +5152,7 @@ impl ServiceContainer {
         };
 
         let runner = hf_engine::runner::EngineRunner::new();
-        // Coverage-guided feedback: watch edge readings for stagnation and, once
-        // coverage plateaus past the threshold, surface a proposal to iterate.
-        // Wrap `on_progress` so every event still flows to the caller unchanged.
+        // Watch edge readings for stagnation while forwarding every event.
         let feedback =
             CoverageFeedback::new(crate::config::coverage_stagnation_secs(), on_progress);
         // Accumulate an intra-run coverage/throughput time series live, so the
@@ -3470,85 +5175,143 @@ impl ServiceContainer {
                     let t = run_started.elapsed().as_secs_f64();
                     let e = last_edges.load(Relaxed);
                     if let Ok(mut s) = series_w.lock() {
-                        s.push((t, e, *v));
+                        if s.len() < MAX_RAW_COVERAGE_SAMPLES {
+                            s.push((t, e, *v));
+                        } else if let Some(last) = s.last_mut() {
+                            *last = (t, e, *v);
+                        }
                     }
                 }
                 _ => {}
             }
             on_progress(p);
         };
+        let output_monitor_stop = CancellationToken::new();
+        let output_budget_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_monitor = tokio::spawn(monitor_run_output(
+            artifacts.output_host.clone(),
+            artifacts.corpus_host.clone(),
+            64 * 1024 * 1024,
+            cancel.clone(),
+            output_monitor_stop.clone(),
+            Arc::clone(&output_budget_exceeded),
+        ));
         // Stream progress live: `on_progress` fires for each output line and
         // stat as the fuzzer runs, not post-hoc.
         let run_result = runner
-            .run_streaming(
+            .run_streaming_opts(
                 engine,
                 &run_cfg,
-                &binary_str,
-                "/work/corpus",
-                "/work/out",
+                &artifacts.binary_container,
+                &artifacts.corpus_container,
+                &artifacts.output_container,
                 self.runtime.as_ref(),
                 &workspace,
+                &sandbox,
                 &cancel,
                 &watched,
             )
             .await;
-        let was_cancelled = cancel.is_cancelled();
-        if let (Some(store), Some(rec)) = (&self.store, &run_record) {
-            let status = if was_cancelled {
-                RunStatus::Cancelled
-            } else if run_result.is_ok() {
-                RunStatus::Done
-            } else {
-                RunStatus::Failed
-            };
-            if let Err(e) = store.set_run_status(rec.id, status, Some(Utc::now())).await {
-                tracing::warn!("failed to record run end: {e}");
-            }
+        output_monitor_stop.cancel();
+        let _ = output_monitor.await;
+        if !run_artifacts_within_budget(&artifacts, 64 * 1024 * 1024).await {
+            output_budget_exceeded.store(true, std::sync::atomic::Ordering::Release);
         }
-        // Close the run's journal scope: it completed (whether ok, errored, or
-        // cancelled), so it is no longer a recovery candidate.
-        self.run_journal.close_run(run_id);
-        let result = run_result?;
+        if output_budget_exceeded.load(std::sync::atomic::Ordering::Acquire) {
+            store
+                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+            self.run_journal.close_run(run_id);
+            return Err(ClassifiedError::Sandbox(
+                "fuzz run corpus/output exceeded its retained-evidence budget".to_owned(),
+            ));
+        }
+        let result = match run_result {
+            Ok(result) => result,
+            Err(error) => {
+                let status_update = store
+                    .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                    .await;
+                status_update.map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+                self.run_journal.close_run(run_id);
+                return Err(error);
+            }
+        };
+        let was_cancelled = result.termination == hf_core::runtime::CommandTermination::Cancelled;
+
+        // Keep the retained corpus immutable throughout execution. Engines
+        // write only to this run's disposable snapshot/output; after the
+        // sandbox exits, bounded corpus APIs preflight those discoveries and
+        // atomically merge unique inputs into the live corpus.
+        let mut retained = match merge_run_discoveries(engine, &artifacts, &corpus_dir).await {
+            Ok(corpus) => corpus,
+            Err(error) => {
+                store
+                    .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                    .await
+                    .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
+                self.run_journal.close_run(run_id);
+                return Err(error);
+            }
+        };
+        retained.target_id = qualified.target_id;
+        if let Err(error) = self.persist_corpus(qualified.target_id, &retained).await {
+            store
+                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await
+                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
+            self.run_journal.close_run(run_id);
+            return Err(error);
+        }
+
         // Summarize from the parsed events. Live streaming already forwarded
         // them to `on_progress`, so do not re-emit here.
-        let mut edges = 0u64;
-        let mut execs = 0.0_f64;
-        let mut crashes = 0u32;
-        for p in &result.progress {
-            match p {
-                FuzzProgress::EdgesCovered(v) => edges = edges.max(*v),
-                FuzzProgress::ExecsPerSec(v) => execs = execs.max(*v),
-                FuzzProgress::CrashesFound(n) => crashes += n,
-                FuzzProgress::LogLine(_) | FuzzProgress::Done => {}
+        let metrics = match terminal_run_metrics(engine, &artifacts, &result).await {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                store
+                    .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                    .await
+                    .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
+                self.run_journal.close_run(run_id);
+                return Err(error);
             }
+        };
+        if let Err(error) =
+            persist_terminal_run_evidence(store, run_record.id, &metrics, &series).await
+        {
+            let _ = store
+                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            self.run_journal.close_run(run_id);
+            return Err(error);
         }
-        // Persist the run's peak coverage + throughput so run history can chart
-        // real trends over time (not just live in the frontend's memory).
-        if let (Some(store), Some(rec)) = (&self.store, &run_record) {
-            if let Err(e) = store
-                .set_run_stats(rec.id, edges, execs, u64::from(crashes))
+        let TerminalRunMetrics {
+            edges,
+            execs,
+            crashes,
+        } = metrics;
+        // A run becomes terminal only after its summary evidence is durable.
+        // This prevents a `Done` record whose stats or coverage curve were lost.
+        let status = if was_cancelled {
+            RunStatus::Cancelled
+        } else {
+            RunStatus::Done
+        };
+        let status_update = store
+            .set_run_status(run_record.id, status, Some(Utc::now()))
+            .await;
+        status_update.map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        if let Err(error) = close_run_journal(&self.run_journal, run_id) {
+            store
+                .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
                 .await
-            {
-                tracing::warn!("failed to persist run stats: {e}");
-            }
-            // Persist the (downsampled) intra-run coverage curve.
-            let raw = series.lock().map(|s| s.clone()).unwrap_or_default();
-            let samples: Vec<CoverageSample> = downsample(&raw, 150)
-                .into_iter()
-                .map(|(t, e, x)| CoverageSample {
-                    t,
-                    edges: e,
-                    execs: x,
-                })
-                .collect();
-            if !samples.is_empty() {
-                if let Ok(json) = serde_json::to_string(&samples) {
-                    if let Err(e) = store.set_run_samples(rec.id, &json).await {
-                        tracing::warn!("failed to persist run samples: {e}");
-                    }
-                }
-            }
+                .map_err(|status_error| ClassifiedError::Storage(status_error.to_string()))?;
+            persisted_run.disarm();
+            return Err(error);
         }
+        persisted_run.disarm();
         // Auto-revert policy: if this run's harness revision regressed coverage
         // past the threshold versus the latest comparable run for this target,
         // restore that last-good revision (HITL-gated recompile). Skipped for
@@ -3556,14 +5319,21 @@ impl ServiceContainer {
         let auto_revert = if was_cancelled {
             None
         } else {
-            let this_rev = run_record.as_ref().and_then(|r| r.harness_rev.clone());
-            self.maybe_auto_revert(project, target, run_id, edges, this_rev.as_deref())
-                .await
+            self.maybe_auto_revert(
+                project,
+                target,
+                run_id,
+                edges,
+                run_record.harness_rev.as_deref(),
+            )
+            .await
         };
         Ok(RunSummary {
+            run_id,
             edges,
             execs,
-            crashes: u64::from(crashes),
+            crashes,
+            termination: result.termination,
             stagnation: feedback.proposal(),
             auto_revert,
         })
@@ -3572,16 +5342,14 @@ impl ServiceContainer {
     /// Run a syzkaller kernel-fuzzing campaign through the sandbox.
     ///
     /// syzkaller fuzzes an OS kernel by mutating syscall sequences inside a
-    /// managed VM whose kernel is built with KCOV coverage. This mounts the
-    /// user-supplied kernel image + rootfs (or an existing `manager.cfg`) into
-    /// the sandbox, synthesizes a qemu `manager.cfg` when needed, and streams
-    /// `syz-manager` progress to `on_progress`.
+    /// managed VM whose kernel is built with KCOV coverage. User-selected
+    /// artifacts are copied into a unique service-owned directory, manager
+    /// paths are rewritten to those staged copies, and `syz-manager` progress
+    /// is streamed to `on_progress`.
     ///
-    /// Unlike a harness/fuzz run, qemu needs container networking and a relaxed
-    /// capability profile, so this uses
-    /// [`SandboxOptions`](hf_core::runtime::SandboxOptions) rather than the
-    /// hardened default -- but it still goes through the `hf-runtime` sandbox
-    /// abstraction (no presentation layer shells out to `docker`).
+    /// qemu runs with the standard capability and privilege hardening, no
+    /// container network, and at most the `/dev/kvm` device. The selected
+    /// rootfs is never mounted writable; qemu receives a disposable copy.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if Docker is unavailable, an artifact path is
@@ -3644,93 +5412,38 @@ impl ServiceContainer {
             ));
         }
 
-        let file_ok = |p: &str| Path::new(p).is_file();
-
-        // Assemble bind mounts and resolve the in-container config path.
-        let mut mounts: Vec<String> = Vec::new();
-        let workspace = workspace_root().join("syzkaller");
-        std::fs::create_dir_all(&workspace)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workspace: {e}")))?;
-        let cfg_in_container: String;
-
         // Use KVM when the host can (native-arch Linux with /dev/kvm); this is
         // orders of magnitude faster than TCG emulation. It drives both the
-        // synthesized qemu args and the `--device /dev/kvm` passthrough below.
+        // synthesized qemu args and the sole device passthrough below.
         let use_kvm = syz_kvm_usable(&platform);
-
-        if let Some(cfg) = manager_cfg.as_deref() {
-            if !file_ok(cfg) {
-                return Err(ClassifiedError::Validation(format!(
-                    "manager.cfg not found: {cfg}"
-                )));
-            }
-            let dir = Path::new(cfg).parent().ok_or_else(|| {
-                ClassifiedError::Validation("manager.cfg has no parent directory".to_owned())
-            })?;
-            mounts.push(format!("{0}:{0}", dir.display()));
-            cfg_in_container = cfg.to_owned();
-            log(&format!("Using provided manager.cfg: {cfg}"));
+        let run_id = Uuid::new_v4();
+        let provided_config = manager_cfg.is_some();
+        let stage_request = crate::syzkaller::SyzkallerStageRequest {
+            workspace_root: workspace_root(),
+            run_id,
+            target_triple: target_triple.clone(),
+            manager_cfg: manager_cfg.map(PathBuf::from),
+            kernel_image: kernel_image.map(PathBuf::from),
+            disk_image: disk_image.map(PathBuf::from),
+            ssh_key: ssh_key.map(PathBuf::from),
+            vm_count: opts.vm_count,
+            use_kvm,
+        };
+        // Rootfs images can be several GiB. Keep the copy off the async runtime
+        // while retaining a guard that removes staging on completion or abort.
+        let stage =
+            tokio::task::spawn_blocking(move || crate::syzkaller::prepare_stage(&stage_request))
+                .await
+                .map_err(|error| {
+                    ClassifiedError::Internal(format!("join syzkaller staging task: {error}"))
+                })??;
+        let workspace = stage.root.clone();
+        let sandbox_opts = crate::syzkaller::sandbox_options(&stage, &platform, use_kvm);
+        if provided_config {
+            log("Validated and rewrote the provided manager.cfg into isolated staging.");
         } else {
-            let kernel = kernel_image.ok_or_else(|| {
-                ClassifiedError::Validation(
-                    "kernel_image is required when no manager.cfg is provided".to_owned(),
-                )
-            })?;
-            let disk = disk_image.ok_or_else(|| {
-                ClassifiedError::Validation(
-                    "disk_image is required when no manager.cfg is provided".to_owned(),
-                )
-            })?;
-            if !file_ok(&kernel) {
-                return Err(ClassifiedError::Validation(format!(
-                    "kernel image not found: {kernel}"
-                )));
-            }
-            if !file_ok(&disk) {
-                return Err(ClassifiedError::Validation(format!(
-                    "disk image not found: {disk}"
-                )));
-            }
-            mounts.push(format!("{kernel}:/syzbench/kernel:ro"));
-            mounts.push(format!("{disk}:/syzbench/rootfs.img"));
-
-            let sshkey_field = if let Some(key) = ssh_key.as_deref() {
-                if !file_ok(key) {
-                    return Err(ClassifiedError::Validation(format!(
-                        "ssh key not found: {key}"
-                    )));
-                }
-                mounts.push(format!("{key}:/syzbench/id_rsa:ro"));
-                "\n  \"sshkey\": \"/syzbench/id_rsa\",".to_owned()
-            } else {
-                String::new()
-            };
-
-            let count = opts.vm_count.unwrap_or(2).max(1);
-            let procs = count.min(4);
-            let machine = if hf_runtime::platform_short(&platform) == "arm64" {
-                "virt"
-            } else {
-                "pc"
-            };
-            let accel = if use_kvm { "kvm" } else { "tcg" };
-            // KVM pairs with `-cpu host`; TCG emulation uses `-cpu max`.
-            let cpu = if use_kvm { "host" } else { "max" };
-            let qemu_args = format!("-machine {machine},accel={accel} -cpu {cpu}");
-            let cfg_json = format!(
-                "{{\n  \"target\": \"{target_triple}\",\n  \"http\": \"0.0.0.0:56741\",\n  \"workdir\": \"/syzbench/workdir\",\n  \"image\": \"/syzbench/rootfs.img\",{sshkey_field}\n  \"syzkaller\": \"/opt/syzkaller\",\n  \"procs\": {procs},\n  \"type\": \"qemu\",\n  \"vm\": {{\n    \"count\": {count},\n    \"kernel\": \"/syzbench/kernel\",\n    \"cpu\": 2,\n    \"mem\": 2048,\n    \"qemu_args\": \"{qemu_args}\"\n  }}\n}}\n"
-            );
-            let cfg_host = workspace.join("manager.cfg");
-            std::fs::write(&cfg_host, &cfg_json)
-                .map_err(|e| ClassifiedError::Internal(format!("write manager.cfg: {e}")))?;
-            let workdir_host = workspace.join("workdir");
-            std::fs::create_dir_all(&workdir_host)
-                .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workdir: {e}")))?;
-            mounts.push(format!("{}:/syzbench/manager.cfg:ro", cfg_host.display()));
-            mounts.push(format!("{}:/syzbench/workdir", workdir_host.display()));
-            cfg_in_container = "/syzbench/manager.cfg".to_owned();
             log(&format!(
-                "Synthesized qemu manager.cfg ({target_triple}, {count} VM(s))."
+                "Synthesized an isolated qemu manager.cfg ({target_triple})."
             ));
         }
 
@@ -3753,19 +5466,6 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
-        let sandbox_opts = hf_core::runtime::SandboxOptions {
-            extra_mounts: mounts,
-            platform: Some(platform),
-            network_enabled: true,
-            workdir: Some("/syzbench".to_owned()),
-            relax_hardening: true,
-            devices: if use_kvm {
-                vec!["/dev/kvm".to_owned()]
-            } else {
-                Vec::new()
-            },
-        };
-
         // Cross-line state for the streaming callback.
         let peak_edges = AtomicU64::new(0);
         let last_execs = AtomicU64::new(0);
@@ -3795,7 +5495,6 @@ impl ServiceContainer {
         // `cancel_all_runs`) and `cancel_run` can tear down a long KVM campaign.
         // `ActiveRunGuard` removes it again even if this future is aborted.
         let cancel = CancellationToken::new();
-        let run_id = Uuid::new_v4();
         if let Ok(mut runs) = self.active_runs.lock() {
             runs.insert(run_id, cancel.clone());
         }
@@ -3803,17 +5502,37 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
-        let cmd = syzkaller_manager_command(&cfg_in_container, opts.duration_secs);
-        let result = self
+        let cmd = syzkaller_manager_command(
+            crate::syzkaller::CONTAINER_MANAGER_CONFIG,
+            opts.duration_secs,
+        );
+        let writable_monitor =
+            crate::syzkaller::WritableBudgetMonitor::start(&stage, cancel.clone());
+        let run_result = self
             .runtime
             .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox_opts, &cancel, &on_line)
-            .await?;
+            .await;
+        if !writable_monitor.finish().await {
+            return Err(ClassifiedError::Sandbox(
+                "syzkaller scratch/workdir exceeded its 4 GiB growth or 100000-entry budget"
+                    .to_owned(),
+            ));
+        }
+        let result = run_result?;
 
         // GNU `timeout` uses 124 when the requested campaign budget expires;
         // that is the normal bounded completion path. Any other non-zero exit
         // means the manager or its container setup failed and must not be
         // presented as a successful campaign.
-        if !cancel.is_cancelled() && result.exit_code != 0 && result.exit_code != 124 {
+        if result.termination == hf_core::runtime::CommandTermination::TimedOut {
+            return Err(ClassifiedError::Sandbox(
+                "syzkaller exceeded the sandbox wall-clock headroom".to_owned(),
+            ));
+        }
+        if result.termination == hf_core::runtime::CommandTermination::Completed
+            && result.exit_code != 0
+            && result.exit_code != 124
+        {
             let detail = result.stderr.lines().last().unwrap_or("no error output");
             return Err(ClassifiedError::Sandbox(format!(
                 "syz-manager exited with {}: {detail}",
@@ -3821,12 +5540,15 @@ impl ServiceContainer {
             )));
         }
 
-        on_progress(FuzzProgress::Done);
+        if result.termination == hf_core::runtime::CommandTermination::Completed {
+            on_progress(FuzzProgress::Done);
+        }
         Ok(SyzkallerSummary {
             edges: peak_edges.load(Ordering::Relaxed),
             execs: last_execs.load(Ordering::Relaxed) as f64,
             crashes: peak_crashes.load(Ordering::Relaxed),
             exit_code: Some(result.exit_code),
+            termination: Some(result.termination),
         })
     }
 
@@ -3841,6 +5563,82 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        let run = match self.latest_run_record(project, Some(target)).await {
+            Some(run) => run,
+            None if self.store.is_some() => {
+                return Err(ClassifiedError::Validation(format!(
+                    "no terminal run for target '{target}' has attributable crash evidence; run smoke qualification or a campaign before triage"
+                )));
+            }
+            None => RunRecord::new(
+                project.to_string_lossy(),
+                EngineKind::LibFuzzer,
+                None,
+                Utc::now(),
+            ),
+        };
+        self.triage_run_record(project, target, run).await
+    }
+
+    /// Triage the evidence owned by one exact persisted run.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the run is missing, belongs to another
+    /// project/target, is nonterminal, or its evidence is invalid.
+    pub async fn triage_run(
+        &self,
+        project: &Path,
+        target: &str,
+        run_id: Uuid,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let run = store
+            .get_run(run_id)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+            .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
+        if run.project_root != project.to_string_lossy()
+            || !run_has_crash_evidence(run.status)
+            || self.run_target_id(store, &run).await
+                != Some(self.resolve_target_id_any_language(project, target).await)
+        {
+            return Err(ClassifiedError::Validation(format!(
+                "run {run_id} does not own terminal evidence for target '{target}'"
+            )));
+        }
+        self.triage_run_record(project, target, run).await
+    }
+
+    async fn triage_run_record(
+        &self,
+        project: &Path,
+        target: &str,
+        run: RunRecord,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        const TRIAGE_BUDGET: std::time::Duration = std::time::Duration::from_mins(5);
+
+        tokio::time::timeout(
+            TRIAGE_BUDGET,
+            self.triage_run_record_inner(project, target, run),
+        )
+        .await
+        .map_err(|_| {
+            ClassifiedError::Sandbox(format!(
+                "triage exceeded its {} second end-to-end budget",
+                TRIAGE_BUDGET.as_secs()
+            ))
+        })?
+    }
+
+    async fn triage_run_record_inner(
+        &self,
+        project: &Path,
+        target: &str,
+        run: RunRecord,
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         /// Cap on LLM bug-report drafts per triage pass: a run may surface many
         /// distinct bugs, and one report each would fan out into hundreds of LLM
         /// calls. Crashes beyond the cap are still ingested and persisted, just
@@ -3849,20 +5647,16 @@ impl ServiceContainer {
 
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
-        let out_dir = workspace.join("out");
         let target_id = self.resolve_target_id_any_language(project, target).await;
-        // Link crashes to the run that produced them, and learn its engine to
-        // pick the right CASR driver. Resolve through the target's harness; a
-        // project-wide latest run can belong to another concurrent campaign,
-        // while a fresh UUID would orphan every crash.
-        let (run_id, engine) = match self.latest_run(project, target).await {
-            Some(run) => run,
-            None if self.store.is_some() => {
-                return Err(ClassifiedError::Validation(format!(
-                    "no terminal run for target '{target}' has attributable crash evidence; run smoke qualification or a campaign before triage"
-                )));
-            }
-            None => (Uuid::new_v4(), EngineKind::LibFuzzer),
+        let run_id = run.id;
+        let engine = run.engine;
+        let out_dir = run_output_dir(&workspace, &run)?;
+        let run_binary = run_binary_path(&workspace, &run, target)?;
+        let source_context = if run.harness_rev.is_some() {
+            let source = run_source_path(&workspace, &run)?;
+            std::fs::read_to_string(&source).ok()
+        } else {
+            None
         };
 
         // Prefer CASR: it reproduces each crash, classifies exploitability and
@@ -3875,12 +5669,12 @@ impl ServiceContainer {
             Vec<hf_core::crash::Crash>,
             std::collections::HashMap<PathBuf, String>,
         ) = match self
-            .run_casr_triage(&workspace, target, engine, run_id, target_id)
-            .await
+            .run_casr_triage(&workspace, &out_dir, &run_binary, engine, run_id, target_id)
+            .await?
         {
             Some(crashes) if !crashes.is_empty() => (crashes, std::collections::HashMap::new()),
             _ => {
-                self.legacy_triage(&out_dir, &workspace, target, run_id, target_id)
+                self.legacy_triage(&out_dir, &workspace, &run_binary, engine, run_id, target_id)
                     .await?
             }
         };
@@ -3896,8 +5690,6 @@ impl ServiceContainer {
         // configured, using the captured sanitizer trace (capped, see above).
         if let Some(pool) = self.provider_pool() {
             let unique = deduped.len();
-            // Target source context lets the model infer a root cause and fix.
-            let source_context = gather_source_context(&workspace);
             for crash in deduped.iter_mut().take(MAX_BUG_REPORT_DRAFTS) {
                 let bridge = LlmProviderBridge::new(Arc::clone(&pool))
                     .with_diagnostics(Arc::clone(&self.diagnostics), "triage_report");
@@ -3925,6 +5717,12 @@ impl ServiceContainer {
             }
         }
 
+        // Re-check immutable evidence after untrusted triage execution before
+        // persisting any derived classification.
+        let _ = run_binary_path(&workspace, &run, target)?;
+        if run.harness_rev.is_some() {
+            let _ = run_source_path(&workspace, &run)?;
+        }
         if let Some(store) = &self.store {
             for crash in &deduped {
                 if let Err(e) = store.upsert_crash(crash).await {
@@ -3955,17 +5753,19 @@ impl ServiceContainer {
         // gate it like triage.
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
-        if !workspace.join(format!("fuzz_{target}")).exists() {
+        let binary_name = harness_binary_name(target);
+        if !workspace.join(&binary_name).exists() {
             return Err(ClassifiedError::Validation(format!(
-                "Compiled harness 'fuzz_{target}' not found -- compile the harness first."
+                "Compiled harness '{binary_name}' not found -- compile the harness first."
             )));
         }
 
         // (crash_id, input_path) pairs: persisted crashes first, else staged.
         let mut inputs: Vec<(String, PathBuf)> = Vec::new();
+        let latest_run = self.latest_run_record(project, Some(target)).await;
         if let Some(store) = &self.store {
-            if let Some((run_id, _engine)) = self.latest_run(project, target).await {
-                if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
+            if let Some(run) = &latest_run {
+                if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
                     inputs.extend(
                         crashes
                             .into_iter()
@@ -3975,7 +5775,16 @@ impl ServiceContainer {
             }
         }
         if inputs.is_empty() {
-            inputs = collect_crash_inputs(&workspace.join("out"))
+            let out_dir = match latest_run.as_ref() {
+                Some(run) => run_output_dir(&workspace, run)?,
+                None => workspace.join("out"),
+            };
+            inputs = latest_run
+                .as_ref()
+                .map_or_else(
+                    || collect_legacy_crash_inputs(&out_dir),
+                    |run| collect_crash_inputs(run.engine, &out_dir),
+                )
                 .into_iter()
                 .map(|p| (String::new(), p))
                 .collect();
@@ -3986,10 +5795,14 @@ impl ServiceContainer {
             if !is_regular_file(&input) {
                 continue;
             }
-            let trace = self.reproduce_crash(&workspace, target, &input).await;
-            let still_crashes = hf_crash::looks_like_crash(&trace);
+            let binary = workspace.join(harness_binary_name(target));
+            let trace = self.reproduce_crash(&workspace, &binary, &input).await;
+            let verified = trace.is_some();
+            let still_crashes = trace.as_deref().is_some_and(hf_crash::looks_like_crash);
             let summary = if still_crashes {
                 trace
+                    .as_deref()
+                    .unwrap_or_default()
                     .lines()
                     .find(|l| {
                         let s = l.to_ascii_lowercase();
@@ -4000,13 +5813,16 @@ impl ServiceContainer {
                     .chars()
                     .take(200)
                     .collect()
-            } else {
+            } else if verified {
                 "no crash on replay (fixed)".to_owned()
+            } else {
+                "replay did not complete; result is inconclusive".to_owned()
             };
             results.push(RegressionResult {
                 crash_id,
                 input: input.display().to_string(),
                 still_crashes,
+                verified,
                 summary,
             });
         }
@@ -4055,12 +5871,16 @@ impl ServiceContainer {
         match self.runtime.run_command(&cmd, &workspace, &limits).await {
             // Cache successful runs (even empty -- the signature invalidates them
             // when the corpus changes); do not cache infra failures, so they retry.
-            Ok(result) => {
+            Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
                 let covered = parse_covered_functions(&result.stdout);
                 if let Ok(mut map) = coverage_cache().lock() {
                     map.insert(cache_key, (signature, covered.clone()));
                 }
                 covered
+            }
+            Ok(result) => {
+                tracing::warn!(termination = ?result.termination, "coverage collection was force-stopped");
+                Vec::new()
             }
             Err(e) => {
                 tracing::warn!("coverage collection failed: {e}");
@@ -4112,12 +5932,16 @@ impl ServiceContainer {
             ptrace: false,
         };
         match self.runtime.run_command(&cmd, &workspace, &limits).await {
-            Ok(result) => {
+            Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
                 let summary = hf_coverage::parse_llvm_cov_summary(&result.stdout)?;
                 if let Ok(mut map) = summary_cache().lock() {
                     map.insert(cache_key, (signature, summary));
                 }
                 Some(summary)
+            }
+            Ok(result) => {
+                tracing::warn!(termination = ?result.termination, "coverage summary was force-stopped");
+                None
             }
             Err(e) => {
                 tracing::warn!("coverage summary collection failed: {e}");
@@ -4434,20 +6258,20 @@ impl ServiceContainer {
     }
 
     /// Replay a single crash input through the compiled harness in the sandbox
-    /// and return the combined stdout+stderr (the sanitizer trace). Best-effort:
-    /// returns an empty string if the binary is missing or the run fails.
+    /// and return the combined stdout+stderr (the sanitizer trace). A forced
+    /// stop or runtime failure is inconclusive and returns `None`.
     async fn reproduce_crash(
         &self,
         workspace: &Path,
-        target: &str,
+        binary_host: &Path,
         input_host_path: &Path,
-    ) -> String {
-        let bin = format!("fuzz_{target}");
-        if !workspace.join(&bin).exists() {
-            return String::new();
+    ) -> Option<String> {
+        if !binary_host.is_file() {
+            return None;
         }
+        let binary = container_input_path(workspace, binary_host);
         let container_input = container_input_path(workspace, input_host_path);
-        let cmd = vec![format!("/work/{bin}"), container_input];
+        let cmd = vec![binary, container_input];
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 2048,
             max_cpus: 1,
@@ -4455,12 +6279,26 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
-        match self.runtime.run_command(&cmd, workspace, &limits).await {
+        let sandbox = hf_core::runtime::SandboxOptions {
+            workspace_read_only: true,
+            ..hf_core::runtime::SandboxOptions::default()
+        };
+        match self
+            .runtime
+            .run_command_opts(&cmd, workspace, &limits, &sandbox)
+            .await
+        {
             // A crashing input exits non-zero; the trace is the useful output.
-            Ok(result) => format!("{}\n{}", result.stdout, result.stderr),
+            Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
+                Some(format!("{}\n{}", result.stdout, result.stderr))
+            }
+            Ok(result) => {
+                tracing::warn!(termination = ?result.termination, "crash reproduction did not complete");
+                None
+            }
             Err(e) => {
                 tracing::warn!("crash reproduction failed: {e}");
-                String::new()
+                None
             }
         }
     }
@@ -4493,31 +6331,24 @@ impl ServiceContainer {
         None
     }
 
-    /// Most recent terminal run id + engine for a target.
-    async fn latest_run(&self, project: &Path, target: &str) -> Option<(Uuid, EngineKind)> {
-        self.latest_run_record(project, Some(target))
-            .await
-            .map(|run| (run.id, run.engine))
-    }
-
     /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
     /// unique (clustered) report with its severity/analysis. Returns `None` when
     /// CASR is unavailable or produced nothing, so the caller can fall back.
     async fn run_casr_triage(
         &self,
         workspace: &Path,
-        target: &str,
+        out_dir: &Path,
+        binary_host: &Path,
         engine: EngineKind,
         run_id: Uuid,
         target_id: Uuid,
-    ) -> Option<Vec<hf_core::crash::Crash>> {
-        let bin = format!("fuzz_{target}");
-        if !workspace.join(&bin).exists() {
-            return None;
+    ) -> Result<Option<Vec<hf_core::crash::Crash>>, ClassifiedError> {
+        if !binary_host.is_file() {
+            return Ok(None);
         }
-        let out_dir = workspace.join("out");
+        let binary = container_input_path(workspace, binary_host);
         if !out_dir.exists() {
-            return None;
+            return Ok(None);
         }
         // CASR's input expectation differs by driver: `casr-afl` walks the AFL
         // output tree (out/<instance>/crashes/...), while `casr-libfuzzer` wants
@@ -4525,33 +6356,60 @@ impl ServiceContainer {
         // real crash inputs into a clean dir, since engines like honggfuzz mix
         // coverage maps and logs into `out` that CASR would otherwise replay.
         let crash_dir = if engine == EngineKind::AflPlusPlus {
-            "/work/out".to_owned()
+            container_input_path(workspace, out_dir)
         } else {
-            let staging = workspace.join("casr_in");
+            let staging = workspace
+                .join("runs")
+                .join(run_id.to_string())
+                .join("triage")
+                .join("casr_in");
             let _ = std::fs::remove_dir_all(&staging);
-            if stage_crash_inputs(&out_dir, &staging) == 0 {
-                return None;
+            if stage_crash_inputs(engine, out_dir, &staging) == 0 {
+                return Ok(None);
             }
-            "/work/casr_in".to_owned()
+            container_input_path(workspace, &staging)
         };
         // Fresh CASR output directory each pass.
-        let casr_host = workspace.join("casr_out");
+        let casr_host = workspace
+            .join("runs")
+            .join(run_id.to_string())
+            .join("triage")
+            .join("casr_out");
         let _ = std::fs::remove_dir_all(&casr_host);
-        let cmd = hf_crash::casr_command(
-            engine,
-            &format!("/work/{bin}"),
-            &crash_dir,
-            "/work/casr_out",
-            30,
-        );
+        std::fs::create_dir_all(&casr_host).map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "create CASR output directory {}: {error}",
+                casr_host.display()
+            ))
+        })?;
+        let casr_container = container_input_path(workspace, &casr_host);
+        let cmd = hf_crash::casr_command(engine, &binary, &crash_dir, &casr_container, 30);
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
             max_cpus: 2,
-            max_duration_secs: 900,
+            max_duration_secs: 240,
             env: std::collections::HashMap::new(),
             ptrace: true,
         };
-        match self.runtime.run_command(&cmd, workspace, &limits).await {
+        let sandbox = hf_core::runtime::SandboxOptions {
+            workspace_read_only: true,
+            extra_mounts: vec![hf_core::runtime::SandboxMount::writable(
+                casr_host.clone(),
+                casr_container.clone(),
+            )],
+            ..hf_core::runtime::SandboxOptions::default()
+        };
+        match self
+            .runtime
+            .run_command_opts(&cmd, workspace, &limits, &sandbox)
+            .await
+        {
+            Ok(r) if r.termination != hf_core::runtime::CommandTermination::Completed => {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "CASR triage was force-stopped: {:?}",
+                    r.termination
+                )));
+            }
             Ok(r) if r.exit_code != 0 => {
                 tracing::warn!(
                     "casr exited {}: {}",
@@ -4562,21 +6420,21 @@ impl ServiceContainer {
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("casr run failed, falling back to built-in triage: {e}");
-                return None;
+                return Ok(None);
             }
         }
         let reports = collect_casreps(&casr_host);
         if reports.is_empty() {
             tracing::info!("casr produced no reports; falling back to built-in triage");
-            return None;
+            return Ok(None);
         }
         // The actual crash inputs, including AFL++'s nested
         // out/<instance>/crashes/ layout, so each casrep resolves to a real file.
-        let crash_inputs = collect_crash_inputs(&out_dir);
+        let crash_inputs = collect_crash_inputs(engine, out_dir);
         let mut crashes = reports
             .into_iter()
             .map(|(path, casr)| {
-                let input_path = casrep_input_path(&out_dir, &path, &crash_inputs);
+                let input_path = casrep_input_path(out_dir, &path, &crash_inputs);
                 let signature = if casr.crashline.is_empty() {
                     casr.stack.first().cloned().unwrap_or_default()
                 } else {
@@ -4606,7 +6464,7 @@ impl ServiceContainer {
         // Crashes CASR did not cluster (cluster=None) all pass through.
         crashes = bucket_by_cluster(crashes);
         tracing::info!("casr triaged {} unique crash(es)", crashes.len());
-        Some(crashes)
+        Ok(Some(crashes))
     }
 
     /// Built-in triage fallback: replay crashes in the sandbox until the set of
@@ -4616,7 +6474,8 @@ impl ServiceContainer {
         &self,
         out_dir: &Path,
         workspace: &Path,
-        target: &str,
+        binary_host: &Path,
+        engine: EngineKind,
         run_id: Uuid,
         target_id: Uuid,
     ) -> Result<
@@ -4632,7 +6491,16 @@ impl ServiceContainer {
         /// stack signature (the distinct-bug set has saturated).
         const SIGNATURE_STAGNATION: usize = 40;
 
-        let crashes = hf_crash::ingest(out_dir, run_id, target_id)?;
+        let ingested = hf_crash::ingest_for_engine(out_dir, engine, run_id, target_id)?;
+        if ingested.is_truncated() {
+            tracing::warn!(
+                run_id = %run_id,
+                artifact_limit_reached = ingested.artifact_limit_reached,
+                report_limit_reached = ingested.report_limit_reached,
+                "triage crash ingestion reached a safety limit"
+            );
+        }
+        let crashes = ingested.crashes;
         let total_ingested = crashes.len();
         let mut logs: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
         let mut reproduced: Vec<hf_core::crash::Crash> = Vec::new();
@@ -4644,12 +6512,12 @@ impl ServiceContainer {
                 break;
             }
             let log = self
-                .reproduce_crash(workspace, target, &crash.input_path)
+                .reproduce_crash(workspace, binary_host, &crash.input_path)
                 .await;
-            if log.trim().is_empty() {
+            if log.as_deref().is_none_or(|value| value.trim().is_empty()) {
                 since_new_signature += 1;
-            } else {
-                let (kind, sig, summary) = hf_crash::classify(&log);
+            } else if let Some(log) = log.as_deref() {
+                let (kind, sig, summary) = hf_crash::classify(log);
                 crash.kind = kind;
                 crash.summary = summary;
                 if seen_signatures.insert(sig.clone()) {
@@ -4659,7 +6527,9 @@ impl ServiceContainer {
                 }
                 crash.stack_signature = sig;
             }
-            logs.insert(crash.input_path.clone(), log);
+            if let Some(log) = log {
+                logs.insert(crash.input_path.clone(), log);
+            }
             reproduced.push(crash);
         }
         if reproduced.len() < total_ingested {
@@ -4699,15 +6569,13 @@ impl ServiceContainer {
     ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        std::fs::create_dir_all(&corpus_dir)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         let seeds = vec![
             (b"{}".to_vec(), "seed_empty".to_owned()),
             (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
         ];
         let target_id = self.resolve_target_id_any_language(project, target).await;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
-        self.persist_corpus(target_id, &corpus).await;
+        self.persist_corpus(target_id, &corpus).await?;
         Ok(corpus.entries.len())
     }
 
@@ -4722,11 +6590,15 @@ impl ServiceContainer {
     ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        let out_dir = workspace.join("out");
+        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let out_dir = match latest_run.as_ref() {
+            Some(run) => run_output_dir(&workspace, run)?,
+            None => workspace.join("out"),
+        };
         let mut corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
         let target_id = self.resolve_target_id_any_language(project, target).await;
         corpus.target_id = target_id;
-        self.persist_corpus(target_id, &corpus).await;
+        self.persist_corpus(target_id, &corpus).await?;
         Ok(corpus.entries.len())
     }
 
@@ -4734,11 +6606,17 @@ impl ServiceContainer {
     ///
     /// # Errors
     /// Returns `ClassifiedError` if files cannot be removed.
-    pub fn corpus_prune(&self, project: &Path, target: &str) -> Result<usize, ClassifiedError> {
+    pub async fn corpus_prune(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let corpus = hf_corpus::list(&corpus_dir)?;
         let pruned = hf_corpus::prune(corpus)?;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
+        self.persist_corpus(target_id, &pruned).await?;
         Ok(pruned.entries.len())
     }
 
@@ -4748,10 +6626,10 @@ impl ServiceContainer {
     /// (keep one input per distinct coverage set), unlike `corpus_prune` which,
     /// absent coverage data, can only collapse byte-identical files.
     ///
-    /// Inputs whose coverage cannot be measured (the binary is missing, or the
-    /// engine is not AFL-instrumented so `afl-showmap` yields nothing) keep a
-    /// `None` coverage hash and fall back to content-dedup -- so this never
-    /// collapses two genuinely distinct inputs under an empty key.
+    /// Inputs for which a successful `afl-showmap` command yields no coverage
+    /// keep a `None` coverage hash and fall back to content-dedup, so this never
+    /// collapses two genuinely distinct inputs under an empty key. Qualification
+    /// and sandbox failures abort without pruning.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the corpus cannot be read.
@@ -4764,34 +6642,92 @@ impl ServiceContainer {
         let corpus_dir = workspace.join("corpus");
         let mut corpus = hf_corpus::list(&corpus_dir)?;
         let before = corpus.entries.len();
+        if before == 0 {
+            return Ok(MinimizeOutcome {
+                before: 0,
+                after: 0,
+            });
+        }
+        if before > 10_000 {
+            return Err(ClassifiedError::Validation(
+                "coverage pruning is limited to 10000 corpus inputs per operation".to_owned(),
+            ));
+        }
 
-        let bin = format!("fuzz_{target}");
+        let qualified = self
+            .active_harness(project, target, EngineKind::AflPlusPlus)
+            .await?;
+        if qualified.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(
+                "coverage pruning requires an explicitly promoted AFL++ harness".to_owned(),
+            ));
+        }
+        self.verify_harness_qualification(project, target, &qualified)
+            .await?;
+        self.guardrails
+            .authorize(Action::RunFuzzer {
+                engine: "AFL++ showmap".to_owned(),
+                duration_secs: 600,
+            })
+            .await?;
+
+        let bin = harness_binary_name(target);
         let binary = workspace.join(&bin);
-        if binary.exists() {
-            let binary_container = format!("/work/{bin}");
-            let limits = hf_core::runtime::ResourceLimits {
-                max_mem_mb: 2048,
-                max_cpus: 1,
-                max_duration_secs: 30,
-                env: std::collections::HashMap::new(),
-                ptrace: false,
+        if !is_regular_file(&binary) {
+            return Err(ClassifiedError::Validation(format!(
+                "promoted AFL++ harness binary is missing: {}",
+                binary.display()
+            )));
+        }
+        let binary_container = format!("/work/{bin}");
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 10,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        let sandbox = hf_core::runtime::SandboxOptions {
+            workspace_read_only: true,
+            ..hf_core::runtime::SandboxOptions::default()
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(10);
+        for entry in &mut corpus.entries {
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return Err(ClassifiedError::Sandbox(
+                    "coverage pruning exceeded its 10-minute operation budget".to_owned(),
+                ));
             };
-            for entry in &mut corpus.entries {
-                let input_container = container_input_path(&workspace, &entry.path);
-                let args =
-                    hf_engine::showmap::build_showmap_args(&binary_container, &input_container);
-                if let Ok(result) = self.runtime.run_command(&args, &workspace, &limits).await {
-                    if let Some(hash) = hf_engine::showmap::coverage_hash(&result.stdout) {
-                        entry.coverage_hash = Some(hash);
-                    }
-                }
+            let input_container = container_input_path(&workspace, &entry.path);
+            let args = hf_engine::showmap::build_showmap_args(&binary_container, &input_container);
+            let result = tokio::time::timeout(
+                remaining,
+                self.runtime
+                    .run_command_opts(&args, &workspace, &limits, &sandbox),
+            )
+            .await
+            .map_err(|_| {
+                ClassifiedError::Sandbox(
+                    "coverage pruning exceeded its 10-minute operation budget".to_owned(),
+                )
+            })?;
+            let result = result?.require_completed("AFL++ coverage pruning")?;
+            if result.exit_code != 0 {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "AFL++ coverage pruning exited with status {}: {}",
+                    result.exit_code,
+                    result.stderr.trim()
+                )));
+            }
+            if let Some(hash) = hf_engine::showmap::coverage_hash(&result.stdout) {
+                entry.coverage_hash = Some(hash);
             }
         }
 
         let pruned = hf_corpus::prune(corpus)?;
         let after = pruned.entries.len();
-        let target_id = self.resolve_target_id_any_language(project, target).await;
-        self.persist_corpus(target_id, &pruned).await;
+        self.persist_corpus(qualified.target_id, &pruned).await?;
         Ok(MinimizeOutcome { before, after })
     }
 
@@ -4811,6 +6747,51 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<usize, ClassifiedError> {
+        let latest_run = self.latest_run_record(project, Some(target)).await;
+        self.corpus_absorb_run_record(project, target, latest_run)
+            .await
+    }
+
+    /// Feed crash reproducers from one exact run back into the target corpus.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the run does not own terminal evidence for
+    /// this target or the corpus cannot be read or written.
+    pub async fn corpus_absorb_crashes_for_run(
+        &self,
+        project: &Path,
+        target: &str,
+        run_id: Uuid,
+    ) -> Result<usize, ClassifiedError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| ClassifiedError::Validation("no database configured".to_owned()))?;
+        let run = store
+            .get_run(run_id)
+            .await
+            .map_err(|e| ClassifiedError::Storage(e.to_string()))?
+            .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
+        let target_id = self.resolve_target_id_any_language(project, target).await;
+        if target_id.is_nil()
+            || run.project_root != project.to_string_lossy()
+            || !run_has_crash_evidence(run.status)
+            || self.run_target_id(store, &run).await != Some(target_id)
+        {
+            return Err(ClassifiedError::Validation(format!(
+                "run {run_id} does not own terminal evidence for target '{target}'"
+            )));
+        }
+        self.corpus_absorb_run_record(project, target, Some(run))
+            .await
+    }
+
+    async fn corpus_absorb_run_record(
+        &self,
+        project: &Path,
+        target: &str,
+        run: Option<RunRecord>,
+    ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
 
@@ -4818,33 +6799,37 @@ impl ServiceContainer {
         // fall back to whatever crash inputs are staged under the run output.
         let mut inputs: Vec<PathBuf> = Vec::new();
         if let Some(store) = &self.store {
-            if let Some((run_id, _engine)) = self.latest_run(project, target).await {
-                if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
+            if let Some(run) = &run {
+                if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
                     inputs.extend(crashes.into_iter().map(|c| c.input_path));
                 }
             }
         }
         if inputs.is_empty() {
-            inputs = collect_crash_inputs(&workspace.join("out"));
+            let out_dir = match run.as_ref() {
+                Some(run) => run_output_dir(&workspace, run)?,
+                None => workspace.join("out"),
+            };
+            inputs = run.as_ref().map_or_else(
+                || collect_legacy_crash_inputs(&out_dir),
+                |run| collect_crash_inputs(run.engine, &out_dir),
+            );
         }
 
         let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
         let target_id = self.resolve_target_id_any_language(project, target).await;
         corpus.target_id = target_id;
-        self.persist_corpus(target_id, &corpus).await;
+        self.persist_corpus(target_id, &corpus).await?;
         Ok(added)
     }
 
     /// Coverage-guided corpus minimization.
     ///
-    /// Builds a libFuzzer coverage binary from the workspace sources in the
-    /// sandbox and runs the canonical `-merge=1` pass, which keeps only inputs
-    /// that contribute new coverage, into a fresh directory; the survivors then
-    /// replace the live corpus (tagged `CorpusSource::Minimized`). Engine-
-    /// agnostic: it compiles its own coverage binary rather than reusing the
-    /// run's. Returns the entry counts before and after. When the coverage
-    /// tooling is unavailable the corpus is left untouched and the two counts
-    /// are equal.
+    /// Runs libFuzzer's canonical `-merge=1` pass with the exact promoted and
+    /// smoke-qualified harness. The service exposes only an immutable run-owned
+    /// corpus snapshot and a bounded writable output directory to the sandbox;
+    /// a successful merge is then reconciled into the retained corpus and its
+    /// database inventory. Returns the entry counts before and after.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the corpus directory cannot be read or
@@ -4855,22 +6840,54 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<MinimizeOutcome, ClassifiedError> {
         let workspace = workspace_dir(project, target);
-        let corpus_dir = workspace.join("corpus");
+        let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
         let before = hf_corpus::list(&corpus_dir)?.entries.len();
-        if !workspace.join("harness.c").exists() || before == 0 {
+        if before == 0 {
             return Ok(MinimizeOutcome {
-                before,
-                after: before,
+                before: 0,
+                after: 0,
             });
         }
-        // Build the coverage binary and run libFuzzer's coverage-guided merge
-        // into a clean directory, all inside the sandbox.
-        let min_host = workspace.join("corpus_min");
-        let _ = std::fs::remove_dir_all(&min_host);
-        let pipeline = "clang -g -O1 -fsanitize=fuzzer,address *.c -o fuzz_min 2>/dev/null \
-             && rm -rf corpus_min && mkdir -p corpus_min \
-             && ./fuzz_min -merge=1 corpus_min corpus 2>/dev/null";
-        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
+
+        let qualified = self
+            .active_harness(project, target, EngineKind::LibFuzzer)
+            .await?;
+        if qualified.status != HarnessStatus::Promoted {
+            return Err(ClassifiedError::Validation(
+                "corpus minimization requires an explicitly promoted libFuzzer harness".to_owned(),
+            ));
+        }
+        self.verify_harness_qualification(project, target, &qualified)
+            .await?;
+        self.guardrails
+            .authorize(Action::RunFuzzer {
+                engine: "libFuzzer corpus minimization".to_owned(),
+                duration_secs: 300,
+            })
+            .await?;
+
+        let binary = workspace.join(harness_binary_name(target));
+        if !is_regular_file(&binary) {
+            return Err(ClassifiedError::Validation(format!(
+                "promoted libFuzzer harness binary is missing: {}",
+                binary.display()
+            )));
+        }
+        let artifacts =
+            stage_run_artifacts(&workspace, Uuid::new_v4(), &qualified.source, &binary)?;
+        let run_root = artifacts.output_host.parent().ok_or_else(|| {
+            ClassifiedError::Internal("minimization output has no run directory".to_owned())
+        })?;
+        let _staging_guard = StagingDirectoryGuard(run_root.to_path_buf());
+        verify_staged_qualification(&qualified, &artifacts)?;
+        verify_run_artifacts(&artifacts)?;
+
+        let cmd = vec![
+            artifacts.binary_container.clone(),
+            "-merge=1".to_owned(),
+            artifacts.output_container.clone(),
+            artifacts.corpus_container.clone(),
+        ];
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
             max_cpus: 2,
@@ -4878,32 +6895,70 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
-        // If the sandbox build/merge fails or yields nothing, leave the corpus
-        // untouched rather than wiping it on tooling failure.
-        match self.runtime.run_command(&cmd, &workspace, &limits).await {
-            Ok(_)
-                if min_host.is_dir()
-                    && std::fs::read_dir(&min_host).is_ok_and(|mut d| d.next().is_some()) => {}
-            Ok(_) => {
-                tracing::info!("corpus minimize produced no merged set; leaving corpus untouched");
-                return Ok(MinimizeOutcome {
-                    before,
-                    after: before,
-                });
-            }
-            Err(e) => {
-                tracing::warn!("corpus minimize failed: {e}");
-                return Ok(MinimizeOutcome {
-                    before,
-                    after: before,
-                });
-            }
+        let sandbox = minimization_sandbox_options(&artifacts);
+        let cancel = CancellationToken::new();
+        let monitor_stop = CancellationToken::new();
+        let budget_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let monitor = tokio::spawn(monitor_run_output(
+            artifacts.output_host.clone(),
+            artifacts.corpus_host.clone(),
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+            cancel.clone(),
+            monitor_stop.clone(),
+            Arc::clone(&budget_exceeded),
+        ));
+        let result = self
+            .runtime
+            .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox, &cancel, &|_| {})
+            .await;
+        monitor_stop.cancel();
+        let _ = monitor.await;
+        if !run_artifacts_within_budget(
+            &artifacts,
+            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+        )
+        .await
+        {
+            budget_exceeded.store(true, std::sync::atomic::Ordering::Release);
         }
-        let mut minimized = hf_corpus::minimize(&corpus_dir, &min_host)?;
-        let _ = std::fs::remove_dir_all(&min_host);
-        let target_id = self.resolve_target_id_any_language(project, target).await;
-        minimized.target_id = target_id;
-        self.persist_corpus(target_id, &minimized).await;
+        if budget_exceeded.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ClassifiedError::Sandbox(
+                "corpus minimization exceeded its corpus/output budget".to_owned(),
+            ));
+        }
+        let result = result?.require_completed("corpus minimization")?;
+        if result.exit_code != 0 {
+            return Err(ClassifiedError::Sandbox(format!(
+                "corpus minimization exited with status {}: {}",
+                result.exit_code,
+                result.stderr.trim()
+            )));
+        }
+
+        let merged = hf_corpus::list(&artifacts.output_host)?;
+        if merged.entries.is_empty() {
+            return Err(ClassifiedError::Sandbox(
+                "corpus minimization produced an empty survivor set".to_owned(),
+            ));
+        }
+        let mut minimized = match hf_corpus::minimize(&corpus_dir, &artifacts.output_host) {
+            Ok(corpus) => corpus,
+            Err(error) => {
+                return Err(minimization_failure_with_rollback(
+                    &corpus_dir,
+                    &artifacts.corpus_host,
+                    error,
+                ));
+            }
+        };
+        minimized.target_id = qualified.target_id;
+        if let Err(error) = self.persist_corpus(qualified.target_id, &minimized).await {
+            return Err(minimization_failure_with_rollback(
+                &corpus_dir,
+                &artifacts.corpus_host,
+                error,
+            ));
+        }
         Ok(MinimizeOutcome {
             before,
             after: minimized.entries.len(),
@@ -5079,6 +7134,8 @@ pub struct CampaignOutcome {
     /// regressed coverage past the threshold). Counts both applied reverts and
     /// notify-only detections, so headless history surfaces self-healing.
     pub auto_reverts: usize,
+    /// Why the final campaign iteration stopped.
+    pub termination: hf_core::runtime::CommandTermination,
 }
 
 /// Outcome of replaying one stored crash input against the current harness.
@@ -5090,6 +7147,8 @@ pub struct RegressionResult {
     pub input: String,
     /// True if the input still triggers a crash (a regression / unfixed bug).
     pub still_crashes: bool,
+    /// Whether the sandbox replay completed and the result is conclusive.
+    pub verified: bool,
     /// A short trace/summary line from the replay.
     pub summary: String,
 }
@@ -5220,8 +7279,9 @@ fn auto_revert_decision(
 ///
 /// The harness id is intentionally ignored because a revision change is the
 /// subject of the comparison. Engine, budget, sanitizer, corpus location,
-/// environment, and engine arguments must match; otherwise a lower edge count
-/// can be caused by the experimental setup rather than the new harness.
+/// environment, engine arguments, and the separately persisted comparison
+/// context must match; otherwise a lower edge count can be caused by the
+/// experimental setup rather than the new harness.
 fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunConfig) -> bool {
     previous.engine == current.engine
         && previous.duration == current.duration
@@ -5236,7 +7296,11 @@ fn auto_revert_baseline_compatible(previous: &FuzzRunConfig, current: &FuzzRunCo
 /// Stable opaque key for grouping comparable coverage experiments in
 /// presentation layers. The harness id is excluded so revision A/B results for
 /// the same target and execution context share a key.
-fn auto_revert_comparison_key(target_id: Uuid, config: &FuzzRunConfig) -> String {
+fn auto_revert_comparison_key(
+    target_id: Uuid,
+    config: &FuzzRunConfig,
+    context_rev: &str,
+) -> String {
     use sha2::{Digest, Sha256};
 
     let context = serde_json::json!({
@@ -5249,6 +7313,7 @@ fn auto_revert_comparison_key(target_id: Uuid, config: &FuzzRunConfig) -> String
         "sanitizer": config.sanitizer,
         "env": config.env,
         "extra_args": config.extra_args,
+        "context_rev": context_rev,
     });
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&context).unwrap_or_default());
@@ -5289,16 +7354,24 @@ pub struct RunHistoryItem {
     pub edges: Option<u64>,
     /// Peak executions/second, once the run finished.
     pub execs: Option<f64>,
-    /// Short hash of the harness revision the run used.
+    /// Full SHA-256 of the approved harness source the run used.
     pub harness_rev: Option<String>,
+    /// Full SHA-256 of the staged executable the run used.
+    pub binary_rev: Option<String>,
+    /// Workspace-relative run output directory.
+    pub evidence_dir: Option<String>,
 }
 
 /// A fuzz run summary.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunSummary {
+    /// Persisted run that owns this summary and its evidence.
+    pub run_id: Uuid,
     pub edges: u64,
     pub execs: f64,
     pub crashes: u64,
+    /// Authoritative reason the sandboxed engine stopped.
+    pub termination: hf_core::runtime::CommandTermination,
     /// A coverage-stagnation proposal surfaced during the run (e.g. regenerate
     /// the harness), or `None` if coverage kept progressing. Lets a presentation
     /// layer offer an iterate-next affordance.
@@ -5357,15 +7430,20 @@ pub struct SyzkallerRunOpts {
     pub arch: Option<String>,
     /// Campaign duration in seconds.
     pub duration_secs: u64,
-    /// Path to a KCOV kernel image (bzImage). Required without `manager_cfg`.
+    /// Path to a KCOV kernel image (bzImage). Required without `manager_cfg`;
+    /// otherwise overrides the config's `vm.kernel` path.
     pub kernel_image: Option<String>,
-    /// Path to a rootfs disk image. Required without `manager_cfg`.
+    /// Path to a rootfs disk image. Required without `manager_cfg`; otherwise
+    /// overrides the config's `image` path. The selected file is copied before
+    /// qemu receives a writable view.
     pub disk_image: Option<String>,
-    /// Optional SSH private key for the VM.
+    /// Optional SSH private key for the VM; overrides the config's `sshkey`.
     pub ssh_key: Option<String>,
-    /// Path to an existing `syz-manager` config; bypasses synthesis.
+    /// Path to an existing `syz-manager` config. The service parses and
+    /// rewrites managed paths rather than mounting this file or its parent.
     pub manager_cfg: Option<String>,
-    /// Number of fuzzing VMs (default 2).
+    /// Number of fuzzing VMs (default 2); overrides a supplied config when set
+    /// and is clamped to the service maximum of four.
     pub vm_count: Option<u32>,
 }
 
@@ -5376,14 +7454,15 @@ pub struct SyzkallerSummary {
     pub execs: f64,
     pub crashes: u64,
     pub exit_code: Option<i32>,
+    /// Authoritative reason the sandbox stopped.
+    pub termination: Option<hf_core::runtime::CommandTermination>,
 }
 
 /// Build the syzkaller manager argv without a shell interpolation boundary.
 ///
-/// `manager_cfg` is user-selected and may contain whitespace or shell
-/// metacharacters. Keeping it as one argv element makes those bytes data rather
-/// than executable syntax. The inner timeout ends the campaign at its requested
-/// budget; the runtime deadline remains a teardown backstop.
+/// Keeping the staged config path as one argv element makes its bytes data
+/// rather than executable syntax. The inner timeout ends the campaign at its
+/// requested budget; the runtime deadline remains a teardown backstop.
 fn syzkaller_manager_command(manager_cfg: &str, duration_secs: u64) -> Vec<String> {
     vec![
         "timeout".to_owned(),
@@ -5512,7 +7591,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
         build_cmd: hf_harness::build_command(
             engine,
             candidate.language,
-            &format!("fuzz_{}", candidate.symbol),
+            &harness_binary_name(&candidate.symbol),
         ),
     }
 }
@@ -5819,8 +7898,9 @@ mod coverage_tests {
 #[cfg(test)]
 mod workspace_tests {
     use super::{
-        document_staging_dir, project_workspace_dir, read_current_harness_source, workspace_dir,
-        write_current_harness_source,
+        document_staging_dir, project_workspace_dir, read_current_harness_source, run_binary_path,
+        run_context_digest, run_output_dir, run_output_relative, run_output_within_budget,
+        stage_run_artifacts, verify_run_artifacts, workspace_dir, write_current_harness_source,
     };
     use std::path::{Component, Path};
 
@@ -5861,10 +7941,214 @@ mod workspace_tests {
     }
 
     #[test]
+    fn each_run_gets_a_unique_evidence_directory() {
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+
+        assert_eq!(
+            run_output_relative(first),
+            std::path::PathBuf::from("runs")
+                .join(first.to_string())
+                .join("out")
+        );
+        assert_ne!(run_output_relative(first), run_output_relative(second));
+    }
+
+    #[test]
+    fn comparison_context_tracks_target_and_corpus_bytes() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("src")).unwrap();
+        std::fs::create_dir(workspace.path().join("corpus")).unwrap();
+        std::fs::write(workspace.path().join("src/lib.rs"), "pub fn parse() {}").unwrap();
+        std::fs::write(workspace.path().join("corpus/seed"), b"one").unwrap();
+
+        let first = run_context_digest(workspace.path()).unwrap();
+        assert_eq!(first, run_context_digest(workspace.path()).unwrap());
+        std::fs::write(workspace.path().join("corpus/seed"), b"two").unwrap();
+        assert_ne!(first, run_context_digest(workspace.path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn comparison_context_rejects_symlinked_inputs() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"secret").unwrap();
+        std::fs::create_dir(workspace.path().join("corpus")).unwrap();
+        symlink(
+            outside.path().join("secret"),
+            workspace.path().join("corpus/seed"),
+        )
+        .unwrap();
+
+        let error = run_context_digest(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("symlink"));
+    }
+
+    #[test]
+    fn staged_run_artifacts_are_digest_verified_before_launch() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        std::fs::create_dir(workspace.path().join("corpus")).unwrap();
+        std::fs::write(workspace.path().join("corpus/seed"), b"retained").unwrap();
+        let run_id = uuid::Uuid::new_v4();
+
+        let artifacts =
+            stage_run_artifacts(workspace.path(), run_id, "approved source", &binary).unwrap();
+        assert_eq!(artifacts.source_sha256.len(), 64);
+        assert_eq!(artifacts.binary_sha256.len(), 64);
+        assert!(artifacts.output_host.is_dir());
+        assert_eq!(
+            std::fs::read(artifacts.corpus_host.join("seed")).unwrap(),
+            b"retained"
+        );
+        std::fs::write(artifacts.corpus_host.join("seed"), b"run-local").unwrap();
+        assert_eq!(
+            std::fs::read(workspace.path().join("corpus/seed")).unwrap(),
+            b"retained"
+        );
+        verify_run_artifacts(&artifacts).unwrap();
+
+        std::fs::write(&artifacts.binary_host, b"tampered binary").unwrap();
+        let error = verify_run_artifacts(&artifacts).unwrap_err();
+        assert!(error.to_string().contains("binary digest changed"));
+    }
+
+    #[test]
+    fn run_output_budget_rejects_oversized_or_excessive_evidence() {
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(output.path().join("one"), b"1234").unwrap();
+        assert!(run_output_within_budget(output.path(), 4, 1, 4));
+        assert!(!run_output_within_budget(output.path(), 3, 1, 4));
+        assert!(!run_output_within_budget(output.path(), 4, 1, 3));
+        std::fs::write(output.path().join("two"), b"x").unwrap();
+        assert!(!run_output_within_budget(output.path(), 10, 1, 10));
+    }
+
+    #[test]
+    fn persisted_run_evidence_never_falls_back_after_tampering() {
+        let workspace = tempfile::tempdir().unwrap();
+        let active = workspace.path().join("fuzz_parse");
+        std::fs::write(&active, b"mutable active binary").unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        let artifacts = stage_run_artifacts(workspace.path(), run_id, "source", &active).unwrap();
+        let mut run = hf_storage::RunRecord::new(
+            "/project",
+            hf_core::engine::EngineKind::LibFuzzer,
+            None,
+            chrono::Utc::now(),
+        );
+        run.id = run_id;
+        run.binary_rev = Some(artifacts.binary_sha256.clone());
+        run.evidence_dir = Some(artifacts.output_relative.to_string_lossy().into_owned());
+
+        assert_eq!(
+            run_output_dir(workspace.path(), &run).unwrap(),
+            std::fs::canonicalize(&artifacts.output_host).unwrap()
+        );
+        assert_eq!(
+            run_binary_path(workspace.path(), &run, "parse").unwrap(),
+            std::fs::canonicalize(&artifacts.binary_host).unwrap()
+        );
+
+        std::fs::write(&artifacts.binary_host, b"tampered").unwrap();
+        let error = run_binary_path(workspace.path(), &run, "parse").unwrap_err();
+        assert!(error.to_string().contains("digest"));
+        std::fs::remove_file(&artifacts.binary_host).unwrap();
+        let error = run_binary_path(workspace.path(), &run, "parse").unwrap_err();
+        assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn persisted_run_rejects_mismatched_evidence_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut run = hf_storage::RunRecord::new(
+            "/project",
+            hf_core::engine::EngineKind::LibFuzzer,
+            None,
+            chrono::Utc::now(),
+        );
+        std::fs::create_dir_all(
+            workspace
+                .path()
+                .join("runs")
+                .join(run.id.to_string())
+                .join("out"),
+        )
+        .unwrap();
+        run.evidence_dir = Some("out".to_owned());
+
+        let error = run_output_dir(workspace.path(), &run).unwrap_err();
+        assert!(error.to_string().contains("invalid evidence directory"));
+    }
+
+    #[test]
+    fn staged_run_artifacts_reject_a_lexical_parent_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let outside = root.path().join("outside-binary");
+        std::fs::write(&outside, b"outside").unwrap();
+        let escaped = workspace.join("..").join("outside-binary");
+
+        let result = stage_run_artifacts(
+            &workspace,
+            uuid::Uuid::new_v4(),
+            "approved source",
+            &escaped,
+        );
+        assert!(result.is_err(), "parent traversal staged an outside binary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_run_artifacts_reject_a_symlinked_runs_directory() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fuzz_parse");
+        std::fs::write(&binary, b"approved binary").unwrap();
+        symlink(outside.path(), workspace.path().join("runs")).unwrap();
+
+        let result = stage_run_artifacts(
+            workspace.path(),
+            uuid::Uuid::new_v4(),
+            "approved source",
+            &binary,
+        );
+        let Err(error) = result else {
+            panic!("a build-created symlink redirected run evidence");
+        };
+
+        assert!(error.to_string().contains("runs"));
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
     fn normal_target_is_preserved() {
         let project = Path::new("/home/user/myproj");
         let ws = workspace_dir(project, "parse_json");
         assert_eq!(ws, base(project).join("parse_json"));
+    }
+
+    #[test]
+    fn harness_binary_name_is_one_safe_component() {
+        for target in ["../../outside", "/etc/passwd", "ns::Parser/read", ""] {
+            let name = super::harness_binary_name(target);
+            assert!(name.starts_with("fuzz_"));
+            assert_eq!(Path::new(&name).components().count(), 1, "{name}");
+            assert!(!name.contains(".."), "{name}");
+            assert!(!name.contains('/'), "{name}");
+            assert!(!name.contains('\\'), "{name}");
+        }
+        assert_eq!(
+            super::harness_binary_name("parse_entry"),
+            "fuzz_parse_entry"
+        );
     }
 
     #[test]
@@ -6134,18 +8418,22 @@ mod auto_revert_tests {
         let mut other_revision = current.clone();
         other_revision.harness_id = Uuid::new_v4();
         assert_eq!(
-            auto_revert_comparison_key(target, &current),
-            auto_revert_comparison_key(target, &other_revision)
+            auto_revert_comparison_key(target, &current, "context-a"),
+            auto_revert_comparison_key(target, &other_revision, "context-a")
         );
 
         assert_ne!(
-            auto_revert_comparison_key(target, &current),
-            auto_revert_comparison_key(Uuid::new_v4(), &current)
+            auto_revert_comparison_key(target, &current, "context-a"),
+            auto_revert_comparison_key(Uuid::new_v4(), &current, "context-a")
         );
         other_revision.duration = Some(Duration::from_mins(10));
         assert_ne!(
-            auto_revert_comparison_key(target, &current),
-            auto_revert_comparison_key(target, &other_revision)
+            auto_revert_comparison_key(target, &current, "context-a"),
+            auto_revert_comparison_key(target, &other_revision, "context-a")
+        );
+        assert_ne!(
+            auto_revert_comparison_key(target, &current, "context-a"),
+            auto_revert_comparison_key(target, &current, "context-b")
         );
     }
 
@@ -6221,5 +8509,25 @@ mod crash_id_tests {
             base,
             deterministic_crash_id(Uuid::new_v4(), "sig", Path::new("/work/out/crash-abc"))
         );
+    }
+}
+
+#[cfg(test)]
+mod journal_boundary_tests {
+    use super::ensure_run_journal_durable;
+
+    #[test]
+    fn degraded_recovery_journal_blocks_new_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let wal = directory.path().join("run_journal.jsonl");
+        std::fs::write(&wal, b"{truncated").unwrap();
+        let journal = crate::recovery::RunJournal::open(wal);
+
+        let error = ensure_run_journal_durable(&journal)
+            .expect_err("degraded recovery evidence must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("run recovery journal is degraded"));
     }
 }

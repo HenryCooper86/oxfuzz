@@ -28,6 +28,31 @@ pub struct SessionManager {
     config: RwLock<SessionConfig>,
 }
 
+/// Pre-mutation transcript and metadata counts used to compensate a failed
+/// multi-store append.
+#[derive(Debug, Clone)]
+pub struct TranscriptSnapshot {
+    context_count: usize,
+    display_count: usize,
+    token_count: u32,
+    message_count: u32,
+}
+
+impl TranscriptSnapshot {
+    /// Number of context messages present when the snapshot was taken.
+    #[must_use]
+    pub fn context_count(&self) -> usize {
+        self.context_count
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FullTranscriptSnapshot {
+    context: Vec<Message>,
+    display: Vec<Message>,
+    session: hf_core::session::SessionNode,
+}
+
 impl SessionManager {
     /// Create a new session manager.
     pub fn new(
@@ -106,15 +131,28 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Append a message to a session's transcript.
-    ///
-    /// Dual-writes to both the display transcript (GUI-facing) and the
-    /// context transcript (LLM-facing). Display store is written first.
+    /// Append a message to both transcript stores as one recoverable mutation.
     #[instrument(skip(self, message), fields(session_id = %session_id))]
     pub async fn append_message(
         &self,
         session_id: &SessionId,
         message: &Message,
+    ) -> Result<(), SessionManagerError> {
+        self.append_messages(session_id, std::slice::from_ref(message))
+            .await
+    }
+
+    /// Append multiple messages to the display and context transcripts and
+    /// commit their metadata count together.
+    ///
+    /// If either transcript or the metadata write fails, both transcripts are
+    /// truncated back to their independent pre-mutation counts before the
+    /// error is returned.
+    #[instrument(skip(self, messages), fields(session_id = %session_id, count = messages.len()))]
+    pub async fn append_messages(
+        &self,
+        session_id: &SessionId,
+        messages: &[Message],
     ) -> Result<(), SessionManagerError> {
         // Verify session exists and is active.
         let session = self.session_store.get(session_id).await?;
@@ -124,42 +162,122 @@ impl SessionManager {
                 to: "append message (requires Active)".into(),
             });
         }
+        if messages.is_empty() {
+            return Ok(());
+        }
 
-        // Write to display transcript first (append-only, GUI source of truth).
+        let snapshot = self.transcript_snapshot(session_id, &session).await?;
+        let mutation = async {
+            for message in messages {
+                self.display_transcript_store
+                    .append(session_id, message)
+                    .await
+                    .map_err(|error| SessionManagerError::Transcript {
+                        message: format!("display transcript: {error}"),
+                    })?;
+            }
+            for message in messages {
+                self.transcript_store
+                    .append(session_id, message)
+                    .await
+                    .map_err(|error| SessionManagerError::Transcript {
+                        message: format!("context transcript: {error}"),
+                    })?;
+            }
+
+            let count = self
+                .transcript_store
+                .message_count(session_id)
+                .await
+                .map_err(|error| SessionManagerError::Transcript {
+                    message: format!("count context transcript: {error}"),
+                })?;
+            self.session_store
+                .update_metadata(
+                    session_id,
+                    None,
+                    session.token_count,
+                    u32::try_from(count).unwrap_or(u32::MAX),
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = mutation {
+            let compensation = self
+                .restore_transcript_snapshot(session_id, &snapshot)
+                .await;
+            return Err(compensated_error("append messages", &error, compensation));
+        }
+
+        Ok(())
+    }
+
+    /// Capture transcript and metadata counts before a larger chat mutation.
+    pub async fn snapshot_transcripts(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<TranscriptSnapshot, SessionManagerError> {
+        let session = self.session_store.get(session_id).await?;
+        self.transcript_snapshot(session_id, &session).await
+    }
+
+    /// Restore transcript and metadata counts captured by
+    /// [`Self::snapshot_transcripts`].
+    pub async fn restore_transcript_snapshot(
+        &self,
+        session_id: &SessionId,
+        snapshot: &TranscriptSnapshot,
+    ) -> Result<(), SessionManagerError> {
         self.display_transcript_store
-            .append(session_id, message)
+            .truncate(session_id, snapshot.display_count)
             .await
-            .map_err(|e| SessionManagerError::Transcript {
-                message: format!("display transcript: {e}"),
+            .map_err(|error| SessionManagerError::Transcript {
+                message: format!("restore display transcript: {error}"),
             })?;
-
-        // Write to context transcript (LLM source of truth).
         self.transcript_store
-            .append(session_id, message)
+            .truncate(session_id, snapshot.context_count)
             .await
-            .map_err(|e| SessionManagerError::Transcript {
-                message: e.to_string(),
+            .map_err(|error| SessionManagerError::Transcript {
+                message: format!("restore context transcript: {error}"),
             })?;
-
-        // Update session metadata counters.
-        let count = self
-            .transcript_store
-            .message_count(session_id)
-            .await
-            .map_err(|e| SessionManagerError::Transcript {
-                message: e.to_string(),
-            })?;
-
         self.session_store
             .update_metadata(
                 session_id,
                 None,
-                session.token_count,
-                u32::try_from(count).unwrap_or(u32::MAX),
+                snapshot.token_count,
+                snapshot.message_count,
             )
             .await?;
-
         Ok(())
+    }
+
+    async fn transcript_snapshot(
+        &self,
+        session_id: &SessionId,
+        session: &hf_core::session::SessionNode,
+    ) -> Result<TranscriptSnapshot, SessionManagerError> {
+        let display_count = self
+            .display_transcript_store
+            .message_count(session_id)
+            .await
+            .map_err(|error| SessionManagerError::Transcript {
+                message: format!("count display transcript: {error}"),
+            })?;
+        let context_count = self
+            .transcript_store
+            .message_count(session_id)
+            .await
+            .map_err(|error| SessionManagerError::Transcript {
+                message: format!("count context transcript: {error}"),
+            })?;
+        Ok(TranscriptSnapshot {
+            context_count,
+            display_count,
+            token_count: session.token_count,
+            message_count: session.message_count,
+        })
     }
 
     /// Read all messages from the context transcript (for LLM context assembly).
@@ -311,43 +429,68 @@ impl SessionManager {
     /// soft-delete (mark session as tombstone) to preserve referential integrity.
     #[instrument(skip(self), fields(session_id = %id))]
     pub async fn delete_session(&self, id: &SessionId) -> Result<(), SessionManagerError> {
-        let session = self.session_store.get(id).await?;
+        let snapshot = self.full_transcript_snapshot(id).await?;
 
-        let hard_deleted = match self.session_store.delete(id).await {
-            Ok(()) => true,
-            Err(e) if is_foreign_key_delete_error(&e) => {
+        if let Err(error) = self.display_transcript_store.truncate(id, 0).await {
+            return Err(SessionManagerError::Transcript {
+                message: format!("clear display transcript before delete: {error}"),
+            });
+        }
+        if let Err(error) = self.transcript_store.truncate(id, 0).await {
+            let compensation = self.restore_full_transcript(id, &snapshot).await;
+            return Err(compensated_error(
+                "clear context transcript before delete",
+                &SessionManagerError::Transcript {
+                    message: error.to_string(),
+                },
+                compensation,
+            ));
+        }
+
+        match self.session_store.delete(id).await {
+            Ok(()) => Ok(()),
+            Err(error) if is_foreign_key_delete_error(&error) => {
                 tracing::warn!(
                     session_id = %id,
-                    error = %e,
+                    error = %error,
                     "hard-delete blocked by foreign key, falling back to tombstone"
                 );
-                false
+                let tombstone = async {
+                    if snapshot.session.state != SessionState::Tombstone {
+                        StateMachine::validate_transition(
+                            &snapshot.session.state,
+                            &SessionState::Tombstone,
+                        )?;
+                    }
+                    self.session_store.update_metadata(id, None, 0, 0).await?;
+                    if snapshot.session.state != SessionState::Tombstone {
+                        self.session_store
+                            .set_state(id, SessionState::Tombstone)
+                            .await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = tombstone {
+                    let compensation = self.restore_full_transcript(id, &snapshot).await;
+                    return Err(compensated_error(
+                        "tombstone session after delete conflict",
+                        &error,
+                        compensation,
+                    ));
+                }
+                Ok(())
             }
-            Err(e) => return Err(e.into()),
-        };
-
-        if !hard_deleted {
-            if session.state != SessionState::Tombstone {
-                StateMachine::validate_transition(&session.state, &SessionState::Tombstone)?;
-                self.session_store
-                    .set_state(id, SessionState::Tombstone)
-                    .await?;
-            }
-            if let Err(e) = self.session_store.update_metadata(id, None, 0, 0).await {
-                tracing::warn!(session_id = %id, error = %e, "failed to reset session counters");
+            Err(error) => {
+                let compensation = self.restore_full_transcript(id, &snapshot).await;
+                let error = SessionManagerError::from(error);
+                Err(compensated_error(
+                    "delete session metadata",
+                    &error,
+                    compensation,
+                ))
             }
         }
-
-        // Best-effort cleanup: deletion should still succeed even if transcript
-        // files are missing/corrupted.
-        if let Err(e) = self.display_transcript_store.truncate(id, 0).await {
-            tracing::warn!(session_id = %id, error = %e, "failed to clear display transcript");
-        }
-        if let Err(e) = self.transcript_store.truncate(id, 0).await {
-            tracing::warn!(session_id = %id, error = %e, "failed to clear context transcript");
-        }
-
-        Ok(())
     }
 
     /// Get the persisted context reset index for a session.
@@ -531,43 +674,59 @@ impl SessionManager {
             })
             .await?;
 
-        // 6. Copy display messages [0..=message_index].
         let display_end = message_index.saturating_add(1).min(display_messages.len());
-        for msg in &display_messages[..display_end] {
-            self.display_transcript_store
-                .append(&fork_node.id, msg)
-                .await
-                .map_err(|e| SessionManagerError::Transcript {
-                    message: format!("write forked display transcript: {e}"),
-                })?;
-        }
-
-        // 7. Copy context messages [0..=message_index].
         let context_end = message_index.saturating_add(1).min(context_messages.len());
-        for msg in &context_messages[..context_end] {
-            self.transcript_store
-                .append(&fork_node.id, msg)
-                .await
-                .map_err(|e| SessionManagerError::Transcript {
-                    message: e.to_string(),
-                })?;
-        }
-
-        // 8. Carry over context_reset_index if it falls within forked range.
-        if let Ok(Some(reset_idx)) = self.session_store.get_context_reset_index(source_id).await {
-            let reset_usize = reset_idx as usize;
-            if reset_usize < context_end {
-                self.session_store
-                    .set_context_reset_index(&fork_node.id, Some(reset_idx))
-                    .await?;
+        let copy_result = async {
+            // 6. Copy display messages [0..=message_index].
+            for msg in &display_messages[..display_end] {
+                self.display_transcript_store
+                    .append(&fork_node.id, msg)
+                    .await
+                    .map_err(|error| SessionManagerError::Transcript {
+                        message: format!("write forked display transcript: {error}"),
+                    })?;
             }
-        }
 
-        // 9. Update metadata on the new session.
-        let msg_count = u32::try_from(context_end).unwrap_or(u32::MAX);
-        self.session_store
-            .update_metadata(&fork_node.id, None, 0, msg_count)
-            .await?;
+            // 7. Copy context messages [0..=message_index].
+            for msg in &context_messages[..context_end] {
+                self.transcript_store
+                    .append(&fork_node.id, msg)
+                    .await
+                    .map_err(|error| SessionManagerError::Transcript {
+                        message: format!("write forked context transcript: {error}"),
+                    })?;
+            }
+
+            // 8. Carry over context_reset_index if it falls within forked range.
+            if let Some(reset_idx) = self
+                .session_store
+                .get_context_reset_index(source_id)
+                .await?
+            {
+                if (reset_idx as usize) < context_end {
+                    self.session_store
+                        .set_context_reset_index(&fork_node.id, Some(reset_idx))
+                        .await?;
+                }
+            }
+
+            // 9. Update metadata on the new session.
+            let msg_count = u32::try_from(context_end).unwrap_or(u32::MAX);
+            self.session_store
+                .update_metadata(&fork_node.id, None, 0, msg_count)
+                .await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = copy_result {
+            let compensation = self.cleanup_incomplete_session(&fork_node.id).await;
+            return Err(compensated_error(
+                "copy branch transcript",
+                &error,
+                compensation,
+            ));
+        }
 
         tracing::info!(
             fork_id = %fork_node.id,
@@ -579,6 +738,108 @@ impl SessionManager {
         // Re-read the node to get updated metadata.
         let updated = self.session_store.get(&fork_node.id).await?;
         Ok(updated)
+    }
+
+    async fn full_transcript_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<FullTranscriptSnapshot, SessionManagerError> {
+        let session = self.session_store.get(session_id).await?;
+        let display = self
+            .display_transcript_store
+            .read_all(session_id)
+            .await
+            .map_err(|error| SessionManagerError::Transcript {
+                message: format!("read display transcript: {error}"),
+            })?;
+        let context = self
+            .transcript_store
+            .read_all(session_id)
+            .await
+            .map_err(|error| SessionManagerError::Transcript {
+                message: format!("read context transcript: {error}"),
+            })?;
+        Ok(FullTranscriptSnapshot {
+            context,
+            display,
+            session,
+        })
+    }
+
+    async fn restore_full_transcript(
+        &self,
+        session_id: &SessionId,
+        snapshot: &FullTranscriptSnapshot,
+    ) -> Result<(), SessionManagerError> {
+        let mut errors = Vec::new();
+        match self.display_transcript_store.truncate(session_id, 0).await {
+            Ok(_) => {
+                for message in &snapshot.display {
+                    if let Err(error) = self
+                        .display_transcript_store
+                        .append(session_id, message)
+                        .await
+                    {
+                        errors.push(format!("restore display transcript: {error}"));
+                        break;
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("reset display transcript for restore: {error}")),
+        }
+        match self.transcript_store.truncate(session_id, 0).await {
+            Ok(_) => {
+                for message in &snapshot.context {
+                    if let Err(error) = self.transcript_store.append(session_id, message).await {
+                        errors.push(format!("restore context transcript: {error}"));
+                        break;
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("reset context transcript for restore: {error}")),
+        }
+        if let Err(error) = self
+            .session_store
+            .update_metadata(
+                session_id,
+                None,
+                snapshot.session.token_count,
+                snapshot.session.message_count,
+            )
+            .await
+        {
+            errors.push(format!("restore session metadata: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SessionManagerError::Other {
+                message: errors.join("; "),
+            })
+        }
+    }
+
+    async fn cleanup_incomplete_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.display_transcript_store.truncate(session_id, 0).await {
+            errors.push(format!("clear display transcript: {error}"));
+        }
+        if let Err(error) = self.transcript_store.truncate(session_id, 0).await {
+            errors.push(format!("clear context transcript: {error}"));
+        }
+        if let Err(error) = self.session_store.delete(session_id).await {
+            errors.push(format!("delete session metadata: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SessionManagerError::Other {
+                message: errors.join("; "),
+            })
+        }
     }
 
     /// Get a snapshot of the session configuration.
@@ -612,33 +873,117 @@ fn is_foreign_key_delete_error(error: &hf_core::session::SessionError) -> bool {
     )
 }
 
+fn compensated_error(
+    operation: &str,
+    original: &SessionManagerError,
+    compensation: Result<(), SessionManagerError>,
+) -> SessionManagerError {
+    let message = match compensation {
+        Ok(()) => format!("{operation} failed and was rolled back: {original}"),
+        Err(rollback) => {
+            format!("{operation} failed: {original}; compensation also failed: {rollback}")
+        }
+    };
+    SessionManagerError::Other { message }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hf_core::session::SessionType;
+    use async_trait::async_trait;
+    use hf_core::session::{SessionError, SessionType};
     use hf_core::types::Role;
+    use hf_test_utils::mock_storage::{
+        MockDisplayTranscriptStore, MockSessionStore, MockTranscriptStore,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    async fn setup() -> SessionManager {
-        let config = hf_storage::StorageConfig::in_memory();
-        let pool = hf_storage::create_pool(&config).await.unwrap();
-        hf_storage::migration::run_embedded_migrations(&pool)
+    #[derive(Debug, Default)]
+    struct ToggleTranscriptStore {
+        inner: MockTranscriptStore,
+        fail_append: AtomicBool,
+        fail_truncate: AtomicBool,
+    }
+
+    #[async_trait]
+    impl TranscriptStore for ToggleTranscriptStore {
+        async fn append(
+            &self,
+            session_id: &SessionId,
+            message: &Message,
+        ) -> Result<(), SessionError> {
+            if self.fail_append.load(Ordering::SeqCst) {
+                return Err(SessionError::TranscriptError {
+                    message: "injected append failure".to_owned(),
+                });
+            }
+            self.inner.append(session_id, message).await
+        }
+
+        async fn read_all(&self, session_id: &SessionId) -> Result<Vec<Message>, SessionError> {
+            self.inner.read_all(session_id).await
+        }
+
+        async fn read_last(
+            &self,
+            session_id: &SessionId,
+            count: usize,
+        ) -> Result<Vec<Message>, SessionError> {
+            self.inner.read_last(session_id, count).await
+        }
+
+        async fn message_count(&self, session_id: &SessionId) -> Result<usize, SessionError> {
+            self.inner.message_count(session_id).await
+        }
+
+        async fn truncate(
+            &self,
+            session_id: &SessionId,
+            keep_count: usize,
+        ) -> Result<usize, SessionError> {
+            if self.fail_truncate.load(Ordering::SeqCst) {
+                return Err(SessionError::TranscriptError {
+                    message: "injected truncate failure".to_owned(),
+                });
+            }
+            self.inner.truncate(session_id, keep_count).await
+        }
+    }
+
+    struct TestManager {
+        manager: SessionManager,
+        _storage_dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for TestManager {
+        type Target = SessionManager;
+
+        fn deref(&self) -> &Self::Target {
+            &self.manager
+        }
+    }
+
+    async fn setup() -> TestManager {
+        let storage_dir = tempfile::tempdir().unwrap();
+        let store = hf_storage::Store::connect(storage_dir.path().join("sessions.db"))
             .await
             .unwrap();
-
-        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(pool));
-        let transcript_dir = tempfile::tempdir().unwrap();
-        let transcript_path = transcript_dir.path().to_path_buf();
+        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()));
+        let transcript_path = storage_dir.path().join("transcripts");
         let transcript_store = Arc::new(hf_storage::JsonlTranscriptStore::new(&transcript_path));
         let display_transcript_store = Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(
             &transcript_path,
         ));
 
-        SessionManager::new(
-            session_store,
-            transcript_store,
-            display_transcript_store,
-            SessionConfig::default(),
-        )
+        TestManager {
+            manager: SessionManager::new(
+                session_store,
+                transcript_store,
+                display_transcript_store,
+                SessionConfig::default(),
+            ),
+            _storage_dir: storage_dir,
+        }
     }
 
     fn test_msg(content: &str) -> Message {
@@ -741,6 +1086,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_manager_append_messages_commits_one_metadata_update() {
+        let mgr = setup().await;
+        let session = mgr
+            .create_session(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+
+        mgr.append_messages(
+            &session.id,
+            &[test_msg("user"), Message::assistant("assistant")],
+        )
+        .await
+        .unwrap();
+
+        let updated = mgr.get_session(&session.id).await.unwrap();
+        assert_eq!(updated.message_count, 2);
+        assert_eq!(mgr.read_transcript(&session.id).await.unwrap().len(), 2);
+        assert_eq!(
+            mgr.read_display_transcript(&session.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_append_compensates_display_when_context_write_fails() {
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let store = hf_storage::Store::connect(transcript_dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()));
+        let invalid_context_dir = transcript_dir.path().join("context-is-a-file");
+        std::fs::write(&invalid_context_dir, b"not a directory").unwrap();
+        let display = Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(
+            transcript_dir.path().join("display"),
+        ));
+        let mgr = SessionManager::new(
+            session_store,
+            Arc::new(hf_storage::JsonlTranscriptStore::new(invalid_context_dir)),
+            display.clone(),
+            SessionConfig::default(),
+        );
+        let session = mgr
+            .create_session(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+
+        let result = mgr
+            .append_message(&session.id, &test_msg("not committed"))
+            .await;
+
+        assert!(result.is_err());
+        assert!(display.read_all(&session.id).await.unwrap().is_empty());
+        assert_eq!(mgr.get_session(&session.id).await.unwrap().message_count, 0);
+    }
+
+    #[tokio::test]
     async fn test_manager_rejects_transcript_reads_for_unknown_sessions() {
         let mgr = setup().await;
         let unknown = SessionId::from_string("unknown-session");
@@ -797,12 +1211,10 @@ mod tests {
         let tp = td.path().to_path_buf();
         let mgr = SessionManager::new(
             {
-                let config = hf_storage::StorageConfig::in_memory();
-                let pool = hf_storage::create_pool(&config).await.unwrap();
-                hf_storage::migration::run_embedded_migrations(&pool)
+                let store = hf_storage::Store::connect(td.path().join("sessions.db"))
                     .await
                     .unwrap();
-                Arc::new(hf_storage::SqliteSessionStore::new(pool))
+                Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()))
             },
             Arc::new(hf_storage::JsonlTranscriptStore::new(&tp)),
             Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(&tp)),
@@ -1032,6 +1444,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fork_failure_removes_incomplete_branch() {
+        let session_store = Arc::new(MockSessionStore::new());
+        let context = Arc::new(ToggleTranscriptStore::default());
+        let display = Arc::new(MockDisplayTranscriptStore::new());
+        let mgr = SessionManager::new(
+            session_store.clone(),
+            context.clone(),
+            display,
+            SessionConfig::default(),
+        );
+        let source = mgr
+            .create_session(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+        mgr.append_message(&source.id, &test_msg("source"))
+            .await
+            .unwrap();
+        context.fail_append.store(true, Ordering::SeqCst);
+
+        let result = mgr.fork_session(&source.id, 0, None).await;
+
+        assert!(result.is_err());
+        let sessions = session_store.list(&SessionFilter::default()).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, source.id);
+    }
+
+    #[tokio::test]
     async fn test_descendants_including_self_returns_only_subtree() {
         let mgr = setup().await;
         let root = mgr
@@ -1123,6 +1568,47 @@ mod tests {
         let display_msgs = mgr.read_display_transcript(&parent.id).await.unwrap();
         assert!(context_msgs.is_empty());
         assert!(display_msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_failure_restores_transcripts_and_keeps_session_active() {
+        let session_store = Arc::new(MockSessionStore::new());
+        let context = Arc::new(ToggleTranscriptStore::default());
+        let display = Arc::new(MockDisplayTranscriptStore::new());
+        let mgr = SessionManager::new(
+            session_store,
+            context.clone(),
+            display,
+            SessionConfig::default(),
+        );
+        let session = mgr
+            .create_session(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+        mgr.append_message(&session.id, &test_msg("keep me"))
+            .await
+            .unwrap();
+        context.fail_truncate.store(true, Ordering::SeqCst);
+
+        let result = mgr.delete_session(&session.id).await;
+
+        assert!(result.is_err());
+        let node = mgr.get_session(&session.id).await.unwrap();
+        assert_eq!(node.state, SessionState::Active);
+        assert_eq!(node.message_count, 1);
+        assert_eq!(mgr.read_transcript(&session.id).await.unwrap().len(), 1);
+        assert_eq!(
+            mgr.read_display_transcript(&session.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

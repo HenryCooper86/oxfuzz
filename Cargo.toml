@@ -16,7 +16,6 @@ members = [
     "crates/hf-knowledge",
     "crates/hf-diagnostics",
     "crates/hf-guardrails",
-    "crates/hf-journal",
     "crates/hf-discovery",
     "crates/hf-harness",
     "crates/hf-engine",
@@ -25,7 +24,6 @@ members = [
     "crates/hf-coverage",
     "crates/hf-service",
     "crates/hf-agent",
-    "crates/hf-bot",
     "crates/hf-web",
     "crates/hf-cli",
     "crates/hf-test-utils",
@@ -71,6 +69,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sha2 = "0.10"
 hex = "0.4"
 regex = "1"
+subtle = "2"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
@@ -150,7 +149,6 @@ hf-scheduler = { path = "crates/hf-scheduler" }
 hf-knowledge = { path = "crates/hf-knowledge" }
 hf-diagnostics = { path = "crates/hf-diagnostics" }
 hf-guardrails = { path = "crates/hf-guardrails" }
-hf-journal = { path = "crates/hf-journal" }
 hf-discovery = { path = "crates/hf-discovery" }
 hf-harness = { path = "crates/hf-harness" }
 hf-engine = { path = "crates/hf-engine" }
@@ -159,7 +157,6 @@ hf-corpus = { path = "crates/hf-corpus" }
 hf-coverage = { path = "crates/hf-coverage" }
 hf-service = { path = "crates/hf-service" }
 hf-agent = { path = "crates/hf-agent" }
-hf-bot = { path = "crates/hf-bot" }
 hf-web = { path = "crates/hf-web" }
 hf-cli = { path = "crates/hf-cli" }
 hf-test-utils = { path = "crates/hf-test-utils" }

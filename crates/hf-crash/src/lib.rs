@@ -12,6 +12,9 @@ pub mod report;
 pub use casr::{casr_command, cluster_from_path, kind_from_short, parse_casrep, severity_from_str};
 pub use classify::{classify, looks_like_crash};
 pub use dedup::dedup;
-pub use ingest::ingest;
+pub use ingest::{
+    ingest, ingest_for_engine, CrashIngestResult, MAX_AGGREGATE_REPORT_BYTES, MAX_CRASH_ARTIFACTS,
+    MAX_SANITIZER_REPORT_BYTES,
+};
 pub use minimize::build_minimize_args;
 pub use report::{draft_report, MAX_SOURCE_CONTEXT_CHARS};

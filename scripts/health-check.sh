@@ -26,10 +26,4 @@ else
     echo "MISSING  config/providers.toml (run: hobot-fuzz init)"
 fi
 
-if [ -f config/engines.toml ]; then
-    echo "OK  config/engines.toml"
-else
-    echo "MISSING  config/engines.toml"
-fi
-
 echo "Done."

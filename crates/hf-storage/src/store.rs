@@ -38,6 +38,9 @@ pub enum StorageError {
     /// A stored identifier or model field is malformed.
     #[error("invalid stored data: {0}")]
     InvalidData(String),
+    /// A requested row did not exist, so a mutation could not be applied.
+    #[error("record not found: {0}")]
+    NotFound(String),
 }
 
 impl From<StorageError> for ClassifiedError {
@@ -60,6 +63,19 @@ pub enum RunStatus {
     Failed,
     /// Cancelled by the user before completing.
     Cancelled,
+}
+
+/// The purpose of a persisted execution.
+///
+/// Qualification smoke runs are retained as evidence, but they are not valid
+/// coverage-regression baselines for full campaigns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    /// A normal fuzzing campaign run.
+    Campaign,
+    /// A bounded harness-qualification smoke run.
+    Smoke,
 }
 
 /// A project's stored auto-revert policy override (a full policy for one
@@ -112,6 +128,8 @@ pub struct RunRecord {
     pub engine: EngineKind,
     /// Current lifecycle status.
     pub status: RunStatus,
+    /// Whether this record is campaign output or qualification evidence.
+    pub kind: RunKind,
     /// When the run was created.
     pub started_at: DateTime<Utc>,
     /// When the run finished, if it has.
@@ -124,9 +142,16 @@ pub struct RunRecord {
     pub execs: Option<f64>,
     /// Crashes the fuzzer reported during the run (raw, pre-triage-dedup).
     pub crash_count: Option<u64>,
-    /// Short content hash of the harness source the run used, so a coverage
-    /// change can be attributed to a harness revision.
+    /// Full SHA-256 digest of the approved harness source the run used, so a
+    /// coverage change can be attributed to an exact revision.
     pub harness_rev: Option<String>,
+    /// Full SHA-256 digest of the staged harness binary executed by this run.
+    pub binary_rev: Option<String>,
+    /// Workspace-relative directory containing this run's output evidence.
+    pub evidence_dir: Option<String>,
+    /// Digest of target sources, starting corpus, and runtime image used to
+    /// decide whether two campaign coverage measurements are comparable.
+    pub context_rev: Option<String>,
 }
 
 impl RunRecord {
@@ -143,6 +168,7 @@ impl RunRecord {
             project_root: project_root.into(),
             engine,
             status: RunStatus::Pending,
+            kind: RunKind::Campaign,
             started_at: now,
             ended_at: None,
             config,
@@ -150,6 +176,9 @@ impl RunRecord {
             execs: None,
             crash_count: None,
             harness_rev: None,
+            binary_rev: None,
+            evidence_dir: None,
+            context_rev: None,
         }
     }
 }
@@ -254,8 +283,8 @@ impl Store {
             None => None,
         };
         sqlx::query(
-            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev, binary_rev, evidence_dir, run_kind, context_rev)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )
         .bind(run.id.to_string())
         .bind(&run.project_root)
@@ -268,6 +297,10 @@ impl Store {
         .bind(run.execs)
         .bind(run.crash_count.map(|c| i64::try_from(c).unwrap_or(i64::MAX)))
         .bind(run.harness_rev.as_deref())
+        .bind(run.binary_rev.as_deref())
+        .bind(run.evidence_dir.as_deref())
+        .bind(enum_str(&run.kind))
+        .bind(run.context_rev.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -285,13 +318,15 @@ impl Store {
         execs: f64,
         crashes: u64,
     ) -> Result<(), StorageError> {
-        sqlx::query("UPDATE runs SET edges = ?2, execs = ?3, crash_count = ?4 WHERE id = ?1")
-            .bind(id.to_string())
-            .bind(i64::try_from(edges).unwrap_or(i64::MAX))
-            .bind(execs)
-            .bind(i64::try_from(crashes).unwrap_or(i64::MAX))
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE runs SET edges = ?2, execs = ?3, crash_count = ?4 WHERE id = ?1")
+                .bind(id.to_string())
+                .bind(i64::try_from(edges).unwrap_or(i64::MAX))
+                .bind(execs)
+                .bind(i64::try_from(crashes).unwrap_or(i64::MAX))
+                .execute(&self.pool)
+                .await?;
+        require_one_run(result.rows_affected(), id)?;
         Ok(())
     }
 
@@ -300,11 +335,12 @@ impl Store {
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn set_run_samples(&self, id: Uuid, samples_json: &str) -> Result<(), StorageError> {
-        sqlx::query("UPDATE runs SET samples_json = ?2 WHERE id = ?1")
+        let result = sqlx::query("UPDATE runs SET samples_json = ?2 WHERE id = ?1")
             .bind(id.to_string())
             .bind(samples_json)
             .execute(&self.pool)
             .await?;
+        require_one_run(result.rows_affected(), id)?;
         Ok(())
     }
 
@@ -329,11 +365,12 @@ impl Store {
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn set_run_harness_source(&self, id: Uuid, source: &str) -> Result<(), StorageError> {
-        sqlx::query("UPDATE runs SET harness_source = ?2 WHERE id = ?1")
+        let result = sqlx::query("UPDATE runs SET harness_source = ?2 WHERE id = ?1")
             .bind(id.to_string())
             .bind(source)
             .execute(&self.pool)
             .await?;
+        require_one_run(result.rows_affected(), id)?;
         Ok(())
     }
 
@@ -532,12 +569,13 @@ impl Store {
         status: RunStatus,
         ended_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
-        sqlx::query("UPDATE runs SET status = ?2, ended_at = ?3 WHERE id = ?1")
+        let result = sqlx::query("UPDATE runs SET status = ?2, ended_at = ?3 WHERE id = ?1")
             .bind(id.to_string())
             .bind(enum_str(&status))
             .bind(ended_at.map(|t| t.to_rfc3339()))
             .execute(&self.pool)
             .await?;
+        require_one_run(result.rows_affected(), id)?;
         Ok(())
     }
 
@@ -737,10 +775,13 @@ impl Store {
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM runs WHERE id = ?1")
+        let result = sqlx::query("DELETE FROM runs WHERE id = ?1")
             .bind(run_id)
             .execute(&mut *tx)
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::NotFound(format!("run {run_id}")));
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -757,15 +798,25 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a single corpus entry by its content hash.
+    /// Delete one target's corpus entry by its content hash.
     ///
     /// # Errors
     /// Returns a storage error on a database failure.
-    pub async fn delete_corpus_entry(&self, sha256: &str) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM corpus_entries WHERE sha256 = ?1")
+    pub async fn delete_corpus_entry(
+        &self,
+        target_id: Uuid,
+        sha256: &str,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query("DELETE FROM corpus_entries WHERE target_id = ?1 AND sha256 = ?2")
+            .bind(target_id.to_string())
             .bind(sha256)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::NotFound(format!(
+                "corpus entry {target_id}/{sha256}"
+            )));
+        }
         Ok(())
     }
 
@@ -1097,6 +1148,82 @@ impl Store {
         Ok(())
     }
 
+    /// Transactionally replace the persisted corpus snapshot for one target.
+    ///
+    /// Rows absent from `entries` are removed. When a filesystem rescan reports
+    /// a retained entry as `Manual`, its stronger persisted source is kept; a
+    /// missing coverage hash is likewise filled from the prior row.
+    ///
+    /// # Errors
+    /// Returns an error on duplicate hashes, SQL failure, malformed stored
+    /// data, or serialization failure.
+    pub async fn replace_corpus_entries(
+        &self,
+        target_id: Uuid,
+        entries: &[CorpusEntry],
+    ) -> Result<(), StorageError> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut tx = self.pool.begin().await?;
+        let existing_rows =
+            sqlx::query("SELECT data_json FROM corpus_entries WHERE target_id = ?1")
+                .bind(target_id.to_string())
+                .fetch_all(&mut *tx)
+                .await?;
+        let existing = existing_rows
+            .iter()
+            .map(|row| json_col::<CorpusEntry>(row, "data_json"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|entry| (entry.sha256.clone(), entry))
+            .collect::<HashMap<_, _>>();
+
+        let mut seen = HashSet::with_capacity(entries.len());
+        let mut replacements = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !seen.insert(entry.sha256.clone()) {
+                return Err(StorageError::InvalidData(format!(
+                    "duplicate corpus hash for target {target_id}: {}",
+                    entry.sha256
+                )));
+            }
+            let mut merged = entry.clone();
+            if let Some(previous) = existing.get(&entry.sha256) {
+                if merged.source == hf_core::corpus::CorpusSource::Manual {
+                    merged.source = previous.source;
+                }
+                if merged.coverage_hash.is_none() {
+                    merged.coverage_hash.clone_from(&previous.coverage_hash);
+                }
+            }
+            let json = serde_json::to_string(&merged)?;
+            replacements.push((merged, json));
+        }
+
+        sqlx::query("DELETE FROM corpus_entries WHERE target_id = ?1")
+            .bind(target_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for (entry, json) in replacements {
+            sqlx::query(
+                "INSERT INTO corpus_entries
+                    (id, target_id, sha256, size, source, coverage_hash, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(target_id.to_string())
+            .bind(&entry.sha256)
+            .bind(i64::try_from(entry.size).unwrap_or(i64::MAX))
+            .bind(enum_str(&entry.source))
+            .bind(entry.coverage_hash.clone())
+            .bind(json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// List corpus entries for a target.
     ///
     /// # Errors
@@ -1261,12 +1388,17 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
     let execs: Option<f64> = row.try_get("execs")?;
     let crash_count: Option<i64> = row.try_get("crash_count")?;
     let harness_rev: Option<String> = row.try_get("harness_rev")?;
+    let binary_rev: Option<String> = row.try_get("binary_rev")?;
+    let evidence_dir: Option<String> = row.try_get("evidence_dir")?;
+    let run_kind: String = row.try_get("run_kind")?;
+    let context_rev: Option<String> = row.try_get("context_rev")?;
     Ok(RunRecord {
         id: Uuid::parse_str(&id_str)
             .map_err(|e| StorageError::Timestamp(format!("bad uuid: {e}")))?,
         project_root: row.try_get("project_root")?,
         engine: enum_from(&engine_str)?,
         status: enum_from(&status_str)?,
+        kind: enum_from(&run_kind)?,
         started_at: ts(&started_at)?,
         ended_at: ended_at.as_deref().map(ts).transpose()?,
         config,
@@ -1274,6 +1406,9 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
         execs,
         crash_count: crash_count.map(|c| u64::try_from(c).unwrap_or(0)),
         harness_rev,
+        binary_rev,
+        evidence_dir,
+        context_rev,
     })
 }
 
@@ -1282,4 +1417,12 @@ fn enum_from<T: DeserializeOwned>(s: &str) -> Result<T, StorageError> {
     Ok(serde_json::from_value(serde_json::Value::String(
         s.to_owned(),
     ))?)
+}
+
+fn require_one_run(rows_affected: u64, id: Uuid) -> Result<(), StorageError> {
+    if rows_affected == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::NotFound(format!("run {id}")))
+    }
 }

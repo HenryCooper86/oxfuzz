@@ -23,6 +23,6 @@ pub use canonical::{CanonicalConfig, CanonicalSessionManager, Channel};
 pub use checkpoint::{ChatCheckpointManager, RollbackResult};
 pub use config::SessionConfig;
 pub use error::SessionManagerError;
-pub use manager::SessionManager;
+pub use manager::{SessionManager, TranscriptSnapshot};
 pub use state_machine::StateMachine;
 pub use tree::TreeUtils;

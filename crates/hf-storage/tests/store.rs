@@ -10,7 +10,9 @@ use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
-use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, Store};
+use hf_storage::{
+    AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError, Store,
+};
 use uuid::Uuid;
 
 async fn temp_store() -> (Store, tempfile::TempDir) {
@@ -18,6 +20,19 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+#[test]
+fn applied_run_revision_migration_remains_byte_for_byte_immutable() {
+    // sqlx stores a checksum for every applied migration. Editing an old SQL
+    // file, including its comments, prevents existing databases from opening.
+    assert_eq!(
+        include_str!("../migrations/0009_run_harness_rev.sql"),
+        "-- Record which harness revision a run used, as a short content hash of the\n\
+         -- harness source. Lets run history tie a coverage jump to the harness change\n\
+         -- that produced it. Nullable; forward-only.\n\
+         ALTER TABLE runs ADD COLUMN harness_rev TEXT;\n"
+    );
 }
 
 fn sample_target(project: &str) -> TargetCandidate {
@@ -327,6 +342,7 @@ async fn run_roundtrip_and_status_update() {
     let fetched = store.get_run(id).await.unwrap().expect("run exists");
     assert_eq!(fetched.id, id);
     assert_eq!(fetched.status, RunStatus::Pending);
+    assert_eq!(fetched.kind, RunKind::Campaign);
     assert_eq!(fetched.engine, EngineKind::AflPlusPlus);
 
     let ended = Utc::now();
@@ -666,6 +682,90 @@ async fn crash_and_corpus_roundtrip() {
 }
 
 #[tokio::test]
+async fn corpus_replacement_is_exact_and_preserves_richer_metadata() {
+    let (store, _dir) = temp_store().await;
+    let target_id = Uuid::new_v4();
+    let stale = CorpusEntry {
+        path: PathBuf::from("corpus/stale"),
+        sha256: "stale".to_owned(),
+        size: 5,
+        source: CorpusSource::Fuzzer,
+        coverage_hash: Some("old-coverage".to_owned()),
+    };
+    let retained = CorpusEntry {
+        path: PathBuf::from("corpus/original"),
+        sha256: "retained".to_owned(),
+        size: 8,
+        source: CorpusSource::Seed,
+        coverage_hash: Some("coverage".to_owned()),
+    };
+    store.upsert_corpus_entry(target_id, &stale).await.unwrap();
+    store
+        .upsert_corpus_entry(target_id, &retained)
+        .await
+        .unwrap();
+
+    let rediscovered = CorpusEntry {
+        path: PathBuf::from("corpus/current"),
+        sha256: retained.sha256.clone(),
+        size: retained.size,
+        source: CorpusSource::Manual,
+        coverage_hash: None,
+    };
+    store
+        .replace_corpus_entries(target_id, &[rediscovered])
+        .await
+        .unwrap();
+
+    let entries = store.list_corpus_entries(target_id).await.unwrap();
+    assert_eq!(entries.len(), 1, "stale rows must be removed");
+    assert_eq!(entries[0].path, PathBuf::from("corpus/current"));
+    assert_eq!(entries[0].source, CorpusSource::Seed);
+    assert_eq!(entries[0].coverage_hash.as_deref(), Some("coverage"));
+}
+
+#[tokio::test]
+async fn corpus_deletion_is_scoped_to_the_owning_target() {
+    let (store, _dir) = temp_store().await;
+    let first_target = Uuid::new_v4();
+    let second_target = Uuid::new_v4();
+    let entry = CorpusEntry {
+        path: PathBuf::from("corpus/shared"),
+        sha256: "same-content".to_owned(),
+        size: 12,
+        source: CorpusSource::Manual,
+        coverage_hash: None,
+    };
+    store
+        .upsert_corpus_entry(first_target, &entry)
+        .await
+        .unwrap();
+    store
+        .upsert_corpus_entry(second_target, &entry)
+        .await
+        .unwrap();
+
+    store
+        .delete_corpus_entry(first_target, &entry.sha256)
+        .await
+        .unwrap();
+
+    assert!(store
+        .list_corpus_entries(first_target)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .list_corpus_entries(second_target)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn schedule_executions_round_trip_and_latest_fire() {
     let (store, _dir) = temp_store().await;
 
@@ -835,11 +935,48 @@ async fn run_samples_roundtrip() {
 async fn run_harness_rev_roundtrips() {
     let (store, _dir) = temp_store().await;
     let mut run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
-    run.harness_rev = Some("abc123def456".to_owned());
+    run.harness_rev = Some("a".repeat(64));
+    run.binary_rev = Some("b".repeat(64));
+    run.evidence_dir = Some("runs/7b6f2c7f/out".to_owned());
+    run.kind = RunKind::Smoke;
+    run.context_rev = Some("c".repeat(64));
     let id = run.id;
     store.insert_run(&run).await.unwrap();
     let got = store.get_run(id).await.unwrap().unwrap();
-    assert_eq!(got.harness_rev.as_deref(), Some("abc123def456"));
+    assert_eq!(got.harness_rev.as_deref(), Some("a".repeat(64).as_str()));
+    assert_eq!(got.binary_rev.as_deref(), Some("b".repeat(64).as_str()));
+    assert_eq!(got.evidence_dir.as_deref(), Some("runs/7b6f2c7f/out"));
+    assert_eq!(got.kind, RunKind::Smoke);
+    assert_eq!(got.context_rev.as_deref(), Some("c".repeat(64).as_str()));
+}
+
+#[tokio::test]
+async fn run_mutations_fail_when_the_run_does_not_exist() {
+    let (store, _dir) = temp_store().await;
+    let missing = Uuid::new_v4();
+
+    assert!(matches!(
+        store
+            .set_run_status(missing, RunStatus::Failed, Some(Utc::now()))
+            .await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.set_run_stats(missing, 1, 1.0, 0).await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.set_run_samples(missing, "[]").await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.set_run_harness_source(missing, "source").await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.delete_run(&missing.to_string()).await,
+        Err(StorageError::NotFound(_))
+    ));
 }
 
 #[tokio::test]

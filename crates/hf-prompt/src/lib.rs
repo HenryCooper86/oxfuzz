@@ -1,9 +1,11 @@
-//! hf-prompt: prompt templates + the ported y-agent prompt section/template
-//! system.
+//! hf-prompt: canonical prompt assembly and fuzzing prompt templates.
 //!
 //! - `render`: hobot's fuzzing prompt renderers (discovery, harness, triage).
-//! - `budget`/`builtins`/`section`/`store`/`template`: y-agent's structured
-//!   prompt sections, templates, and section store (used by hf-context).
+//! - `agent`: the invariant, token-budgeted system prompt used by `hf-agent`.
+//! - `budget`/`builtins`/`section`/`store`/`template`: structured prompt
+//!   sections, templates, and section store (used by `hf-context`).
+
+pub mod agent;
 
 pub mod render;
 
@@ -17,6 +19,8 @@ pub use render::{
     render_discovery_prompt, render_harness_prompt, render_harness_refine_prompt,
     render_harness_repair_prompt, render_seed_prompt,
 };
+
+pub use agent::{build_agent_system_prompt, AgentPromptInput, AGENT_SYSTEM_PROMPT_TOKEN_BUDGET};
 
 pub use budget::{
     estimate_tokens, truncate_to_budget, truncate_tool_result, MAX_TOOL_RESULT_CHARS,
