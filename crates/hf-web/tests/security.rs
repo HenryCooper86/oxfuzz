@@ -287,6 +287,35 @@ async fn run_control_maps_preflight_and_identity_outcomes_without_inventing_ids(
     let app =
         build_with_state_and_security(AppState::new(container), open_local_security(root.path()));
 
+    let syzkaller = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/runs/start")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project": root.path(),
+                        "target": "kernel",
+                        "engine": "syzkaller",
+                        "duration_secs": 60
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(syzkaller.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(syzkaller.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(body["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("trusted local desktop")));
+
     let start = app
         .clone()
         .oneshot(
@@ -383,8 +412,9 @@ async fn lagging_sse_clients_receive_an_explicit_drop_notice() {
 
     for sequence in 0..300 {
         producer
-            .publish_event(SseEvent::DockerStatus {
-                message: format!("event-{sequence}"),
+            .publish_event(SseEvent::RunStatus {
+                run_id: uuid::Uuid::new_v4().to_string(),
+                status: format!("event-{sequence}"),
             })
             .unwrap();
     }

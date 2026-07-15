@@ -61,12 +61,23 @@ task, so disconnecting the HTTP request does not orphan or implicitly cancel the
 campaign. Status and cancellation resolve the durable row through service APIs;
 missing and inactive runs remain distinct transport outcomes.
 
+The network run-control surface is intentionally limited to harness-backed
+user-space engines. Syzkaller remains a trusted-local Tauri workflow because it
+accepts kernel, rootfs, SSH-key, and manager-config artifacts and may request
+KVM device access; exposing that launch contract remotely would expand the web
+threat model beyond approved project paths. Browser mode reports that boundary
+explicitly. The REST API likewise exposes exact-id cancellation instead of a
+blanket `cancel_all_runs` operation, preventing one client from stopping an
+unrelated operator's campaign.
+
 SSE uses a bounded broadcast channel. Oversized events are rejected before
 enqueueing. A slow subscriber receives a `stream:lagged` event with the number
-of dropped messages, then continues from the channel's current position. Run
-progress and lifecycle events always carry the service-owned run id. The
-service emits `running` before execution and exactly one terminal lifecycle
-event (`done`, `failed`, or `cancelled`) after the background task returns.
+of dropped messages, then continues from the channel's current position. The
+web transport exposes only channels with production producers: run progress,
+run lifecycle, and stream lag. Run progress and lifecycle events always carry
+the service-owned run id. The service emits `running` before execution and
+exactly one terminal lifecycle event (`done`, `failed`, or `cancelled`) after
+the background task returns.
 
 Every `ClassifiedError` crosses the HTTP boundary through one mapping:
 validation is `400`, harness/engine execution rejection is `422`, provider

@@ -258,8 +258,8 @@ const SCREEN_RUN = `
 "（需要批准）"或"（未构建）"。警告会直接链接到测试桩界面以便修复。而一次 Syzkaller 内核
 测试活动则需要一个项目外加内核构件（bzImage、rootfs、SSH 密钥、manager.cfg）。
 
-**Web 模式：** 模糊测试仅限桌面版；浏览器版本会显示"Fuzzing is not available in web
-mode."（Web 模式下无法使用模糊测试）。
+**Web 模式：** 基于测试桩的用户态运行通过带身份验证的 REST/SSE 传输，并支持按运行追踪进
+度、状态和取消。Syzkaller 需要启动本地内核/虚拟机构件并可能使用 KVM，因此仅限桌面版。
 
 **它显示什么：** 实时统计卡片（已覆盖边、崩溃、每秒执行数）、运行后摘要、覆盖率停滞 /
 自动回退提示，以及一段流式日志。
@@ -520,8 +520,8 @@ const REF_TROUBLESHOOTING = `
   动启动它并构建沙箱镜像。
 - **"Fuzzing sandbox image not built"（模糊测试沙箱镜像未构建）** —— 镜像仍在构建或构建
   失败；首次启动时请给它几分钟。
-- **"Fuzzing is not available in web mode"（Web 模式下无法使用模糊测试）** —— 运行仅限桌
-  面版；请使用原生应用。
+- **"Syzkaller is not available in web mode"（Web 模式下无法使用 Syzkaller）** —— 内核/
+  虚拟机活动需要可信的本地桌面工作流；用户态模糊测试仍可在浏览器中运行。
 
 ## 提供方 / AI
 

@@ -1092,7 +1092,11 @@ pub fn dismiss_interrupted_run(
 pub async fn schedule_list(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
-    Ok(state.scheduler.list_views().await)
+    state
+        .scheduler
+        .list_views()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Recent scheduled-campaign executions (newest first).
@@ -1101,7 +1105,11 @@ pub async fn schedule_history(
     state: tauri::State<'_, crate::state::AppState>,
     limit: Option<usize>,
 ) -> Result<Vec<hf_service::scheduler::ExecutionView>, String> {
-    Ok(state.scheduler.recent_executions(limit.unwrap_or(20)).await)
+    state
+        .scheduler
+        .recent_executions(limit.unwrap_or(20))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Clear the scheduled-campaign execution history.
@@ -1109,7 +1117,11 @@ pub async fn schedule_history(
 pub async fn schedule_history_clear(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<u64, String> {
-    Ok(state.scheduler.clear_history().await)
+    state
+        .scheduler
+        .clear_history()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Targets in `project` a campaign can be scheduled against: those with a
@@ -1155,8 +1167,16 @@ pub async fn schedule_create(
         max_total_secs,
         schedule_id: String::new(),
     };
-    state.scheduler.create(&name, &params, trigger).await;
-    Ok(state.scheduler.list_views().await)
+    state
+        .scheduler
+        .try_create(&name, &params, trigger)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .scheduler
+        .list_views()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The global concurrent-campaign cap.
@@ -1173,7 +1193,10 @@ pub async fn schedule_concurrency_set(
     state: tauri::State<'_, crate::state::AppState>,
     max_concurrent: usize,
 ) -> Result<usize, String> {
-    state.scheduler.set_max_concurrent(max_concurrent);
+    state
+        .scheduler
+        .try_set_max_concurrent(max_concurrent)
+        .map_err(|error| error.to_string())?;
     Ok(state.scheduler.max_concurrent())
 }
 
@@ -1183,10 +1206,19 @@ pub async fn schedule_delete(
     state: tauri::State<'_, crate::state::AppState>,
     id: String,
 ) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
-    if !state.scheduler.remove(&id).await {
+    if !state
+        .scheduler
+        .try_remove(&id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
         return Err(format!("no scheduled campaign with id '{id}'"));
     }
-    Ok(state.scheduler.list_views().await)
+    state
+        .scheduler
+        .list_views()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Enable or disable a scheduled campaign; returns the updated list.
@@ -1196,10 +1228,19 @@ pub async fn schedule_set_enabled(
     id: String,
     enabled: bool,
 ) -> Result<Vec<hf_service::scheduler::CampaignView>, String> {
-    if !state.scheduler.set_enabled(&id, enabled).await {
+    if !state
+        .scheduler
+        .try_set_enabled(&id, enabled)
+        .await
+        .map_err(|error| error.to_string())?
+    {
         return Err(format!("no scheduled campaign with id '{id}'"));
     }
-    Ok(state.scheduler.list_views().await)
+    state
+        .scheduler
+        .list_views()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Index a project's source files into its BM25 knowledge base.
