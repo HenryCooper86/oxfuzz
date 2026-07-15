@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { isTauriEnvironment } from "../lib/transport";
 import { createHttpTransport } from "../lib/httpTransport";
+import type { FuzzerRunResult, RunProgressEvent } from "../lib/transport";
 
 describe("transport", () => {
   it("isTauriEnvironment returns false in test env", () => {
@@ -84,6 +85,234 @@ describe("transport", () => {
       expect(calls[0].init.method).toBe("GET");
       expect(calls[1].url).toBe("http://localhost:8081/runs/run%2Fid/cancel");
       expect(calls[1].init.method).toBe("POST");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("bridges run_fuzzer to the durable asynchronous run contract", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const progress: RunProgressEvent[] = [];
+    const encoder = new TextEncoder();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const request = { url: String(url), init: init ?? {} };
+      calls.push(request);
+      const path = new URL(request.url).pathname;
+      if (path === "/runs/start") {
+        return new Response(
+          JSON.stringify({ run_id: "service-run-1", status: "running" }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/events") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  [
+                    'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"other-run","kind":"LogLine","data":"ignore"}}\n\n',
+                    'event: run:progress\ndata: {"type":"RunProgress","data":{"run_id":"service-run-1","kind":"LogLine","data":"owned"}}\n\n',
+                    'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"service-run-1","status":"done"}}\n\n',
+                  ].join(""),
+                ),
+              );
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (path === "/runs/service-run-1/status") {
+        return new Response(
+          JSON.stringify({
+            run_id: "service-run-1",
+            status: "running",
+            active: true,
+            started_at: "2026-07-15T00:00:00Z",
+            ended_at: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/runs/history") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "other-run",
+              status: "Done",
+              crashes: 99,
+              edges: 999,
+              execs: 999,
+            },
+            {
+              id: "service-run-1",
+              status: "Done",
+              crashes: 2,
+              edges: 41,
+              execs: 123.5,
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected request: ${request.url}`);
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const unlisten = await transport.listen<RunProgressEvent>("run:progress", (event) => {
+        progress.push(event.payload);
+      });
+      const result = await transport.invoke<FuzzerRunResult>("run_fuzzer", {
+        project: "/tmp/project",
+        target: "parse_entry",
+        engine: "libfuzzer",
+        duration: 60,
+      });
+      unlisten();
+
+      expect(result).toEqual({
+        run_id: "service-run-1",
+        edges: 41,
+        crashes: 2,
+        execs: 123.5,
+        exit_code: null,
+        termination: "completed",
+        stagnation: null,
+        auto_revert: null,
+      });
+      expect(progress).toEqual([
+        { run_id: "service-run-1", type: "LogLine", data: "owned" },
+      ]);
+      const start = calls.find((call) => call.url.endsWith("/runs/start"));
+      expect(start?.init.method).toBe("POST");
+      expect(JSON.parse(String(start?.init.body))).toEqual({
+        project: "/tmp/project",
+        target: "parse_entry",
+        engine: "libfuzzer",
+        duration_secs: 60,
+      });
+      expect(calls.some((call) => call.url.endsWith("/runs/service-run-1/status"))).toBe(
+        true,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("cancels the exact service-owned run id returned by start", async () => {
+    const calls: string[] = [];
+    const encoder = new TextEncoder();
+    const originalFetch = globalThis.fetch;
+    let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let eventsReadyResolve: (() => void) | undefined;
+    const eventsReady = new Promise<void>((resolve) => {
+      eventsReadyResolve = resolve;
+    });
+    let cancelled = false;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(url);
+      calls.push(value);
+      const path = new URL(value).pathname;
+      if (path === "/runs/start") {
+        return new Response(
+          JSON.stringify({ run_id: "server-selected-id", status: "running" }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/events") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              eventController = controller;
+              eventsReadyResolve?.();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (path === "/runs/server-selected-id/status") {
+        return new Response(
+          JSON.stringify({
+            run_id: "server-selected-id",
+            status: cancelled ? "cancelled" : "running",
+            active: !cancelled,
+            started_at: "2026-07-15T00:00:00Z",
+            ended_at: cancelled ? "2026-07-15T00:00:01Z" : null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/runs/server-selected-id/cancel") {
+        expect(init?.method).toBe("POST");
+        cancelled = true;
+        eventController?.enqueue(
+          encoder.encode(
+            'event: run:status\ndata: {"type":"RunStatus","data":{"run_id":"server-selected-id","status":"cancelled"}}\n\n',
+          ),
+        );
+        eventController?.close();
+        return new Response(
+          JSON.stringify({ run_id: "server-selected-id", accepted: true }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (path === "/runs/history") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "server-selected-id",
+              status: "Cancelled",
+              crashes: 1,
+              edges: 12,
+              execs: 34,
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected request: ${value}`);
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const run = transport.invoke<FuzzerRunResult>("run_fuzzer", {
+        project: "/tmp/project",
+        target: "parse_entry",
+        engine: "libfuzzer",
+        duration: 60,
+      });
+      await eventsReady;
+      expect(await transport.invoke<number>("cancel_run")).toBe(1);
+      expect((await run).termination).toBe("cancelled");
+      expect(calls).toContain(
+        "http://localhost:8081/runs/server-selected-id/cancel",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects a run start response without a service-owned id", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ status: "running" }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await expect(
+        transport.invoke("run_fuzzer", {
+          project: "/tmp/project",
+          target: "parse_entry",
+          engine: "libfuzzer",
+          duration: 60,
+        }),
+      ).rejects.toThrow("service-owned run id");
     } finally {
       globalThis.fetch = originalFetch;
     }

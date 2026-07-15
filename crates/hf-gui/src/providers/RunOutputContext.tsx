@@ -238,11 +238,6 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
           engine: p.engine,
           duration: p.duration,
         });
-        // Web mode has no run_fuzzer endpoint and resolves to undefined.
-        if (!result) {
-          appendLog(`[${now()}] ${t("run.webModeUnavailable")}`);
-          return 0;
-        }
         patch(k, (d) => ({
           ...d,
           summary: {
@@ -280,7 +275,7 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
         activeRunKeyRef.current = null;
       }
     },
-    [appendLog, patch, setActiveEngine, t],
+    [appendLog, patch, setActiveEngine],
   );
 
   // Cooperatively cancel the active fuzz run. The backend kills the sandboxed
