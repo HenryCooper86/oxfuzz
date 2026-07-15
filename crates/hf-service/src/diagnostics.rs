@@ -46,6 +46,9 @@ pub enum DiagnosticsError {
     /// The backing trace store could not serve the summary query.
     #[error("diagnostics store query failed: {0}")]
     Store(#[from] TraceStoreError),
+    /// The application store could not serve the system counters query.
+    #[error("application store query failed: {0}")]
+    ApplicationStore(#[from] hf_storage::StorageError),
 }
 
 /// Records LLM generations as diagnostics traces and aggregates their cost.

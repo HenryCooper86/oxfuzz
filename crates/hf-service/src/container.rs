@@ -2553,8 +2553,8 @@ impl ServiceContainer {
 
         let (targets, crashes) = if let Some(store) = &self.store {
             (
-                store.list_all_targets().await.map_or(0, |t| t.len()),
-                store.list_all_crashes().await.map_or(0, |c| c.len()),
+                store.list_all_targets().await?.len(),
+                store.list_all_crashes().await?.len(),
             )
         } else {
             (0, 0)
@@ -2597,10 +2597,10 @@ impl ServiceContainer {
     /// crashes already ingested by triage regardless of which target's workspace
     /// they came from, rather than re-scanning a single (possibly wrong) target
     /// workspace. Returns an empty list when no database is configured.
-    pub async fn all_crashes(&self) -> Vec<hf_core::crash::Crash> {
+    pub async fn all_crashes(&self) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         match self.store.as_ref() {
-            Some(store) => store.list_all_crashes().await.unwrap_or_default(),
-            None => Vec::new(),
+            Some(store) => Ok(store.list_all_crashes().await?),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -2842,24 +2842,25 @@ impl ServiceContainer {
 
     /// Run history for a project (or all projects when `None`), newest first,
     /// enriched with the crash count per run. Powers the Runs history view.
-    pub async fn run_history(&self, project: Option<&Path>) -> Vec<RunHistoryItem> {
+    pub async fn run_history(
+        &self,
+        project: Option<&Path>,
+    ) -> Result<Vec<RunHistoryItem>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let key = project.map(|p| p.to_string_lossy().to_string());
-        let runs = store.list_runs(key.as_deref()).await.unwrap_or_default();
-        let crashes = store.list_all_crashes().await.unwrap_or_default();
+        let runs = store.list_runs(key.as_deref()).await?;
+        let crashes = store.list_all_crashes().await?;
         let harnesses: std::collections::HashMap<Uuid, Harness> = store
             .list_all_harnesses()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|h| (h.id, h))
             .collect();
         let targets: std::collections::HashMap<Uuid, String> = store
             .list_all_targets()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|t| (t.id, t.symbol))
             .collect();
@@ -2921,39 +2922,36 @@ impl ServiceContainer {
             })
             .collect();
         items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        items
+        Ok(items)
     }
 
     /// The intra-run coverage/throughput curve for a run (empty if none was
     /// recorded, e.g. runs from before this was captured).
-    pub async fn run_coverage_series(&self, run_id: &str) -> Vec<CoverageSample> {
+    pub async fn run_coverage_series(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<CoverageSample>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let Ok(id) = Uuid::parse_str(run_id) else {
-            return Vec::new();
+        let id = Uuid::parse_str(run_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad run id: {error}")))?;
+        let Some(json) = store.run_samples(id).await? else {
+            return Ok(Vec::new());
         };
-        match store.run_samples(id).await {
-            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
-            _ => Vec::new(),
-        }
+        serde_json::from_str(&json)
+            .map_err(|error| ClassifiedError::Storage(format!("decode run samples: {error}")))
     }
 
     /// The harness source a run used, for diffing revisions (empty if none was
     /// recorded).
-    pub async fn run_harness_source(&self, run_id: &str) -> String {
+    pub async fn run_harness_source(&self, run_id: &str) -> Result<String, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return String::new();
+            return Ok(String::new());
         };
-        let Ok(id) = Uuid::parse_str(run_id) else {
-            return String::new();
-        };
-        store
-            .run_harness_source(id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default()
+        let id = Uuid::parse_str(run_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad run id: {error}")))?;
+        Ok(store.run_harness_source(id).await?.unwrap_or_default())
     }
 
     /// Restore the exact source and executable a run used, so that promoted
@@ -3077,10 +3075,18 @@ impl ServiceContainer {
 
     /// The target a persisted run exercised, resolved through its harness
     /// (`run.config.harness_id -> harness.target_id`). `None` if unrecorded.
-    async fn run_target_id(&self, store: &Store, run: &RunRecord) -> Option<Uuid> {
-        let harness_id = run.config.as_ref().map(|c| c.harness_id)?;
-        let harness = store.get_harness(harness_id).await.ok().flatten()?;
-        Some(harness.target_id)
+    async fn run_target_id(
+        &self,
+        store: &Store,
+        run: &RunRecord,
+    ) -> Result<Option<Uuid>, ClassifiedError> {
+        let Some(harness_id) = run.config.as_ref().map(|c| c.harness_id) else {
+            return Ok(None);
+        };
+        Ok(store
+            .get_harness(harness_id)
+            .await?
+            .map(|harness| harness.target_id))
     }
 
     /// The effective auto-revert policy for a project: its stored per-project
@@ -3088,40 +3094,48 @@ impl ServiceContainer {
     async fn effective_auto_revert_policy(
         &self,
         project: &Path,
-    ) -> crate::config::AutoRevertPolicy {
+    ) -> Result<crate::config::AutoRevertPolicy, ClassifiedError> {
         if let Some(store) = self.store.as_ref() {
             let key = project.to_string_lossy().to_string();
-            if let Ok(Some(o)) = store.project_auto_revert(&key).await {
-                return crate::config::AutoRevertPolicy {
+            if let Some(o) = store.project_auto_revert(&key).await? {
+                return Ok(crate::config::AutoRevertPolicy {
                     enabled: o.enabled,
                     threshold_pct: o.threshold_pct,
                     notify_only: o.notify_only,
-                };
+                });
             }
         }
-        crate::config::auto_revert_policy()
+        Ok(crate::config::auto_revert_policy())
     }
 
     /// A project's auto-revert override, or `None` when it inherits the global
     /// policy. For the settings UI to show whether an override is in effect.
-    pub async fn project_auto_revert_override(&self, project: &Path) -> Option<ProjectAutoRevert> {
-        let store = self.store.as_ref()?;
+    pub async fn project_auto_revert_override(
+        &self,
+        project: &Path,
+    ) -> Result<Option<ProjectAutoRevert>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
         let key = project.to_string_lossy().to_string();
-        store.project_auto_revert(&key).await.ok().flatten()
+        Ok(store.project_auto_revert(&key).await?)
     }
 
     /// The effective auto-revert policy for a project (its override merged over
     /// the global default) plus whether an override is in effect -- for a badge
     /// that shows the active project's resolved policy.
-    pub async fn effective_auto_revert_view(&self, project: &Path) -> EffectiveAutoRevert {
-        let overridden = self.project_auto_revert_override(project).await.is_some();
-        let p = self.effective_auto_revert_policy(project).await;
-        EffectiveAutoRevert {
+    pub async fn effective_auto_revert_view(
+        &self,
+        project: &Path,
+    ) -> Result<EffectiveAutoRevert, ClassifiedError> {
+        let overridden = self.project_auto_revert_override(project).await?.is_some();
+        let p = self.effective_auto_revert_policy(project).await?;
+        Ok(EffectiveAutoRevert {
             enabled: p.enabled,
             threshold_pct: p.threshold_pct,
             notify_only: p.notify_only,
             overridden,
-        }
+        })
     }
 
     /// Every project's auto-revert override, keyed by project root -- so a
@@ -3129,16 +3143,15 @@ impl ServiceContainer {
     /// Empty when no store is configured or no project overrides.
     pub async fn project_auto_revert_overrides(
         &self,
-    ) -> std::collections::HashMap<String, ProjectAutoRevert> {
+    ) -> Result<std::collections::HashMap<String, ProjectAutoRevert>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return std::collections::HashMap::new();
+            return Ok(std::collections::HashMap::new());
         };
-        store
+        Ok(store
             .all_project_auto_reverts()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
-            .collect()
+            .collect())
     }
 
     /// Set (or replace) a project's auto-revert override.
@@ -3212,7 +3225,13 @@ impl ServiceContainer {
         this_edges: u64,
         this_rev: Option<&str>,
     ) -> Option<AutoRevertOutcome> {
-        let policy = self.effective_auto_revert_policy(project).await;
+        let policy = match self.effective_auto_revert_policy(project).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "auto-revert could not read its effective policy");
+                return None;
+            }
+        };
         if !policy.enabled {
             return None;
         }
@@ -3222,7 +3241,13 @@ impl ServiceContainer {
         // The most recent comparable finished run for this same target, before
         // this one, that recorded edge coverage and a harness revision.
         let key = project.to_string_lossy().to_string();
-        let mut runs = store.list_runs(Some(&key)).await.unwrap_or_default();
+        let mut runs = match store.list_runs(Some(&key)).await {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::warn!(%error, "auto-revert could not read comparable runs");
+                return None;
+            }
+        };
         runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
         let this_run = runs.iter().find(|r| r.id == this_run_id).cloned()?;
         let this_config = this_run.config.as_ref()?;
@@ -3236,7 +3261,14 @@ impl ServiceContainer {
         // Resolve the target through the run's persisted harness rather than
         // re-discovering it as C. This keeps C++, Rust, and future language runs
         // eligible for the same rollback policy.
-        let target_id = self.run_target_id(store, &this_run).await?;
+        let target_id = match self.run_target_id(store, &this_run).await {
+            Ok(Some(target_id)) => target_id,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(%error, "auto-revert could not resolve the current run target");
+                return None;
+            }
+        };
         let mut prev = None;
         for r in runs {
             if r.id == this_run_id
@@ -3258,7 +3290,14 @@ impl ServiceContainer {
             if !auto_revert_baseline_compatible(previous_config, this_config) {
                 continue;
             }
-            if self.run_target_id(store, &r).await == Some(target_id) {
+            let candidate_target = match self.run_target_id(store, &r).await {
+                Ok(candidate_target) => candidate_target,
+                Err(error) => {
+                    tracing::warn!(%error, "auto-revert could not resolve a baseline run target");
+                    return None;
+                }
+            };
+            if candidate_target == Some(target_id) {
                 prev = Some(r);
                 break;
             }
@@ -3358,26 +3397,28 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
         limit: usize,
-    ) -> Vec<AutoRevertEvent> {
+    ) -> Result<Vec<AutoRevertEvent>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let key = project.map(|p| p.to_string_lossy().to_string());
-        store
+        Ok(store
             .list_auto_revert_events(key.as_deref(), i64::try_from(limit).unwrap_or(200))
-            .await
-            .unwrap_or_default()
+            .await?)
     }
 
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
-    pub async fn export_project_data(&self, project: Option<&Path>) -> serde_json::Value {
+    pub async fn export_project_data(
+        &self,
+        project: Option<&Path>,
+    ) -> Result<serde_json::Value, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return serde_json::json!({ "error": "no database configured" });
+            return Ok(serde_json::json!({ "error": "no database configured" }));
         };
         let key = project.map(|p| p.to_string_lossy().to_string());
-        let targets = store.list_all_targets().await.unwrap_or_default();
+        let targets = store.list_all_targets().await?;
         let scoped_targets: Vec<_> = match &key {
             Some(k) => targets
                 .into_iter()
@@ -3389,27 +3430,24 @@ impl ServiceContainer {
             scoped_targets.iter().map(|t| t.id).collect();
         let harnesses: Vec<_> = store
             .list_all_harnesses()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|h| key.is_none() || target_ids.contains(&h.target_id))
             .collect();
         let crashes: Vec<_> = store
             .list_all_crashes()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|c| key.is_none() || target_ids.contains(&c.target_id))
             .collect();
         let corpus: Vec<_> = store
             .list_all_corpus_entries_with_targets()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|(target_id, _)| key.is_none() || target_ids.contains(target_id))
             .map(|(_, entry)| entry)
             .collect();
-        let runs = self.run_history(project).await;
+        let runs = self.run_history(project).await?;
         let evidence: Vec<_> = scoped_targets
             .iter()
             .map(|target| {
@@ -3428,7 +3466,7 @@ impl ServiceContainer {
                 })
             })
             .collect();
-        serde_json::json!({
+        Ok(serde_json::json!({
             "schema": "hobot_fuzz.export.v2",
             "generated_at": Utc::now().to_rfc3339(),
             "tool_version": env!("CARGO_PKG_VERSION"),
@@ -3439,7 +3477,7 @@ impl ServiceContainer {
             "corpus": corpus,
             "runs": runs,
             "evidence": evidence,
-        })
+        }))
     }
 
     /// Every corpus entry persisted to the store, across all targets.
@@ -3447,10 +3485,12 @@ impl ServiceContainer {
     /// The browse-all counterpart to [`Self::corpus_list`] (which is scoped to a
     /// single target's on-disk corpus). Returns an empty list when no database
     /// is configured.
-    pub async fn all_corpus_entries(&self) -> Vec<hf_core::corpus::CorpusEntry> {
+    pub async fn all_corpus_entries(
+        &self,
+    ) -> Result<Vec<hf_core::corpus::CorpusEntry>, ClassifiedError> {
         match self.store.as_ref() {
-            Some(store) => store.list_all_corpus_entries().await.unwrap_or_default(),
-            None => Vec::new(),
+            Some(store) => Ok(store.list_all_corpus_entries().await?),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -3459,7 +3499,7 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
         target: Option<&str>,
-    ) -> crate::workbench::WorkbenchDashboard {
+    ) -> Result<crate::workbench::WorkbenchDashboard, ClassifiedError> {
         crate::workbench::dashboard(self.store.as_deref(), project, target).await
     }
 
@@ -3468,7 +3508,7 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
         target: Option<&str>,
-    ) -> Vec<crate::workbench::HarnessReviewItem> {
+    ) -> Result<Vec<crate::workbench::HarnessReviewItem>, ClassifiedError> {
         crate::workbench::harness_review_queue(self.store.as_deref(), project, target).await
     }
 
@@ -4000,7 +4040,10 @@ impl ServiceContainer {
 
         let mut schedulable = Vec::new();
         for candidate in targets {
-            let harnesses = store.list_harnesses(candidate.id).await.unwrap_or_default();
+            let harnesses = store
+                .list_harnesses(candidate.id)
+                .await
+                .map_err(ClassifiedError::from)?;
             for harness in harnesses
                 .iter()
                 .filter(|h| h.status == HarnessStatus::Promoted)
@@ -4580,10 +4623,7 @@ impl ServiceContainer {
                 break;
             }
 
-            let triaged = self
-                .triage_run(project, &target, summary.run_id)
-                .await
-                .unwrap_or_default();
+            let triaged = self.triage_run(project, &target, summary.run_id).await?;
             crashes = triaged.len();
             // Feed any crash reproducers back into the corpus (close the loop).
             let _ = self
@@ -5757,7 +5797,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
-        let run = match self.latest_run_record(project, Some(target)).await {
+        let run = match self.latest_run_record(project, Some(target)).await? {
             Some(run) => run,
             None if self.store.is_some() => {
                 return Err(ClassifiedError::Validation(format!(
@@ -5796,7 +5836,7 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
         if run.project_root != project.to_string_lossy()
             || !run_has_crash_evidence(run.status)
-            || self.run_target_id(store, &run).await
+            || self.run_target_id(store, &run).await?
                 != Some(self.resolve_target_id_any_language(project, target).await)
         {
             return Err(ClassifiedError::Validation(format!(
@@ -6055,7 +6095,7 @@ impl ServiceContainer {
 
         // (crash_id, input_path) pairs: persisted crashes first, else staged.
         let mut inputs: Vec<(String, PathBuf)> = Vec::new();
-        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let latest_run = self.latest_run_record(project, Some(target)).await?;
         if let Some(store) = &self.store {
             if let Some(run) = &latest_run {
                 if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
@@ -6249,17 +6289,17 @@ impl ServiceContainer {
         &self,
         project: &Path,
         target: Option<&str>,
-    ) -> Vec<hf_core::crash::Crash> {
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         let Some(store) = &self.store else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let run = self.latest_run_record(project, target).await;
-        match run {
+        let run = self.latest_run_record(project, target).await?;
+        Ok(match run {
             // Guard against any pre-existing duplicate rows (e.g. crashes
             // persisted before the deterministic-id fix): collapse by signature.
-            Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await.unwrap_or_default()),
+            Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await?),
             None => Vec::new(),
-        }
+        })
     }
 
     /// Export the latest run's crashes as a SARIF 2.1.0 document (string),
@@ -6273,7 +6313,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<String, ClassifiedError> {
-        let crashes = self.crashes_for_latest_run(project, Some(target)).await;
+        let crashes = self.crashes_for_latest_run(project, Some(target)).await?;
         let sarif = crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"));
         serde_json::to_string_pretty(&sarif)
             .map_err(|e| ClassifiedError::Internal(format!("serialize sarif: {e}")))
@@ -6325,7 +6365,7 @@ impl ServiceContainer {
     ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
-        let crashes = self.crashes_for_latest_run(project, target).await;
+        let crashes = self.crashes_for_latest_run(project, target).await?;
         if crashes.is_empty() {
             return Err(ClassifiedError::Validation(
                 "no triaged crashes to push to DefectDojo".to_owned(),
@@ -6380,13 +6420,11 @@ impl ServiceContainer {
 
         // Latest run + its crashes from the store, when persistence is wired.
         let (run, crashes) = if let Some(store) = &self.store {
-            let run = self.latest_run_record(project, Some(target)).await;
+            let run = self.latest_run_record(project, Some(target)).await?;
             let crashes = match &run {
                 // Collapse any pre-existing duplicate rows by signature so the
                 // report never lists the same crash twice.
-                Some(r) => {
-                    hf_crash::dedup(store.list_crashes_by_run(r.id).await.unwrap_or_default())
-                }
+                Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await?),
                 None => Vec::new(),
             };
             (run, crashes)
@@ -6397,7 +6435,9 @@ impl ServiceContainer {
         // Live coverage (best-effort) and corpus composition.
         let coverage = self.coverage_summary(project, target).await;
         let covered_functions = self.coverage_functions(project, target).await.len();
-        let corpus = self.collect_corpus_stats(project, target, target_id).await;
+        let corpus = self
+            .collect_corpus_stats(project, target, target_id)
+            .await?;
 
         let data = ReportData {
             generated_at: Utc::now().to_rfc3339(),
@@ -6516,22 +6556,17 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         target_id: Uuid,
-    ) -> crate::report::CorpusStats {
+    ) -> Result<crate::report::CorpusStats, ClassifiedError> {
         use hf_core::corpus::CorpusSource;
 
         let entries = match &self.store {
-            Some(store) if target_id != Uuid::nil() => store
-                .list_corpus_entries(target_id)
-                .await
-                .unwrap_or_default(),
+            Some(store) if target_id != Uuid::nil() => store.list_corpus_entries(target_id).await?,
             _ => Vec::new(),
         };
         let entries = if entries.is_empty() {
             // No persisted entries: read the live corpus directory.
             let workspace = workspace_dir(project, target);
-            hf_corpus::list(&workspace.join("corpus"))
-                .map(|c| c.entries)
-                .unwrap_or_default()
+            hf_corpus::list(&workspace.join("corpus"))?.entries
         } else {
             entries
         };
@@ -6547,7 +6582,7 @@ impl ServiceContainer {
                 CorpusSource::Manual => {}
             }
         }
-        stats
+        Ok(stats)
     }
 
     /// Replay a single crash input through the compiled harness in the sandbox
@@ -6598,30 +6633,33 @@ impl ServiceContainer {
 
     /// Most recent terminal persisted run in a project, optionally restricted to one
     /// target through `run.config.harness_id -> harness.target_id`.
-    async fn latest_run_record(&self, project: &Path, target: Option<&str>) -> Option<RunRecord> {
-        let store = self.store.as_ref()?;
-        let runs = store
-            .list_runs(Some(&project.to_string_lossy()))
-            .await
-            .ok()?;
+    async fn latest_run_record(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+    ) -> Result<Option<RunRecord>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let runs = store.list_runs(Some(&project.to_string_lossy())).await?;
         let Some(target) = target else {
-            return runs
+            return Ok(runs
                 .into_iter()
-                .find(|run| run_has_crash_evidence(run.status));
+                .find(|run| run_has_crash_evidence(run.status)));
         };
         let target_id = self.resolve_target_id_any_language(project, target).await;
         if target_id.is_nil() {
-            return None;
+            return Ok(None);
         }
         for run in runs {
             if !run_has_crash_evidence(run.status) {
                 continue;
             }
-            if self.run_target_id(store, &run).await == Some(target_id) {
-                return Some(run);
+            if self.run_target_id(store, &run).await? == Some(target_id) {
+                return Ok(Some(run));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
@@ -6883,7 +6921,7 @@ impl ServiceContainer {
     ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let latest_run = self.latest_run_record(project, Some(target)).await?;
         let out_dir = match latest_run.as_ref() {
             Some(run) => run_output_dir(&workspace, run)?,
             None => workspace.join("out"),
@@ -7040,7 +7078,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<usize, ClassifiedError> {
-        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let latest_run = self.latest_run_record(project, Some(target)).await?;
         self.corpus_absorb_run_record(project, target, latest_run)
             .await
     }
@@ -7069,7 +7107,7 @@ impl ServiceContainer {
         if target_id.is_nil()
             || run.project_root != project.to_string_lossy()
             || !run_has_crash_evidence(run.status)
-            || self.run_target_id(store, &run).await != Some(target_id)
+            || self.run_target_id(store, &run).await? != Some(target_id)
         {
             return Err(ClassifiedError::Validation(format!(
                 "run {run_id} does not own terminal evidence for target '{target}'"
