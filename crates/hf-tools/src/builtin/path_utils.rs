@@ -63,20 +63,13 @@ fn resolve_path_with_read_dirs(
         .collect::<Vec<_>>();
     let has_workspace_root = workspace_root.is_some();
     let has_additional_roots = !additional_roots.is_empty();
-    let temporary_roots = if has_workspace_root || has_additional_roots {
-        system_temporary_roots()
-    } else {
-        Vec::new()
-    };
 
-    let mut allowed_roots = Vec::with_capacity(
-        workspace_root.as_ref().map_or(0, |_| 1) + additional_roots.len() + temporary_roots.len(),
-    );
+    let mut allowed_roots =
+        Vec::with_capacity(workspace_root.as_ref().map_or(0, |_| 1) + additional_roots.len());
     if let Some(workspace) = workspace_root {
         allowed_roots.push(workspace);
     }
     allowed_roots.extend(additional_roots);
-    allowed_roots.extend(temporary_roots);
 
     if !allowed_roots.is_empty() {
         let is_allowed = allowed_roots
@@ -113,9 +106,9 @@ fn resolve_path_with_read_dirs(
         // untrusted fuzz target plants `<workspace>/link -> /etc`). Resolve
         // symlinks in the existing portion of the path and confirm the real
         // target is still within a canonicalized allowed root. Roots are
-        // canonicalized too so equivalent paths (e.g. macOS `/tmp` ->
-        // `/private/tmp`) compare correctly. When nothing on the path exists
-        // yet, both sides fall back to lexical form, preserving prior behavior.
+        // canonicalized too so equivalent paths compare correctly. When
+        // nothing on the path exists yet, both sides fall back to lexical
+        // form, preserving prior behavior.
         let real_target = canonicalize_existing_ancestor(&resolved);
         let within_real_root = allowed_roots.iter().any(|root| {
             let real_root = root.canonicalize().unwrap_or_else(|_| root.clone());
@@ -164,28 +157,6 @@ fn canonicalize_existing_ancestor(path: &Path) -> PathBuf {
     }
 }
 
-fn system_temporary_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let temp_dir = std::env::temp_dir();
-    push_unique_root(&mut roots, &temp_dir);
-
-    #[cfg(unix)]
-    {
-        push_unique_root(&mut roots, Path::new("/tmp"));
-        push_unique_root(&mut roots, Path::new("/var/tmp"));
-        push_unique_root(&mut roots, Path::new("/private/tmp"));
-    }
-
-    roots
-}
-
-fn push_unique_root(roots: &mut Vec<PathBuf>, root: &Path) {
-    let root = normalize_lexically(root);
-    if !roots.iter().any(|existing| existing == &root) {
-        roots.push(root);
-    }
-}
-
 fn path_is_within_root(path: &Path, root: &Path) -> bool {
     if path == root {
         return true;
@@ -197,11 +168,12 @@ fn path_is_within_root(path: &Path, root: &Path) -> bool {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn symlink_escaping_workspace_is_denied() {
         let ws = tempfile::tempdir().unwrap();
 
@@ -228,6 +200,79 @@ mod tests {
         assert!(resolve_read_path("FileRead", Some("src/a.c"), Some(ws_str), &[]).is_ok());
         // A not-yet-created file under an existing dir resolves (for writes).
         assert!(resolve_workspace_path("FileWrite", Some("src/new.txt"), Some(ws_str)).is_ok());
+    }
+
+    #[test]
+    fn project_root_under_system_temp_remains_usable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("project.c");
+        std::fs::write(&file, "int project(void) { return 0; }").unwrap();
+
+        let resolved = resolve_read_path(
+            "FileRead",
+            Some(file.to_str().unwrap()),
+            workspace.path().to_str(),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(resolved, file);
+    }
+
+    #[test]
+    fn absolute_sibling_system_temp_path_is_denied() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        let file = sibling.path().join("host-secret.txt");
+        std::fs::write(&file, "not project data").unwrap();
+
+        let result = resolve_read_path(
+            "FileRead",
+            Some(file.to_str().unwrap()),
+            workspace.path().to_str(),
+            &[],
+        );
+
+        assert!(matches!(result, Err(ToolError::PermissionDenied { .. })));
+    }
+
+    #[test]
+    fn explicit_additional_system_temp_root_is_allowed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let additional = tempfile::tempdir().unwrap();
+        let file = additional.path().join("approved-plan.md");
+        std::fs::write(&file, "approved").unwrap();
+        let roots = vec![additional.path().display().to_string()];
+
+        let resolved = resolve_read_path(
+            "FileRead",
+            Some(file.to_str().unwrap()),
+            workspace.path().to_str(),
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_to_sibling_system_temp_path_is_denied() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        let file = sibling.path().join("host-secret.txt");
+        std::fs::write(&file, "not project data").unwrap();
+        let link = workspace.path().join("escape");
+        std::os::unix::fs::symlink(sibling.path(), &link).unwrap();
+
+        let result = resolve_read_path(
+            "FileRead",
+            Some("escape/host-secret.txt"),
+            workspace.path().to_str(),
+            &[],
+        );
+
+        assert!(matches!(result, Err(ToolError::PermissionDenied { .. })));
     }
 }
 
