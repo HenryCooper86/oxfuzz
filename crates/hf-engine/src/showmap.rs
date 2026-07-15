@@ -11,15 +11,15 @@
 /// stdout. `binary` and `input` are container-internal paths.
 #[must_use]
 pub fn build_showmap_args(binary: &str, input: &str) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "afl-showmap".to_owned(),
         "-o".to_owned(),
         "-".to_owned(),  // write the map to stdout
         "-q".to_owned(), // quiet: only the map
         "--".to_owned(),
-        binary.to_owned(),
-        input.to_owned(),
-    ]
+    ];
+    args.extend(crate::afl::build_reproduction_args(binary, input));
+    args
 }
 
 /// Compute a coverage fingerprint from `afl-showmap` output: the deterministic
