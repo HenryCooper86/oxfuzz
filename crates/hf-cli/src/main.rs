@@ -878,48 +878,44 @@ async fn cmd_ci(
     let engine_kind = parse_engine(engine)?;
     let _lang = parse_lang(lang)?;
     let duration_secs = parse_duration(duration)?;
-    // CI is a non-interactive, deliberately-automated run. Set permissive
-    // guardrails for this process so the high-risk run/triage steps proceed
-    // without an interactive approval (safe-by-default still applies elsewhere).
-    if std::env::var_os("HF_GUARDRAILS").is_none() {
-        std::env::set_var("HF_GUARDRAILS", "permissive");
-    }
     let container = ServiceContainer::bootstrap().await;
 
     println!("[ci] requiring a previously smoke-qualified and promoted harness for {target}...");
-    if let Err(e) = container.generate_seeds(&project, target).await {
-        eprintln!("[ci] warning: seed generation failed: {e}");
-    }
-
     println!("[ci] fuzzing {target} for {duration_secs}s...");
     let on_progress = |p: FuzzProgress| {
         if let FuzzProgress::CrashesFound(_) = p {
             println!("[ci] >> crash found");
         }
     };
-    container
-        .run_fuzzer(&project, target, engine_kind, duration_secs, &on_progress)
+    let outcome = container
+        .run_ci_gate(
+            hf_service::sarif::CiGateRequest {
+                project: &project,
+                target,
+                engine: engine_kind,
+                duration_secs,
+            },
+            &on_progress,
+        )
         .await?;
-
-    println!("[ci] triaging...");
-    let crashes = container.triage(&project, target).await?;
+    if let Some(warning) = &outcome.seed_warning {
+        eprintln!("[ci] warning: seed generation failed: {warning}");
+    }
 
     // Always emit SARIF (even with zero results) so code scanning can clear
     // stale alerts when a bug is fixed.
-    let doc = container.export_sarif(&project, target).await?;
-    std::fs::write(sarif, &doc)?;
+    std::fs::write(sarif, &outcome.sarif)?;
     println!("[ci] SARIF written to {}", sarif.display());
 
-    if crashes.is_empty() {
+    if outcome.passed() {
         println!("[ci] PASS: no crashes found.");
         Ok(())
     } else {
-        eprintln!("[ci] FAIL: {} crash(es) found.", crashes.len());
-        for c in &crashes {
-            eprintln!("[ci]   {:?}: {}", c.kind, c.summary);
+        eprintln!("[ci] FAIL: {} crash(es) found.", outcome.findings.len());
+        for finding in &outcome.findings {
+            eprintln!("[ci]   {}: {}", finding.kind, finding.summary);
         }
-        // Non-zero exit gates the PR; SARIF was already written + can be uploaded.
-        std::process::exit(1);
+        anyhow::bail!("CI fuzzing gate found crashing inputs")
     }
 }
 
