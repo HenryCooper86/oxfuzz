@@ -446,6 +446,18 @@ impl ProviderPoolConfig {
             if !seen_ids.insert(&p.id) {
                 return Err(ProviderPoolError::DuplicateProvider { id: p.id.clone() });
             }
+            if !p.cost_per_1k_input.is_finite()
+                || p.cost_per_1k_input < 0.0
+                || !p.cost_per_1k_output.is_finite()
+                || p.cost_per_1k_output < 0.0
+            {
+                return Err(ProviderPoolError::Config {
+                    message: format!(
+                        "provider '{}' costs must be finite, non-negative values",
+                        p.id
+                    ),
+                });
+            }
             crate::http_headers::custom_header_map(&p.headers).map_err(|message| {
                 ProviderPoolError::Config {
                     message: format!("provider '{}' has invalid custom header: {message}", p.id),
@@ -886,6 +898,27 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("dup"));
+    }
+
+    #[test]
+    fn test_config_validate_rejects_invalid_costs() {
+        for invalid in ["-0.1", "nan", "inf"] {
+            let raw = format!(
+                r#"
+                [[providers]]
+                id = "priced"
+                provider_type = "openai"
+                model = "test"
+                cost_per_1k_input = {invalid}
+                cost_per_1k_output = 0.5
+                "#
+            );
+            let config: ProviderPoolConfig = toml::from_str(&raw).expect("cost should parse");
+            assert!(
+                config.validate().is_err(),
+                "invalid provider cost {invalid} was accepted"
+            );
+        }
     }
 
     #[test]
