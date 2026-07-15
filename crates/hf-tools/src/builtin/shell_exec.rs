@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 use hf_core::exec::{
-    BackgroundProcessSnapshot, ProcessCapability, ProcessStatus, RuntimeCapability,
+    BackgroundProcessSnapshot, ProcessCapability, ProcessStatus, RuntimeCapability, RuntimeError,
 };
 use hf_core::tool::{
     Tool, ToolCategory, ToolDefinition, ToolError, ToolInput, ToolOutput, ToolType,
@@ -345,75 +345,39 @@ impl Tool for ShellExecTool {
             "Executing shell command: `{command}` (working_dir: {working_dir:?}, timeout_secs: {timeout_secs})"
         );
 
-        // Prefer the injected CommandRunner (runtime-aware execution).
-        // Falls back to direct local execution when no runner is provided
-        // (backward compatibility for tests and standalone usage).
-        if let Some(ref runner) = input.command_runner {
-            let result = runner
-                .run_command(command, working_dir, timeout)
-                .await
-                .map_err(|e| ToolError::RuntimeError {
-                    name: "ShellExec".into(),
-                    message: format!("{e}"),
-                })?;
-
-            let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&result.stderr).to_string();
-
-            return Ok(ToolOutput {
-                success: result.exit_code == 0,
-                content: serde_json::json!({
-                    "exit_code": result.exit_code,
-                    "stdout": Self::truncate_output(&stdout),
-                    "stderr": Self::truncate_output(&stderr),
-                }),
-                warnings: vec![],
-                metadata: serde_json::json!({}),
-            });
-        }
-
-        // Fallback: direct local execution (no runtime manager).
-        let (shell, shell_flag): (&str, &str) = if cfg!(windows) {
-            ("cmd.exe", "/C")
-        } else {
-            ("sh", "-c")
-        };
-        let mut cmd = tokio::process::Command::new(shell);
-        cmd.arg(shell_flag).arg(command);
-
-        if let Some(wd) = working_dir {
-            cmd.current_dir(wd);
-        }
-
-        // Capture output.
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let result = tokio::time::timeout(timeout, cmd.output()).await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1);
-
-                Ok(ToolOutput {
-                    success: exit_code == 0,
-                    content: serde_json::json!({
-                        "exit_code": exit_code,
-                        "stdout": Self::truncate_output(&stdout),
-                        "stderr": Self::truncate_output(&stderr),
-                    }),
-                    warnings: vec![],
-                    metadata: serde_json::json!({}),
-                })
-            }
-            Ok(Err(e)) => Err(ToolError::RuntimeError {
+        let runner = input
+            .command_runner
+            .as_ref()
+            .ok_or_else(|| ToolError::RuntimeError {
                 name: "ShellExec".into(),
-                message: format!("failed to execute command: {e}"),
+                message: "shell execution requires a sandbox-backed runtime command runner".into(),
+            })?;
+        let result = runner
+            .run_command(command, working_dir, timeout)
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Timeout { timeout } => ToolError::Timeout {
+                    timeout_secs: timeout.as_secs(),
+                },
+                error => ToolError::RuntimeError {
+                    name: "ShellExec".into(),
+                    message: error.to_string(),
+                },
+            })?;
+
+        let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+
+        Ok(ToolOutput {
+            success: result.exit_code == 0,
+            content: serde_json::json!({
+                "exit_code": result.exit_code,
+                "stdout": Self::truncate_output(&stdout),
+                "stderr": Self::truncate_output(&stderr),
             }),
-            Err(_) => Err(ToolError::Timeout { timeout_secs }),
-        }
+            warnings: vec![],
+            metadata: serde_json::json!({}),
+        })
     }
 
     fn definition(&self) -> &ToolDefinition {
@@ -430,7 +394,7 @@ mod tests {
     use super::*;
     use hf_core::exec::{
         BackgroundProcessInfo, BackgroundProcessSnapshot, CommandRunner, ExecutionResult,
-        ProcessHandle, ProcessStatus, ResourceUsage, RuntimeBackend, RuntimeError,
+        ProcessHandle, ProcessStatus, ResourceUsage, RuntimeBackend,
     };
     use hf_core::types::SessionId;
     use std::sync::{Arc, Mutex};
@@ -440,6 +404,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         working_dirs: Mutex<Vec<Option<String>>>,
         owner_session_ids: Mutex<Vec<String>>,
+        exit_code: i32,
+        times_out: bool,
     }
 
     impl RecordingRunner {
@@ -448,6 +414,22 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 working_dirs: Mutex::new(Vec::new()),
                 owner_session_ids: Mutex::new(Vec::new()),
+                exit_code: 0,
+                times_out: false,
+            }
+        }
+
+        fn with_exit_code(exit_code: i32) -> Self {
+            Self {
+                exit_code,
+                ..Self::new()
+            }
+        }
+
+        fn timing_out() -> Self {
+            Self {
+                times_out: true,
+                ..Self::new()
             }
         }
 
@@ -495,8 +477,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(working_dir.map(ToOwned::to_owned));
+            if self.times_out {
+                return Err(RuntimeError::Timeout {
+                    timeout: Duration::from_secs(1),
+                });
+            }
             Ok(ExecutionResult {
-                exit_code: 0,
+                exit_code: self.exit_code,
                 stdout: b"hello\n".to_vec(),
                 stderr: Vec::new(),
                 duration: Duration::from_millis(10),
@@ -636,24 +623,45 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_exec_without_runtime_runner_does_not_spawn_host_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("host-process-ran");
+        let tool = ShellExecTool::new();
+        let input = make_input(serde_json::json!({
+            "command": format!("touch '{}'", sentinel.display())
+        }));
+
+        let result = tool.execute(input).await;
+
+        assert!(matches!(
+            result,
+            Err(ToolError::RuntimeError { name, .. }) if name == "ShellExec"
+        ));
+        assert!(!sentinel.exists(), "ShellExec spawned a host process");
+    }
+
     #[tokio::test]
     async fn test_shell_exec_success() {
         let tool = ShellExecTool::new();
-        let input = make_input(serde_json::json!({
-            "command": "echo hello"
-        }));
+        let runner = Arc::new(RecordingRunner::new());
+        let input = make_input_with_runner(
+            serde_json::json!({ "command": "echo hello" }),
+            runner.clone(),
+        );
         let output = tool.execute(input).await.unwrap();
         assert!(output.success);
         assert_eq!(output.content["exit_code"], 0);
         assert!(output.content["stdout"].as_str().unwrap().contains("hello"));
+        assert_eq!(runner.calls(), vec!["run:echo hello"]);
     }
 
     #[tokio::test]
     async fn test_shell_exec_nonzero_exit() {
         let tool = ShellExecTool::new();
-        let input = make_input(serde_json::json!({
-            "command": "exit 42"
-        }));
+        let runner = Arc::new(RecordingRunner::with_exit_code(42));
+        let input = make_input_with_runner(serde_json::json!({ "command": "exit 42" }), runner);
         let output = tool.execute(input).await.unwrap();
         assert!(!output.success);
         assert_eq!(output.content["exit_code"], 42);
@@ -662,10 +670,14 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_timeout() {
         let tool = ShellExecTool::new();
-        let input = make_input(serde_json::json!({
-            "command": "sleep 60",
-            "timeout_secs": 1
-        }));
+        let runner = Arc::new(RecordingRunner::timing_out());
+        let input = make_input_with_runner(
+            serde_json::json!({
+                "command": "sleep 60",
+                "timeout_secs": 1
+            }),
+            runner,
+        );
         let result = tool.execute(input).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ToolError::Timeout { .. }));
@@ -674,15 +686,17 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_with_working_dir() {
         let tool = ShellExecTool::new();
-        let input = make_input(serde_json::json!({
-            "command": "pwd",
-            "working_dir": "/tmp"
-        }));
+        let runner = Arc::new(RecordingRunner::new());
+        let input = make_input_with_runner(
+            serde_json::json!({
+                "command": "pwd",
+                "working_dir": "/tmp"
+            }),
+            runner.clone(),
+        );
         let output = tool.execute(input).await.unwrap();
         assert!(output.success);
-        // On macOS /tmp is a symlink to /private/tmp.
-        let stdout = output.content["stdout"].as_str().unwrap();
-        assert!(stdout.contains("tmp"));
+        assert_eq!(runner.working_dirs(), vec![Some("/tmp".into())]);
     }
 
     #[tokio::test]
