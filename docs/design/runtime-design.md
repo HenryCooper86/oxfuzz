@@ -58,13 +58,19 @@ digests; the service recomputes both immediately before launch and fails closed
 on a mismatch.
 
 The primary workspace mount is read-only for fuzzer execution. Only explicit,
-service-created corpus and run-output directories are mounted writable. Extra
+service-created disposable corpus snapshots and run-output directories are
+mounted writable; the retained corpus is never exposed writable. Extra
 mounts use structured host/container/read-only fields rather than raw Docker
 volume strings. Immediately before launch, the runtime canonicalizes every host
 source and rejects anything outside its approved workspace root, including a
 directory redirected through a symlink. This prevents an untrusted engine from
 rewriting its approved executable, source, configuration, or evidence belonging
 to another run.
+
+Fuzzer profiles set a per-file `RLIMIT_FSIZE` through
+`SandboxOptions.max_file_size_bytes`. The service combines this with an
+aggregate run-directory budget; either limit stops the run before oversized
+output is accepted as retained evidence.
 
 ## 5. Failure Semantics
 

@@ -682,6 +682,90 @@ async fn crash_and_corpus_roundtrip() {
 }
 
 #[tokio::test]
+async fn corpus_replacement_is_exact_and_preserves_richer_metadata() {
+    let (store, _dir) = temp_store().await;
+    let target_id = Uuid::new_v4();
+    let stale = CorpusEntry {
+        path: PathBuf::from("corpus/stale"),
+        sha256: "stale".to_owned(),
+        size: 5,
+        source: CorpusSource::Fuzzer,
+        coverage_hash: Some("old-coverage".to_owned()),
+    };
+    let retained = CorpusEntry {
+        path: PathBuf::from("corpus/original"),
+        sha256: "retained".to_owned(),
+        size: 8,
+        source: CorpusSource::Seed,
+        coverage_hash: Some("coverage".to_owned()),
+    };
+    store.upsert_corpus_entry(target_id, &stale).await.unwrap();
+    store
+        .upsert_corpus_entry(target_id, &retained)
+        .await
+        .unwrap();
+
+    let rediscovered = CorpusEntry {
+        path: PathBuf::from("corpus/current"),
+        sha256: retained.sha256.clone(),
+        size: retained.size,
+        source: CorpusSource::Manual,
+        coverage_hash: None,
+    };
+    store
+        .replace_corpus_entries(target_id, &[rediscovered])
+        .await
+        .unwrap();
+
+    let entries = store.list_corpus_entries(target_id).await.unwrap();
+    assert_eq!(entries.len(), 1, "stale rows must be removed");
+    assert_eq!(entries[0].path, PathBuf::from("corpus/current"));
+    assert_eq!(entries[0].source, CorpusSource::Seed);
+    assert_eq!(entries[0].coverage_hash.as_deref(), Some("coverage"));
+}
+
+#[tokio::test]
+async fn corpus_deletion_is_scoped_to_the_owning_target() {
+    let (store, _dir) = temp_store().await;
+    let first_target = Uuid::new_v4();
+    let second_target = Uuid::new_v4();
+    let entry = CorpusEntry {
+        path: PathBuf::from("corpus/shared"),
+        sha256: "same-content".to_owned(),
+        size: 12,
+        source: CorpusSource::Manual,
+        coverage_hash: None,
+    };
+    store
+        .upsert_corpus_entry(first_target, &entry)
+        .await
+        .unwrap();
+    store
+        .upsert_corpus_entry(second_target, &entry)
+        .await
+        .unwrap();
+
+    store
+        .delete_corpus_entry(first_target, &entry.sha256)
+        .await
+        .unwrap();
+
+    assert!(store
+        .list_corpus_entries(first_target)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .list_corpus_entries(second_target)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn schedule_executions_round_trip_and_latest_fire() {
     let (store, _dir) = temp_store().await;
 
