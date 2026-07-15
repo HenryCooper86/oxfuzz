@@ -17,6 +17,7 @@ pub enum ExecutionStatus {
     Completed,
     Failed,
     Skipped,
+    Cancelled,
 }
 
 impl std::fmt::Display for ExecutionStatus {
@@ -27,6 +28,7 @@ impl std::fmt::Display for ExecutionStatus {
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Skipped => write!(f, "skipped"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -52,7 +54,7 @@ pub struct ScheduleExecution {
     pub request_summary: serde_json::Value,
     /// Response/output summary (JSON): execution result, output content.
     pub response_summary: serde_json::Value,
-    /// Human-readable error message when status is `Failed`.
+    /// Human-readable error/cancellation message for non-successful runs.
     pub error_message: Option<String>,
 }
 
@@ -83,53 +85,61 @@ pub struct ExecutionStore {
     records: Vec<ScheduleExecution>,
     /// Maximum records to retain (per schedule). 0 = unlimited.
     max_per_schedule: usize,
+    /// Recent actual starts used by hourly admission independently of UI
+    /// history retention.
+    recent_starts: std::collections::HashMap<String, Vec<(String, DateTime<Utc>)>>,
 }
 
 impl ExecutionStore {
     /// Create a new execution store with default retention (100 per schedule).
     pub fn new() -> Self {
+        Self::with_retention(100)
+    }
+
+    /// Create an execution store with a per-schedule retention limit.
+    ///
+    /// A zero limit retains unlimited history.
+    pub fn with_retention(max_per_schedule: usize) -> Self {
         Self {
             records: Vec::new(),
-            max_per_schedule: 100,
+            max_per_schedule,
+            recent_starts: std::collections::HashMap::new(),
         }
     }
 
     /// Record a new execution.
     pub fn record(&mut self, execution: ScheduleExecution) {
         let schedule_id = execution.schedule_id.clone();
+        self.remember_start(&execution);
         self.records.push(execution);
-
-        // Enforce per-schedule retention limit.
-        if self.max_per_schedule > 0 {
-            let count = self
-                .records
-                .iter()
-                .filter(|e| e.schedule_id == schedule_id)
-                .count();
-            if count > self.max_per_schedule {
-                // Remove the oldest entries for this schedule.
-                let excess = count - self.max_per_schedule;
-                let mut removed = 0;
-                self.records.retain(|e| {
-                    if e.schedule_id == schedule_id && removed < excess {
-                        removed += 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-        }
+        self.enforce_retention(&schedule_id);
     }
 
     /// Update an existing execution record by ID.
     pub fn update(&mut self, execution_id: &str, updater: impl FnOnce(&mut ScheduleExecution)) {
-        if let Some(rec) = self
+        let changed = if let Some(rec) = self
             .records
             .iter_mut()
             .find(|e| e.execution_id == execution_id)
         {
+            let previously_started = rec.started_at.is_some();
             updater(rec);
+            Some((rec.schedule_id.clone(), !previously_started))
+        } else {
+            None
+        };
+        if let Some((schedule_id, may_have_started)) = changed {
+            if may_have_started {
+                let started = self
+                    .records
+                    .iter()
+                    .find(|record| record.execution_id == execution_id)
+                    .cloned();
+                if let Some(started) = started.as_ref() {
+                    self.remember_start(started);
+                }
+            }
+            self.enforce_retention(&schedule_id);
         }
     }
 
@@ -149,6 +159,27 @@ impl ExecutionStore {
         self.records.iter().find(|e| e.execution_id == execution_id)
     }
 
+    /// Count executions for `schedule_id` that actually started at or after
+    /// `since`. Policy skips have no `started_at` and do not consume rate limits.
+    pub fn started_since(&self, schedule_id: &str, since: DateTime<Utc>) -> usize {
+        self.recent_starts.get(schedule_id).map_or(0, |starts| {
+            starts
+                .iter()
+                .filter(|(_, started_at)| *started_at >= since)
+                .count()
+        })
+    }
+
+    /// Count queued reservations that have not reached their actual start.
+    pub fn pending_since(&self, schedule_id: &str, since: DateTime<Utc>) -> usize {
+        self.records
+            .iter()
+            .filter(|execution| execution.schedule_id == schedule_id)
+            .filter(|execution| execution.status == ExecutionStatus::Pending)
+            .filter(|execution| execution.triggered_at >= since)
+            .count()
+    }
+
     /// List the most recent executions across all schedules.
     pub fn list_recent(&self, limit: usize) -> Vec<&ScheduleExecution> {
         let mut results: Vec<&ScheduleExecution> = self.records.iter().collect();
@@ -165,6 +196,76 @@ impl ExecutionStore {
     /// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    fn remember_start(&mut self, execution: &ScheduleExecution) {
+        if execution.status == ExecutionStatus::Skipped {
+            return;
+        }
+        let Some(started_at) = execution.started_at else {
+            return;
+        };
+        let cutoff = Utc::now() - chrono::Duration::hours(1);
+        let starts = self
+            .recent_starts
+            .entry(execution.schedule_id.clone())
+            .or_default();
+        starts.retain(|(_, timestamp)| *timestamp >= cutoff);
+        if !starts
+            .iter()
+            .any(|(execution_id, _)| execution_id == &execution.execution_id)
+        {
+            starts.push((execution.execution_id.clone(), started_at));
+        }
+    }
+
+    fn enforce_retention(&mut self, schedule_id: &str) {
+        if self.max_per_schedule == 0 {
+            return;
+        }
+
+        let active_count = self
+            .records
+            .iter()
+            .filter(|execution| execution.schedule_id == schedule_id)
+            .filter(|execution| {
+                matches!(
+                    execution.status,
+                    ExecutionStatus::Pending | ExecutionStatus::Running
+                )
+            })
+            .count();
+        let terminal_to_keep = self.max_per_schedule.saturating_sub(active_count);
+        let mut terminal: Vec<&ScheduleExecution> = self
+            .records
+            .iter()
+            .filter(|execution| execution.schedule_id == schedule_id)
+            .filter(|execution| {
+                !matches!(
+                    execution.status,
+                    ExecutionStatus::Pending | ExecutionStatus::Running
+                )
+            })
+            .collect();
+        terminal.sort_by(|left, right| {
+            right
+                .triggered_at
+                .cmp(&left.triggered_at)
+                .then_with(|| right.execution_id.cmp(&left.execution_id))
+        });
+        let retained_terminal: std::collections::HashSet<String> = terminal
+            .into_iter()
+            .take(terminal_to_keep)
+            .map(|execution| execution.execution_id.clone())
+            .collect();
+        self.records.retain(|execution| {
+            execution.schedule_id != schedule_id
+                || matches!(
+                    execution.status,
+                    ExecutionStatus::Pending | ExecutionStatus::Running
+                )
+                || retained_terminal.contains(execution.execution_id.as_str())
+        });
     }
 }
 
@@ -328,10 +429,7 @@ mod tests {
 
     #[test]
     fn test_execution_store_retention() {
-        let mut exec_store = ExecutionStore {
-            records: Vec::new(),
-            max_per_schedule: 2,
-        };
+        let mut exec_store = ExecutionStore::with_retention(2);
 
         for i in 0..5 {
             exec_store.record(ScheduleExecution {
@@ -350,6 +448,114 @@ mod tests {
 
         // Should retain only the 2 most recent.
         assert_eq!(exec_store.len(), 2);
+    }
+
+    #[test]
+    fn retention_is_timestamp_ordered_and_preserves_active_records() {
+        let mut exec_store = ExecutionStore::with_retention(2);
+        let now = Utc::now();
+        for (id, offset, status) in [
+            ("newest", 30, ExecutionStatus::Completed),
+            ("oldest", -30, ExecutionStatus::Completed),
+            ("active", -60, ExecutionStatus::Running),
+        ] {
+            exec_store.record(ScheduleExecution {
+                execution_id: id.to_owned(),
+                schedule_id: "s1".to_owned(),
+                triggered_at: now + chrono::Duration::seconds(offset),
+                started_at: Some(now),
+                completed_at: None,
+                status,
+                workflow_execution_id: None,
+                request_summary: serde_json::Value::Null,
+                response_summary: serde_json::Value::Null,
+                error_message: None,
+            });
+        }
+
+        assert!(exec_store.get("active").is_some());
+        assert!(exec_store.get("newest").is_some());
+        assert!(exec_store.get("oldest").is_none());
+    }
+
+    #[test]
+    fn hourly_start_log_survives_history_pruning() {
+        let mut exec_store = ExecutionStore::with_retention(1);
+        let now = Utc::now();
+        for id in ["first", "second"] {
+            exec_store.record(ScheduleExecution {
+                execution_id: id.to_owned(),
+                schedule_id: "s1".to_owned(),
+                triggered_at: now,
+                started_at: Some(now),
+                completed_at: Some(now),
+                status: ExecutionStatus::Completed,
+                workflow_execution_id: None,
+                request_summary: serde_json::Value::Null,
+                response_summary: serde_json::Value::Null,
+                error_message: None,
+            });
+        }
+
+        assert_eq!(exec_store.get_history("s1").len(), 1);
+        assert_eq!(
+            exec_store.started_since("s1", now - chrono::Duration::minutes(1)),
+            2
+        );
+    }
+
+    #[test]
+    fn zero_retention_limit_is_unlimited() {
+        let mut exec_store = ExecutionStore::with_retention(0);
+        for i in 0..3 {
+            exec_store.record(ScheduleExecution {
+                execution_id: format!("exec-{i}"),
+                schedule_id: "s1".to_owned(),
+                triggered_at: Utc::now(),
+                started_at: Some(Utc::now()),
+                completed_at: Some(Utc::now()),
+                status: ExecutionStatus::Completed,
+                workflow_execution_id: None,
+                request_summary: serde_json::Value::Null,
+                response_summary: serde_json::Value::Null,
+                error_message: None,
+            });
+        }
+
+        assert_eq!(exec_store.get_history("s1").len(), 3);
+    }
+
+    #[test]
+    fn hourly_count_excludes_policy_skips_and_old_runs() {
+        let mut exec_store = ExecutionStore::new();
+        let now = Utc::now();
+        for (id, started_at, status) in [
+            ("recent", now, ExecutionStatus::Completed),
+            (
+                "old",
+                now - chrono::Duration::hours(2),
+                ExecutionStatus::Completed,
+            ),
+            ("skip", now, ExecutionStatus::Skipped),
+        ] {
+            exec_store.record(ScheduleExecution {
+                execution_id: id.to_owned(),
+                schedule_id: "s1".to_owned(),
+                triggered_at: started_at,
+                started_at: Some(started_at),
+                completed_at: Some(started_at),
+                status,
+                workflow_execution_id: None,
+                request_summary: serde_json::Value::Null,
+                response_summary: serde_json::Value::Null,
+                error_message: None,
+            });
+        }
+
+        assert_eq!(
+            exec_store.started_since("s1", now - chrono::Duration::hours(1)),
+            1
+        );
     }
 
     #[test]

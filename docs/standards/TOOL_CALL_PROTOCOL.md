@@ -50,9 +50,9 @@ wired around these boundaries.
 
 ## 4. Permission Model
 
-- Inspection calls pass through the registry executor and hooks middleware.
-  Service-domain actions independently pass through `hf-guardrails` and their
-  operation-specific approval gates.
+- Inspection calls pass through the registry executor for schema validation
+  and exact registered-tool dispatch. Service-domain actions independently
+  pass through `hf-guardrails` and their operation-specific approval gates.
 - The active generic tool registry is read-only. A future mutating or process
   tool requires an explicit service-owned design, sandbox-backed execution,
   risk classification, and human-approval policy before it can be registered.
@@ -65,6 +65,14 @@ wired around these boundaries.
   must be supplied explicitly and remain subject to canonical symlink-boundary
   validation. The active registry contains no file-mutation tool.
 - The active registry contains no shell or general process-execution tool.
+
+The former generic hook executor and standalone MCP client were removed after
+dependency-graph and runtime-construction audits found no production consumer.
+Keeping those prototypes would have implied interception and remote-tool
+capabilities that the active agent did not execute. A future hook or MCP
+subsystem requires a service-owned design, an explicit runtime construction
+path, and integration tests proving that advertised behavior reaches the live
+agent.
 
 ## 5. Agent Protocol and Parsing
 

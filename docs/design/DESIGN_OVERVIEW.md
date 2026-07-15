@@ -50,6 +50,21 @@ all under human-in-the-loop supervision.
   (`hf-cli`, `hf-web`) depend only on `hf-service`.
 - No presentation crate imports a domain or infrastructure crate directly.
 
+## 4.1 Effective Runtime Configuration
+
+Configuration exposed to operators is part of the runtime contract, not merely
+serialized UI state. Provider token prices are copied into the corresponding
+`ProviderMetadata` so both cost-aware routing and recorded spend use the same
+values. Global knowledge, session, and scheduler settings are resolved by
+`hf-service` and passed to their owning infrastructure components. Unsupported
+settings are rejected or removed instead of being accepted as no-ops.
+
+Schedule definitions inherit scheduler defaults when a per-schedule policy is
+absent. Once resolved, concurrency and hourly-rate policies are enforced before
+dispatch, and every policy skip or cancellation remains visible in execution
+history. Cron expressions are evaluated in their persisted IANA timezone; new
+non-UTC schedules use the explicit `CRON_TZ=<zone> <expression>` form.
+
 ## 5. Open Questions
 
 1. Tree-sitter vs. clang AST for C/C++ target discovery? (Leaning: Tree-sitter

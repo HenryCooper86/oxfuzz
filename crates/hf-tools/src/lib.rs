@@ -7,9 +7,8 @@
 //! - [`ToolIndex`] — compact entries for LLM context (name+description only)
 //! - [`ToolActivationSet`] — LRU cache of active tools (ceiling: 20)
 //! - [`JsonSchemaValidator`] — parameter validation with compiled schema cache
-//! - [`ToolExecutor`] — validates + runs tools through middleware chain
+//! - [`ToolExecutor`] — validates and executes registered tools
 //! - [`DynamicToolManager`] — CRUD lifecycle for agent-created tools
-//! - [`RateLimiter`] — per-tool token-bucket rate limiting
 //! - [`ResultFormatter`] — formats tool output for LLM consumption
 //! - [`builtin::file_read`], [`builtin::glob`], and [`builtin::grep`] — the
 //!   project-scoped, read-only inspection tools used by the active agent
@@ -31,10 +30,7 @@ pub mod error;
 pub mod executor;
 pub mod formatter;
 pub mod index;
-pub mod mcp_integration;
-pub mod mcp_toml;
 pub mod parser;
-pub mod rate_limiter;
 pub mod registry;
 pub mod taxonomy;
 pub mod validator;
@@ -47,11 +43,9 @@ pub use error::ToolRegistryError;
 pub use executor::ToolExecutor;
 pub use formatter::{FormattedResult, FormatterConfig, ResultFormat, ResultFormatter};
 pub use index::ToolIndex;
-pub use mcp_integration::McpServerConfig;
 pub use parser::{
     format_tool_result, parse_tool_calls, strip_tool_call_blocks, ParseResult, ParsedToolCall,
 };
-pub use rate_limiter::{RateLimitConfig, RateLimitResult, RateLimiter};
 pub use registry::ToolRegistryImpl;
 pub use taxonomy::ToolTaxonomy;
 pub use validator::JsonSchemaValidator;

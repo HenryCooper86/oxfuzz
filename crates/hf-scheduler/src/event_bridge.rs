@@ -1,4 +1,4 @@
-//! Event bridge: connects the `y-hooks` event bus to `EventSchedule` triggers.
+//! Event bridge: connects external event producers to `EventSchedule` triggers.
 //!
 //! The `EventBridge` receives events (e.g., from file watchers, webhooks) and
 //! matches them against registered `EventSchedule` triggers, applying debounce
@@ -18,7 +18,7 @@ use crate::store::{ScheduleStore, TriggerConfig};
 use crate::store::Schedule;
 use crate::trigger::{FiredTrigger, TriggerType};
 
-/// An incoming event from the hook system or external source.
+/// An incoming event from an external producer.
 #[derive(Debug, Clone)]
 pub struct IncomingEvent {
     /// Event type identifier (e.g. `"file.changed"`).
@@ -86,6 +86,7 @@ impl EventBridge {
                     schedule_id: schedule.id.clone(),
                     fired_at: event.timestamp,
                     trigger_type: TriggerType::Event,
+                    is_recovery: false,
                 };
 
                 if tx.send(trigger).await.is_ok() {

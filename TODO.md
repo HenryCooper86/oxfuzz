@@ -115,8 +115,8 @@ Status legend: [x] done - [~] partial - [ ] not started.
 ## Audit backlog (refreshed 2026-07-15)
 
 A multi-crate audit fixed dozens of correctness, safety, dead-code, and
-documentation issues (see git log). Completed findings are checked below; the
-unchecked findings remain verified follow-up work.
+documentation issues (see git log). Every verified finding in this audit is
+resolved below; intentionally deferred roadmap work remains in Phase 5.
 
 ### Safety and security (highest impact)
 - [x] Persist promoted source and binary digests, verify them immediately before
@@ -153,8 +153,9 @@ unchecked findings remain verified follow-up work.
   keeping smoke findings attributable to the correct target.
 - [x] Parse terminal AFL++ coverage and crash metrics from the run-local
   `out/default/fuzzer_stats`; stdout parsing remains live telemetry only.
-- [ ] Crash minimization is unwired: `hf-crash::build_minimize_args` has no
-  caller and `Crash.minimized` is always false. Wire a minimize step into triage.
+- [x] Triage minimizes supported AFL++ and libFuzzer crashes through the bounded
+  sandbox path, stages minimized artifacts safely, and records the resulting
+  `Crash.minimized` evidence without following untrusted symlinks.
 - [x] Prompt-protocol agent tool results use provider-compatible user messages;
   strict OpenAI-compatible relays no longer receive an orphan `tool` message.
 - [x] Make chat turns and rollback durable across display/context transcripts,
@@ -171,13 +172,14 @@ unchecked findings remain verified follow-up work.
   durability failures before new execution starts.
 
 ### REST/web parity
-- [ ] REST cannot start or observe a fuzz run (`run_fuzzer`/`run_syzkaller`/
-  `cancel_all_runs` have no route) and the SSE `RunProgress`/`DockerStatus`
-  channel is never fed. Add the routes + wire the SSE producer.
+- [x] REST can start, observe, and cancel exact user-space fuzz runs through
+  durable run ids, run-scoped status, and fed SSE progress/status events.
+  Syzkaller remains intentionally limited to the trusted local desktop workflow
+  because its kernel, rootfs, SSH, and VM inputs require a stronger boundary.
 - [x] Apply an origin-bounded `CorsLayer` in web mode and send the configured
   bearer token from both frontend HTTP and SSE transports.
-- [ ] REST handlers hardcode status codes; map `ClassifiedError` category to
-  4xx/5xx instead.
+- [x] REST maps `ClassifiedError` categories consistently to 4xx/5xx responses,
+  including validation, provider, sandbox, timeout, and storage failures.
 - [x] Canonicalize and bound REST discovery/knowledge paths to the configured
   workspace before host filesystem access or snippet return.
 
@@ -185,24 +187,30 @@ unchecked findings remain verified follow-up work.
 - [x] Remove the inert engines/runtime/guardrails/storage/session/tools config
   sections from templates, APIs, and Settings rather than presenting controls
   that do not affect runtime behavior.
-- [ ] Provider `cost_per_1k_input/output` never reaches `ProviderMetadata`, so
-  `CostOptimized` routing degenerates to "first candidate".
-- [ ] Per-schedule `concurrency_policy` / `max_executions_per_hour` are persisted
-  but never enforced; `SchedulerConfig.history_retention_limit`/others are inert.
-- [ ] `KnowledgeConfig.retrieval_strategy`/weights and `SessionConfig` fields are
-  deserialized but never mapped into the retriever/session manager.
-- [ ] `cmd_ci` composes pipeline logic in the CLI and mutates global env
-  (`HF_GUARDRAILS`); move to a `ServiceContainer::run_ci_gate` method.
+- [x] Provider `cost_per_1k_input/output` reaches `ProviderMetadata`, so
+  `CostOptimized` routing compares configured costs instead of falling back to
+  provider order.
+- [x] Scheduler concurrency/hourly policies, recovery, timezone-aware cron, and
+  history retention are enforced. CLI, web, and desktop startup and mutations
+  use fallible scheduler APIs; missing web schedule ids return 404.
+- [x] Effective knowledge strategy, score threshold, weights, and chunk limits
+  reach retrieval; unsupported semantic-only retrieval is rejected until an
+  embedding pipeline exists. Supported session settings reach the session
+  manager, and inert session controls were removed.
+- [x] CI-gate orchestration lives in `ServiceContainer::run_ci_gate`; the CLI is
+  a thin renderer and no longer mutates `HF_GUARDRAILS` to run the pipeline.
 
 ### Data / schema
 - [x] Unified `hf-storage` on `Store::connect` plus forward-only
   `migrations/*.sql`; session and checkpoint tests now exercise the production
   schema path, and the destructive test-only schema initializer was removed.
-- [ ] Fix `DATABASE_SCHEMA.md` drift (runs missing statistics columns and
-  ancillary persistence tables are undocumented).
-- [ ] `list_all_crashes` doc claims newest-first but has no `ORDER BY`.
-- [ ] `container.rs` storage reads use `.await.unwrap_or_default()` (14 sites), so
-  a DB error renders as "no data" (worst for the crash list). At least log the error.
+- [x] `DATABASE_SCHEMA.md` documents run statistics and ancillary persistence
+  tables and is verified against the production migration path.
+- [x] Crash history queries have deterministic newest-first ordering matching
+  their API contract.
+- [x] Authoritative storage reads propagate typed failures instead of rendering
+  database errors as empty data. Bootstrap recovery also logs unrepairable run
+  ids and failed interrupted-run status repairs while retaining WAL evidence.
 - [x] Persist schedules and campaign budget state with locked atomic replace,
   file and parent-directory fsync, and explicit corrupt-state errors.
 
@@ -212,11 +220,12 @@ unchecked findings remain verified follow-up work.
   inspection tools plus service-backed knowledge search.
 - [x] Remove the zero-consumer `hf-bot` scaffold and the duplicate `hf-journal`
   state model; the service-owned durable WAL is the sole run-recovery journal.
-- [ ] `hf-mcp` (3.3k LOC) has zero dependents. Much of `hf-diagnostics`
-  (subscriber/search/replay/langfuse/cost) is dead. Hook execution/blocking path
-  is never constructed. The per-tool `RateLimiter` and provider
-  `PriorityScheduler`/`LeaseManager` are unused.
-- [ ] Knowledge dedup fingerprints only the first 100 chars and keys on a
-  never-written `l1_section_index`, so distinct chunks are dropped from RAG.
-- [ ] Cron `timezone` is dropped at evaluation (latent; creation forces UTC).
-- [ ] `providers.example.toml` recommends a retired Anthropic model id.
+- [x] Removed the zero-consumer MCP, hook, diagnostics, per-tool rate-limit, and
+  provider scheduling/lease prototypes while retaining live observability and
+  provider behavior.
+- [x] Knowledge dedup uses complete content and chunk identities instead of a
+  100-character prefix and an unwritten section index.
+- [x] Cron evaluation preserves configured timezones through trigger evaluation
+  and calendar/DST-aware restart recovery.
+- [x] `providers.example.toml` uses the current supported Anthropic model
+  example rather than the retired id.

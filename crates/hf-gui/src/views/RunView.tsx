@@ -277,9 +277,8 @@ export function RunView({
           {running ? t("run.running") : isSyz ? t("run.launchCampaign") : t("run.runFuzzer")}
         </Button>
 
-        {/* Stop is offered for any in-flight run. Both harness fuzzing and
-            kernel (syzkaller) campaigns register a cancellation token, and
-            cancel_run signals every active run, so this works for both. */}
+        {/* Stop is offered for any in-flight run. Web mode cancels the exact
+            service-owned run id; desktop mode signals its active local run. */}
         {running && (
           <Button
             variant="danger"

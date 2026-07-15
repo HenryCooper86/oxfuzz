@@ -1,16 +1,16 @@
-//! y-scheduler: Scheduled task execution for y-agent.
+//! `hf-scheduler`: scheduled workflow execution for `hobot_fuzz`.
 //!
 //! This crate provides time-based and event-driven task scheduling:
 //!
 //! - [`CronSchedule`] — cron expression-based triggers (full 5-field support via `croner`)
 //! - [`IntervalSchedule`] — fixed-interval triggers
 //! - [`OneTimeSchedule`] — one-time delayed triggers
-//! - [`EventSchedule`] — event-driven triggers via `y-hooks`
+//! - [`EventSchedule`] — event-driven triggers from external event producers
 //! - [`ScheduleStore`] — schedule registry with CRUD operations
 //! - [`ScheduleExecutor`] — trigger-to-workflow execution translation
 //! - [`SchedulerManager`] — top-level async service that runs the trigger loop
 //!
-//! Scheduled tasks execute as standard Orchestrator Workflows,
+//! Scheduled tasks execute as standard orchestrated workflows,
 //! supporting parameterized scheduling via `ParameterSchema`.
 
 pub mod config;

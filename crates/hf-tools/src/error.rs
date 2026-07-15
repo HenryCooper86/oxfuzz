@@ -15,9 +15,6 @@ pub enum ToolRegistryError {
     #[error("tool activation limit exceeded: max {max} active tools")]
     ActivationLimitExceeded { max: usize },
 
-    #[error("middleware chain error: {message}")]
-    MiddlewareError { message: String },
-
     #[error("tool execution error: {message}")]
     ExecutionError { message: String },
 
