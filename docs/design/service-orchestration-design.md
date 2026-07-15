@@ -54,6 +54,16 @@ corpus, coverage, export, and report flows verify the exact run directory and
 staged executable digest first. Only pre-migration records with no evidence
 metadata may use the legacy flat paths.
 
+Presentation layers that need non-blocking execution call the service run-start
+API. The service completes all preflight checks, stages immutable evidence,
+inserts the running row, syncs the recovery journal, and registers cooperative
+cancellation before returning the UUID. It then owns the background task and
+emits run-id-attributed progress and lifecycle callbacks. A pre-reservation
+failure returns directly to the caller and never creates a phantom id; a
+post-reservation failure repairs the persisted row to `failed` before emitting
+the terminal lifecycle event. Status and cancellation queries use service DTOs
+rather than presentation-side reconstruction from run history.
+
 Run deletion is also evidence-aware. Running records and runs referenced by a
 harness qualification cannot be deleted, and successful deletion removes only
 the validated, run-owned directory. A cancelled campaign stops orchestration

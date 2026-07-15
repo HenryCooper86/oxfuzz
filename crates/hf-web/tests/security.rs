@@ -278,12 +278,14 @@ async fn public_system_paths_are_redacted() {
 }
 
 #[tokio::test]
-async fn run_control_fails_explicitly_without_inventing_an_execution_id() {
+async fn run_control_maps_preflight_and_identity_outcomes_without_inventing_ids() {
     let root = tempfile::tempdir().unwrap();
-    let app = build_with_state_and_security(
-        AppState::new(hf_service::ServiceContainer::stubbed()),
-        open_local_security(root.path()),
-    );
+    let container = hf_service::ServiceContainer::stubbed()
+        .with_store_path(root.path().join("web-run-control.db"))
+        .await
+        .expect("test persistence");
+    let app =
+        build_with_state_and_security(AppState::new(container), open_local_security(root.path()));
 
     let start = app
         .clone()
@@ -292,12 +294,26 @@ async fn run_control_fails_explicitly_without_inventing_an_execution_id() {
                 .method(Method::POST)
                 .uri("/runs/start")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "project": root.path(),
+                        "target": "parse_entry",
+                        "engine": "libfuzzer",
+                        "duration_secs": 60
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(start.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(start.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(start.into_body(), 4096).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(body.get("run_id").is_none());
+    assert!(body["error"]
+        .as_str()
+        .is_some_and(|error| { error.starts_with("validation error:") }));
 
     let invalid = app
         .clone()
@@ -334,7 +350,7 @@ async fn run_control_fails_explicitly_without_inventing_an_execution_id() {
         )
         .await
         .unwrap();
-    assert_eq!(inactive.status(), StatusCode::CONFLICT);
+    assert_eq!(inactive.status(), StatusCode::NOT_FOUND);
 }
 
 #[test]
