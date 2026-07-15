@@ -972,43 +972,73 @@ async fn pruning_schedule_executions_is_scoped_deterministic_and_supports_zero()
 #[tokio::test]
 async fn counting_schedule_starts_is_scoped_inclusive_and_excludes_skips() {
     let (store, _dir) = temp_store().await;
-    for (id, schedule, triggered_at, status) in [
+    for (id, schedule, triggered_at, started_at, status) in [
         (
-            "a-before",
+            "a-trigger-after-started-before-1",
             "schedule-a",
-            "2026-07-01T00:59:59+00:00",
+            "2026-07-01T02:00:00+00:00",
+            Some("2026-07-01T00:30:00+00:00"),
             "completed",
         ),
         (
-            "a-cutoff",
+            "a-trigger-after-started-before-2",
             "schedule-a",
-            "2026-07-01T01:00:00+00:00",
+            "2026-07-01T03:00:00+00:00",
+            Some("2026-07-01T00:45:00+00:00"),
+            "failed",
+        ),
+        (
+            "a-trigger-before-started-at-cutoff",
+            "schedule-a",
+            "2026-07-01T00:00:00+00:00",
+            Some("2026-07-01T01:00:00+00:00"),
             "failed",
         ),
         (
             "a-after",
             "schedule-a",
             "2026-07-01T01:30:00+00:00",
+            Some("2026-07-01T01:30:00+00:00"),
             "running",
         ),
         (
             "a-skipped",
             "schedule-a",
             "2026-07-01T01:45:00+00:00",
+            Some("2026-07-01T01:45:00+00:00"),
             "skipped",
+        ),
+        (
+            "a-pending",
+            "schedule-a",
+            "2026-07-01T01:50:00+00:00",
+            Some("2026-07-01T01:50:00Z"),
+            "pending",
         ),
         (
             "b-after",
             "schedule-b",
             "2026-07-01T01:30:00+00:00",
+            Some("2026-07-01T01:30:00+00:00"),
             "completed",
         ),
     ] {
+        let data = serde_json::json!({ "started_at": started_at }).to_string();
         store
-            .upsert_schedule_execution(id, schedule, triggered_at, status, "{}")
+            .upsert_schedule_execution(id, schedule, triggered_at, status, &data)
             .await
             .unwrap();
     }
+    store
+        .upsert_schedule_execution(
+            "a-invalid-json",
+            "schedule-a",
+            "2026-07-01T02:00:00+00:00",
+            "completed",
+            "not-json",
+        )
+        .await
+        .unwrap();
 
     assert_eq!(
         store
@@ -1016,7 +1046,7 @@ async fn counting_schedule_starts_is_scoped_inclusive_and_excludes_skips() {
             .await
             .unwrap(),
         2,
-        "the cutoff is inclusive, skipped rows do not consume a start, and other schedules isolate"
+        "started_at drives the inclusive cutoff; skipped rows and other schedules do not count"
     );
     assert_eq!(
         store
@@ -1024,6 +1054,74 @@ async fn counting_schedule_starts_is_scoped_inclusive_and_excludes_skips() {
             .await
             .unwrap(),
         1
+    );
+}
+
+#[tokio::test]
+async fn pruning_preserves_running_and_recent_started_executions() {
+    let (store, _dir) = temp_store().await;
+    let recent_start = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    for (id, schedule, status, started_at) in [
+        (
+            "old-running",
+            "schedule-a",
+            "running",
+            Some("2020-01-01T00:00:00+00:00"),
+        ),
+        ("old-pending", "schedule-a", "pending", None),
+        (
+            "recent-completed",
+            "schedule-a",
+            "completed",
+            Some(recent_start.as_str()),
+        ),
+        (
+            "old-completed",
+            "schedule-a",
+            "completed",
+            Some("2020-01-01T00:00:00+00:00"),
+        ),
+        (
+            "other-old-completed",
+            "schedule-b",
+            "completed",
+            Some("2020-01-01T00:00:00+00:00"),
+        ),
+    ] {
+        let data = serde_json::json!({ "started_at": started_at }).to_string();
+        store
+            .upsert_schedule_execution(id, schedule, "2020-01-01T00:00:00+00:00", status, &data)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store
+            .prune_schedule_executions("schedule-a", 0)
+            .await
+            .unwrap(),
+        1,
+        "only old terminal history is safe to remove"
+    );
+    let remaining_a: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM schedule_executions WHERE schedule_id = 'schedule-a' ORDER BY id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining_a,
+        ["old-pending", "old-running", "recent-completed"]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'schedule-b'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1,
+        "pruning must remain schedule-scoped"
     );
 }
 

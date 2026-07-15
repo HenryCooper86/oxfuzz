@@ -1063,11 +1063,13 @@ impl Store {
         Ok(())
     }
 
-    /// Retain only the newest `keep` executions for one schedule.
+    /// Retain only the newest `keep` historical executions for one schedule.
     ///
     /// Recency is ordered by `triggered_at`, with the execution id as a
-    /// deterministic tie-breaker. Passing zero removes every execution for
-    /// the selected schedule and never affects another schedule.
+    /// deterministic tie-breaker. Pending/running executions and executions
+    /// that started within the rolling hourly-admission window are protected
+    /// from history pruning. The protection keeps UI retention independent
+    /// from live execution state and restart-safe hourly rate limiting.
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
@@ -1076,9 +1078,19 @@ impl Store {
         schedule_id: &str,
         keep: usize,
     ) -> Result<u64, StorageError> {
+        let admission_cutoff = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         let result = sqlx::query(
             "DELETE FROM schedule_executions
              WHERE schedule_id = ?1
+               AND status NOT IN ('pending', 'running')
+               AND NOT CASE
+                   WHEN json_valid(data_json)
+                   THEN COALESCE(
+                       julianday(json_extract(data_json, '$.started_at')) >= julianday(?3),
+                       FALSE
+                   )
+                   ELSE FALSE
+               END
                AND id NOT IN (
                    SELECT id FROM schedule_executions
                    WHERE schedule_id = ?1
@@ -1088,6 +1100,7 @@ impl Store {
         )
         .bind(schedule_id)
         .bind(i64::try_from(keep).unwrap_or(i64::MAX))
+        .bind(admission_cutoff)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
@@ -1095,9 +1108,9 @@ impl Store {
 
     /// Count execution starts for one schedule at or after an RFC 3339 cutoff.
     ///
-    /// Skipped records did not start work and therefore do not consume a rate
-    /// limit slot. Every other persisted status counts, including failures and
-    /// cancellations.
+    /// The actual `started_at` value is read from the serialized execution,
+    /// rather than approximated with its earlier trigger time. Skipped and
+    /// pending records have no start and do not consume a rate-limit slot.
     ///
     /// # Errors
     /// Returns an error on a SQL failure or an invalid negative aggregate.
@@ -1109,8 +1122,15 @@ impl Store {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM schedule_executions
              WHERE schedule_id = ?1
-               AND triggered_at >= ?2
-               AND status <> 'skipped'",
+               AND status NOT IN ('pending', 'skipped')
+               AND CASE
+                   WHEN json_valid(data_json)
+                   THEN COALESCE(
+                       julianday(json_extract(data_json, '$.started_at')) >= julianday(?2),
+                       FALSE
+                   )
+                   ELSE FALSE
+               END",
         )
         .bind(schedule_id)
         .bind(since)
