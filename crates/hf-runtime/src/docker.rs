@@ -7,7 +7,7 @@
 //! `build_exec_args` is a pure function that constructs the `docker run`
 //! argument list from a `RuntimeConfig`; it is unit-tested without a daemon.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::RuntimeConfig;
@@ -180,8 +180,7 @@ pub fn build_exec_args_with(
 /// command inside a `--rm` container created from `RuntimeConfig::image`.
 pub struct DockerRuntime {
     cfg: RuntimeConfig,
-    #[allow(dead_code)]
-    host_workspace: std::path::PathBuf,
+    host_workspace: PathBuf,
 }
 
 impl DockerRuntime {
@@ -191,9 +190,108 @@ impl DockerRuntime {
     /// `cfg.container_workspace`.
     #[must_use]
     pub fn new(cfg: RuntimeConfig, host_workspace: &Path) -> Self {
+        let host_workspace = if host_workspace.is_absolute() {
+            host_workspace.to_path_buf()
+        } else {
+            std::env::current_dir().map_or_else(
+                |_| host_workspace.to_path_buf(),
+                |current| current.join(host_workspace),
+            )
+        };
         Self {
             cfg,
-            host_workspace: host_workspace.to_path_buf(),
+            host_workspace,
+        }
+    }
+
+    /// Resolve the configured workspace root through the host filesystem.
+    fn canonical_workspace_root(&self) -> Result<PathBuf, ClassifiedError> {
+        std::fs::canonicalize(&self.host_workspace).map_err(|e| {
+            ClassifiedError::Sandbox(format!(
+                "approved workspace {} is unavailable: {e}",
+                self.host_workspace.display()
+            ))
+        })
+    }
+
+    /// Convert a caller path to an absolute path without resolving symlinks.
+    fn absolute_path(path: &Path) -> Result<PathBuf, ClassifiedError> {
+        if path.components().any(|part| part == Component::ParentDir) {
+            return Err(ClassifiedError::Sandbox(format!(
+                "workspace path contains parent traversal: {}",
+                path.display()
+            )));
+        }
+        if path.is_absolute() {
+            return Ok(path.to_path_buf());
+        }
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .map_err(|e| ClassifiedError::Sandbox(format!("resolve current directory: {e}")))
+    }
+
+    /// Prove that an existing host path resolves inside the approved workspace.
+    fn confined_existing_path(&self, path: &Path) -> Result<PathBuf, ClassifiedError> {
+        let absolute = Self::absolute_path(path)?;
+        let root = self.canonical_workspace_root()?;
+        let resolved = std::fs::canonicalize(&absolute).map_err(|e| {
+            ClassifiedError::Sandbox(format!(
+                "workspace path {} is unavailable: {e}",
+                absolute.display()
+            ))
+        })?;
+        if resolved == root || resolved.starts_with(&root) {
+            Ok(resolved)
+        } else {
+            Err(ClassifiedError::Sandbox(format!(
+                "workspace path {} resolves outside approved root {}",
+                absolute.display(),
+                root.display()
+            )))
+        }
+    }
+
+    /// Prove that a possibly-missing write path is inside the approved root.
+    ///
+    /// The nearest existing ancestor is canonicalized so a symlinked directory
+    /// cannot redirect a later `create_dir_all` or file write outside the root.
+    fn confined_write_path(&self, path: &Path) -> Result<PathBuf, ClassifiedError> {
+        let absolute = Self::absolute_path(path)?;
+        let root = self.canonical_workspace_root()?;
+        let mut ancestor = absolute.as_path();
+        loop {
+            match std::fs::symlink_metadata(ancestor) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor = ancestor.parent().ok_or_else(|| {
+                        ClassifiedError::Sandbox(format!(
+                            "workspace path has no existing ancestor: {}",
+                            absolute.display()
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(ClassifiedError::Sandbox(format!(
+                        "inspect workspace ancestor {}: {error}",
+                        ancestor.display()
+                    )));
+                }
+            }
+        }
+        let resolved_ancestor = std::fs::canonicalize(ancestor).map_err(|e| {
+            ClassifiedError::Sandbox(format!(
+                "workspace ancestor {} is unavailable: {e}",
+                ancestor.display()
+            ))
+        })?;
+        if resolved_ancestor == root || resolved_ancestor.starts_with(&root) {
+            Ok(absolute)
+        } else {
+            Err(ClassifiedError::Sandbox(format!(
+                "workspace path {} resolves outside approved root {}",
+                absolute.display(),
+                root.display()
+            )))
         }
     }
 
@@ -342,6 +440,7 @@ impl RuntimeAdapter for DockerRuntime {
     ) -> Result<CommandResult, ClassifiedError> {
         use tokio::process::Command;
 
+        let cwd = self.confined_existing_path(cwd)?;
         let timeout = Duration::from_secs(limits.max_duration_secs);
         let mut args = build_exec_args(&self.cfg, limits, cmd);
         // Replace the placeholder host workspace with the real cwd.
@@ -384,7 +483,7 @@ impl RuntimeAdapter for DockerRuntime {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            workspace: cwd.to_path_buf(),
+            workspace: cwd,
         })
     }
 
@@ -416,24 +515,26 @@ impl RuntimeAdapter for DockerRuntime {
         cancel: &tokio_util::sync::CancellationToken,
         on_line: &hf_core::runtime::LineSink<'_>,
     ) -> Result<CommandResult, ClassifiedError> {
+        let cwd = self.confined_existing_path(cwd)?;
         // A run cancelled before it starts launches no container.
         if cancel.is_cancelled() {
             return Ok(CommandResult {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
-                workspace: cwd.to_path_buf(),
+                workspace: cwd,
             });
         }
 
         let timeout = Duration::from_secs(limits.max_duration_secs);
-        let (args, container_name) = self.prepare_stream_args(cmd, cwd, limits, opts);
-        self.stream_docker_run(&args, &container_name, timeout, cwd, cancel, on_line)
+        let (args, container_name) = self.prepare_stream_args(cmd, &cwd, limits, opts);
+        self.stream_docker_run(&args, &container_name, timeout, &cwd, cancel, on_line)
             .await
     }
 
     async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {
         // Write on the host within the workspace; the container mounts it.
+        let path = self.confined_write_path(path)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -446,6 +547,7 @@ impl RuntimeAdapter for DockerRuntime {
     }
 
     async fn read_file(&self, path: &Path) -> Result<String, ClassifiedError> {
+        let path = self.confined_existing_path(path)?;
         tokio::fs::read_to_string(path)
             .await
             .map_err(|e| ClassifiedError::Sandbox(format!("read: {e}")))

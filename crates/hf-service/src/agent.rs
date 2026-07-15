@@ -33,6 +33,14 @@ impl ServiceContainer {
         sink: &dyn EventSink,
     ) -> Result<String, ClassifiedError> {
         let has_session = request.session.is_some() && self.session_manager().is_some();
+        // Validate before inserting into the per-session lock map. Otherwise an
+        // unauthenticated stream of arbitrary ids can retain one mutex per id,
+        // even though no such persisted session exists.
+        if let (Some(id), Some(manager)) = (&request.session, self.session_manager()) {
+            manager.get_session(id).await.map_err(|_| {
+                ClassifiedError::Validation("unknown or invalid chat session".to_owned())
+            })?;
+        }
         let _turn_guard = match &request.session {
             Some(id) if has_session => Some(self.session_turn_lock(id).lock_owned().await),
             _ => None,

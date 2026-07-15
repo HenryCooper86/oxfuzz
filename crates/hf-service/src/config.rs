@@ -6,7 +6,7 @@
 //! never diverges between presentations (AGENTS.md 2.9).
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -344,7 +344,114 @@ pub fn write_config(name: &str, content: &str) -> Result<(), String> {
     toml::from_str::<toml::Value>(content).map_err(|e| format!("invalid TOML: {e}"))?;
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(format!("{section}.toml")), content).map_err(|e| e.to_string())
+    write_private_config_file(&dir.join(format!("{section}.toml")), content)
+}
+
+/// Create and fully sync an owner-only temporary config file.
+fn private_temporary_file(parent: &Path, content: &str) -> Result<tempfile::NamedTempFile, String> {
+    use std::io::Write as _;
+
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".hobot-fuzz-config-")
+        .tempfile_in(parent)
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+    }
+    temporary
+        .write_all(content.as_bytes())
+        .map_err(|error| error.to_string())?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    Ok(temporary)
+}
+
+/// Atomically replace a config file with owner-only permissions.
+///
+/// Creating a fresh inode repairs a pre-existing `0644` file instead of
+/// preserving its public mode during an in-place truncate/write. `persist`
+/// uses the platform's replace operation, including replacement on Windows.
+pub(crate) fn write_private_config_file(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    private_temporary_file(parent, content)?
+        .persist(path)
+        .map_err(|error| error.error.to_string())?;
+    Ok(())
+}
+
+/// Copy a config into place exactly once with private permissions.
+///
+/// A fully written temporary inode is persisted without replacement, making
+/// creation atomic and non-clobbering: a concurrent creator or pre-existing
+/// symlink yields `Ok(false)` instead of being overwritten or followed.
+pub fn copy_private_config_if_missing(source: &Path, destination: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    if !std::fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(format!(
+            "config source is not a regular file: {}",
+            source.display()
+        ));
+    }
+    let content = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match private_temporary_file(parent, &content)?.persist_noclobber(destination) {
+        Ok(_) => Ok(true),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.error.to_string()),
+    }
+}
+
+/// Validate real TOML config files and tighten them to owner-only on Unix.
+/// Example templates contain no live credentials and retain repository modes.
+pub fn secure_config_directory(config_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir).map_err(|error| error.to_string())?;
+    let entries = std::fs::read_dir(config_dir).map_err(|error| error.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension() != Some(std::ffi::OsStr::new("toml"))
+            || path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.ends_with(".example"))
+        {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return Err(format!("config must be a regular file: {}", path.display()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = entry
+                .metadata()
+                .map_err(|error| format!("inspect {}: {error}", path.display()))?
+                .permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&path, permissions)
+                .map_err(|error| format!("secure {}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// List the models from the configured provider pool. Drives model selectors.
@@ -499,7 +606,7 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     toml::from_str::<toml::Value>(&content).map_err(|e| format!("invalid TOML: {e}"))?;
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("providers.toml"), content).map_err(|e| e.to_string())
+    write_private_config_file(&dir.join("providers.toml"), &content)
 }
 
 /// Probe a provider configuration by building it and sending a tiny chat
@@ -676,5 +783,71 @@ cpus = 2\n";
         let value = toml_to_json(bundled_example("engines")).expect("valid toml");
         let engines = value["engines"].as_array().expect("engines array");
         assert!(!engines.is_empty(), "embedded engines example is empty");
+    }
+
+    #[test]
+    fn private_config_write_replaces_existing_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        std::fs::write(&path, "api_key = \"old\"\n").unwrap();
+
+        write_private_config_file(&path, "api_key = \"new\"\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "api_key = \"new\"\n"
+        );
+    }
+
+    #[test]
+    fn private_config_copy_never_clobbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.toml");
+        let destination = dir.path().join("user").join("providers.toml");
+        std::fs::write(&source, "api_key = \"first\"\n").unwrap();
+
+        assert!(copy_private_config_if_missing(&source, &destination).unwrap());
+        std::fs::write(&source, "api_key = \"replacement\"\n").unwrap();
+        assert!(!copy_private_config_if_missing(&source, &destination).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(destination).unwrap(),
+            "api_key = \"first\"\n"
+        );
+    }
+
+    #[test]
+    fn private_config_copy_does_not_require_source_when_destination_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("missing-source.toml");
+        let destination = dir.path().join("providers.toml");
+        std::fs::write(&destination, "api_key = \"existing\"\n").unwrap();
+
+        assert!(!copy_private_config_if_missing(&source, &destination).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(destination).unwrap(),
+            "api_key = \"existing\"\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_config_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.toml");
+        let copied = dir.path().join("copied.toml");
+        let replaced = dir.path().join("replaced.toml");
+        std::fs::write(&source, "api_key = \"source\"\n").unwrap();
+        std::fs::write(&replaced, "api_key = \"old\"\n").unwrap();
+        std::fs::set_permissions(&replaced, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(copy_private_config_if_missing(&source, &copied).unwrap());
+        write_private_config_file(&replaced, "api_key = \"new\"\n").unwrap();
+
+        for path in [copied, replaced] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }
