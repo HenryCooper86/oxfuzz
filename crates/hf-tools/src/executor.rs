@@ -1,10 +1,7 @@
-//! `ToolExecutor`: validates parameters and executes tools through middleware.
-
-use std::sync::Arc;
+//! `ToolExecutor`: validates parameters and executes registered tools.
 
 use tracing::instrument;
 
-use hf_core::hook::{ChainType, MiddlewareContext};
 use hf_core::tool::{ToolInput, ToolOutput};
 use hf_core::types::ToolName;
 
@@ -12,18 +9,14 @@ use crate::error::ToolRegistryError;
 use crate::registry::ToolRegistryImpl;
 use crate::validator::JsonSchemaValidator;
 
-/// Executes tools with parameter validation and middleware integration.
+/// Executes registered tools with parameter validation.
 ///
 /// The executor:
 /// 1. Looks up the tool in the registry.
 /// 2. Validates parameters against its JSON Schema.
-/// 3. Runs the Tool middleware chain (pre-execution).
-/// 4. Executes the tool.
-/// 5. Runs the Tool middleware chain (post-execution).
+/// 3. Executes the tool.
 pub struct ToolExecutor {
     validator: JsonSchemaValidator,
-    /// Optional middleware chain for tool execution (from y-hooks).
-    middleware_chain: Option<Arc<hf_hooks::MiddlewareChain>>,
 }
 
 impl ToolExecutor {
@@ -31,15 +24,6 @@ impl ToolExecutor {
     pub fn new() -> Self {
         Self {
             validator: JsonSchemaValidator::new(),
-            middleware_chain: None,
-        }
-    }
-
-    /// Create a new tool executor with a middleware chain.
-    pub fn with_middleware(chain: Arc<hf_hooks::MiddlewareChain>) -> Self {
-        Self {
-            validator: JsonSchemaValidator::new(),
-            middleware_chain: Some(chain),
         }
     }
 
@@ -71,63 +55,13 @@ impl ToolExecutor {
         self.validator
             .validate(&definition.parameters, &input.arguments)?;
 
-        // 3. Run pre-execution middleware (if configured).
-        if let Some(ref chain) = self.middleware_chain {
-            let mut ctx = MiddlewareContext {
-                chain_type: ChainType::Tool,
-                payload: serde_json::json!({
-                    "tool_name": name.as_str(),
-                    "arguments": input.arguments,
-                    "phase": "pre"
-                }),
-                metadata: serde_json::json!({}),
-                aborted: false,
-                abort_reason: None,
-            };
-
-            chain
-                .execute(&mut ctx)
-                .await
-                .map_err(|e| ToolRegistryError::MiddlewareError {
-                    message: e.to_string(),
-                })?;
-
-            if ctx.aborted {
-                return Err(ToolRegistryError::ExecutionError {
-                    message: format!(
-                        "tool execution aborted by middleware: {}",
-                        ctx.abort_reason.unwrap_or_default()
-                    ),
-                });
-            }
-        }
-
-        // 4. Execute the tool.
+        // 3. Execute the tool.
         let output = tool
             .execute(input)
             .await
             .map_err(|e| ToolRegistryError::ExecutionError {
                 message: e.to_string(),
             })?;
-
-        // 5. Run post-execution middleware (if configured).
-        if let Some(ref chain) = self.middleware_chain {
-            let mut ctx = MiddlewareContext {
-                chain_type: ChainType::Tool,
-                payload: serde_json::json!({
-                    "tool_name": name.as_str(),
-                    "result": output.content,
-                    "phase": "post"
-                }),
-                metadata: serde_json::json!({}),
-                aborted: false,
-                abort_reason: None,
-            };
-
-            if let Err(e) = chain.execute(&mut ctx).await {
-                tracing::warn!(tool = %name.as_str(), error = %e, "post-execution middleware failed");
-            }
-        }
 
         Ok(output)
     }
@@ -141,6 +75,8 @@ impl Default for ToolExecutor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use hf_core::exec::RuntimeCapability;
     use hf_core::tool::{Tool, ToolCategory, ToolDefinition, ToolError, ToolType};
     use hf_core::types::SessionId;
@@ -240,18 +176,6 @@ mod tests {
             .execute(&reg, &ToolName::from_string("nonexistent"), input)
             .await;
         assert!(matches!(result, Err(ToolRegistryError::NotFound { .. })));
-    }
-
-    #[tokio::test]
-    async fn test_executor_with_middleware_chain() {
-        let chain = hf_hooks::MiddlewareChain::new(ChainType::Tool);
-        let reg = make_registry().await;
-        let mut executor = ToolExecutor::with_middleware(Arc::new(chain));
-        let input = make_input(serde_json::json!({"message": "hello"}));
-        let result = executor
-            .execute(&reg, &ToolName::from_string("echo"), input)
-            .await;
-        assert!(result.is_ok());
     }
 
     #[tokio::test]

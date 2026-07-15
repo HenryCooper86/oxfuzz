@@ -5,9 +5,7 @@ members = [
     "crates/hf-provider",
     "crates/hf-session",
     "crates/hf-context",
-    "crates/hf-hooks",
     "crates/hf-tools",
-    "crates/hf-mcp",
     "crates/hf-skills",
     "crates/hf-prompt",
     "crates/hf-storage",
@@ -51,7 +49,6 @@ toml = "0.8"
 
 # Markdown rendering (report export to HTML)
 comrak = { version = "0.29", default-features = false }
-toml_edit = "0.22"
 
 # Error handling
 thiserror = "2"
@@ -92,9 +89,6 @@ reqwest = { version = "0.12", features = ["json", "stream", "socks"] }
 axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
-
-# Unix process management
-nix = { version = "0.29", features = ["signal", "process"] }
 
 # Encoding
 base64 = "0.22"
@@ -138,9 +132,7 @@ hf-core = { path = "crates/hf-core" }
 hf-provider = { path = "crates/hf-provider" }
 hf-session = { path = "crates/hf-session" }
 hf-context = { path = "crates/hf-context" }
-hf-hooks = { path = "crates/hf-hooks" }
 hf-tools = { path = "crates/hf-tools" }
-hf-mcp = { path = "crates/hf-mcp" }
 hf-skills = { path = "crates/hf-skills" }
 hf-prompt = { path = "crates/hf-prompt" }
 hf-storage = { path = "crates/hf-storage" }
