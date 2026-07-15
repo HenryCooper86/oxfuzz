@@ -93,7 +93,7 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
   command surface; `hf-knowledge` + sub-agent pools are still scaffolds).
 - [ ] Remaining scaffold crates: hf-mcp, hf-scheduler, hf-knowledge,
-  hf-skills (thin), hf-hooks, hf-journal, hf-tools (skeleton), hf-test-utils.
+  hf-skills (thin), hf-hooks, hf-tools (skeleton), hf-test-utils.
 
 ## Integrations
 
@@ -204,10 +204,10 @@ but larger or riskier than a drop-in fix.
   silently re-enable previously exhausted work.
 
 ### Unwired subsystems (decide: roadmap or remove)
-- [ ] `hf-mcp` (3.3k LOC) has zero dependents. Most of `hf-journal` (file_history/
-  rollback/middleware/hash) and much of `hf-diagnostics` (subscriber/search/
-  replay/langfuse/cost) are dead. Hook execution/blocking path is never
-  constructed. Per-tool `RateLimiter`, `PriorityScheduler`, `LeaseManager` unused.
+- [ ] `hf-mcp` (3.3k LOC) has zero dependents. Much of `hf-diagnostics`
+  (subscriber/search/replay/langfuse/cost) is dead. Hook execution/blocking path
+  is never constructed. Per-tool `RateLimiter`, `PriorityScheduler`,
+  `LeaseManager` unused.
 - [ ] Knowledge dedup fingerprints only the first 100 chars and keys on a
   never-written `l1_section_index`, so distinct chunks are dropped from RAG.
 - [ ] Cron `timezone` is dropped at evaluation (latent; creation forces UTC).

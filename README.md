@@ -341,14 +341,13 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-knowledge` | Full-text (BM25) retrieval over project source and ingested documents; optional vector search behind the `vector_qdrant` feature. |
 | `hf-diagnostics` | Span-based tracing, cost intelligence, run metrics. |
 | `hf-guardrails` | Permission model, loop detection, risk scoring. |
-| `hf-journal` | WAL-based run journaling for interrupted-run recovery. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, reachability. |
 | `hf-harness` | Harness generation, compile validation, smoke fuzz. |
 | `hf-engine` | `EngineAdapter` adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller. |
 | `hf-crash` | Crash ingestion, dedup, minimization, bug-report drafting. |
 | `hf-corpus` | Corpus management: seed, grow, prune, merge. |
 | `hf-coverage` | Coverage delta tracking, stagnation detection. |
-| `hf-service` | Business logic orchestrating all of the above (`ServiceContainer`). |
+| `hf-service` | Business logic orchestrating all of the above, including durable run recovery (`ServiceContainer`). |
 | `hf-agent` | Service-agnostic reason/act loop and delegation behind the `AgentBackend` port. |
 | `hf-web` | REST API + SSE streaming. |
 | `hf-cli` | CLI + TUI. |
