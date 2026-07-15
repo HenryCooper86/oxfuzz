@@ -320,3 +320,48 @@ async fn schedule_list_without_scheduler_returns_empty_array() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json.as_array().map(Vec::len), Some(0));
 }
+
+#[tokio::test]
+async fn schedule_mutations_report_missing_ids() {
+    allow_open_dev_mode();
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = std::sync::Arc::new(
+        hf_service::scheduler::CampaignScheduler::try_start(
+            hf_service::ServiceContainer::stubbed(),
+            dir.path().join("schedules.json"),
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    let app = hf_web::router::build_with_state(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed())
+            .with_scheduler(scheduler),
+    );
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/schedule/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+
+    let enabled = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/missing/enabled")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::NOT_FOUND);
+}

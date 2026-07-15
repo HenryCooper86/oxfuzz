@@ -44,10 +44,17 @@ use commands::{
 /// # Panics
 /// Panics if the Tauri runtime fails to initialize.
 pub fn run() {
+    let app_state = match build_app_state() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("failed to initialize hobot_fuzz application state: {error}");
+            return;
+        }
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(build_app_state())
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             discover,
             open_folder_dialog,
@@ -230,18 +237,23 @@ pub fn run() {
 /// a Docker (or stub) runtime, an LLM provider pool from the environment, and
 /// the `HF_DB_PATH` persistence store -- the same construction the CLI and web
 /// API use.
-fn build_app_state() -> AppState {
-    pin_user_data_dirs().expect("prepare private desktop config and data directories");
+fn build_app_state() -> Result<AppState, String> {
+    pin_user_data_dirs()?;
     tauri::async_runtime::block_on(async {
         let container = hf_service::ServiceContainer::bootstrap().await;
         // The scheduler runs campaigns headlessly; persist schedules under the
         // user data dir so they survive restarts.
         let store_path = hf_service::init::user_app_dir().join("schedules.json");
         let scheduler = std::sync::Arc::new(
-            hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path, None)
-                .await,
+            hf_service::scheduler::CampaignScheduler::try_start(
+                container.clone(),
+                store_path,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
         );
-        AppState::new(container, scheduler)
+        Ok(AppState::new(container, scheduler))
     })
 }
 
