@@ -81,18 +81,36 @@ fn code_normalize(s: &str) -> String {
 /// # Errors
 /// Returns `ClassifiedError` if the project tree cannot be walked.
 pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> {
-    let chunker = ChunkingStrategy::new(KnowledgeConfig::default());
-    // Pure keyword (BM25) retrieval -- no embeddings here -- with the similarity
-    // threshold disabled, since raw BM25 scores are not on the 0..1 scale the
-    // default 0.65 threshold assumes (which would discard every keyword hit).
-    let mut retriever = HybridRetriever::with_config(
-        AutoTokenizer::new(),
-        RetrievalConfig {
-            strategy: SearchStrategy::KeywordSearch,
-            min_similarity_threshold: 0.0,
-            ..Default::default()
-        },
-    );
+    Ok(index_project_with_config(
+        project,
+        crate::config::effective_knowledge_config(),
+    ))
+}
+
+fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
+    let strategy = match config
+        .retrieval_strategy
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "semantic" => SearchStrategy::SemanticSearch,
+        "keyword" => SearchStrategy::KeywordSearch,
+        _ => SearchStrategy::Hybrid,
+    };
+    RetrievalConfig {
+        strategy,
+        min_similarity_threshold: config.min_similarity_threshold,
+        bm25_weight: config.bm25_weight,
+        vector_weight: config.vector_weight,
+        ..Default::default()
+    }
+}
+
+fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> KnowledgeStats {
+    let retrieval = retrieval_config(&config);
+    let chunker = ChunkingStrategy::new(config);
+    let mut retriever = HybridRetriever::with_config(AutoTokenizer::new(), retrieval);
     let mut originals: HashMap<String, String> = HashMap::new();
     let mut files = 0usize;
     let mut chunks = 0usize;
@@ -157,7 +175,7 @@ pub fn index_project(project: &Path) -> Result<KnowledgeStats, ClassifiedError> 
     if let Ok(mut map) = cache().lock() {
         map.insert(key, index);
     }
-    Ok(KnowledgeStats { files, chunks })
+    KnowledgeStats { files, chunks }
 }
 
 /// The per-project directory holding ingested documents (converted to Markdown
@@ -360,6 +378,48 @@ mod tests {
         assert!(
             !hits.is_empty(),
             "on-demand index should surface the symbol"
+        );
+    }
+
+    #[test]
+    fn retrieval_config_applies_strategy_threshold_and_weights() {
+        let knowledge = KnowledgeConfig {
+            retrieval_strategy: "semantic".to_owned(),
+            min_similarity_threshold: 0.42,
+            bm25_weight: 2.5,
+            vector_weight: 0.25,
+            ..KnowledgeConfig::default()
+        };
+
+        let retrieval = retrieval_config(&knowledge);
+
+        assert_eq!(retrieval.strategy, SearchStrategy::SemanticSearch);
+        assert!((retrieval.min_similarity_threshold - 0.42).abs() < f64::EPSILON);
+        assert!((retrieval.bm25_weight - 2.5).abs() < f64::EPSILON);
+        assert!((retrieval.vector_weight - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn configured_chunk_limit_reaches_project_index() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("limited.c"),
+            "alpha hidden_token_that_must_be_truncated",
+        )
+        .unwrap();
+        let config = KnowledgeConfig {
+            l2_max_tokens: 2,
+            retrieval_strategy: "keyword".to_owned(),
+            min_similarity_threshold: 0.0,
+            ..KnowledgeConfig::default()
+        };
+
+        index_project_with_config(dir.path(), config);
+
+        assert!(!search_project(dir.path(), "alpha", 10).is_empty());
+        assert!(
+            search_project(dir.path(), "hidden_token_that_must_be_truncated", 10).is_empty(),
+            "configured L2 token budget was ignored"
         );
     }
 

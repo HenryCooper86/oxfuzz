@@ -24,3 +24,24 @@ auto_revert_threshold_pct = 20.0
 # with permissive guardrails and would otherwise mutate the harness unattended.
 # Override with HF_AUTO_REVERT_NOTIFY_ONLY.
 auto_revert_notify_only = false
+
+# Project knowledge indexing and retrieval. Only settings consumed by the
+# production L2 project index are exposed here.
+[knowledge]
+l2_max_tokens = 450
+min_similarity_threshold = 0.65
+retrieval_strategy = "hybrid" # hybrid | keyword | semantic
+bm25_weight = 1.0
+vector_weight = 1.0
+
+# Session tree limits. Additional historical SessionConfig fields were removed
+# because no production lifecycle consumed them.
+[session]
+max_depth = 10
+
+# Background campaign scheduling. A zero history limit means unlimited.
+[scheduler]
+max_concurrent_executions = 10
+default_missed_policy = "skip" # catch_up | skip | backfill
+default_concurrency_policy = "skip_if_running" # allow | skip_if_running | queue | cancel_previous
+history_retention_limit = 100

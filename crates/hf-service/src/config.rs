@@ -19,6 +19,161 @@ use crate::init::config_dir;
 /// settings APIs from accepting files that have no runtime effect.
 pub const CONFIG_SECTIONS: &[&str] = &["hobot-fuzz", "providers", "defectdojo", "issue_tracker"];
 
+/// Knowledge settings that the production project index currently consumes.
+///
+/// Keeping this narrower than `hf_knowledge::KnowledgeConfig` prevents the
+/// global config from advertising embedding and multi-resolution controls that
+/// this service index does not execute.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct KnowledgeRuntimeConfig {
+    l2_max_tokens: u32,
+    min_similarity_threshold: f64,
+    retrieval_strategy: String,
+    bm25_weight: f64,
+    vector_weight: f64,
+}
+
+impl Default for KnowledgeRuntimeConfig {
+    fn default() -> Self {
+        let defaults = hf_knowledge::config::KnowledgeConfig::default();
+        Self {
+            l2_max_tokens: defaults.l2_max_tokens,
+            min_similarity_threshold: defaults.min_similarity_threshold,
+            retrieval_strategy: defaults.retrieval_strategy,
+            bm25_weight: defaults.bm25_weight,
+            vector_weight: defaults.vector_weight,
+        }
+    }
+}
+
+impl KnowledgeRuntimeConfig {
+    fn effective(&self) -> hf_knowledge::config::KnowledgeConfig {
+        hf_knowledge::config::KnowledgeConfig {
+            l2_max_tokens: self.l2_max_tokens,
+            min_similarity_threshold: self.min_similarity_threshold,
+            retrieval_strategy: self.retrieval_strategy.clone(),
+            bm25_weight: self.bm25_weight,
+            vector_weight: self.vector_weight,
+            ..Default::default()
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.l2_max_tokens == 0 {
+            return Err("knowledge.l2_max_tokens must be greater than zero".to_owned());
+        }
+        if !self.min_similarity_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.min_similarity_threshold)
+        {
+            return Err(
+                "knowledge.min_similarity_threshold must be finite and within 0..=1".to_owned(),
+            );
+        }
+        if !matches!(
+            self.retrieval_strategy.trim().to_ascii_lowercase().as_str(),
+            "hybrid" | "keyword" | "semantic"
+        ) {
+            return Err(
+                "knowledge.retrieval_strategy must be hybrid, keyword, or semantic".to_owned(),
+            );
+        }
+        for (name, value) in [
+            ("bm25_weight", self.bm25_weight),
+            ("vector_weight", self.vector_weight),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "knowledge.{name} must be a finite, non-negative value"
+                ));
+            }
+        }
+        if self.bm25_weight == 0.0 && self.vector_weight == 0.0 {
+            return Err("knowledge retrieval weights cannot both be zero".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Typed global settings whose values are consumed during service bootstrap.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HobotFuzzRuntimeConfig {
+    coverage_stagnation_secs: u64,
+    auto_revert_enabled: bool,
+    auto_revert_threshold_pct: f64,
+    auto_revert_notify_only: bool,
+    knowledge: KnowledgeRuntimeConfig,
+    session: hf_session::SessionConfig,
+    scheduler: hf_scheduler::SchedulerConfig,
+}
+
+impl Default for HobotFuzzRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            coverage_stagnation_secs: DEFAULT_STAGNATION_THRESHOLD_SECS,
+            auto_revert_enabled: false,
+            auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
+            auto_revert_notify_only: false,
+            knowledge: KnowledgeRuntimeConfig::default(),
+            session: hf_session::SessionConfig::default(),
+            scheduler: hf_scheduler::SchedulerConfig::default(),
+        }
+    }
+}
+
+impl HobotFuzzRuntimeConfig {
+    fn validate(&self) -> Result<(), String> {
+        if !valid_auto_revert_threshold(self.auto_revert_threshold_pct) {
+            return Err("auto_revert_threshold_pct must be within (0, 100]".to_owned());
+        }
+        self.knowledge.validate()?;
+        if self.session.max_depth == 0 {
+            return Err("session.max_depth must be greater than zero".to_owned());
+        }
+        if self.scheduler.max_concurrent_executions == 0 {
+            return Err("scheduler.max_concurrent_executions must be greater than zero".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn parse_hobot_fuzz_runtime_config(raw: &str) -> Result<HobotFuzzRuntimeConfig, String> {
+    let config: HobotFuzzRuntimeConfig =
+        toml::from_str(raw).map_err(|error| format!("invalid hobot-fuzz config: {error}"))?;
+    config.validate()?;
+    Ok(config)
+}
+
+fn effective_runtime_config() -> HobotFuzzRuntimeConfig {
+    let raw = read_config("hobot-fuzz").unwrap_or_default();
+    match parse_hobot_fuzz_runtime_config(&raw) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "invalid hobot-fuzz runtime config; using safe defaults");
+            HobotFuzzRuntimeConfig::default()
+        }
+    }
+}
+
+/// Resolve the knowledge configuration applied to project indexing/retrieval.
+#[must_use]
+pub fn effective_knowledge_config() -> hf_knowledge::config::KnowledgeConfig {
+    effective_runtime_config().knowledge.effective()
+}
+
+/// Resolve the session configuration applied when building `SessionManager`.
+#[must_use]
+pub fn effective_session_config() -> hf_session::SessionConfig {
+    effective_runtime_config().session
+}
+
+/// Resolve the scheduler configuration applied at campaign scheduler startup.
+#[must_use]
+pub fn effective_scheduler_config() -> hf_scheduler::SchedulerConfig {
+    effective_runtime_config().scheduler
+}
+
 /// One editable config section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigSection {
@@ -329,6 +484,9 @@ fn strip_nulls(value: &mut serde_json::Value) {
 pub fn write_config(name: &str, content: &str) -> Result<(), String> {
     let section = validated_section(name)?;
     toml::from_str::<toml::Value>(content).map_err(|e| format!("invalid TOML: {e}"))?;
+    if section == "hobot-fuzz" {
+        parse_hobot_fuzz_runtime_config(content)?;
+    }
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     write_private_config_file(&dir.join(format!("{section}.toml")), content)
@@ -819,6 +977,72 @@ cpus = 2\n";
     }
 
     #[test]
+    fn runtime_subsystem_config_is_deserialized_and_validated() {
+        let config = parse_hobot_fuzz_runtime_config(
+            r#"
+            coverage_stagnation_secs = 90
+
+            [knowledge]
+            l2_max_tokens = 123
+            retrieval_strategy = "keyword"
+            bm25_weight = 2.5
+            vector_weight = 0.25
+
+            [session]
+            max_depth = 4
+
+            [scheduler]
+            max_concurrent_executions = 3
+            default_missed_policy = "catch_up"
+            default_concurrency_policy = "allow"
+            history_retention_limit = 17
+            "#,
+        )
+        .expect("runtime config should parse");
+
+        assert_eq!(config.knowledge.l2_max_tokens, 123);
+        assert_eq!(config.knowledge.retrieval_strategy, "keyword");
+        assert!((config.knowledge.bm25_weight - 2.5).abs() < f64::EPSILON);
+        assert_eq!(config.session.max_depth, 4);
+        assert_eq!(config.scheduler.max_concurrent_executions, 3);
+        assert_eq!(
+            config.scheduler.default_missed_policy,
+            hf_scheduler::MissedPolicy::CatchUp
+        );
+        assert_eq!(
+            config.scheduler.default_concurrency_policy,
+            hf_scheduler::ConcurrencyPolicy::Allow
+        );
+        assert_eq!(config.scheduler.history_retention_limit, 17);
+    }
+
+    #[test]
+    fn hobot_config_rejects_removed_session_knobs() {
+        let error = parse_hobot_fuzz_runtime_config(
+            "[session]\nmax_depth = 4\ntitle_summarize_interval = 3\n",
+        )
+        .expect_err("removed no-op session option should be rejected");
+
+        assert!(error.contains("title_summarize_interval"));
+    }
+
+    #[test]
+    fn hobot_config_rejects_invalid_runtime_values() {
+        for raw in [
+            "[knowledge]\nretrieval_strategy = \"unknown\"\n",
+            "[knowledge]\nbm25_weight = -1.0\n",
+            "[knowledge]\nvector_weight = nan\n",
+            "[scheduler]\nmax_concurrent_executions = 0\n",
+            "[session]\nmax_depth = 0\n",
+        ] {
+            assert!(
+                parse_hobot_fuzz_runtime_config(raw).is_err(),
+                "invalid runtime config was accepted: {raw}"
+            );
+        }
+    }
+
+    #[test]
     fn every_section_has_a_valid_embedded_example() {
         // The embedded fallback is what an installed app (unseeded config dir)
         // renders, so each section must yield non-empty, valid TOML.
@@ -863,6 +1087,9 @@ cpus = 2\n";
             "auto_revert_notify_only",
             "auto_revert_threshold_pct",
             "coverage_stagnation_secs",
+            "knowledge",
+            "scheduler",
+            "session",
         ];
 
         for (label, raw) in [
