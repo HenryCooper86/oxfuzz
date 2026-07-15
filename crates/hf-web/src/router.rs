@@ -1136,6 +1136,8 @@ async fn chat_send(
 struct ChatAgentRequest {
     message: String,
     #[serde(default)]
+    display_message: Option<String>,
+    #[serde(default)]
     project: Option<String>,
     #[serde(default)]
     agent_id: Option<String>,
@@ -1174,6 +1176,7 @@ async fn chat_agent(
                 session,
                 history_fallback,
                 message: req.message,
+                display_message: req.display_message,
             },
             &hf_service::NullSink,
         )
@@ -1206,8 +1209,13 @@ struct CreateSessionRequest {
 async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
-) -> Json<Option<String>> {
-    Json(state.container.create_chat_session(req.title).await)
+) -> ApiResult<Option<String>> {
+    let id = state
+        .container
+        .create_chat_session(req.title)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(id))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1218,25 +1226,40 @@ struct SessionRequest {
 async fn chat_history(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<Message>> {
+) -> ApiResult<Vec<Message>> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_history(&id).await)
+    let history = state
+        .container
+        .chat_history(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(history))
 }
 
 async fn delete_session(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<bool> {
+) -> ApiResult<bool> {
     let id = SessionId(req.session_id);
-    Json(state.container.delete_chat_session(&id).await)
+    let deleted = state
+        .container
+        .delete_chat_session(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(deleted))
 }
 
 async fn chat_rollback(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<usize> {
+) -> ApiResult<usize> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_rollback_last(&id).await)
+    let removed = state
+        .container
+        .chat_rollback_last(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(removed))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1248,22 +1271,27 @@ struct RollbackToRequest {
 async fn chat_rollback_to(
     State(state): State<AppState>,
     Json(req): Json<RollbackToRequest>,
-) -> Json<usize> {
+) -> ApiResult<usize> {
     let id = SessionId(req.session_id);
-    Json(
-        state
-            .container
-            .chat_rollback_to(&id, &req.checkpoint_id)
-            .await,
-    )
+    let removed = state
+        .container
+        .chat_rollback_to(&id, &req.checkpoint_id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(removed))
 }
 
 async fn chat_checkpoints(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<hf_service::checkpoints::CheckpointView>> {
+) -> ApiResult<Vec<hf_service::checkpoints::CheckpointView>> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_checkpoints(&id).await)
+    let checkpoints = state
+        .container
+        .chat_checkpoints(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(checkpoints))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1277,26 +1305,31 @@ struct BranchRequest {
 async fn chat_branch(
     State(state): State<AppState>,
     Json(req): Json<BranchRequest>,
-) -> Json<Option<String>> {
+) -> ApiResult<String> {
     let id = SessionId(req.session_id);
-    Json(
-        state
-            .container
-            .chat_branch(
-                &id,
-                req.fork_message_count,
-                req.title.filter(|t| !t.is_empty()),
-            )
-            .await,
-    )
+    let branch = state
+        .container
+        .chat_branch(
+            &id,
+            req.fork_message_count,
+            req.title.filter(|t| !t.is_empty()),
+        )
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(branch))
 }
 
 async fn chat_branches(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<hf_service::checkpoints::BranchView>> {
+) -> ApiResult<Vec<hf_service::checkpoints::BranchView>> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_branches(&id).await)
+    let branches = state
+        .container
+        .chat_branches(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(branches))
 }
 
 // -- Knowledge base --------------------------------------------------------

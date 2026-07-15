@@ -49,7 +49,34 @@ validated before transcript file I/O, and the session metadata row must exist
 before the service loads model context or retains a per-session turn lock. Raw
 session strings never become filesystem paths outside the transcript store.
 
-### 4.1 Coverage Regression Rollback
+### 4.1 Persistent Chat Durability
+
+Every mutation of a persistent conversation is serialized through one
+per-session service lock. This includes model turns, rollback, branching, and
+deletion; presentation layers never mutate chat state directly.
+
+A completed turn is visible only after its user and assistant messages have
+been written to both the display and context transcripts, session metadata has
+been updated, and its rollback checkpoint has been persisted. Transcript
+dual-writes use pre-mutation counts for compensating truncation. If any step
+fails, the service returns an error and restores the prior transcript counts;
+it never returns an assistant answer as though persistence succeeded.
+
+Rollback snapshots both transcripts before changing them. A failure in the
+second transcript, metadata update, or checkpoint invalidation triggers a
+best-effort restoration of the pre-rollback transcript and metadata state and
+is surfaced to the caller. Branch creation copies through the session manager;
+a failed copy cleans up the incomplete child instead of returning its id.
+Deletion clears both transcripts before deleting or tombstoning metadata, so a
+reported success cannot leave a live transcript behind.
+
+After any successful persistent mutation, presentation layers reload the
+canonical display transcript. Optimistic tool-progress entries are transient
+and are not used to calculate rollback or branch indices. A cached session id
+that no longer exists is discarded and replaced with a newly-created session
+instead of silently switching to frontend-only history.
+
+### 4.2 Coverage Regression Rollback
 
 Automatic harness rollback is evidence-gated. A completed run may be compared
 only with an earlier successful run for the same target whose engine, requested
@@ -93,5 +120,11 @@ manifest tests enforce this boundary and prevent a service/agent cycle.
   a newer run that belongs to another target in the same project.
 - Security regression: malformed session ids cannot escape transcript storage,
   and unknown sessions are rejected before model invocation.
+- Durability regression: failed transcript, metadata, checkpoint, rollback,
+  branch, and delete mutations return errors without reporting partial success.
+- Concurrency regression: every persistent mutation for one session shares a
+  lock, while independent sessions remain concurrent.
+- Presentation regression: successful turns, rollback, and branching reload the
+  canonical display transcript instead of slicing optimistic local messages.
 - Contract: presentation manifests contain no direct domain, runtime, or agent
   dependencies.

@@ -1398,7 +1398,11 @@ pub fn delete_agent(id: String) -> Result<(), String> {
 pub async fn create_session(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Option<String>, String> {
-    Ok(state.container.create_chat_session(None).await)
+    state
+        .container
+        .create_chat_session(None)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Roll back the most recent chat turn for a session, truncating the persisted
@@ -1409,7 +1413,11 @@ pub async fn chat_rollback(
     session_id: String,
 ) -> Result<usize, String> {
     let id = SessionId(session_id);
-    Ok(state.container.chat_rollback_last(&id).await)
+    state
+        .container
+        .chat_rollback_last(&id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// List the per-turn checkpoints for a chat session (the rollback picker).
@@ -1419,7 +1427,11 @@ pub async fn chat_checkpoints(
     session_id: String,
 ) -> Result<Vec<hf_service::checkpoints::CheckpointView>, String> {
     let id = SessionId(session_id);
-    Ok(state.container.chat_checkpoints(&id).await)
+    state
+        .container
+        .chat_checkpoints(&id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Roll back a chat session to a specific checkpoint. Returns messages removed.
@@ -1430,7 +1442,11 @@ pub async fn chat_rollback_to(
     checkpoint_id: String,
 ) -> Result<usize, String> {
     let id = SessionId(session_id);
-    Ok(state.container.chat_rollback_to(&id, &checkpoint_id).await)
+    state
+        .container
+        .chat_rollback_to(&id, &checkpoint_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Wire string for a message role.
@@ -1451,12 +1467,13 @@ pub async fn chat_branch(
     session_id: String,
     fork_count: u32,
     title: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     let id = SessionId(session_id);
-    Ok(state
+    state
         .container
         .chat_branch(&id, fork_count, title.filter(|t| !t.is_empty()))
-        .await)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Delete a chat session and its transcript (the "clear history" action).
@@ -1467,7 +1484,11 @@ pub async fn delete_session(
     session_id: String,
 ) -> Result<bool, String> {
     let id = SessionId(session_id);
-    Ok(state.container.delete_chat_session(&id).await)
+    state
+        .container
+        .delete_chat_session(&id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Load a session's transcript as chat turns (for switching branches).
@@ -1477,10 +1498,12 @@ pub async fn chat_history(
     session_id: String,
 ) -> Result<Vec<ChatTurn>, String> {
     let id = SessionId(session_id);
-    Ok(state
+    let messages = state
         .container
         .chat_history(&id)
         .await
+        .map_err(|error| error.to_string())?;
+    Ok(messages
         .into_iter()
         .map(|m| ChatTurn {
             role: role_to_str(m.role).to_owned(),
@@ -1509,7 +1532,11 @@ pub async fn chat_branches(
     session_id: String,
 ) -> Result<Vec<hf_service::checkpoints::BranchView>, String> {
     let id = SessionId(session_id);
-    Ok(state.container.chat_branches(&id).await)
+    state
+        .container
+        .chat_branches(&id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Run an autonomous agent turn over the active project.
@@ -1526,6 +1553,7 @@ pub async fn chat_agent(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
     message: String,
+    display_message: Option<String>,
     project: Option<String>,
     history: Option<Vec<ChatTurn>>,
     session_id: Option<String>,
@@ -1568,6 +1596,7 @@ pub async fn chat_agent(
                 session,
                 history_fallback,
                 message,
+                display_message,
             },
             &sink,
         )
