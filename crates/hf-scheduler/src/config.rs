@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for the scheduler module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
     /// Maximum number of concurrent schedule executions.
     #[serde(default = "default_max_concurrent")]

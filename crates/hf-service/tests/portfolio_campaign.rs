@@ -39,7 +39,7 @@ async fn a_portfolio_campaign_has_no_fixed_target_and_starts_at_zero_progress() 
     let trigger = hf_service::scheduler::parse_trigger("interval", "3600").unwrap();
     scheduler.create("nightly sweep", &params, trigger).await;
 
-    let views = scheduler.list_views().await;
+    let views = scheduler.list_views().await.unwrap();
     assert_eq!(views.len(), 1);
     let v = &views[0];
     assert!(v.target.is_none(), "portfolio campaign has no fixed target");
@@ -72,9 +72,9 @@ async fn deleting_a_campaign_clears_it_from_the_list() {
             hf_service::scheduler::parse_trigger("interval", "60").unwrap(),
         )
         .await;
-    assert_eq!(scheduler.list_views().await.len(), 1);
+    assert_eq!(scheduler.list_views().await.unwrap().len(), 1);
     assert!(scheduler.remove(&sched.id).await);
-    assert!(scheduler.list_views().await.is_empty());
+    assert!(scheduler.list_views().await.unwrap().is_empty());
     // A bogus id is not a success.
     assert!(!scheduler.remove("no-such-id").await);
 }

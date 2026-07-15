@@ -13,6 +13,7 @@ pub mod campaign_state;
 pub mod checkpoints;
 pub mod config;
 pub mod container;
+mod crash_minimization;
 pub mod defectdojo;
 pub mod defectdojo_lifecycle;
 pub mod diagnostics;
@@ -33,6 +34,7 @@ pub use hf_agent::{
     AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
 };
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
+pub use hf_core::error::ClassifiedError;
 pub use hf_core::runtime::CommandTermination;
 pub use hf_core::target::{TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, Role, SessionId};
@@ -49,8 +51,9 @@ pub use container::{
     provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,
     workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot, ArtifactSummary, CompileOutcome,
     CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome, ProviderSnapshot,
-    RegressionResult, RunHistoryItem, RunSummary, SchedulableTarget, SeedEntry, ServiceContainer,
-    SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
+    RegressionResult, RunCancelOutcome, RunControlStatus, RunHistoryItem, RunLifecycleStatus,
+    RunSummary, SchedulableTarget, SeedEntry, ServiceContainer, SystemSnapshot, SyzkallerRunOpts,
+    SyzkallerSummary,
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};

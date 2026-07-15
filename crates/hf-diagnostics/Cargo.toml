@@ -3,15 +3,9 @@ name = "hf-diagnostics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Span-based tracing, cost intelligence, run replay"
-
-[features]
-default = []
-langfuse = ["dep:reqwest", "dep:base64", "dep:regex", "dep:tokio-util"]
+description = "Persistent LLM trace and cost evidence"
 
 [dependencies]
-hf-core = { workspace = true }
-hf-storage = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,15 +13,8 @@ thiserror = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-reqwest = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true }
-regex = { workspace = true, optional = true }
-tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

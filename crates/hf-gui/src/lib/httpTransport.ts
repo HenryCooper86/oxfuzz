@@ -1,10 +1,19 @@
 // HTTP transport for web mode -- routes invoke() to REST endpoints.
 
-import type { Transport, UnlistenFn } from "./transport";
+import type {
+  FuzzerRunResult,
+  RunControlStatus,
+  RunLifecycleStatus,
+  RunStartResponse,
+  RunStatusEvent,
+  Transport,
+  UnlistenFn,
+} from "./transport";
 import { SseAdapter } from "./sseAdapter";
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8081";
 const DEFAULT_API_TOKEN = import.meta.env.VITE_API_TOKEN;
+const RUN_STATUS_POLL_MS = 1000;
 
 interface HttpTransportOptions {
   baseUrl?: string;
@@ -25,6 +34,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   run_coverage_series: { method: "POST", path: "/runs/coverage" },
   run_harness_source: { method: "POST", path: "/runs/harness-source" },
   revert_harness_from_run: { method: "POST", path: "/runs/revert-harness" },
+  run_fuzzer: { method: "POST", path: "/runs/start" },
   run_status: { method: "GET", path: "/runs/{run_id}/status" },
   cancel_run_by_id: { method: "POST", path: "/runs/{run_id}/cancel" },
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },
@@ -159,16 +169,182 @@ function buildRequest(
   return { url: `${baseUrl}${path}${suffix ? `?${suffix}` : ""}`, body };
 }
 
+interface RunHistorySnapshot {
+  id: string;
+  status: string;
+  crashes: number;
+  edges: number | null;
+  execs: number | null;
+}
+
+function runStartArgs(args?: Record<string, unknown>): Record<string, unknown> {
+  const mapped = { ...(args ?? {}) };
+  if ("duration" in mapped) {
+    mapped.durationSecs = mapped.duration;
+    delete mapped.duration;
+  }
+  return mapped;
+}
+
+function serviceRunId(start: RunStartResponse): string {
+  if (typeof start.run_id !== "string" || start.run_id.trim().length === 0) {
+    throw new Error("POST /runs/start did not return a service-owned run id");
+  }
+  return start.run_id;
+}
+
+function isTerminalStatus(status: RunLifecycleStatus): boolean {
+  return status === "done" || status === "failed" || status === "cancelled";
+}
+
+function isAttributedRunEvent(payload: unknown, runId: string | null): boolean {
+  if (!runId || !payload || typeof payload !== "object" || !("run_id" in payload)) {
+    return false;
+  }
+  return (payload as { run_id?: unknown }).run_id === runId;
+}
+
+function finiteMetric(value: number | null): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 export function createHttpTransport(options: HttpTransportOptions = {}): Transport {
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   const token = options.token ?? DEFAULT_API_TOKEN;
   const sse = new SseAdapter(baseUrl, token);
+  let activeRunId: string | null = null;
+  let pendingRunStart: Promise<RunStartResponse> | null = null;
+
+  async function request<T>(
+    endpoint: { method: string; path: string },
+    args?: Record<string, unknown>,
+  ): Promise<T> {
+    const { url, body } = buildRequest(baseUrl, endpoint, args);
+    const headers: Record<string, string> = {};
+    if (endpoint.method !== "GET") headers["content-type"] = "application/json";
+    if (token) headers.authorization = `Bearer ${token}`;
+    const response = await fetch(url, {
+      method: endpoint.method,
+      headers,
+      body: endpoint.method === "GET" ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);
+    }
+    return response.json() as Promise<T>;
+  }
+
+  function waitForTerminalStatus(runId: string): Promise<RunLifecycleStatus> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let pollInFlight = false;
+      let pollTimer: ReturnType<typeof setInterval> | null = null;
+      let unlisten: UnlistenFn = () => {};
+
+      const finish = (status: RunLifecycleStatus) => {
+        if (settled || !isTerminalStatus(status)) return;
+        settled = true;
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = null;
+        unlisten();
+        resolve(status);
+      };
+
+      unlisten = sse.listen<RunStatusEvent>("run:status", (event) => {
+        if (event.payload.run_id === runId) finish(event.payload.status);
+      });
+
+      const poll = async () => {
+        if (settled || pollInFlight) return;
+        pollInFlight = true;
+        try {
+          const snapshot = await request<RunControlStatus>(COMMAND_MAP.run_status, {
+            runId,
+          });
+          if (snapshot.run_id === runId) finish(snapshot.status);
+        } catch {
+          // SSE remains authoritative while a transient status read is
+          // unavailable. The next bounded poll retries without detaching from
+          // the service-owned run.
+        } finally {
+          pollInFlight = false;
+        }
+      };
+      void poll();
+      pollTimer = setInterval(() => void poll(), RUN_STATUS_POLL_MS);
+    });
+  }
+
+  async function runFuzzer(args?: Record<string, unknown>): Promise<FuzzerRunResult> {
+    if (activeRunId || pendingRunStart) {
+      throw new Error("A browser fuzz run is already active");
+    }
+
+    const startPromise = request<RunStartResponse>(
+      COMMAND_MAP.run_fuzzer,
+      runStartArgs(args),
+    );
+    pendingRunStart = startPromise;
+    let start: RunStartResponse;
+    try {
+      start = await startPromise;
+    } finally {
+      if (pendingRunStart === startPromise) pendingRunStart = null;
+    }
+
+    const runId = serviceRunId(start);
+    activeRunId = runId;
+    try {
+      const status = await waitForTerminalStatus(runId);
+      if (status === "failed") {
+        throw new Error(`Fuzz run ${runId} failed`);
+      }
+      const history = await request<RunHistorySnapshot[]>(COMMAND_MAP.run_history, {
+        project: args?.project,
+      });
+      const completed = history.find((run) => run.id === runId);
+      if (!completed) {
+        throw new Error(`Run history does not contain service-owned run ${runId}`);
+      }
+      return {
+        run_id: runId,
+        edges: finiteMetric(completed.edges),
+        crashes: finiteMetric(completed.crashes),
+        execs: finiteMetric(completed.execs),
+        exit_code: null,
+        termination: status === "cancelled" ? "cancelled" : "completed",
+        stagnation: null,
+        auto_revert: null,
+      };
+    } finally {
+      if (activeRunId === runId) activeRunId = null;
+    }
+  }
+
+  async function cancelActiveRun(): Promise<number> {
+    let runId = activeRunId;
+    if (!runId && pendingRunStart) {
+      runId = serviceRunId(await pendingRunStart);
+    }
+    if (!runId) return 0;
+    const response = await request<{ run_id: string; accepted: boolean }>(
+      COMMAND_MAP.cancel_run_by_id,
+      { runId },
+    );
+    if (response.run_id !== runId) {
+      throw new Error("Run cancellation response did not match the active service-owned run id");
+    }
+    return response.accepted ? 1 : 0;
+  }
+
   return {
     async invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T> {
+      if (command === "run_fuzzer") return runFuzzer(args) as Promise<T>;
+      if (command === "cancel_run") return cancelActiveRun() as Promise<T>;
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
-        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "run_fuzzer", "run_syzkaller", "cancel_run", "save_report"].includes(command)) {
+        if (["show_window", "heartbeat_pong", "toggle_devtools", "open_folder_dialog", "open_file_dialog", "run_syzkaller", "save_report"].includes(command)) {
           if (command === "open_folder_dialog") {
             // Web fallback: use <input type="file" webkitdirectory>
             return new Promise((resolve) => {
@@ -195,21 +371,14 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         // already `.catch()` this and degrade to an empty/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
-      const { url, body } = buildRequest(baseUrl, endpoint, args);
-      const headers: Record<string, string> = {};
-      if (endpoint.method !== "GET") headers["content-type"] = "application/json";
-      if (token) headers.authorization = `Bearer ${token}`;
-      const response = await fetch(url, {
-        method: endpoint.method,
-        headers,
-        body: endpoint.method === "GET" ? undefined : JSON.stringify(body),
-      });
-      if (!response.ok) {
-        throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);
-      }
-      return response.json() as Promise<T>;
+      return request<T>(endpoint, args);
     },
     async listen<T = unknown>(event: string, callback: (event: { payload: T }) => void): Promise<UnlistenFn> {
+      if (event === "run:progress" || event === "run:status") {
+        return sse.listen<T>(event, (message) => {
+          if (isAttributedRunEvent(message.payload, activeRunId)) callback(message);
+        });
+      }
       return sse.listen(event, callback);
     },
   };

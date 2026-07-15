@@ -159,7 +159,7 @@ async fn create_session_without_db_returns_null() {
 #[tokio::test]
 async fn chat_history_without_db_reports_persistence_error() {
     let (status, json) = post_json("/chat/history", serde_json::json!({"session_id": "s1"})).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["error"]
         .as_str()
         .is_some_and(|error| error.contains("chat persistence")));
@@ -319,4 +319,49 @@ async fn schedule_list_without_scheduler_returns_empty_array() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn schedule_mutations_report_missing_ids() {
+    allow_open_dev_mode();
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = std::sync::Arc::new(
+        hf_service::scheduler::CampaignScheduler::try_start(
+            hf_service::ServiceContainer::stubbed(),
+            dir.path().join("schedules.json"),
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    let app = hf_web::router::build_with_state(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed())
+            .with_scheduler(scheduler),
+    );
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/schedule/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+
+    let enabled = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/missing/enabled")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::NOT_FOUND);
 }

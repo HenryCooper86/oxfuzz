@@ -41,6 +41,20 @@ pub struct Crash {
 ## 4. Safety
 
 - Crash inputs are untrusted; minimization runs in sandbox.
+- Minimization accepts only a bounded regular crash artifact owned by the exact
+  persisted run. The original run output remains immutable. Derived artifacts
+  are written below `runs/<run-id>/triage/minimized` through a fresh partial
+  file and atomically published only after validation.
+- The primary workspace, staged harness, and original crash input are mounted
+  read-only. Only the run-owned minimization directory is writable; networking
+  remains disabled and the command is constructed as argv without a shell.
+- A triage pass attempts at most 20 unique crashes. Only AFL++ and libFuzzer
+  use their native minimizers; unsupported engines retain the original input
+  and `minimized = false`.
+- `minimized = true` means the sandbox completed with status zero and produced
+  a non-empty regular file within the crash-input size ceiling. Timeout,
+  cancellation, non-zero exit, missing/oversized output, or atomic publication
+  failure leaves the original crash unchanged and is surfaced in diagnostics.
 - Ingestion and report parsing enforce entry, per-file, and aggregate byte
   limits before allocating or replaying data. Truncation is surfaced rather
   than silently treating an unbounded directory as fully triaged.
@@ -56,3 +70,6 @@ pub struct Crash {
 - Unit: classify parses an ASan log into `CrashKind::Asan`.
 - Integration: ingest engine-specific real/false-positive fixtures, directory
   floods, and oversized reports from a mocked engine output dir.
+- Integration: mocked AFL++/libFuzzer minimizers receive only run-owned paths;
+  successful output is persisted and timeout/non-zero/missing output never sets
+  the minimized flag or replaces the original evidence path.

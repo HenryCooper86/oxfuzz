@@ -19,7 +19,7 @@ full observability - WAL-based recoverability - self-evolving skills -
 
 **Core**: `hf-core`
 **Infrastructure**: `hf-provider` - `hf-session` - `hf-context` - `hf-storage` - `hf-knowledge` - `hf-diagnostics`
-**Middleware**: `hf-hooks` - `hf-guardrails` - `hf-prompt` - `hf-mcp`
+**Middleware**: `hf-guardrails` - `hf-prompt`
 **Capabilities**: `hf-tools` - `hf-skills` - `hf-runtime` - `hf-scheduler`
 **Fuzzing Domain**: `hf-discovery` - `hf-harness` - `hf-engine` - `hf-crash` - `hf-corpus` - `hf-coverage`
 **Orchestration**: `hf-agent`

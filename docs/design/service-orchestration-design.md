@@ -28,6 +28,16 @@ dashboard DTO with state, score, blockers, and detail text instead of
 re-deriving readiness from raw counts. This keeps REST, Tauri, CLI, and future
 surfaces aligned on the same operational status.
 
+### 3.1 CI Gate Ownership
+
+The non-interactive CI pipeline is a service operation. `hf-service` selects an
+explicit permissive guardrail instance for that operation, requires an already
+smoke-qualified and human-promoted harness, attempts seed generation, runs the
+bounded campaign, triages its artifacts, and always produces SARIF. The CLI
+only parses input, renders progress/outcome, writes the service-produced SARIF
+to the requested destination, and chooses its process exit status. It never
+mutates process-global guardrail environment variables.
+
 ## 4. Orchestration Flow
 
 1. `discover` -> `TargetInventory` persisted; HITL selects targets.
@@ -53,6 +63,16 @@ claim run-scoped evidence never fall back to mutable active paths: crash,
 corpus, coverage, export, and report flows verify the exact run directory and
 staged executable digest first. Only pre-migration records with no evidence
 metadata may use the legacy flat paths.
+
+Presentation layers that need non-blocking execution call the service run-start
+API. The service completes all preflight checks, stages immutable evidence,
+inserts the running row, syncs the recovery journal, and registers cooperative
+cancellation before returning the UUID. It then owns the background task and
+emits run-id-attributed progress and lifecycle callbacks. A pre-reservation
+failure returns directly to the caller and never creates a phantom id; a
+post-reservation failure repairs the persisted row to `failed` before emitting
+the terminal lifecycle event. Status and cancellation queries use service DTOs
+rather than presentation-side reconstruction from run history.
 
 Run deletion is also evidence-aware. Running records and runs referenced by a
 harness qualification cannot be deleted, and successful deletion removes only

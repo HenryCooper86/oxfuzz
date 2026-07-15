@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// An event-driven schedule trigger.
 ///
-/// Fires when a matching event is received from the `y-hooks` event bus.
+/// Fires when a matching event is received from an external event producer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSchedule {
     /// Event type to match (e.g., "file.changed").

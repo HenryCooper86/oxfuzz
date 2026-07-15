@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -46,10 +46,24 @@ pub trait SchedulerPersistence: Send + Sync {
 
     /// Persist a changed schedule definition, including its latest fire cursor.
     async fn update_schedule(&self, schedule: &Schedule) -> Result<(), PersistenceError>;
+
+    /// Count executions that started at or after `since` for rate-limit recovery.
+    ///
+    /// In-memory-only adapters may keep the default zero; the manager combines
+    /// this with its live history using `max`, avoiding double-counting mirrored
+    /// rows while preserving limits across service restarts.
+    async fn executions_started_since(
+        &self,
+        _schedule_id: &str,
+        _since: chrono::DateTime<Utc>,
+    ) -> Result<u64, PersistenceError> {
+        Ok(0)
+    }
 }
 
 struct TrackedDispatch {
     execution_id: String,
+    schedule_id: String,
     handle: JoinHandle<()>,
 }
 
@@ -115,7 +129,9 @@ impl SchedulerManager {
         Self {
             store: Arc::new(Mutex::new(ScheduleStore::new())),
             executor: Arc::new(Mutex::new(ScheduleExecutor::new())),
-            execution_store: Arc::new(Mutex::new(ExecutionStore::new())),
+            execution_store: Arc::new(Mutex::new(ExecutionStore::with_retention(
+                config.history_retention_limit,
+            ))),
             config,
             runtime: StdMutex::new(RuntimeState::new()),
             dispatcher: Arc::new(Mutex::new(None)),
@@ -132,7 +148,11 @@ impl SchedulerManager {
     }
 
     /// Register a schedule.
-    pub async fn register(&self, schedule: Schedule) {
+    pub async fn register(&self, mut schedule: Schedule) {
+        schedule.policies.resolve_defaults(
+            self.config.default_missed_policy,
+            self.config.default_concurrency_policy,
+        );
         let mut store = self.store.lock().await;
         info!(schedule_id = %schedule.id, "Registering schedule");
         store.register(schedule);
@@ -404,8 +424,8 @@ impl SchedulerManager {
                 }
                 remaining -= 1;
                 if remaining > 0 {
-                    let Some(next) = fired_at.checked_add_signed(batch.interval) else {
-                        warn!(schedule_id = %batch.schedule_id, "Recovery timestamp overflow");
+                    let Some(next) = batch.next_fire(fired_at) else {
+                        warn!(schedule_id = %batch.schedule_id, "Cannot advance recovery schedule");
                         return;
                     };
                     fired_at = next;
@@ -435,15 +455,6 @@ impl SchedulerManager {
                 }
                 trigger = rx.recv() => {
                     if let Some(fired) = trigger {
-                        let permit = tokio::select! {
-                            () = shutdown.notified() => break,
-                            result = Arc::clone(&execution_slots).acquire_owned() => {
-                                match result {
-                                    Ok(permit) => permit,
-                                    Err(_) => break,
-                                }
-                            }
-                        };
                         // Re-read the dispatcher on every trigger so that
                         // late injection (after loop start) takes effect.
                         let current_dispatcher = dispatcher.lock().await.clone();
@@ -456,7 +467,7 @@ impl SchedulerManager {
                             persistence.lock().await.clone(),
                             &serial_locks,
                             &dispatch_tasks,
-                            permit,
+                            &execution_slots,
                         ).await;
                     } else {
                         info!("Trigger queue closed, executor stopping");
@@ -465,6 +476,117 @@ impl SchedulerManager {
                 }
             }
         }
+    }
+
+    fn schedule_has_active_dispatch(dispatch_tasks: &DispatchTasks, schedule_id: &str) -> bool {
+        let mut tasks = dispatch_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tasks.retain(|task| !task.handle.is_finished());
+        tasks.iter().any(|task| task.schedule_id == schedule_id)
+    }
+
+    fn take_active_dispatches(
+        dispatch_tasks: &DispatchTasks,
+        schedule_id: &str,
+    ) -> Vec<TrackedDispatch> {
+        let mut tasks = dispatch_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut retained = Vec::with_capacity(tasks.len());
+        let mut cancelled = Vec::new();
+        for task in tasks.drain(..) {
+            if task.handle.is_finished() {
+                continue;
+            }
+            if task.schedule_id == schedule_id {
+                cancelled.push(task);
+            } else {
+                retained.push(task);
+            }
+        }
+        *tasks = retained;
+        cancelled
+    }
+
+    async fn cancel_previous_dispatches(
+        dispatch_tasks: &DispatchTasks,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        persistence: Option<&Arc<dyn SchedulerPersistence>>,
+        schedule_id: &str,
+    ) {
+        let cancelled = Self::take_active_dispatches(dispatch_tasks, schedule_id);
+        for task in &cancelled {
+            task.handle.abort();
+        }
+        for task in cancelled {
+            let _ = task.handle.await;
+            let updated = {
+                let mut executions = execution_store.lock().await;
+                executions.update(&task.execution_id, |record| {
+                    if matches!(
+                        record.status,
+                        ExecutionStatus::Pending | ExecutionStatus::Running
+                    ) {
+                        record.status = ExecutionStatus::Cancelled;
+                        record.completed_at = Some(Utc::now());
+                        record.error_message =
+                            Some("cancelled by newer schedule trigger".to_owned());
+                        record.response_summary = serde_json::json!({
+                            "status": "cancelled",
+                            "reason": "cancelled by newer schedule trigger",
+                        });
+                    }
+                });
+                executions.get(&task.execution_id).cloned()
+            };
+            if let Some(updated) = updated {
+                Self::persist_update(persistence, &updated).await;
+            }
+        }
+    }
+
+    async fn record_policy_skip(
+        fired: &FiredTrigger,
+        schedule: &Schedule,
+        reason: String,
+        store: &Arc<Mutex<ScheduleStore>>,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        persistence: Option<&Arc<dyn SchedulerPersistence>>,
+    ) {
+        let now = Utc::now();
+        let record = ScheduleExecution {
+            execution_id: format!("exec-{}-{}", schedule.id, uuid::Uuid::new_v4()),
+            schedule_id: schedule.id.clone(),
+            triggered_at: fired.fired_at,
+            started_at: None,
+            completed_at: Some(now),
+            status: ExecutionStatus::Skipped,
+            workflow_execution_id: None,
+            request_summary: serde_json::json!({
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "workflow_id": schedule.workflow_id,
+                "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
+                "parameter_values": schedule.parameter_values,
+                "trigger_time": fired.fired_at.to_rfc3339(),
+            }),
+            response_summary: serde_json::json!({
+                "status": "skipped",
+                "reason": reason,
+            }),
+            error_message: None,
+        };
+        execution_store.lock().await.record(record.clone());
+        let updated_schedule = {
+            let mut schedules = store.lock().await;
+            schedules.update_last_fire(&schedule.id, fired.fired_at.max(now));
+            schedules.get(&schedule.id).cloned()
+        };
+        if let Some(updated_schedule) = &updated_schedule {
+            Self::persist_schedule(persistence, updated_schedule).await;
+        }
+        Self::persist_record(persistence, &record).await;
     }
 
     /// Handle a single fired trigger.
@@ -484,19 +606,106 @@ impl SchedulerManager {
         persistence: Option<Arc<dyn SchedulerPersistence>>,
         serial_locks: &SerialLocks,
         dispatch_tasks: &DispatchTasks,
-        execution_permit: OwnedSemaphorePermit,
+        execution_slots: &Arc<Semaphore>,
     ) {
-        let mut store_guard = store.lock().await;
-        let schedule = if let Some(s) = store_guard.get(&fired.schedule_id) {
-            s.clone()
-        } else {
-            warn!(schedule_id = %fired.schedule_id, "Schedule not found, skipping");
-            return;
+        let schedule = {
+            let store_guard = store.lock().await;
+            let Some(schedule) = store_guard.get(&fired.schedule_id).cloned() else {
+                warn!(schedule_id = %fired.schedule_id, "Schedule not found, skipping");
+                return;
+            };
+            schedule
         };
 
+        let now = chrono::Utc::now();
+        let max_per_hour = schedule.policies.max_executions_per_hour;
+        if max_per_hour > 0 {
+            let since = now - chrono::Duration::hours(1);
+            let (live_started, pending) = {
+                let executions = execution_store.lock().await;
+                (
+                    executions.started_since(&schedule.id, since),
+                    executions.pending_since(&schedule.id, since),
+                )
+            };
+            let persisted_started = if let Some(adapter) = persistence.as_ref() {
+                match adapter.executions_started_since(&schedule.id, since).await {
+                    Ok(count) => usize::try_from(count).unwrap_or(usize::MAX),
+                    Err(error) => {
+                        warn!(
+                            schedule_id = %schedule.id,
+                            %error,
+                            "Cannot verify hourly schedule limit; skipping trigger"
+                        );
+                        Self::record_policy_skip(
+                            &fired,
+                            &schedule,
+                            "hourly execution history is unavailable".to_owned(),
+                            store,
+                            execution_store,
+                            persistence.as_ref(),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            } else {
+                0
+            };
+            let admitted = live_started.max(persisted_started).saturating_add(pending);
+            if admitted >= usize::try_from(max_per_hour).unwrap_or(usize::MAX) {
+                Self::record_policy_skip(
+                    &fired,
+                    &schedule,
+                    format!("hourly execution limit reached ({max_per_hour})"),
+                    store,
+                    execution_store,
+                    persistence.as_ref(),
+                )
+                .await;
+                return;
+            }
+        }
+
         if let Some(disp) = dispatcher {
-            // Real dispatch path: create a Running record, spawn real execution.
-            let now = chrono::Utc::now();
+            let concurrency_policy = if fired.is_recovery
+                && schedule.policies.effective_missed_policy() == MissedPolicy::Backfill
+            {
+                ConcurrencyPolicy::Queue
+            } else {
+                schedule.policies.effective_concurrency_policy()
+            };
+            match concurrency_policy {
+                ConcurrencyPolicy::SkipIfRunning
+                    if Self::schedule_has_active_dispatch(dispatch_tasks, &schedule.id) =>
+                {
+                    Self::record_policy_skip(
+                        &fired,
+                        &schedule,
+                        "previous execution is still running".to_owned(),
+                        store,
+                        execution_store,
+                        persistence.as_ref(),
+                    )
+                    .await;
+                    return;
+                }
+                ConcurrencyPolicy::CancelPrevious => {
+                    Self::cancel_previous_dispatches(
+                        dispatch_tasks,
+                        execution_store,
+                        persistence.as_ref(),
+                        &schedule.id,
+                    )
+                    .await;
+                }
+                ConcurrencyPolicy::Allow
+                | ConcurrencyPolicy::Queue
+                | ConcurrencyPolicy::SkipIfRunning => {}
+            }
+
+            // Reserve the execution before spawning so the rolling-hour policy
+            // cannot over-admit while tasks wait for dispatch capacity.
             let execution_id = format!("exec-{}-{}", schedule.id, uuid::Uuid::new_v4());
 
             let request_summary = serde_json::json!({
@@ -508,13 +717,13 @@ impl SchedulerManager {
                 "trigger_time": fired.fired_at.to_rfc3339(),
             });
 
-            let running_record = ScheduleExecution {
+            let pending_record = ScheduleExecution {
                 execution_id: execution_id.clone(),
                 schedule_id: schedule.id.clone(),
                 triggered_at: fired.fired_at,
-                started_at: Some(now),
+                started_at: None,
                 completed_at: None,
-                status: ExecutionStatus::Running,
+                status: ExecutionStatus::Pending,
                 workflow_execution_id: None,
                 request_summary,
                 response_summary: serde_json::json!({}),
@@ -523,19 +732,21 @@ impl SchedulerManager {
 
             {
                 let mut exec_store_guard = execution_store.lock().await;
-                exec_store_guard.record(running_record.clone());
+                exec_store_guard.record(pending_record.clone());
             }
 
             // Advance monotonically. Recovery pre-advances to the latest due
             // occurrence, so individual historical backfill items must not move
             // the durable cursor backwards while they drain.
-            store_guard.update_last_fire(&schedule.id, fired.fired_at.max(now));
-            let updated_schedule = store_guard.get(&schedule.id).cloned();
-            drop(store_guard);
+            let updated_schedule = {
+                let mut store_guard = store.lock().await;
+                store_guard.update_last_fire(&schedule.id, fired.fired_at.max(now));
+                store_guard.get(&schedule.id).cloned()
+            };
             if let Some(updated_schedule) = &updated_schedule {
                 Self::persist_schedule(persistence.as_ref(), updated_schedule).await;
             }
-            Self::persist_record(persistence.as_ref(), &running_record).await;
+            Self::persist_record(persistence.as_ref(), &pending_record).await;
 
             // Spawn real execution without blocking the trigger loop.
             let workflow_id = schedule.workflow_id.clone();
@@ -543,8 +754,8 @@ impl SchedulerManager {
             let exec_store_clone = Arc::clone(execution_store);
             let exec_id_clone = execution_id.clone();
             let persistence_clone = persistence.clone();
-            let serialize = schedule.policies.missed_policy == MissedPolicy::Backfill
-                || schedule.policies.concurrency_policy == ConcurrencyPolicy::Queue;
+            let execution_slots_clone = Arc::clone(execution_slots);
+            let serialize = concurrency_policy == ConcurrencyPolicy::Queue;
             let serial_lock = if serialize {
                 let mut locks = serial_locks.lock().await;
                 Some(
@@ -558,11 +769,25 @@ impl SchedulerManager {
             };
 
             let handle = tokio::spawn(async move {
-                let _execution_permit = execution_permit;
                 let _serial_guard = match serial_lock {
                     Some(lock) => Some(lock.lock_owned().await),
                     None => None,
                 };
+                let _execution_permit = execution_slots_clone
+                    .acquire_owned()
+                    .await
+                    .expect("scheduler execution semaphore is never closed");
+                let started = {
+                    let mut store = exec_store_clone.lock().await;
+                    store.update(&exec_id_clone, |record| {
+                        record.status = ExecutionStatus::Running;
+                        record.started_at = Some(Utc::now());
+                    });
+                    store.get(&exec_id_clone).cloned()
+                };
+                if let Some(started) = started {
+                    Self::persist_update(persistence_clone.as_ref(), &started).await;
+                }
                 let dispatch_start = std::time::Instant::now();
                 match disp.dispatch(&workflow_id, parameter_values).await {
                     Ok(result) => {
@@ -621,10 +846,12 @@ impl SchedulerManager {
             tasks.retain(|task| !task.handle.is_finished());
             tasks.push(TrackedDispatch {
                 execution_id,
+                schedule_id: schedule.id,
                 handle,
             });
         } else {
             // Placeholder path: instant completion via ScheduleExecutor.
+            let mut store_guard = store.lock().await;
             let mut exec_guard = executor.lock().await;
             let mut exec_store_guard = execution_store.lock().await;
             let execution_id =
@@ -635,7 +862,6 @@ impl SchedulerManager {
             drop(exec_store_guard);
             drop(exec_guard);
             drop(store_guard);
-            drop(execution_permit);
             if let Some(updated_schedule) = &updated_schedule {
                 Self::persist_schedule(persistence.as_ref(), updated_schedule).await;
             }
@@ -760,14 +986,17 @@ impl SchedulerManager {
             let mut executions = self.execution_store.lock().await;
             for execution_id in cancelled {
                 executions.update(&execution_id, |record| {
-                    if record.status == ExecutionStatus::Running {
-                        record.status = ExecutionStatus::Failed;
+                    if matches!(
+                        record.status,
+                        ExecutionStatus::Pending | ExecutionStatus::Running
+                    ) {
+                        record.status = ExecutionStatus::Cancelled;
                         record.completed_at = Some(Utc::now());
                         record.error_message =
                             Some("scheduler stopped before completion".to_owned());
                         record.response_summary = serde_json::json!({
-                            "status": "failed",
-                            "error": "scheduler stopped before completion",
+                            "status": "cancelled",
+                            "reason": "scheduler stopped before completion",
                         });
                     }
                 });
@@ -830,6 +1059,29 @@ mod tests {
         let retrieved = mgr.get_schedule("test-schedule").await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "Test Schedule");
+    }
+
+    #[tokio::test]
+    async fn register_materializes_configured_policy_defaults() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            default_missed_policy: MissedPolicy::CatchUp,
+            default_concurrency_policy: ConcurrencyPolicy::Allow,
+            ..SchedulerConfig::default()
+        });
+        mgr.register(Schedule::new(
+            "defaults",
+            "Defaults",
+            TriggerConfig::Interval { interval_secs: 60 },
+            "wf",
+        ))
+        .await;
+
+        let schedule = mgr.get_schedule("defaults").await.unwrap();
+        assert_eq!(schedule.policies.missed_policy, Some(MissedPolicy::CatchUp));
+        assert_eq!(
+            schedule.policies.concurrency_policy,
+            Some(ConcurrencyPolicy::Allow)
+        );
     }
 
     #[tokio::test]
@@ -935,6 +1187,7 @@ mod tests {
     struct RecordingPersistence {
         recorded: AsyncMutex<Vec<ScheduleExecution>>,
         last_fire_updates: AsyncMutex<Vec<(String, DateTime<Utc>)>>,
+        persisted_started: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -961,6 +1214,14 @@ mod tests {
                 schedule.last_fire.unwrap_or_else(Utc::now),
             ));
             Ok(())
+        }
+
+        async fn executions_started_since(
+            &self,
+            _schedule_id: &str,
+            _since: DateTime<Utc>,
+        ) -> Result<u64, PersistenceError> {
+            Ok(u64::try_from(self.persisted_started.load(Ordering::SeqCst)).unwrap_or(u64::MAX))
         }
     }
 
@@ -1041,8 +1302,8 @@ mod tests {
         let mut schedule =
             Schedule::new(id, id, TriggerConfig::Interval { interval_secs: 1 }, "wf")
                 .with_policies(SchedulePolicies {
-                    missed_policy: policy,
-                    concurrency_policy: ConcurrencyPolicy::default(),
+                    missed_policy: Some(policy),
+                    concurrency_policy: Some(ConcurrencyPolicy::default()),
                     max_executions_per_hour: 0,
                 });
         schedule.last_fire = Some(Utc::now() - TimeDelta::seconds(i64::from(count)));
@@ -1205,6 +1466,252 @@ mod tests {
         );
     }
 
+    async fn wait_for_history(mgr: &SchedulerManager, schedule_id: &str, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mgr.execution_history(schedule_id).await.len() >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduler history did not reach expected size");
+    }
+
+    fn policy_schedule(
+        id: &str,
+        concurrency_policy: ConcurrencyPolicy,
+        max_hourly: u32,
+    ) -> Schedule {
+        let mut schedule = Schedule::new(
+            id,
+            id,
+            TriggerConfig::Interval {
+                interval_secs: 3600,
+            },
+            "wf",
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Skip),
+            concurrency_policy: Some(concurrency_policy),
+            max_executions_per_hour: max_hourly,
+        });
+        schedule.last_fire = Some(Utc::now());
+        schedule
+    }
+
+    async fn send_now(mgr: &SchedulerManager, schedule_id: &str) {
+        mgr.trigger_sender()
+            .expect("scheduler started")
+            .send(FiredTrigger {
+                schedule_id: schedule_id.to_owned(),
+                fired_at: Utc::now(),
+                trigger_type: crate::trigger::TriggerType::Interval,
+                is_recovery: false,
+            })
+            .await
+            .expect("trigger accepted");
+    }
+
+    #[tokio::test]
+    async fn hourly_limit_records_policy_skip_without_dispatching() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(SerialRecordingDispatcher::new());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(policy_schedule("hourly", ConcurrencyPolicy::Allow, 1))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "hourly").await;
+        dispatcher.wait_for(1).await;
+        send_now(&mgr, "hourly").await;
+        wait_for_history(&mgr, "hourly", 2).await;
+        mgr.stop().await;
+
+        assert_eq!(dispatcher.completed.load(Ordering::SeqCst), 1);
+        let history = mgr.execution_history("hourly").await;
+        assert!(history
+            .iter()
+            .any(|execution| execution.status == ExecutionStatus::Skipped));
+    }
+
+    #[tokio::test]
+    async fn hourly_limit_combines_persisted_starts_with_pending_reservations() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            max_concurrent_executions: 1,
+            ..SchedulerConfig::default()
+        });
+        let persistence = Arc::new(RecordingPersistence {
+            persisted_started: AtomicUsize::new(1),
+            ..RecordingPersistence::default()
+        });
+        let persistence_trait: Arc<dyn SchedulerPersistence> = persistence;
+        mgr.set_persistence(persistence_trait).await;
+        let dispatcher = Arc::new(BlockingDispatcher {
+            calls: AtomicUsize::new(0),
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(policy_schedule("blocker", ConcurrencyPolicy::Allow, 0))
+            .await;
+        mgr.register(policy_schedule("limited", ConcurrencyPolicy::Queue, 2))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "blocker").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dispatcher.calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capacity blocker did not start");
+        send_now(&mgr, "limited").await;
+        wait_for_history(&mgr, "limited", 1).await;
+        send_now(&mgr, "limited").await;
+        wait_for_history(&mgr, "limited", 2).await;
+
+        let history = mgr.execution_history("limited").await;
+        assert_eq!(
+            history
+                .iter()
+                .filter(|execution| execution.status == ExecutionStatus::Pending)
+                .count(),
+            1
+        );
+        assert_eq!(
+            history
+                .iter()
+                .filter(|execution| execution.status == ExecutionStatus::Skipped)
+                .count(),
+            1
+        );
+        mgr.stop().await;
+    }
+
+    #[tokio::test]
+    async fn skip_if_running_rejects_overlapping_dispatch() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            max_concurrent_executions: 1,
+            ..SchedulerConfig::default()
+        });
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dispatcher = Arc::new(BlockingDispatcher {
+            calls: AtomicUsize::new(0),
+            dropped,
+        });
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(policy_schedule(
+            "skip-running",
+            ConcurrencyPolicy::SkipIfRunning,
+            0,
+        ))
+        .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "skip-running").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dispatcher.calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first dispatch did not start");
+        send_now(&mgr, "skip-running").await;
+        wait_for_history(&mgr, "skip-running", 2).await;
+        mgr.stop().await;
+
+        let history = mgr.execution_history("skip-running").await;
+        assert_eq!(
+            history
+                .iter()
+                .filter(|execution| execution.status == ExecutionStatus::Skipped)
+                .count(),
+            1
+        );
+    }
+
+    struct ReplaceDispatcher {
+        calls: AtomicUsize,
+        first_dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowDispatcher for ReplaceDispatcher {
+        async fn dispatch(
+            &self,
+            _workflow_id: &str,
+            _parameter_values: serde_json::Value,
+        ) -> Result<DispatchResult, DispatchError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _drop_signal = DropSignal(Arc::clone(&self.first_dropped));
+                std::future::pending().await
+            } else {
+                Ok(DispatchResult {
+                    success: true,
+                    summary: "replacement completed".to_owned(),
+                    output: serde_json::Value::Null,
+                    duration_ms: 1,
+                    error: None,
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_previous_reconciles_displaced_execution() {
+        let mgr = SchedulerManager::new(SchedulerConfig {
+            max_concurrent_executions: 1,
+            ..SchedulerConfig::default()
+        });
+        let first_dropped = Arc::new(AtomicBool::new(false));
+        let dispatcher = Arc::new(ReplaceDispatcher {
+            calls: AtomicUsize::new(0),
+            first_dropped: Arc::clone(&first_dropped),
+        });
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(policy_schedule(
+            "replace",
+            ConcurrencyPolicy::CancelPrevious,
+            0,
+        ))
+        .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "replace").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dispatcher.calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first dispatch did not start");
+        send_now(&mgr, "replace").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dispatcher.calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replacement did not run");
+        wait_for_history(&mgr, "replace", 2).await;
+        mgr.stop().await;
+
+        assert!(first_dropped.load(Ordering::SeqCst));
+        let history = mgr.execution_history("replace").await;
+        assert!(history
+            .iter()
+            .any(|execution| execution.status == ExecutionStatus::Cancelled));
+        assert!(history
+            .iter()
+            .any(|execution| execution.status == ExecutionStatus::Completed));
+    }
+
     struct DropSignal(Arc<AtomicBool>);
 
     impl Drop for DropSignal {
@@ -1214,7 +1721,7 @@ mod tests {
     }
 
     struct BlockingDispatcher {
-        started: Notify,
+        calls: AtomicUsize,
         dropped: Arc<AtomicBool>,
     }
 
@@ -1226,7 +1733,7 @@ mod tests {
             _parameter_values: serde_json::Value,
         ) -> Result<DispatchResult, DispatchError> {
             let _drop_signal = DropSignal(Arc::clone(&self.dropped));
-            self.started.notify_waiters();
+            self.calls.fetch_add(1, Ordering::SeqCst);
             std::future::pending().await
         }
     }
@@ -1236,7 +1743,7 @@ mod tests {
         let mgr = SchedulerManager::with_defaults();
         let dropped = Arc::new(AtomicBool::new(false));
         let dispatcher = Arc::new(BlockingDispatcher {
-            started: Notify::new(),
+            calls: AtomicUsize::new(0),
             dropped: Arc::clone(&dropped),
         });
         let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
@@ -1250,9 +1757,13 @@ mod tests {
         .await;
 
         mgr.start(Duration::from_mins(1)).await;
-        tokio::time::timeout(Duration::from_secs(1), dispatcher.started.notified())
-            .await
-            .expect("dispatch did not start");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dispatcher.calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch did not start");
         mgr.stop().await;
 
         assert!(
@@ -1261,7 +1772,7 @@ mod tests {
         );
         let history = mgr.execution_history("blocking").await;
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].status, ExecutionStatus::Failed);
+        assert_eq!(history[0].status, ExecutionStatus::Cancelled);
         assert!(history[0]
             .error_message
             .as_deref()

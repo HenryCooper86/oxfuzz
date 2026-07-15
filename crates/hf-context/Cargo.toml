@@ -8,7 +8,6 @@ description = "Token-budget-aware prompt assembly pipeline"
 [dependencies]
 hf-core = { workspace = true }
 hf-prompt = { workspace = true }
-hf-hooks = { workspace = true }
 hf-tools = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

@@ -9,7 +9,6 @@
 //! - [`FreezeManager`] — exponential backoff freeze/thaw lifecycle
 //! - [`HealthChecker`] — health probe for frozen provider recovery
 //! - [`ProviderMetrics`] — lock-free per-provider request/token counters
-//! - [`PriorityScheduler`] — three-tier priority scheduling (Critical/Normal/Idle)
 //! - [`OpenAiProvider`] / [`AnthropicProvider`] / [`GeminiProvider`] /
 //!   [`OllamaProvider`] / [`AzureOpenAiProvider`] — LLM backends
 
@@ -21,13 +20,11 @@ pub mod health;
 pub mod http_headers;
 mod inter_stream;
 mod inter_stream_adapter;
-pub mod lease;
 pub mod metrics;
 pub mod metrics_export;
 pub mod pool;
 pub mod providers;
 pub mod router;
-pub mod scheduler;
 pub mod sse;
 mod tool_call_accumulator;
 
@@ -39,7 +36,6 @@ pub use error::ProviderPoolError;
 pub use error_classifier::{classify, classify_provider_error, StandardError};
 pub use freeze::FreezeManager;
 pub use health::HealthChecker;
-pub use lease::{LeaseGuard, LeaseId, LeaseManager};
 pub use metrics::{MetricsEvent, MetricsSnapshot, ProviderMetrics};
 pub use metrics_export::render_prometheus;
 pub use pool::{build_providers, ProviderPoolImpl};
@@ -49,4 +45,3 @@ pub use providers::gemini::GeminiProvider;
 pub use providers::ollama::OllamaProvider;
 pub use providers::openai::OpenAiProvider;
 pub use router::{SelectionStrategy, TagBasedRouter};
-pub use scheduler::{PriorityScheduler, SchedulerSnapshot};

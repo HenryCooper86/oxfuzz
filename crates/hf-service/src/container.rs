@@ -2023,7 +2023,7 @@ fn build_session_managers(
         Arc::clone(&session_store),
         Arc::clone(&transcript),
         Arc::clone(&display),
-        hf_session::SessionConfig::default(),
+        crate::config::effective_session_config(),
     ));
     let checkpoints = Arc::new(hf_session::ChatCheckpointManager::new(
         transcript,
@@ -2110,6 +2110,21 @@ impl ServiceContainer {
         self.checkpoint_manager = Some(checkpoints);
         self.store = Some(store);
         self
+    }
+
+    /// Connect persistence at an explicit path and attach it to this container.
+    ///
+    /// This keeps embedding and presentation tests on the service boundary
+    /// without exposing the infrastructure store type in their manifests.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError::Storage`] when the database cannot be
+    /// opened or migrated.
+    pub async fn with_store_path(self, path: PathBuf) -> Result<Self, ClassifiedError> {
+        let store = Store::connect(path)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        Ok(self.with_store(Arc::new(store)))
     }
 
     /// The chat checkpoint manager (turn-level rollback), if a database is
@@ -2538,8 +2553,8 @@ impl ServiceContainer {
 
         let (targets, crashes) = if let Some(store) = &self.store {
             (
-                store.list_all_targets().await.map_or(0, |t| t.len()),
-                store.list_all_crashes().await.map_or(0, |c| c.len()),
+                store.list_all_targets().await?.len(),
+                store.list_all_crashes().await?.len(),
             )
         } else {
             (0, 0)
@@ -2582,10 +2597,10 @@ impl ServiceContainer {
     /// crashes already ingested by triage regardless of which target's workspace
     /// they came from, rather than re-scanning a single (possibly wrong) target
     /// workspace. Returns an empty list when no database is configured.
-    pub async fn all_crashes(&self) -> Vec<hf_core::crash::Crash> {
+    pub async fn all_crashes(&self) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         match self.store.as_ref() {
-            Some(store) => store.list_all_crashes().await.unwrap_or_default(),
-            None => Vec::new(),
+            Some(store) => Ok(store.list_all_crashes().await?),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -2827,24 +2842,25 @@ impl ServiceContainer {
 
     /// Run history for a project (or all projects when `None`), newest first,
     /// enriched with the crash count per run. Powers the Runs history view.
-    pub async fn run_history(&self, project: Option<&Path>) -> Vec<RunHistoryItem> {
+    pub async fn run_history(
+        &self,
+        project: Option<&Path>,
+    ) -> Result<Vec<RunHistoryItem>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let key = project.map(|p| p.to_string_lossy().to_string());
-        let runs = store.list_runs(key.as_deref()).await.unwrap_or_default();
-        let crashes = store.list_all_crashes().await.unwrap_or_default();
+        let runs = store.list_runs(key.as_deref()).await?;
+        let crashes = store.list_all_crashes().await?;
         let harnesses: std::collections::HashMap<Uuid, Harness> = store
             .list_all_harnesses()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|h| (h.id, h))
             .collect();
         let targets: std::collections::HashMap<Uuid, String> = store
             .list_all_targets()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|t| (t.id, t.symbol))
             .collect();
@@ -2906,39 +2922,36 @@ impl ServiceContainer {
             })
             .collect();
         items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        items
+        Ok(items)
     }
 
     /// The intra-run coverage/throughput curve for a run (empty if none was
     /// recorded, e.g. runs from before this was captured).
-    pub async fn run_coverage_series(&self, run_id: &str) -> Vec<CoverageSample> {
+    pub async fn run_coverage_series(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<CoverageSample>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let Ok(id) = Uuid::parse_str(run_id) else {
-            return Vec::new();
+        let id = Uuid::parse_str(run_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad run id: {error}")))?;
+        let Some(json) = store.run_samples(id).await? else {
+            return Ok(Vec::new());
         };
-        match store.run_samples(id).await {
-            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
-            _ => Vec::new(),
-        }
+        serde_json::from_str(&json)
+            .map_err(|error| ClassifiedError::Storage(format!("decode run samples: {error}")))
     }
 
     /// The harness source a run used, for diffing revisions (empty if none was
     /// recorded).
-    pub async fn run_harness_source(&self, run_id: &str) -> String {
+    pub async fn run_harness_source(&self, run_id: &str) -> Result<String, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return String::new();
+            return Ok(String::new());
         };
-        let Ok(id) = Uuid::parse_str(run_id) else {
-            return String::new();
-        };
-        store
-            .run_harness_source(id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default()
+        let id = Uuid::parse_str(run_id)
+            .map_err(|error| ClassifiedError::Validation(format!("bad run id: {error}")))?;
+        Ok(store.run_harness_source(id).await?.unwrap_or_default())
     }
 
     /// Restore the exact source and executable a run used, so that promoted
@@ -3062,10 +3075,18 @@ impl ServiceContainer {
 
     /// The target a persisted run exercised, resolved through its harness
     /// (`run.config.harness_id -> harness.target_id`). `None` if unrecorded.
-    async fn run_target_id(&self, store: &Store, run: &RunRecord) -> Option<Uuid> {
-        let harness_id = run.config.as_ref().map(|c| c.harness_id)?;
-        let harness = store.get_harness(harness_id).await.ok().flatten()?;
-        Some(harness.target_id)
+    async fn run_target_id(
+        &self,
+        store: &Store,
+        run: &RunRecord,
+    ) -> Result<Option<Uuid>, ClassifiedError> {
+        let Some(harness_id) = run.config.as_ref().map(|c| c.harness_id) else {
+            return Ok(None);
+        };
+        Ok(store
+            .get_harness(harness_id)
+            .await?
+            .map(|harness| harness.target_id))
     }
 
     /// The effective auto-revert policy for a project: its stored per-project
@@ -3073,40 +3094,48 @@ impl ServiceContainer {
     async fn effective_auto_revert_policy(
         &self,
         project: &Path,
-    ) -> crate::config::AutoRevertPolicy {
+    ) -> Result<crate::config::AutoRevertPolicy, ClassifiedError> {
         if let Some(store) = self.store.as_ref() {
             let key = project.to_string_lossy().to_string();
-            if let Ok(Some(o)) = store.project_auto_revert(&key).await {
-                return crate::config::AutoRevertPolicy {
+            if let Some(o) = store.project_auto_revert(&key).await? {
+                return Ok(crate::config::AutoRevertPolicy {
                     enabled: o.enabled,
                     threshold_pct: o.threshold_pct,
                     notify_only: o.notify_only,
-                };
+                });
             }
         }
-        crate::config::auto_revert_policy()
+        Ok(crate::config::auto_revert_policy())
     }
 
     /// A project's auto-revert override, or `None` when it inherits the global
     /// policy. For the settings UI to show whether an override is in effect.
-    pub async fn project_auto_revert_override(&self, project: &Path) -> Option<ProjectAutoRevert> {
-        let store = self.store.as_ref()?;
+    pub async fn project_auto_revert_override(
+        &self,
+        project: &Path,
+    ) -> Result<Option<ProjectAutoRevert>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
         let key = project.to_string_lossy().to_string();
-        store.project_auto_revert(&key).await.ok().flatten()
+        Ok(store.project_auto_revert(&key).await?)
     }
 
     /// The effective auto-revert policy for a project (its override merged over
     /// the global default) plus whether an override is in effect -- for a badge
     /// that shows the active project's resolved policy.
-    pub async fn effective_auto_revert_view(&self, project: &Path) -> EffectiveAutoRevert {
-        let overridden = self.project_auto_revert_override(project).await.is_some();
-        let p = self.effective_auto_revert_policy(project).await;
-        EffectiveAutoRevert {
+    pub async fn effective_auto_revert_view(
+        &self,
+        project: &Path,
+    ) -> Result<EffectiveAutoRevert, ClassifiedError> {
+        let overridden = self.project_auto_revert_override(project).await?.is_some();
+        let p = self.effective_auto_revert_policy(project).await?;
+        Ok(EffectiveAutoRevert {
             enabled: p.enabled,
             threshold_pct: p.threshold_pct,
             notify_only: p.notify_only,
             overridden,
-        }
+        })
     }
 
     /// Every project's auto-revert override, keyed by project root -- so a
@@ -3114,16 +3143,15 @@ impl ServiceContainer {
     /// Empty when no store is configured or no project overrides.
     pub async fn project_auto_revert_overrides(
         &self,
-    ) -> std::collections::HashMap<String, ProjectAutoRevert> {
+    ) -> Result<std::collections::HashMap<String, ProjectAutoRevert>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return std::collections::HashMap::new();
+            return Ok(std::collections::HashMap::new());
         };
-        store
+        Ok(store
             .all_project_auto_reverts()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
-            .collect()
+            .collect())
     }
 
     /// Set (or replace) a project's auto-revert override.
@@ -3197,7 +3225,13 @@ impl ServiceContainer {
         this_edges: u64,
         this_rev: Option<&str>,
     ) -> Option<AutoRevertOutcome> {
-        let policy = self.effective_auto_revert_policy(project).await;
+        let policy = match self.effective_auto_revert_policy(project).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "auto-revert could not read its effective policy");
+                return None;
+            }
+        };
         if !policy.enabled {
             return None;
         }
@@ -3207,7 +3241,13 @@ impl ServiceContainer {
         // The most recent comparable finished run for this same target, before
         // this one, that recorded edge coverage and a harness revision.
         let key = project.to_string_lossy().to_string();
-        let mut runs = store.list_runs(Some(&key)).await.unwrap_or_default();
+        let mut runs = match store.list_runs(Some(&key)).await {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::warn!(%error, "auto-revert could not read comparable runs");
+                return None;
+            }
+        };
         runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
         let this_run = runs.iter().find(|r| r.id == this_run_id).cloned()?;
         let this_config = this_run.config.as_ref()?;
@@ -3221,7 +3261,14 @@ impl ServiceContainer {
         // Resolve the target through the run's persisted harness rather than
         // re-discovering it as C. This keeps C++, Rust, and future language runs
         // eligible for the same rollback policy.
-        let target_id = self.run_target_id(store, &this_run).await?;
+        let target_id = match self.run_target_id(store, &this_run).await {
+            Ok(Some(target_id)) => target_id,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(%error, "auto-revert could not resolve the current run target");
+                return None;
+            }
+        };
         let mut prev = None;
         for r in runs {
             if r.id == this_run_id
@@ -3243,7 +3290,14 @@ impl ServiceContainer {
             if !auto_revert_baseline_compatible(previous_config, this_config) {
                 continue;
             }
-            if self.run_target_id(store, &r).await == Some(target_id) {
+            let candidate_target = match self.run_target_id(store, &r).await {
+                Ok(candidate_target) => candidate_target,
+                Err(error) => {
+                    tracing::warn!(%error, "auto-revert could not resolve a baseline run target");
+                    return None;
+                }
+            };
+            if candidate_target == Some(target_id) {
                 prev = Some(r);
                 break;
             }
@@ -3343,26 +3397,28 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
         limit: usize,
-    ) -> Vec<AutoRevertEvent> {
+    ) -> Result<Vec<AutoRevertEvent>, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let key = project.map(|p| p.to_string_lossy().to_string());
-        store
+        Ok(store
             .list_auto_revert_events(key.as_deref(), i64::try_from(limit).unwrap_or(200))
-            .await
-            .unwrap_or_default()
+            .await?)
     }
 
     /// A JSON bundle of a project's persisted fuzzing data (targets, runs,
     /// harnesses, crashes, corpus) for hand-off to other tools. Scoped by
     /// project; pass `None` to export everything.
-    pub async fn export_project_data(&self, project: Option<&Path>) -> serde_json::Value {
+    pub async fn export_project_data(
+        &self,
+        project: Option<&Path>,
+    ) -> Result<serde_json::Value, ClassifiedError> {
         let Some(store) = self.store.as_ref() else {
-            return serde_json::json!({ "error": "no database configured" });
+            return Ok(serde_json::json!({ "error": "no database configured" }));
         };
         let key = project.map(|p| p.to_string_lossy().to_string());
-        let targets = store.list_all_targets().await.unwrap_or_default();
+        let targets = store.list_all_targets().await?;
         let scoped_targets: Vec<_> = match &key {
             Some(k) => targets
                 .into_iter()
@@ -3374,27 +3430,24 @@ impl ServiceContainer {
             scoped_targets.iter().map(|t| t.id).collect();
         let harnesses: Vec<_> = store
             .list_all_harnesses()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|h| key.is_none() || target_ids.contains(&h.target_id))
             .collect();
         let crashes: Vec<_> = store
             .list_all_crashes()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|c| key.is_none() || target_ids.contains(&c.target_id))
             .collect();
         let corpus: Vec<_> = store
             .list_all_corpus_entries_with_targets()
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .filter(|(target_id, _)| key.is_none() || target_ids.contains(target_id))
             .map(|(_, entry)| entry)
             .collect();
-        let runs = self.run_history(project).await;
+        let runs = self.run_history(project).await?;
         let evidence: Vec<_> = scoped_targets
             .iter()
             .map(|target| {
@@ -3413,7 +3466,7 @@ impl ServiceContainer {
                 })
             })
             .collect();
-        serde_json::json!({
+        Ok(serde_json::json!({
             "schema": "hobot_fuzz.export.v2",
             "generated_at": Utc::now().to_rfc3339(),
             "tool_version": env!("CARGO_PKG_VERSION"),
@@ -3424,7 +3477,7 @@ impl ServiceContainer {
             "corpus": corpus,
             "runs": runs,
             "evidence": evidence,
-        })
+        }))
     }
 
     /// Every corpus entry persisted to the store, across all targets.
@@ -3432,10 +3485,12 @@ impl ServiceContainer {
     /// The browse-all counterpart to [`Self::corpus_list`] (which is scoped to a
     /// single target's on-disk corpus). Returns an empty list when no database
     /// is configured.
-    pub async fn all_corpus_entries(&self) -> Vec<hf_core::corpus::CorpusEntry> {
+    pub async fn all_corpus_entries(
+        &self,
+    ) -> Result<Vec<hf_core::corpus::CorpusEntry>, ClassifiedError> {
         match self.store.as_ref() {
-            Some(store) => store.list_all_corpus_entries().await.unwrap_or_default(),
-            None => Vec::new(),
+            Some(store) => Ok(store.list_all_corpus_entries().await?),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -3444,7 +3499,7 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
         target: Option<&str>,
-    ) -> crate::workbench::WorkbenchDashboard {
+    ) -> Result<crate::workbench::WorkbenchDashboard, ClassifiedError> {
         crate::workbench::dashboard(self.store.as_deref(), project, target).await
     }
 
@@ -3453,7 +3508,7 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
         target: Option<&str>,
-    ) -> Vec<crate::workbench::HarnessReviewItem> {
+    ) -> Result<Vec<crate::workbench::HarnessReviewItem>, ClassifiedError> {
         crate::workbench::harness_review_queue(self.store.as_deref(), project, target).await
     }
 
@@ -3684,10 +3739,22 @@ impl ServiceContainer {
         ));
         if let Some(store) = &store {
             for run in run_journal.interrupted() {
-                if let Ok(id) = run.run_id.parse::<Uuid>() {
-                    let _ = store
-                        .set_run_status(id, RunStatus::Failed, Some(Utc::now()))
-                        .await;
+                let id = match run.run_id.parse::<Uuid>() {
+                    Ok(id) => id,
+                    Err(error) => {
+                        tracing::error!(
+                            run_id = %run.run_id,
+                            %error,
+                            "cannot repair interrupted run with an invalid id"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(error) = store
+                    .set_run_status(id, RunStatus::Failed, Some(Utc::now()))
+                    .await
+                {
+                    tracing::error!(run_id = %id, %error, "failed to repair interrupted run status");
                 }
             }
         }
@@ -3932,30 +3999,32 @@ impl ServiceContainer {
         }
     }
 
-    /// Resolve a target symbol to its discovered candidate id, falling back to
-    /// the nil UUID when discovery fails or the symbol is unknown. Shared by
+    /// Resolve a target symbol to its discovered candidate id, using the nil
+    /// UUID only when discovery succeeds but the symbol is absent. Shared by
     /// harness compilation and triage so persisted records key off the same id.
-    async fn resolve_target_id(&self, project: &Path, target: &str, lang: TargetLanguage) -> Uuid {
+    async fn resolve_target_id(
+        &self,
+        project: &Path,
+        target: &str,
+        lang: TargetLanguage,
+    ) -> Result<Uuid, ClassifiedError> {
         if let Some(store) = &self.store {
-            if let Ok(targets) = store.list_targets(&project.to_string_lossy()).await {
-                if let Some(candidate) = targets
-                    .iter()
-                    .find(|candidate| candidate.symbol == target && candidate.language == lang)
-                {
-                    return candidate.id;
-                }
+            let targets = store.list_targets(&project.to_string_lossy()).await?;
+            if let Some(candidate) = targets
+                .iter()
+                .find(|candidate| candidate.symbol == target && candidate.language == lang)
+            {
+                return Ok(candidate.id);
             }
         }
-        self.discover(project, lang)
-            .await
-            .ok()
-            .and_then(|inv| {
-                inv.candidates
-                    .iter()
-                    .find(|c| c.symbol == target)
-                    .map(|c| c.id)
-            })
-            .unwrap_or_default()
+        Ok(self
+            .discover(project, lang)
+            .await?
+            .candidates
+            .iter()
+            .find(|c| c.symbol == target)
+            .map(|c| c.id)
+            .unwrap_or_default())
     }
 
     /// Targets in `project` that a scheduled campaign can legally run: those a
@@ -3981,11 +4050,14 @@ impl ServiceContainer {
         let targets = store
             .list_targets(&project.to_string_lossy())
             .await
-            .map_err(|e| ClassifiedError::Internal(format!("list targets: {e}")))?;
+            .map_err(ClassifiedError::from)?;
 
         let mut schedulable = Vec::new();
         for candidate in targets {
-            let harnesses = store.list_harnesses(candidate.id).await.unwrap_or_default();
+            let harnesses = store
+                .list_harnesses(candidate.id)
+                .await
+                .map_err(ClassifiedError::from)?;
             for harness in harnesses
                 .iter()
                 .filter(|h| h.status == HarnessStatus::Promoted)
@@ -4007,23 +4079,26 @@ impl ServiceContainer {
     /// authoritative; only missing projects are scanned across supported
     /// languages. This prevents run, triage, and corpus records for Rust/C++
     /// targets from being silently attached to the nil UUID.
-    async fn resolve_target_id_any_language(&self, project: &Path, target: &str) -> Uuid {
-        self.resolve_target_candidate_any_language(project, target)
-            .await
-            .map_or_else(Uuid::nil, |candidate| candidate.id)
+    async fn resolve_target_id_any_language(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<Uuid, ClassifiedError> {
+        Ok(self
+            .resolve_target_candidate_any_language(project, target)
+            .await?
+            .map_or_else(Uuid::nil, |candidate| candidate.id))
     }
 
     async fn resolve_target_candidate_any_language(
         &self,
         project: &Path,
         target: &str,
-    ) -> Option<TargetCandidate> {
+    ) -> Result<Option<TargetCandidate>, ClassifiedError> {
         if let Some(store) = &self.store {
-            if let Ok(targets) = store.list_targets(&project.to_string_lossy()).await {
-                if let Some(candidate) = targets.iter().find(|candidate| candidate.symbol == target)
-                {
-                    return Some(candidate.clone());
-                }
+            let targets = store.list_targets(&project.to_string_lossy()).await?;
+            if let Some(candidate) = targets.iter().find(|candidate| candidate.symbol == target) {
+                return Ok(Some(candidate.clone()));
             }
         }
         for language in [
@@ -4039,11 +4114,11 @@ impl ServiceContainer {
                     .into_iter()
                     .find(|candidate| candidate.symbol == target)
                 {
-                    return Some(candidate);
+                    return Ok(Some(candidate));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Resolve the persisted record for the binary/source revision currently
@@ -4085,7 +4160,7 @@ impl ServiceContainer {
             return Ok(harness);
         }
 
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let harnesses = store
             .list_harnesses(target_id)
             .await
@@ -4217,7 +4292,7 @@ impl ServiceContainer {
         let build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
         let harness = Harness {
             id: Uuid::new_v4(),
-            target_id: self.resolve_target_id(project, target, lang).await,
+            target_id: self.resolve_target_id(project, target, lang).await?,
             engine,
             source,
             language: lang,
@@ -4565,10 +4640,7 @@ impl ServiceContainer {
                 break;
             }
 
-            let triaged = self
-                .triage_run(project, &target, summary.run_id)
-                .await
-                .unwrap_or_default();
+            let triaged = self.triage_run(project, &target, summary.run_id).await?;
             crashes = triaged.len();
             // Feed any crash reproducers back into the corpus (close the loop).
             let _ = self
@@ -4845,7 +4917,7 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let seeds = generate_target_seeds(target);
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
         self.persist_corpus(target_id, &hf_corpus::list(&corpus_dir)?)
             .await?;
@@ -4937,7 +5009,7 @@ impl ServiceContainer {
         // and survive as persisted rows -- previously LLM seeds only landed on
         // disk. Listing the dir also folds in any pre-existing entries; the
         // exact target reconciliation stays idempotent.
-        let target_id = self.resolve_target_id(project, target, lang).await;
+        let target_id = self.resolve_target_id(project, target, lang).await?;
         let generated = hf_corpus::seed(target_id, &corpus_dir, named_seeds).await?;
         let entries = generated
             .entries
@@ -4963,6 +5035,168 @@ impl ServiceContainer {
     }
 
     // -- Run --------------------------------------------------------------
+
+    /// Reserve and launch a fuzz campaign in a service-owned background task.
+    ///
+    /// The returned UUID is already persisted, recovery-journaled, and
+    /// registered for cooperative cancellation. Progress and lifecycle sinks
+    /// always receive that same service-owned id. A request future may be
+    /// dropped after this method returns without aborting the campaign.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when preflight or durable reservation
+    /// fails. Errors after reservation are reflected in the persisted run and
+    /// delivered as a [`RunLifecycleStatus::Failed`] lifecycle callback.
+    pub async fn start_fuzzer(
+        &self,
+        project: PathBuf,
+        target: String,
+        engine: EngineKind,
+        duration_secs: u64,
+        on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
+        on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
+    ) -> Result<Uuid, ClassifiedError> {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let active_id = Arc::new(std::sync::Mutex::new(None));
+        let container = self.clone();
+
+        tokio::spawn({
+            let started_tx = Arc::clone(&started_tx);
+            let active_id = Arc::clone(&active_id);
+            async move {
+                let progress_sink = {
+                    let active_id = Arc::clone(&active_id);
+                    let on_progress = Arc::clone(&on_progress);
+                    move |progress| {
+                        if let Ok(id) = active_id.lock() {
+                            if let Some(id) = *id {
+                                on_progress(id, progress);
+                            }
+                        }
+                    }
+                };
+                let started_sink = {
+                    let active_id = Arc::clone(&active_id);
+                    let started_tx = Arc::clone(&started_tx);
+                    let on_status = Arc::clone(&on_status);
+                    move |run_id| {
+                        if let Ok(mut id) = active_id.lock() {
+                            *id = Some(run_id);
+                        }
+                        on_status(run_id, RunLifecycleStatus::Running);
+                        if let Ok(mut sender) = started_tx.lock() {
+                            if let Some(sender) = sender.take() {
+                                let _ = sender.send(Ok(run_id));
+                            }
+                        }
+                    }
+                };
+
+                let result = container
+                    .run_fuzzer_with_started(
+                        &project,
+                        &target,
+                        engine,
+                        duration_secs,
+                        &progress_sink,
+                        &started_sink,
+                    )
+                    .await;
+                match result {
+                    Ok(summary) => {
+                        let status = if summary.termination
+                            == hf_core::runtime::CommandTermination::Cancelled
+                        {
+                            RunLifecycleStatus::Cancelled
+                        } else {
+                            RunLifecycleStatus::Done
+                        };
+                        on_status(summary.run_id, status);
+                    }
+                    Err(error) => {
+                        let run_id = active_id.lock().ok().and_then(|id| *id);
+                        if let Some(run_id) = run_id {
+                            tracing::error!(%run_id, %error, "background fuzz run failed");
+                            on_status(run_id, RunLifecycleStatus::Failed);
+                        } else if let Ok(mut sender) = started_tx.lock() {
+                            if let Some(sender) = sender.take() {
+                                let _ = sender.send(Err(error));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        started_rx.await.map_err(|_| {
+            ClassifiedError::Internal(
+                "background fuzz task ended before durable reservation".to_owned(),
+            )
+        })?
+    }
+
+    /// Read the durable lifecycle state for one run.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when persistence is unavailable or the
+    /// stored row cannot be decoded.
+    pub async fn run_control_status(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Option<RunControlStatus>, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("run control requires the persistent service store".into())
+        })?;
+        let Some(run) = store
+            .get_run(run_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let active = self
+            .active_runs
+            .lock()
+            .map_err(|_| ClassifiedError::Internal("active-run registry is poisoned".into()))?
+            .contains_key(&run_id);
+        Ok(Some(RunControlStatus {
+            run_id,
+            status: run.status.into(),
+            active,
+            started_at: run.started_at.to_rfc3339(),
+            ended_at: run.ended_at.map(|ended_at| ended_at.to_rfc3339()),
+        }))
+    }
+
+    /// Request cooperative cancellation for one durable run.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when run state cannot be read or the
+    /// active-run registry is unavailable.
+    pub async fn request_run_cancel(
+        &self,
+        run_id: Uuid,
+    ) -> Result<RunCancelOutcome, ClassifiedError> {
+        let Some(status) = self.run_control_status(run_id).await? else {
+            return Ok(RunCancelOutcome::NotFound);
+        };
+        if status.status != RunLifecycleStatus::Running || !status.active {
+            return Ok(RunCancelOutcome::Inactive);
+        }
+        let runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| ClassifiedError::Internal("active-run registry is poisoned".into()))?;
+        let Some(token) = runs.get(&run_id) else {
+            return Ok(RunCancelOutcome::Inactive);
+        };
+        if token.is_cancelled() {
+            return Ok(RunCancelOutcome::Inactive);
+        }
+        token.cancel();
+        Ok(RunCancelOutcome::Accepted)
+    }
 
     /// Cancel an in-flight fuzz run by id.
     ///
@@ -5021,6 +5255,19 @@ impl ServiceContainer {
         engine: EngineKind,
         duration_secs: u64,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        self.run_fuzzer_with_started(project, target, engine, duration_secs, on_progress, &|_| {})
+            .await
+    }
+
+    async fn run_fuzzer_with_started(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        duration_secs: u64,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
 
@@ -5150,6 +5397,10 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
+        // The run is durable and cancellable at this point. Non-blocking
+        // presentation transports may now return the exact UUID; no engine
+        // process has been launched yet.
+        on_started(run_id);
 
         let runner = hf_engine::runner::EngineRunner::new();
         // Watch edge readings for stagnation while forwarding every event.
@@ -5563,7 +5814,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
-        let run = match self.latest_run_record(project, Some(target)).await {
+        let run = match self.latest_run_record(project, Some(target)).await? {
             Some(run) => run,
             None if self.store.is_some() => {
                 return Err(ClassifiedError::Validation(format!(
@@ -5602,8 +5853,8 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
         if run.project_root != project.to_string_lossy()
             || !run_has_crash_evidence(run.status)
-            || self.run_target_id(store, &run).await
-                != Some(self.resolve_target_id_any_language(project, target).await)
+            || self.run_target_id(store, &run).await?
+                != Some(self.resolve_target_id_any_language(project, target).await?)
         {
             return Err(ClassifiedError::Validation(format!(
                 "run {run_id} does not own terminal evidence for target '{target}'"
@@ -5647,7 +5898,7 @@ impl ServiceContainer {
 
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let run_id = run.id;
         let engine = run.engine;
         let out_dir = run_output_dir(&workspace, &run)?;
@@ -5665,7 +5916,7 @@ impl ServiceContainer {
         // harness binary, native runtime without casr, or the tool errored). The
         // captured sanitizer traces (`logs`) feed bug-report drafting; CASR-path
         // crashes carry their summary instead.
-        let (mut deduped, logs): (
+        let (mut deduped, mut logs): (
             Vec<hf_core::crash::Crash>,
             std::collections::HashMap<PathBuf, String>,
         ) = match self
@@ -5684,6 +5935,21 @@ impl ServiceContainer {
         // duplicates (the report lists every persisted crash for the run).
         for crash in &mut deduped {
             crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
+        }
+
+        // Native minimizers execute against the immutable run-owned harness and
+        // original crash input. Legacy records without binary digest evidence
+        // remain triageable but cannot claim a verified minimized artifact.
+        if run.binary_rev.is_some() {
+            self.minimize_triaged_crashes(
+                &workspace,
+                run_id,
+                engine,
+                &run_binary,
+                &mut deduped,
+                &mut logs,
+            )
+            .await;
         }
 
         // Draft an LLM bug report for each unique crash when a provider is
@@ -5733,6 +5999,90 @@ impl ServiceContainer {
         Ok(deduped)
     }
 
+    async fn minimize_triaged_crashes(
+        &self,
+        workspace: &Path,
+        run_id: Uuid,
+        engine: EngineKind,
+        binary: &Path,
+        crashes: &mut [hf_core::crash::Crash],
+        logs: &mut std::collections::HashMap<PathBuf, String>,
+    ) {
+        use crate::crash_minimization::{prepare, PreparedMinimization, MAX_CRASH_MINIMIZATIONS};
+
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 120,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        for crash in crashes.iter_mut().take(MAX_CRASH_MINIMIZATIONS) {
+            let original = crash.input_path.clone();
+            let prepared = match prepare(workspace, run_id, engine, binary, &original, crash.id) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    tracing::warn!(
+                        crash_id = %crash.id,
+                        "crash minimization staging failed: {error}"
+                    );
+                    continue;
+                }
+            };
+            let minimized = match prepared {
+                PreparedMinimization::Unsupported => break,
+                PreparedMinimization::Complete(path) => Some(path),
+                PreparedMinimization::Run(run) => {
+                    let result = self
+                        .runtime
+                        .run_command_opts(&run.command, workspace, &limits, &run.sandbox)
+                        .await;
+                    match result {
+                        Ok(result)
+                            if result.termination
+                                == hf_core::runtime::CommandTermination::Completed
+                                && result.exit_code == 0 =>
+                        {
+                            match run.publish() {
+                                Ok(path) => Some(path),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        crash_id = %crash.id,
+                                        "crash minimizer output was rejected: {error}"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        Ok(result) => {
+                            tracing::warn!(
+                                crash_id = %crash.id,
+                                termination = ?result.termination,
+                                exit_code = result.exit_code,
+                                "crash minimizer did not complete successfully"
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                crash_id = %crash.id,
+                                "crash minimizer failed: {error}"
+                            );
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some(path) = minimized {
+                if let Some(log) = logs.get(&original).cloned() {
+                    logs.insert(path.clone(), log);
+                }
+                crash.input_path = path;
+                crash.minimized = true;
+            }
+        }
+    }
+
     /// Regression check: replay stored crash inputs against the current harness
     /// and report which ones still crash.
     ///
@@ -5762,16 +6112,15 @@ impl ServiceContainer {
 
         // (crash_id, input_path) pairs: persisted crashes first, else staged.
         let mut inputs: Vec<(String, PathBuf)> = Vec::new();
-        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let latest_run = self.latest_run_record(project, Some(target)).await?;
         if let Some(store) = &self.store {
             if let Some(run) = &latest_run {
-                if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
-                    inputs.extend(
-                        crashes
-                            .into_iter()
-                            .map(|c| (c.id.to_string(), c.input_path)),
-                    );
-                }
+                let crashes = store.list_crashes_by_run(run.id).await?;
+                inputs.extend(
+                    crashes
+                        .into_iter()
+                        .map(|c| (c.id.to_string(), c.input_path)),
+                );
             }
         }
         if inputs.is_empty() {
@@ -5956,17 +6305,17 @@ impl ServiceContainer {
         &self,
         project: &Path,
         target: Option<&str>,
-    ) -> Vec<hf_core::crash::Crash> {
+    ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
         let Some(store) = &self.store else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let run = self.latest_run_record(project, target).await;
-        match run {
+        let run = self.latest_run_record(project, target).await?;
+        Ok(match run {
             // Guard against any pre-existing duplicate rows (e.g. crashes
             // persisted before the deterministic-id fix): collapse by signature.
-            Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await.unwrap_or_default()),
+            Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await?),
             None => Vec::new(),
-        }
+        })
     }
 
     /// Export the latest run's crashes as a SARIF 2.1.0 document (string),
@@ -5980,7 +6329,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<String, ClassifiedError> {
-        let crashes = self.crashes_for_latest_run(project, Some(target)).await;
+        let crashes = self.crashes_for_latest_run(project, Some(target)).await?;
         let sarif = crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"));
         serde_json::to_string_pretty(&sarif)
             .map_err(|e| ClassifiedError::Internal(format!("serialize sarif: {e}")))
@@ -6032,7 +6381,7 @@ impl ServiceContainer {
     ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
-        let crashes = self.crashes_for_latest_run(project, target).await;
+        let crashes = self.crashes_for_latest_run(project, target).await?;
         if crashes.is_empty() {
             return Err(ClassifiedError::Validation(
                 "no triaged crashes to push to DefectDojo".to_owned(),
@@ -6082,18 +6431,16 @@ impl ServiceContainer {
         // Resolve the target candidate (best-effort) and its id.
         let candidate = self
             .resolve_target_candidate_any_language(project, target)
-            .await;
+            .await?;
         let target_id = candidate.as_ref().map_or_else(Uuid::nil, |c| c.id);
 
         // Latest run + its crashes from the store, when persistence is wired.
         let (run, crashes) = if let Some(store) = &self.store {
-            let run = self.latest_run_record(project, Some(target)).await;
+            let run = self.latest_run_record(project, Some(target)).await?;
             let crashes = match &run {
                 // Collapse any pre-existing duplicate rows by signature so the
                 // report never lists the same crash twice.
-                Some(r) => {
-                    hf_crash::dedup(store.list_crashes_by_run(r.id).await.unwrap_or_default())
-                }
+                Some(r) => hf_crash::dedup(store.list_crashes_by_run(r.id).await?),
                 None => Vec::new(),
             };
             (run, crashes)
@@ -6104,7 +6451,9 @@ impl ServiceContainer {
         // Live coverage (best-effort) and corpus composition.
         let coverage = self.coverage_summary(project, target).await;
         let covered_functions = self.coverage_functions(project, target).await.len();
-        let corpus = self.collect_corpus_stats(project, target, target_id).await;
+        let corpus = self
+            .collect_corpus_stats(project, target, target_id)
+            .await?;
 
         let data = ReportData {
             generated_at: Utc::now().to_rfc3339(),
@@ -6223,22 +6572,17 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
         target_id: Uuid,
-    ) -> crate::report::CorpusStats {
+    ) -> Result<crate::report::CorpusStats, ClassifiedError> {
         use hf_core::corpus::CorpusSource;
 
         let entries = match &self.store {
-            Some(store) if target_id != Uuid::nil() => store
-                .list_corpus_entries(target_id)
-                .await
-                .unwrap_or_default(),
+            Some(store) if target_id != Uuid::nil() => store.list_corpus_entries(target_id).await?,
             _ => Vec::new(),
         };
         let entries = if entries.is_empty() {
             // No persisted entries: read the live corpus directory.
             let workspace = workspace_dir(project, target);
-            hf_corpus::list(&workspace.join("corpus"))
-                .map(|c| c.entries)
-                .unwrap_or_default()
+            hf_corpus::list(&workspace.join("corpus"))?.entries
         } else {
             entries
         };
@@ -6254,7 +6598,7 @@ impl ServiceContainer {
                 CorpusSource::Manual => {}
             }
         }
-        stats
+        Ok(stats)
     }
 
     /// Replay a single crash input through the compiled harness in the sandbox
@@ -6305,30 +6649,33 @@ impl ServiceContainer {
 
     /// Most recent terminal persisted run in a project, optionally restricted to one
     /// target through `run.config.harness_id -> harness.target_id`.
-    async fn latest_run_record(&self, project: &Path, target: Option<&str>) -> Option<RunRecord> {
-        let store = self.store.as_ref()?;
-        let runs = store
-            .list_runs(Some(&project.to_string_lossy()))
-            .await
-            .ok()?;
-        let Some(target) = target else {
-            return runs
-                .into_iter()
-                .find(|run| run_has_crash_evidence(run.status));
+    async fn latest_run_record(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+    ) -> Result<Option<RunRecord>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
         };
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let runs = store.list_runs(Some(&project.to_string_lossy())).await?;
+        let Some(target) = target else {
+            return Ok(runs
+                .into_iter()
+                .find(|run| run_has_crash_evidence(run.status)));
+        };
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         if target_id.is_nil() {
-            return None;
+            return Ok(None);
         }
         for run in runs {
             if !run_has_crash_evidence(run.status) {
                 continue;
             }
-            if self.run_target_id(store, &run).await == Some(target_id) {
-                return Some(run);
+            if self.run_target_id(store, &run).await? == Some(target_id) {
+                return Ok(Some(run));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
@@ -6573,7 +6920,7 @@ impl ServiceContainer {
             (b"{}".to_vec(), "seed_empty".to_owned()),
             (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
         ];
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(corpus.entries.len())
@@ -6590,13 +6937,13 @@ impl ServiceContainer {
     ) -> Result<usize, ClassifiedError> {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
-        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let latest_run = self.latest_run_record(project, Some(target)).await?;
         let out_dir = match latest_run.as_ref() {
             Some(run) => run_output_dir(&workspace, run)?,
             None => workspace.join("out"),
         };
         let mut corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         corpus.target_id = target_id;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(corpus.entries.len())
@@ -6615,7 +6962,7 @@ impl ServiceContainer {
         let corpus_dir = workspace.join("corpus");
         let corpus = hf_corpus::list(&corpus_dir)?;
         let pruned = hf_corpus::prune(corpus)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         self.persist_corpus(target_id, &pruned).await?;
         Ok(pruned.entries.len())
     }
@@ -6747,7 +7094,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<usize, ClassifiedError> {
-        let latest_run = self.latest_run_record(project, Some(target)).await;
+        let latest_run = self.latest_run_record(project, Some(target)).await?;
         self.corpus_absorb_run_record(project, target, latest_run)
             .await
     }
@@ -6772,11 +7119,11 @@ impl ServiceContainer {
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         if target_id.is_nil()
             || run.project_root != project.to_string_lossy()
             || !run_has_crash_evidence(run.status)
-            || self.run_target_id(store, &run).await != Some(target_id)
+            || self.run_target_id(store, &run).await? != Some(target_id)
         {
             return Err(ClassifiedError::Validation(format!(
                 "run {run_id} does not own terminal evidence for target '{target}'"
@@ -6800,9 +7147,8 @@ impl ServiceContainer {
         let mut inputs: Vec<PathBuf> = Vec::new();
         if let Some(store) = &self.store {
             if let Some(run) = &run {
-                if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
-                    inputs.extend(crashes.into_iter().map(|c| c.input_path));
-                }
+                let crashes = store.list_crashes_by_run(run.id).await?;
+                inputs.extend(crashes.into_iter().map(|c| c.input_path));
             }
         }
         if inputs.is_empty() {
@@ -6817,7 +7163,7 @@ impl ServiceContainer {
         }
 
         let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         corpus.target_id = target_id;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(added)
@@ -7360,6 +7706,74 @@ pub struct RunHistoryItem {
     pub binary_rev: Option<String>,
     /// Workspace-relative run output directory.
     pub evidence_dir: Option<String>,
+}
+
+/// Public lifecycle states used by non-blocking run-control transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLifecycleStatus {
+    /// The durable row exists but execution has not started.
+    Pending,
+    /// The sandboxed engine is active and may be cancelled cooperatively.
+    Running,
+    /// Execution completed and terminal evidence is durable.
+    Done,
+    /// Execution failed and the durable row has been repaired.
+    Failed,
+    /// The user requested cooperative cancellation.
+    Cancelled,
+}
+
+impl RunLifecycleStatus {
+    /// Stable lowercase transport representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl From<RunStatus> for RunLifecycleStatus {
+    fn from(status: RunStatus) -> Self {
+        match status {
+            RunStatus::Pending => Self::Pending,
+            RunStatus::Running => Self::Running,
+            RunStatus::Done => Self::Done,
+            RunStatus::Failed => Self::Failed,
+            RunStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Durable status snapshot for one service-owned run UUID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RunControlStatus {
+    /// Service-owned run UUID.
+    pub run_id: Uuid,
+    /// Durable lifecycle state.
+    pub status: RunLifecycleStatus,
+    /// Whether a cooperative cancellation token is currently registered.
+    pub active: bool,
+    /// RFC3339 reservation time.
+    pub started_at: String,
+    /// RFC3339 terminal time, when complete.
+    pub ended_at: Option<String>,
+}
+
+/// Domain outcome of a cooperative cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCancelOutcome {
+    /// The active run's token was signalled.
+    Accepted,
+    /// No durable run exists for the requested UUID.
+    NotFound,
+    /// The run exists but is terminal or no longer active.
+    Inactive,
 }
 
 /// A fuzz run summary.

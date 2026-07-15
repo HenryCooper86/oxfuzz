@@ -117,7 +117,8 @@ async fn dashboard_summarizes_targets_harnesses_runs_and_crashes() {
     let project = PathBuf::from("/proj");
     let dashboard = container
         .workbench_dashboard(Some(project.as_path()), Some("parse_packet"))
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(dashboard.totals.targets, 1);
     assert_eq!(dashboard.totals.harnesses, 1);
@@ -159,7 +160,8 @@ async fn dashboard_target_filter_scopes_runs_through_harness_config() {
     let project = PathBuf::from("/proj");
     let dashboard = container
         .workbench_dashboard(Some(project.as_path()), Some("parse_packet"))
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(dashboard.totals.targets, 1);
     assert_eq!(dashboard.totals.runs, 1);
@@ -185,7 +187,10 @@ async fn run_history_exposes_service_owned_comparison_groups() {
     store.insert_run(&first_run).await.unwrap();
     store.insert_run(&second_run).await.unwrap();
 
-    let history = container.run_history(Some(Path::new("/proj"))).await;
+    let history = container
+        .run_history(Some(Path::new("/proj")))
+        .await
+        .unwrap();
     assert_eq!(history.len(), 2);
     assert!(history
         .iter()
@@ -224,7 +229,8 @@ async fn dashboard_project_filter_does_not_leak_other_project_reviews() {
     let project = PathBuf::from("/proj");
     let dashboard = container
         .workbench_dashboard(Some(project.as_path()), None)
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(dashboard.totals.targets, 0);
     assert_eq!(dashboard.totals.harnesses, 0);
@@ -240,7 +246,8 @@ async fn dashboard_readiness_tracks_operational_state() {
 
     let empty = container
         .workbench_dashboard(Some(project.as_path()), None)
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(empty.readiness.state, "setup_required");
     assert!(empty.readiness.score < 50);
@@ -273,7 +280,8 @@ async fn dashboard_readiness_tracks_operational_state() {
 
     let ready = container
         .workbench_dashboard(Some(project.as_path()), None)
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(ready.readiness.state, "ready");
     assert!(ready.readiness.score >= 80);
@@ -382,7 +390,7 @@ async fn dashboard_without_active_project_is_empty_not_global_aggregate() {
     store.upsert_harness(&harness).await.unwrap();
 
     // With no project selected the workbench shows nothing (not a whole-DB roll-up).
-    let dashboard = container.workbench_dashboard(None, None).await;
+    let dashboard = container.workbench_dashboard(None, None).await.unwrap();
     assert_eq!(dashboard.totals.targets, 0);
     assert_eq!(dashboard.totals.harnesses, 0);
     assert!(dashboard.top_targets.is_empty());
@@ -392,7 +400,8 @@ async fn dashboard_without_active_project_is_empty_not_global_aggregate() {
     // Selecting the project surfaces its data.
     let scoped = container
         .workbench_dashboard(Some(Path::new("/proj")), None)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(scoped.totals.targets, 1);
     assert_eq!(scoped.totals.harnesses, 1);
 }

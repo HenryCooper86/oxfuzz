@@ -38,6 +38,7 @@ mod tests {
             schedule_id: "test".into(),
             fired_at: Utc::now(),
             trigger_type: TriggerType::Interval,
+            is_recovery: false,
         };
 
         tx.send(trigger.clone()).await.unwrap();

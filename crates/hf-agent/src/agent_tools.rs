@@ -1,5 +1,5 @@
 //! Read-only code-inspection tools for the agent, backed by the `hf-tools`
-//! registry + executor (JSON-schema validation + hooks middleware).
+//! registry + executor (JSON-schema validation + registered-tool dispatch).
 //!
 //! These let the fuzzing agent read and search a target's source while it
 //! reasons about what to fuzz, complementing the fuzzing-domain tools
