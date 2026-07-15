@@ -1,12 +1,10 @@
-//! Run recovery via a persistent run journal, backed by `hf-journal`.
+//! Run recovery via a service-owned persistent write-ahead log.
 //!
-//! `hf-journal`'s [`JournalStore`] models work as *scopes* (Open/Closed/
-//! Abandoned) but is in-memory only -- its own docs note a production
-//! implementation "would be backed by `SQLite`". A fuzz run can't span an app
-//! restart, so a run still `Open` after a restart was interrupted (the app
-//! crashed or quit mid-run). [`RunJournal`] supplies the missing durable layer:
-//! it mirrors each run as a scope and appends lifecycle events to a write-ahead
-//! log, then replays the WAL on startup to surface interrupted runs.
+//! A fuzz run cannot span an app restart, so an `open` event without a later
+//! `close` or `dismiss` event identifies a run interrupted by an app crash or
+//! quit. [`RunJournal`] appends synced lifecycle events to a bounded JSONL WAL,
+//! replays it on startup, and surfaces those interrupted runs. The WAL is the
+//! sole source of recovery state; no parallel in-memory scope model exists.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -15,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use hf_core::engine::EngineKind;
-use hf_journal::storage::{JournalStore, ScopeStatus, ScopeType};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -74,15 +71,14 @@ pub struct InterruptedRun {
     pub started_at: i64,
 }
 
-/// Persistent run journal: scope tracking + a WAL for crash recovery.
+/// Persistent run journal backed by a bounded, synced JSONL WAL.
 pub struct RunJournal {
-    store: Mutex<JournalStore>,
     /// Interrupted runs detected at startup (cleared as they are dismissed).
     interrupted: Mutex<Vec<InterruptedRun>>,
     /// WAL path; `None` disables persistence (tests / no data dir).
     wal_path: Option<PathBuf>,
-    /// Serializes the WAL and matching in-memory lifecycle mutation. Instances
-    /// opened on the same path share this lock within the process.
+    /// Serializes WAL replay, compaction, and appends. Instances opened on the
+    /// same path share this lock within the process.
     wal_lock: Arc<Mutex<()>>,
     /// Sticky replay/write failure for callers that need fail-closed startup.
     durability_error: Mutex<Option<String>>,
@@ -97,7 +93,6 @@ impl RunJournal {
     #[must_use]
     pub fn in_memory() -> Self {
         Self {
-            store: Mutex::new(JournalStore::new()),
             interrupted: Mutex::new(Vec::new()),
             wal_path: None,
             wal_lock: Arc::new(Mutex::new(())),
@@ -106,29 +101,24 @@ impl RunJournal {
     }
 
     /// Open the journal at `wal_path`, replaying it to detect interrupted runs
-    /// (scopes opened but never closed/dismissed). A fully valid WAL is then
+    /// (`open` events never closed/dismissed). A fully valid WAL is then
     /// compacted to just the still-open events; a degraded WAL is preserved.
     #[must_use]
     pub fn open(wal_path: PathBuf) -> Self {
         let wal_lock = wal_lock_for_path(&wal_path);
         let _wal_guard = lock_recover(&wal_lock);
         let replay = read_wal(&wal_path);
-        let mut store = JournalStore::new();
         // run_id -> the open event, removed when a matching close/dismiss is seen.
         let open = replay_open_events(&replay.events);
-        // Still-open scopes were interrupted.
+        // Runs with a still-open event were interrupted.
         let interrupted: Vec<InterruptedRun> = open
             .values()
-            .map(|ev| {
-                store.open_scope(&ev.run_id, ScopeType::Pipeline);
-                store.set_scope_status(&ev.run_id, ScopeStatus::Abandoned);
-                InterruptedRun {
-                    run_id: ev.run_id.clone(),
-                    project: ev.project.clone(),
-                    target: ev.target.clone(),
-                    engine: ev.engine.clone(),
-                    started_at: ev.ts,
-                }
+            .map(|ev| InterruptedRun {
+                run_id: ev.run_id.clone(),
+                project: ev.project.clone(),
+                target: ev.target.clone(),
+                engine: ev.engine.clone(),
+                started_at: ev.ts,
             })
             .collect();
         // Compact only a fully valid replay. If even one record is malformed,
@@ -146,7 +136,6 @@ impl RunJournal {
             tracing::error!(%error, path = %wal_path.display(), "run journal is degraded");
         }
         Self {
-            store: Mutex::new(store),
             interrupted: Mutex::new(interrupted),
             wal_path: Some(wal_path),
             wal_lock: Arc::clone(&wal_lock),
@@ -168,12 +157,11 @@ impl RunJournal {
         lock_recover(&self.interrupted).clone()
     }
 
-    /// Mark a run as started (opens a scope; appends to the WAL).
+    /// Mark a run as started by appending an `open` event to the WAL.
     pub fn open_run(&self, run_id: Uuid, project: &Path, target: &str, engine: EngineKind) {
-        let id = run_id.to_string();
         let event = RunEvent {
             event: "open".to_owned(),
-            run_id: id.clone(),
+            run_id: run_id.to_string(),
             project: project.to_string_lossy().into_owned(),
             target: target.to_owned(),
             engine: format!("{engine:?}"),
@@ -181,14 +169,12 @@ impl RunJournal {
             ts: now(),
         };
         let _wal_guard = lock_recover(&self.wal_lock);
-        if self.append_locked(&event) {
-            lock_recover(&self.store).open_scope(&id, ScopeType::Pipeline);
-        }
+        self.append_locked(&event);
     }
 
     /// Record a non-lifecycle note against a run (e.g. an auto-revert firing).
     /// Appended to the WAL for the audit trail; ignored by recovery replay
-    /// (unknown event strings do not reopen a scope).
+    /// (unknown event strings do not change lifecycle state).
     pub fn note(&self, run_id: Uuid, event: &str, detail: &str) {
         let event = RunEvent {
             event: event.to_owned(),
@@ -203,12 +189,11 @@ impl RunJournal {
         self.append_locked(&event);
     }
 
-    /// Mark a run as finished (closes its scope; appends to the WAL).
+    /// Mark a run as finished by appending a `close` event to the WAL.
     pub fn close_run(&self, run_id: Uuid) {
-        let id = run_id.to_string();
         let event = RunEvent {
             event: "close".to_owned(),
-            run_id: id.clone(),
+            run_id: run_id.to_string(),
             project: String::new(),
             target: String::new(),
             engine: String::new(),
@@ -216,13 +201,11 @@ impl RunJournal {
             ts: now(),
         };
         let _wal_guard = lock_recover(&self.wal_lock);
-        if self.append_locked(&event) {
-            lock_recover(&self.store).set_scope_status(&id, ScopeStatus::Closed);
-        }
+        self.append_locked(&event);
     }
 
-    /// Dismiss an interrupted run (marks its scope Abandoned; drops it from the
-    /// recovery list).
+    /// Dismiss an interrupted run and remove it from the recovery list only
+    /// after the `dismiss` event is durable.
     pub fn dismiss(&self, run_id: &str) {
         let event = RunEvent {
             event: "dismiss".to_owned(),
@@ -235,7 +218,6 @@ impl RunJournal {
         };
         let _wal_guard = lock_recover(&self.wal_lock);
         if self.append_locked(&event) {
-            lock_recover(&self.store).set_scope_status(run_id, ScopeStatus::Abandoned);
             lock_recover(&self.interrupted).retain(|run| run.run_id != run_id);
         }
     }
@@ -579,6 +561,37 @@ mod tests {
         drop(j2);
         let j3 = RunJournal::open(wal);
         assert!(j3.interrupted().is_empty());
+    }
+
+    #[test]
+    fn wal_events_alone_define_open_close_and_dismiss_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = dir.path().join("run_journal.jsonl");
+        let closed = "closed-run";
+        let dismissed = "dismissed-run";
+        let interrupted = "interrupted-run";
+        let body = [
+            event("open", closed, "closed-target", 1),
+            event("close", closed, "", 2),
+            event("open", dismissed, "dismissed-target", 3),
+            event("dismiss", dismissed, "", 4),
+            event("open", interrupted, "interrupted-target", 5),
+        ]
+        .iter()
+        .map(json_line)
+        .collect::<String>();
+        std::fs::write(&wal, body).unwrap();
+
+        let journal = RunJournal::open(wal.clone());
+        let recovered = journal.interrupted();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].run_id, interrupted);
+        assert_eq!(recovered[0].target, "interrupted-target");
+
+        journal.dismiss(interrupted);
+        assert!(journal.interrupted().is_empty());
+        drop(journal);
+        assert!(RunJournal::open(wal).interrupted().is_empty());
     }
 
     #[test]

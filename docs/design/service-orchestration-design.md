@@ -67,7 +67,9 @@ events. The database becomes terminal only after metrics and coverage samples
 are durable; if the final journal close cannot be confirmed, the database row
 is downgraded to failed and later campaigns remain blocked. WAL replay is
 bounded and preserves malformed input for operator recovery instead of
-compacting ambiguous evidence away.
+compacting ambiguous evidence away. This bounded JSONL WAL is owned directly by
+`hf-service` and is the sole recovery-state model; there is no parallel
+in-memory scope journal.
 
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist
