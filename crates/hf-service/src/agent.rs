@@ -170,7 +170,10 @@ impl ServiceContainer {
                         "corpus now {} entries",
                         self.corpus_grow(project, target).await?
                     ),
-                    "prune" => format!("pruned to {} entries", self.corpus_prune(project, target)?),
+                    "prune" => format!(
+                        "pruned to {} entries",
+                        self.corpus_prune(project, target).await?
+                    ),
                     "list" => format!(
                         "{} entries",
                         self.corpus_list(project, target)?.entries.len()

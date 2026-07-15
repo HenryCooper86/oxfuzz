@@ -586,27 +586,66 @@ pub fn absorb(
 pub fn minimize(corpus_root: &Path, minimized_dir: &Path) -> Result<Corpus, ClassifiedError> {
     let limits = DEFAULT_CORPUS_LIMITS;
     ensure_regular_directory(corpus_root)?;
-    // Hashes of the inputs the merge decided to keep.
     let kept = prepare_flat_directory(minimized_dir, limits)?;
-    let kept_hashes: HashSet<String> = kept.iter().map(|input| input.sha256.clone()).collect();
-
-    // Drop any live input whose content is not in the minimized set.
-    for entry in list_with_limits(corpus_root, limits)?.entries {
-        if !kept_hashes.contains(&entry.sha256) {
-            let _ = std::fs::remove_file(&entry.path);
+    let live = list_with_limits(corpus_root, limits)?.entries;
+    let mut live_by_hash: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut reserved_names: HashSet<OsString> = HashSet::new();
+    for entry in &live {
+        live_by_hash
+            .entry(entry.sha256.clone())
+            .or_default()
+            .push(entry.path.clone());
+        if let Some(name) = entry.path.file_name() {
+            reserved_names.insert(name.to_owned());
         }
     }
 
-    // Make sure every kept input exists in the live corpus directory.
+    // Prefer one existing path for each surviving content hash. A merge tool
+    // may rename an input, but writing that second name would leave duplicate
+    // bytes in the retained corpus and make the returned inventory inexact.
+    let mut seen_hashes = HashSet::new();
+    let mut selected_existing = HashSet::new();
     let mut entries = Vec::new();
-    for input in kept {
-        let dest = corpus_root.join(input.name);
-        // Always replace the destination through a fresh inode. Besides fixing
-        // stale same-name collisions, this replaces an attacker-planted
-        // symlink instead of reading or writing through it.
-        atomic_write(&dest, &input.data)?;
-        entries.push(make_entry(&dest, &input.data, CorpusSource::Minimized));
+    let mut additions = Vec::new();
+    for mut input in kept {
+        if !seen_hashes.insert(input.sha256.clone()) {
+            continue;
+        }
+        if let Some(paths) = live_by_hash.get_mut(&input.sha256) {
+            if let Some(path) = paths.first().cloned() {
+                selected_existing.insert(path.clone());
+                entries.push(make_entry(&path, &input.data, CorpusSource::Minimized));
+                continue;
+            }
+        }
+        input.name = unique_input_name(&input.name, &input.sha256, &mut reserved_names);
+        additions.push(input);
     }
+
+    // Write new survivors before deleting redundant live inputs. Names are
+    // reserved against every regular live entry, so these writes cannot replace
+    // an existing input. `atomic_write` also replaces a same-name symlink rather
+    // than following it.
+    for input in additions {
+        let destination = corpus_root.join(&input.name);
+        atomic_write(&destination, &input.data)?;
+        entries.push(make_entry(
+            &destination,
+            &input.data,
+            CorpusSource::Minimized,
+        ));
+    }
+    for entry in live {
+        if !selected_existing.contains(&entry.path) {
+            std::fs::remove_file(&entry.path).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "remove redundant corpus input {}: {error}",
+                    entry.path.display()
+                ))
+            })?;
+        }
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(Corpus {
         id: Uuid::new_v4(),
         target_id: Uuid::nil(),

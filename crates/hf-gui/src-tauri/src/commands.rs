@@ -360,6 +360,7 @@ pub async fn generate_seeds(
     let entries = state
         .container
         .generate_seeds(std::path::Path::new(&project), &target)
+        .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"seeds": entries}))
 }
@@ -455,6 +456,7 @@ pub async fn corpus_prune(
     let n = state
         .container
         .corpus_prune(std::path::Path::new(&project), &target)
+        .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"entries": n}))
 }
@@ -987,10 +989,11 @@ pub async fn delete_crash(
 pub async fn delete_corpus_entry(
     state: tauri::State<'_, crate::state::AppState>,
     sha256: String,
+    path: String,
 ) -> Result<(), String> {
     state
         .container
-        .delete_corpus_entry(&sha256)
+        .delete_corpus_entry(&sha256, std::path::Path::new(&path))
         .await
         .map_err(|e| e.to_string())
 }
@@ -1066,9 +1069,12 @@ pub fn interrupted_runs(
 pub fn dismiss_interrupted_run(
     state: tauri::State<'_, crate::state::AppState>,
     run_id: String,
-) -> Vec<hf_service::recovery::InterruptedRun> {
-    state.container.dismiss_interrupted_run(&run_id);
-    state.container.interrupted_runs()
+) -> Result<Vec<hf_service::recovery::InterruptedRun>, String> {
+    state
+        .container
+        .dismiss_interrupted_run(&run_id)
+        .map_err(|error| error.to_string())?;
+    Ok(state.container.interrupted_runs())
 }
 
 /// List all scheduled fuzz campaigns.
