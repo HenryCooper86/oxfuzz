@@ -339,7 +339,7 @@ fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
 
 async fn cmd_export(project: Option<PathBuf>, output: PathBuf) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
-    let bundle = container.export_project_data(project.as_deref()).await;
+    let bundle = container.export_project_data(project.as_deref()).await?;
     let json = serde_json::to_string_pretty(&bundle)?;
     std::fs::write(&output, json)?;
     println!("Exported evidence bundle to {}", output.display());

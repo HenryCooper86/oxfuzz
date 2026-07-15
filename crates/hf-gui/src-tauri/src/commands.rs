@@ -406,7 +406,11 @@ pub async fn corpus_list(
 pub async fn all_crashes(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<serde_json::Value, String> {
-    let crashes = state.container.all_crashes().await;
+    let crashes = state
+        .container
+        .all_crashes()
+        .await
+        .map_err(|error| error.to_string())?;
     serde_json::to_value(&crashes).map_err(|e| e.to_string())
 }
 
@@ -415,7 +419,11 @@ pub async fn all_crashes(
 pub async fn all_corpus(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<serde_json::Value, String> {
-    let entries = state.container.all_corpus_entries().await;
+    let entries = state
+        .container
+        .all_corpus_entries()
+        .await
+        .map_err(|error| error.to_string())?;
     serde_json::to_value(&entries).map_err(|e| e.to_string())
 }
 
@@ -740,10 +748,11 @@ pub async fn workbench_dashboard(
         .filter(|p| !p.is_empty())
         .map(std::path::Path::new);
     let target = target.as_deref().filter(|t| !t.is_empty());
-    Ok(state
+    state
         .container
         .workbench_dashboard(project_path, target)
-        .await)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Generated harnesses that need human review or promotion.
@@ -758,10 +767,11 @@ pub async fn harness_review_queue(
         .filter(|p| !p.is_empty())
         .map(std::path::Path::new);
     let target = target.as_deref().filter(|t| !t.is_empty());
-    Ok(state
+    state
         .container
         .harness_review_queue(project_path, target)
-        .await)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Build an issue draft/prefilled URL for a triaged crash, targeting the fuzzed
@@ -2020,7 +2030,11 @@ pub async fn run_history(
         .as_deref()
         .filter(|p| !p.is_empty())
         .map(std::path::Path::new);
-    Ok(state.container.run_history(path).await)
+    state
+        .container
+        .run_history(path)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The intra-run coverage/throughput curve for a single run (empty if none was
@@ -2030,7 +2044,11 @@ pub async fn run_coverage_series(
     state: tauri::State<'_, crate::state::AppState>,
     run_id: String,
 ) -> Result<Vec<hf_service::CoverageSample>, String> {
-    Ok(state.container.run_coverage_series(&run_id).await)
+    state
+        .container
+        .run_coverage_series(&run_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The harness source a run used, for diffing between harness revisions.
@@ -2039,7 +2057,11 @@ pub async fn run_harness_source(
     state: tauri::State<'_, crate::state::AppState>,
     run_id: String,
 ) -> Result<String, String> {
-    Ok(state.container.run_harness_source(&run_id).await)
+    state
+        .container
+        .run_harness_source(&run_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Restore the harness a run used (recompiling it), reverting the target to that
@@ -2067,10 +2089,11 @@ pub async fn project_auto_revert_override(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
 ) -> Result<Option<hf_service::ProjectAutoRevert>, String> {
-    Ok(state
+    state
         .container
         .project_auto_revert_override(std::path::Path::new(&project))
-        .await)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The auto-revert audit trail (newest first). `project` scopes to one project;
@@ -2082,13 +2105,14 @@ pub async fn auto_revert_events(
     limit: Option<usize>,
 ) -> Result<Vec<hf_service::AutoRevertEvent>, String> {
     let path = project.filter(|p| !p.is_empty());
-    Ok(state
+    state
         .container
         .auto_revert_events(
             path.as_deref().map(std::path::Path::new),
             limit.unwrap_or(200),
         )
-        .await)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The active project's effective auto-revert policy (override merged over the
@@ -2098,10 +2122,11 @@ pub async fn effective_auto_revert_policy(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
 ) -> Result<hf_service::EffectiveAutoRevert, String> {
-    Ok(state
+    state
         .container
         .effective_auto_revert_view(std::path::Path::new(&project))
-        .await)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Every project's auto-revert override, keyed by project root, for badging the
@@ -2110,7 +2135,11 @@ pub async fn effective_auto_revert_policy(
 pub async fn project_auto_revert_overrides(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<std::collections::HashMap<String, hf_service::ProjectAutoRevert>, String> {
-    Ok(state.container.project_auto_revert_overrides().await)
+    state
+        .container
+        .project_auto_revert_overrides()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Set (or replace) a project's auto-revert override.
@@ -2161,7 +2190,11 @@ pub async fn export_project_data(
         .as_deref()
         .filter(|p| !p.is_empty())
         .map(std::path::Path::new);
-    let bundle = state.container.export_project_data(path).await;
+    let bundle = state
+        .container
+        .export_project_data(path)
+        .await
+        .map_err(|error| error.to_string())?;
     let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
     let name = path
         .and_then(|p| p.file_name())

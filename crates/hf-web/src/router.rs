@@ -637,9 +637,12 @@ async fn run_history(
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_optional_project(&state, req.project.as_ref())?;
-    Ok(Json(public_value(
-        state.container.run_history(project.as_deref()).await,
-    )))
+    let history = state
+        .container
+        .run_history(project.as_deref())
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(history)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,9 +654,13 @@ async fn run_coverage_series(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let series = state
+        .container
+        .run_coverage_series(&req.run_id)
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(
-        serde_json::to_value(state.container.run_coverage_series(&req.run_id).await)
-            .unwrap_or(serde_json::Value::Null),
+        serde_json::to_value(series).unwrap_or(serde_json::Value::Null),
     ))
 }
 
@@ -661,7 +668,12 @@ async fn run_harness_source(
     State(state): State<AppState>,
     Json(req): Json<RunIdRequest>,
 ) -> ApiResult<String> {
-    Ok(Json(state.container.run_harness_source(&req.run_id).await))
+    let source = state
+        .container
+        .run_harness_source(&req.run_id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(source))
 }
 
 async fn revert_harness_from_run(
@@ -817,7 +829,11 @@ async fn project_auto_revert_override(
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let over = state.container.project_auto_revert_override(&project).await;
+    let over = state
+        .container
+        .project_auto_revert_override(&project)
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(over)))
 }
 
@@ -838,7 +854,8 @@ async fn auto_revert_events(
     let events = state
         .container
         .auto_revert_events(project.as_deref(), req.limit.unwrap_or(200))
-        .await;
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(events)))
 }
 
@@ -847,16 +864,23 @@ async fn effective_auto_revert_policy(
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let view = state.container.effective_auto_revert_view(&project).await;
+    let view = state
+        .container
+        .effective_auto_revert_view(&project)
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(view)))
 }
 
 async fn project_auto_revert_overrides(
     State(state): State<AppState>,
 ) -> ApiResult<serde_json::Value> {
-    Ok(Json(public_value(
-        state.container.project_auto_revert_overrides().await,
-    )))
+    let overrides = state
+        .container
+        .project_auto_revert_overrides()
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(overrides)))
 }
 
 async fn set_project_auto_revert_override(
@@ -886,12 +910,20 @@ async fn clear_project_auto_revert_override(
 }
 
 async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
-    let crashes = state.container.all_crashes().await;
+    let crashes = state
+        .container
+        .all_crashes()
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(crashes)))
 }
 
 async fn all_corpus(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
-    let entries = state.container.all_corpus_entries().await;
+    let entries = state
+        .container
+        .all_corpus_entries()
+        .await
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(entries)))
 }
 
@@ -900,12 +932,12 @@ async fn export_project_data(
     Json(req): Json<ExportProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_optional_project(&state, req.project.as_ref())?;
-    Ok(Json(public_value(
-        state
-            .container
-            .export_project_data(project.as_deref())
-            .await,
-    )))
+    let export = state
+        .container
+        .export_project_data(project.as_deref())
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(export)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1064,12 +1096,12 @@ async fn workbench_dashboard(
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_optional_project(&state, req.project.as_ref())?;
-    Ok(Json(public_value(
-        state
-            .container
-            .workbench_dashboard(project.as_deref(), opt_target(req.target.as_ref()))
-            .await,
-    )))
+    let dashboard = state
+        .container
+        .workbench_dashboard(project.as_deref(), opt_target(req.target.as_ref()))
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(dashboard)))
 }
 
 async fn harness_review_queue(
@@ -1077,12 +1109,12 @@ async fn harness_review_queue(
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
     let project = approved_optional_project(&state, req.project.as_ref())?;
-    Ok(Json(public_value(
-        state
-            .container
-            .harness_review_queue(project.as_deref(), opt_target(req.target.as_ref()))
-            .await,
-    )))
+    let queue = state
+        .container
+        .harness_review_queue(project.as_deref(), opt_target(req.target.as_ref()))
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(queue)))
 }
 
 #[derive(Debug, Deserialize)]
