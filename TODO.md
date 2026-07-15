@@ -92,7 +92,7 @@ Status legend: [x] done - [~] partial - [ ] not started.
   command; the DiagnosticsPanel renders real per-model cost/usage.
 - [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
   command surface; `hf-knowledge` + sub-agent pools are still scaffolds).
-- [ ] Remaining scaffold crates: hf-bot, hf-mcp, hf-scheduler, hf-knowledge,
+- [ ] Remaining scaffold crates: hf-mcp, hf-scheduler, hf-knowledge,
   hf-skills (thin), hf-hooks, hf-journal, hf-tools (skeleton), hf-test-utils.
 
 ## Integrations
@@ -191,10 +191,11 @@ but larger or riskier than a drop-in fix.
   (`HF_GUARDRAILS`); move to a `ServiceContainer::run_ci_gate` method.
 
 ### Data / schema
-- [ ] `hf-storage` has two schema systems: live `migrations/*.sql` and a
-  test-only `schema.sql` + `migration.rs` whose `prepare_database` would archive
-  any real DB if ever wired in. Unify on one; fix `DATABASE_SCHEMA.md` drift
-  (runs missing 6 columns; ~12 tables undocumented).
+- [x] Unified `hf-storage` on `Store::connect` plus forward-only
+  `migrations/*.sql`; session and checkpoint tests now exercise the production
+  schema path, and the destructive test-only schema initializer was removed.
+- [ ] Fix `DATABASE_SCHEMA.md` drift (runs missing statistics columns and
+  ancillary persistence tables are undocumented).
 - [ ] `list_all_crashes` doc claims newest-first but has no `ORDER BY`.
 - [ ] `container.rs` storage reads use `.await.unwrap_or_default()` (14 sites), so
   a DB error renders as "no data" (worst for the crash list). At least log the error.
