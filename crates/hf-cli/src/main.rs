@@ -210,6 +210,9 @@ enum Commands {
     },
     /// Start the web server (REST API).
     Serve {
+        /// IP address to listen on. Non-loopback addresses require `HF_WEB_TOKEN`.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
         /// Port to listen on.
         #[arg(long, default_value = "8081")]
         port: u16,
@@ -1149,11 +1152,13 @@ async fn main() -> anyhow::Result<()> {
             target,
             out,
         } => cmd_report(project, &target, out.as_deref()).await?,
-        Commands::Serve { port } => {
-            let app = hf_web::build_bootstrapped().await;
-            let addr = format!("0.0.0.0:{port}");
+        Commands::Serve { host, port } => {
+            let security = hf_web::WebSecurityConfig::from_env();
+            let addr = std::net::SocketAddr::new(host, port);
+            hf_web::validate_bind_addr(addr, security.token_configured())?;
+            let app = hf_web::build_bootstrapped_with_security(security).await;
             println!("hobot-fuzz web server listening on http://{addr}");
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;
         }
         Commands::Tui { project } => {

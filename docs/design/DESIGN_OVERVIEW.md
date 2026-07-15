@@ -37,6 +37,7 @@ all under human-in-the-loop supervision.
 | Skill evolution | hf-skills | `SkillRegistry` | (reuse y-agent) |
 | Service orchestration | hf-service | - | service-orchestration-design.md |
 | Agent loop | hf-agent | `AgentDelegator` | (reuse y-agent) |
+| Web API security / transport | hf-web | - | web-api-security-design.md |
 
 ## 4. Crate Dependency Rules
 

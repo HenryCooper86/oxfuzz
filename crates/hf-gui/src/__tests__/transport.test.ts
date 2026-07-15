@@ -43,6 +43,52 @@ describe("transport", () => {
     }
   });
 
+  it("sends the configured bearer token in an authorization header", async () => {
+    const calls: RequestInit[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({ docker: false }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport({ token: "browser-secret" });
+      await transport.invoke("system_status");
+      expect(new Headers(calls[0].headers).get("authorization")).toBe(
+        "Bearer browser-secret",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fills run-control paths from Tauri-style camelCase arguments", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ active: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("run_status", { runId: "run/id" });
+      await transport.invoke("cancel_run_by_id", { runId: "run/id" });
+      expect(calls[0].url).toBe("http://localhost:8081/runs/run%2Fid/status");
+      expect(calls[0].init.method).toBe("GET");
+      expect(calls[1].url).toBe("http://localhost:8081/runs/run%2Fid/cancel");
+      expect(calls[1].init.method).toBe("POST");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps config conversion commands to the web API", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;
