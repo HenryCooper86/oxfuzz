@@ -11,6 +11,7 @@ use crate::bm25::Bm25Index;
 use crate::chunking::{Chunk, ChunkLevel};
 use crate::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -561,23 +562,18 @@ impl<T: Tokenizer> HybridRetriever<T> {
 
     /// Content-level dedup: remove near-duplicate chunks across different documents.
     ///
-    /// Computes a simplified content fingerprint (level prefix + first N chars,
-    /// lowercased, whitespace-normalised) and keeps only the highest-scoring
-    /// result per fingerprint. Level is included so that L0 summaries and L2
-    /// paragraphs with the same text prefix are not treated as duplicates.
+    /// Hashes the complete normalized content and keeps only the
+    /// highest-scoring result per digest. Level is included so that L0
+    /// summaries and L2 paragraphs with identical text remain distinct.
     fn dedup_by_content(results: Vec<RetrievalResult>) -> Vec<RetrievalResult> {
-        /// Number of characters to use for fingerprinting.
-        const FINGERPRINT_LEN: usize = 100;
-
         fn fingerprint(text: &str, level: ChunkLevel) -> String {
-            let mut fp = format!("{level:?}:");
-            fp.extend(
+            let mut normalized = format!("{level:?}:");
+            normalized.extend(
                 text.chars()
                     .filter(|c| !c.is_whitespace())
-                    .flat_map(char::to_lowercase)
-                    .take(FINGERPRINT_LEN),
+                    .flat_map(char::to_lowercase),
             );
-            fp
+            format!("{:x}", Sha256::digest(normalized.as_bytes()))
         }
 
         let mut best: HashMap<String, RetrievalResult> = HashMap::new();
@@ -966,6 +962,31 @@ mod tests {
         assert!(
             ids.contains(&"l0") && ids.contains(&"l2"),
             "cross-level content dedup should preserve both L0 and L2, got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn content_dedup_uses_the_complete_normalized_chunk() {
+        let shared_prefix = "Rust ownership safety ".repeat(12);
+        let first = RetrievalResult {
+            chunk: make_chunk("first", &format!("{shared_prefix}alpha suffix"), "rust"),
+            relevance: 0.9,
+            vector_score: None,
+            bm25_score: Some(0.9),
+        };
+        let second = RetrievalResult {
+            chunk: make_chunk("second", &format!("{shared_prefix}beta suffix"), "rust"),
+            relevance: 0.8,
+            vector_score: None,
+            bm25_score: Some(0.8),
+        };
+
+        let results = HybridRetriever::<SimpleTokenizer>::dedup_by_content(vec![first, second]);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "chunks that differ after a long common prefix are not duplicates"
         );
     }
 
