@@ -18,7 +18,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-toml = { workspace = true }
 tempfile = { workspace = true }
 sqlx = { workspace = true }
 

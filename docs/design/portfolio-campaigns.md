@@ -33,11 +33,11 @@ loads unchanged:
 
 Rotation cursor and budget consumption live in `campaign_state.json` beside
 `schedules.json`, via `campaign_state::CampaignStateStore`. **This is deliberate.**
-`hf-storage`'s migration gate archives-and-recreates the whole database when a
-`REQUIRED_TABLES` entry is missing (`migration.rs::schema_shape_matches`), so
-adding a `campaign_state` table would wipe every existing user's
-targets/harnesses/runs/crashes on the next launch. State only the scheduler owns
-has no business forcing that risk on everything else.
+The state is private to the scheduler and is updated atomically with its
+schedule definitions, so storing it alongside those definitions keeps one
+durability boundary. Shared application data remains in `hf-storage`, whose
+single `Store::connect` initializer applies forward-only SQL migrations without
+archiving a user's database.
 
 `record_success` advances the target cursor once after a successful campaign
 outcome, adds every completed fuzz iteration to `runs_done`, and adds measured

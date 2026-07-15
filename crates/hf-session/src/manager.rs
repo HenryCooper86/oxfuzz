@@ -950,27 +950,40 @@ mod tests {
         }
     }
 
-    async fn setup() -> SessionManager {
-        let config = hf_storage::StorageConfig::in_memory();
-        let pool = hf_storage::create_pool(&config).await.unwrap();
-        hf_storage::migration::run_embedded_migrations(&pool)
+    struct TestManager {
+        manager: SessionManager,
+        _storage_dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for TestManager {
+        type Target = SessionManager;
+
+        fn deref(&self) -> &Self::Target {
+            &self.manager
+        }
+    }
+
+    async fn setup() -> TestManager {
+        let storage_dir = tempfile::tempdir().unwrap();
+        let store = hf_storage::Store::connect(storage_dir.path().join("sessions.db"))
             .await
             .unwrap();
-
-        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(pool));
-        let transcript_dir = tempfile::tempdir().unwrap();
-        let transcript_path = transcript_dir.path().to_path_buf();
+        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()));
+        let transcript_path = storage_dir.path().join("transcripts");
         let transcript_store = Arc::new(hf_storage::JsonlTranscriptStore::new(&transcript_path));
         let display_transcript_store = Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(
             &transcript_path,
         ));
 
-        SessionManager::new(
-            session_store,
-            transcript_store,
-            display_transcript_store,
-            SessionConfig::default(),
-        )
+        TestManager {
+            manager: SessionManager::new(
+                session_store,
+                transcript_store,
+                display_transcript_store,
+                SessionConfig::default(),
+            ),
+            _storage_dir: storage_dir,
+        }
     }
 
     fn test_msg(content: &str) -> Message {
@@ -1106,13 +1119,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_append_compensates_display_when_context_write_fails() {
-        let db = hf_storage::StorageConfig::in_memory();
-        let pool = hf_storage::create_pool(&db).await.unwrap();
-        hf_storage::migration::run_embedded_migrations(&pool)
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let store = hf_storage::Store::connect(transcript_dir.path().join("sessions.db"))
             .await
             .unwrap();
-        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(pool));
-        let transcript_dir = tempfile::tempdir().unwrap();
+        let session_store = Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()));
         let invalid_context_dir = transcript_dir.path().join("context-is-a-file");
         std::fs::write(&invalid_context_dir, b"not a directory").unwrap();
         let display = Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(
@@ -1200,12 +1211,10 @@ mod tests {
         let tp = td.path().to_path_buf();
         let mgr = SessionManager::new(
             {
-                let config = hf_storage::StorageConfig::in_memory();
-                let pool = hf_storage::create_pool(&config).await.unwrap();
-                hf_storage::migration::run_embedded_migrations(&pool)
+                let store = hf_storage::Store::connect(td.path().join("sessions.db"))
                     .await
                     .unwrap();
-                Arc::new(hf_storage::SqliteSessionStore::new(pool))
+                Arc::new(hf_storage::SqliteSessionStore::new(store.pool().clone()))
             },
             Arc::new(hf_storage::JsonlTranscriptStore::new(&tp)),
             Arc::new(hf_storage::JsonlDisplayTranscriptStore::new(&tp)),
