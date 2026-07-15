@@ -118,7 +118,45 @@ Run-history presentation receives an opaque service-owned comparison key. This
 prevents desktop/web clients from calling adjacent runs a regression when they
 belong to another target or use incomparable execution conditions.
 
-### 4.3 Session Diagnostics
+### 4.3 Syzkaller Campaign Isolation
+
+Before `syz-manager` starts, `hf-service` allocates a unique staging directory
+below the runtime's approved workspace root. It validates the selected config,
+kernel, rootfs, and SSH key as regular non-symlink files and copies them into
+that directory. The rootfs copy is disposable; qemu never receives a writable
+mount of the selected original. An existing manager config may reference files
+beside the config, but an implicit reference that resolves outside that config
+directory is rejected. A separately selected artifact is treated as an
+explicit override and is still copied before use.
+
+The service parses and rewrites both supplied and synthesized manager configs.
+`kernel`, `image`, `sshkey`, `workdir`, and `syzkaller` resolve only to fixed
+container locations backed by the unique staging directory. Other absolute or
+parent-traversing config paths fail closed. The sandbox mounts the primary
+workspace and staged inputs read-only, exposes only the disposable rootfs
+directory and work directory as writable, disables container networking, keeps
+the standard capability and privilege hardening, and passes through only
+`/dev/kvm` when native KVM is available. Staging is removed when the service
+call ends or is aborted. The rewritten config clamps both manager processes and
+VM count to a maximum of four, including values inherited from a supplied
+config.
+
+Input staging and writable output are bounded independently. The service
+rejects manager configs and SSH keys over 1 MiB, kernels over 2 GiB, and rootfs
+images over 32 GiB before copying. Each copy is limited while reading and
+rechecks the open source metadata and destination byte count to reject files
+that change during staging. During execution a live aggregate monitor cancels
+the runtime if scratch/workdir logical growth exceeds 4 GiB, their combined
+tree exceeds 100,000 entries, or any symlink/special file appears. A final scan
+runs before success is returned. The container also receives a per-file limit
+large enough for the staged rootfs and that growth allowance.
+
+Rejected alternatives: mounting an existing config directory verbatim exposes
+unreviewed host paths; mounting the selected rootfs writable lets a campaign
+modify the user's source artifact; and disabling the entire hardening profile
+grants qemu more privilege than its device contract requires.
+
+### 4.4 Session Diagnostics
 
 The diagnostics recorder assigns a fresh identifier to each recorder instance.
 Its cost summary includes only generation traces carrying that identifier, even
