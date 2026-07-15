@@ -8,10 +8,13 @@
 //! scheduler owns has no business forcing that risk on everything else.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Default cap on how many campaigns fuzz at once. Conservative: fuzzing is
@@ -26,11 +29,11 @@ pub struct CampaignRuntimeState {
     pub cursor: u64,
     /// Completed fuzz runs (drives the max-runs budget and progress display).
     pub runs_done: u32,
-    /// Cumulative fuzz seconds (drives the max-total-time budget).
+    /// Cumulative measured campaign-work seconds (drives max-total-time).
     pub secs_done: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Persisted {
     #[serde(default = "default_max_concurrent")]
     max_concurrent: usize,
@@ -53,6 +56,97 @@ fn default_max_concurrent() -> usize {
     DEFAULT_MAX_CONCURRENT
 }
 
+/// Durable JSON sidecar error. Missing files are handled separately and are not
+/// errors; unreadable, corrupt, or unwritable state must be surfaced.
+#[derive(Debug, thiserror::Error)]
+pub enum StateFileError {
+    /// The sidecar could not be read or written.
+    #[error("failed to {operation} state file {path}: {source}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The sidecar contained invalid JSON.
+    #[error("failed to decode state file {path}: {source}")]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The in-memory value could not be encoded as JSON.
+    #[error("failed to encode state file {path}: {source}")]
+    Encode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn io_error(operation: &'static str, path: &Path, source: std::io::Error) -> StateFileError {
+    StateFileError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// Read an optional JSON state file while distinguishing absence from damage.
+pub(crate) fn read_json_file<T: DeserializeOwned>(
+    path: &Path,
+) -> Result<Option<T>, StateFileError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("read", path, error)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| StateFileError::Decode {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Atomically replace a JSON file after syncing its contents and containing
+/// directory. The temporary inode lives beside the destination, so rename is
+/// atomic on supported local filesystems.
+pub(crate) fn atomic_write_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), StateFileError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let body = serde_json::to_vec_pretty(value).map_err(|source| StateFileError::Encode {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| io_error("create directory for", path, error))?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".hobot-fuzz-state-")
+        .tempfile_in(parent)
+        .map_err(|error| io_error("create temporary", path, error))?;
+    temporary
+        .write_all(&body)
+        .map_err(|error| io_error("write temporary", path, error))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| io_error("sync temporary", path, error))?;
+    temporary
+        .persist(path)
+        .map_err(|error| io_error("replace", path, error.error))?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error("sync parent directory for", path, error))?;
+    Ok(())
+}
+
 /// File-backed store of per-campaign runtime state plus the global concurrency
 /// setting. One JSON file, loaded once and written through on every change.
 #[derive(Debug)]
@@ -62,16 +156,30 @@ pub struct CampaignStateStore {
 }
 
 impl CampaignStateStore {
-    /// Load from `path` (best-effort; a missing or corrupt file starts empty).
-    #[must_use]
-    pub fn load(path: PathBuf) -> Self {
-        let inner = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Persisted>(&s).ok())
-            .unwrap_or_default();
-        Self {
+    /// Load from `path`. A missing file starts empty; corruption is returned.
+    ///
+    /// # Errors
+    /// Returns a state-file error when an existing sidecar cannot be read or
+    /// decoded.
+    pub fn try_load(path: PathBuf) -> Result<Self, StateFileError> {
+        let inner = read_json_file(&path)?.unwrap_or_default();
+        Ok(Self {
             path,
             inner: Mutex::new(inner),
+        })
+    }
+
+    /// Load from `path`, failing fast if persisted state is damaged.
+    ///
+    /// Prefer [`Self::try_load`] at boundaries that can return an error.
+    ///
+    /// # Panics
+    /// Panics when an existing state file is unreadable or corrupt.
+    #[must_use]
+    pub fn load(path: PathBuf) -> Self {
+        match Self::try_load(path) {
+            Ok(store) => store,
+            Err(error) => panic!("campaign state cannot be loaded: {error}"),
         }
     }
 
@@ -81,24 +189,69 @@ impl CampaignStateStore {
         self.lock().states.get(id).copied().unwrap_or_default()
     }
 
-    /// Record one completed fuzz run: advance the cursor, count the run, add the
-    /// seconds. Persists. Returns the new state.
-    pub fn record_run(&self, id: &str, secs: u64) -> CampaignRuntimeState {
+    /// Record one successful campaign outcome atomically.
+    ///
+    /// One campaign fire advances the target cursor once, while `iterations`
+    /// charges every completed fuzz iteration and `elapsed` charges measured
+    /// wall-clock work. Failed campaign attempts never call this method.
+    ///
+    /// # Errors
+    /// Returns an error without changing in-memory state if persistence fails.
+    pub fn record_success(
+        &self,
+        id: &str,
+        iterations: usize,
+        elapsed: Duration,
+    ) -> Result<CampaignRuntimeState, StateFileError> {
         let mut guard = self.lock();
-        let st = guard.states.entry(id.to_owned()).or_default();
-        st.cursor = st.cursor.wrapping_add(1);
-        st.runs_done = st.runs_done.saturating_add(1);
-        st.secs_done = st.secs_done.saturating_add(secs);
-        let out = *st;
-        persist(&guard, &self.path);
-        out
+        let mut candidate = guard.clone();
+        let state = candidate.states.entry(id.to_owned()).or_default();
+        state.cursor = state.cursor.wrapping_add(1);
+        state.runs_done = state
+            .runs_done
+            .saturating_add(u32::try_from(iterations).unwrap_or(u32::MAX));
+        state.secs_done = state.secs_done.saturating_add(elapsed.as_secs());
+        let result = *state;
+        atomic_write_json(&self.path, &candidate)?;
+        *guard = candidate;
+        Ok(result)
     }
 
-    /// Drop a campaign's state (on delete), so a recreated campaign starts fresh.
-    pub fn forget(&self, id: &str) {
+    /// Record one completed fuzz run using an explicit second count.
+    ///
+    /// This compatibility helper fails fast on persistence errors. New campaign
+    /// code should call [`Self::record_success`].
+    ///
+    /// # Panics
+    /// Panics when the updated state cannot be persisted.
+    pub fn record_run(&self, id: &str, secs: u64) -> CampaignRuntimeState {
+        match self.record_success(id, 1, Duration::from_secs(secs)) {
+            Ok(state) => state,
+            Err(error) => panic!("campaign progress cannot be persisted: {error}"),
+        }
+    }
+
+    /// Drop a campaign's state transactionally.
+    ///
+    /// # Errors
+    /// Returns an error without changing in-memory state if persistence fails.
+    pub fn try_forget(&self, id: &str) -> Result<(), StateFileError> {
         let mut guard = self.lock();
-        if guard.states.remove(id).is_some() {
-            persist(&guard, &self.path);
+        let mut candidate = guard.clone();
+        if candidate.states.remove(id).is_some() {
+            atomic_write_json(&self.path, &candidate)?;
+            *guard = candidate;
+        }
+        Ok(())
+    }
+
+    /// Drop a campaign's state, failing fast if the change cannot be persisted.
+    ///
+    /// # Panics
+    /// Panics when the updated state cannot be persisted.
+    pub fn forget(&self, id: &str) {
+        if let Err(error) = self.try_forget(id) {
+            panic!("campaign progress cannot be removed: {error}");
         }
     }
 
@@ -108,26 +261,33 @@ impl CampaignStateStore {
         self.lock().max_concurrent.max(1)
     }
 
-    /// Set (and persist) the concurrency cap.
-    pub fn set_max_concurrent(&self, n: usize) {
+    /// Set and transactionally persist the concurrency cap.
+    ///
+    /// # Errors
+    /// Returns an error without changing in-memory state if persistence fails.
+    pub fn try_set_max_concurrent(&self, n: usize) -> Result<(), StateFileError> {
         let mut guard = self.lock();
-        guard.max_concurrent = n.max(1);
-        persist(&guard, &self.path);
+        let mut candidate = guard.clone();
+        candidate.max_concurrent = n.max(1);
+        atomic_write_json(&self.path, &candidate)?;
+        *guard = candidate;
+        Ok(())
+    }
+
+    /// Set the concurrency cap, failing fast if it cannot be persisted.
+    ///
+    /// # Panics
+    /// Panics when the updated state cannot be persisted.
+    pub fn set_max_concurrent(&self, n: usize) {
+        if let Err(error) = self.try_set_max_concurrent(n) {
+            panic!("campaign concurrency cannot be persisted: {error}");
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Persisted> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-fn persist(state: &Persisted, path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, json);
     }
 }
 
@@ -274,5 +434,46 @@ mod tests {
         assert!(gate.try_enter().is_none());
         gate.set_limit(2);
         assert!(gate.try_enter().is_some(), "raising the cap frees a slot");
+    }
+
+    #[test]
+    fn corrupt_state_is_reported_without_overwriting_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("campaign_state.json");
+        std::fs::write(&path, "{not-json").unwrap();
+
+        let error = CampaignStateStore::try_load(path.clone()).expect_err("corruption must fail");
+
+        assert!(error.to_string().contains("decode"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{not-json");
+    }
+
+    #[test]
+    fn failed_persistence_does_not_commit_budget_progress_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("state-dir");
+        std::fs::create_dir(&blocked_parent).unwrap();
+        let store = CampaignStateStore::try_load(blocked_parent.join("state.json")).unwrap();
+        std::fs::remove_dir(&blocked_parent).unwrap();
+        std::fs::write(&blocked_parent, "file").unwrap();
+
+        assert!(store
+            .record_success("campaign", 3, std::time::Duration::from_secs(17))
+            .is_err());
+        assert_eq!(store.snapshot("campaign"), CampaignRuntimeState::default());
+    }
+
+    #[test]
+    fn successful_budget_progress_counts_iterations_and_measured_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CampaignStateStore::try_load(dir.path().join("state.json")).unwrap();
+
+        let state = store
+            .record_success("campaign", 3, std::time::Duration::from_secs(17))
+            .unwrap();
+
+        assert_eq!(state.cursor, 1, "one campaign fire advances one target");
+        assert_eq!(state.runs_done, 3, "all successful fuzz iterations count");
+        assert_eq!(state.secs_done, 17, "charge measured wall-clock work");
     }
 }

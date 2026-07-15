@@ -206,7 +206,9 @@ impl ScheduleStore {
     /// Update last fire time.
     pub fn update_last_fire(&mut self, id: &str, time: DateTime<Utc>) {
         if let Some(s) = self.schedules.iter_mut().find(|s| s.id == id) {
-            s.last_fire = Some(time);
+            if s.last_fire.is_none_or(|current| time > current) {
+                s.last_fire = Some(time);
+            }
         }
     }
 
