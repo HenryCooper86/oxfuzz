@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_write_allows_system_temp_path_outside_working_dir() {
+    async fn test_file_write_rejects_system_temp_path_outside_working_dir() {
         let workspace = tempfile::tempdir().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_file = temp_dir.path().join("__file_write_temp_allowed__.txt");
@@ -230,13 +230,13 @@ mod tests {
             }),
             workspace.path(),
         );
-        let output = tool.execute(input).await.unwrap();
+        let result = tool.execute(input).await;
 
-        assert!(output.success);
-        assert_eq!(
-            std::fs::read_to_string(&temp_file).unwrap(),
-            "temporary output"
-        );
+        assert!(matches!(
+            result,
+            Err(ToolError::PermissionDenied { name, .. }) if name == "FileWrite"
+        ));
+        assert!(!temp_file.exists());
     }
 
     #[tokio::test]
