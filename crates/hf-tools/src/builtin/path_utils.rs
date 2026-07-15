@@ -16,14 +16,6 @@ impl Drop for DropGuard {
     }
 }
 
-pub(super) fn resolve_workspace_path(
-    tool_name: &str,
-    path: Option<&str>,
-    working_dir: Option<&str>,
-) -> Result<PathBuf, ToolError> {
-    resolve_path_with_read_dirs(tool_name, path, working_dir, &[])
-}
-
 pub(super) fn resolve_read_path(
     tool_name: &str,
     path: Option<&str>,
@@ -168,6 +160,29 @@ fn path_is_within_root(path: &Path, root: &Path) -> bool {
     }
 }
 
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,8 +213,6 @@ mod tests {
 
         // An existing in-workspace file resolves.
         assert!(resolve_read_path("FileRead", Some("src/a.c"), Some(ws_str), &[]).is_ok());
-        // A not-yet-created file under an existing dir resolves (for writes).
-        assert!(resolve_workspace_path("FileWrite", Some("src/new.txt"), Some(ws_str)).is_ok());
     }
 
     #[test]
@@ -273,28 +286,5 @@ mod tests {
         );
 
         assert!(matches!(result, Err(ToolError::PermissionDenied { .. })));
-    }
-}
-
-fn normalize_lexically(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push("..");
-                }
-            }
-            Component::Normal(part) => normalized.push(part),
-            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        normalized
     }
 }

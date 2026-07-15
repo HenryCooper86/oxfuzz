@@ -331,7 +331,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-session` | Session tree, parent/child delegation, compaction. |
 | `hf-context` | Token-budget-aware prompt assembly pipeline. |
 | `hf-hooks` | Middleware chain, event bus. |
-| `hf-tools` | Tool registry: `ShellExec`, `FileRead`/`Write`, `ProjectScan`, `HarnessBuild`, `FuzzRun`, `CrashMinimize`. |
+| `hf-tools` | Tool registry and validation with project-scoped `FileRead`, `Glob`, and `Grep`; the agent adds service-backed `KnowledgeSearch`. |
 | `hf-mcp` | Model Context Protocol client/server. |
 | `hf-skills` | Skill registry, versioning, experience capture. |
 | `hf-prompt` | Prompt templates for discovery, harness, triage. |
