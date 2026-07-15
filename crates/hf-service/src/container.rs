@@ -3739,10 +3739,22 @@ impl ServiceContainer {
         ));
         if let Some(store) = &store {
             for run in run_journal.interrupted() {
-                if let Ok(id) = run.run_id.parse::<Uuid>() {
-                    let _ = store
-                        .set_run_status(id, RunStatus::Failed, Some(Utc::now()))
-                        .await;
+                let id = match run.run_id.parse::<Uuid>() {
+                    Ok(id) => id,
+                    Err(error) => {
+                        tracing::error!(
+                            run_id = %run.run_id,
+                            %error,
+                            "cannot repair interrupted run with an invalid id"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(error) = store
+                    .set_run_status(id, RunStatus::Failed, Some(Utc::now()))
+                    .await
+                {
+                    tracing::error!(run_id = %id, %error, "failed to repair interrupted run status");
                 }
             }
         }
