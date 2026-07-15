@@ -35,6 +35,59 @@ fn applied_run_revision_migration_remains_byte_for_byte_immutable() {
     );
 }
 
+#[tokio::test]
+async fn database_standard_has_exact_migrated_table_and_column_parity() {
+    let (store, _dir) = temp_store().await;
+    let standard = include_str!("../../../docs/standards/DATABASE_SCHEMA.md");
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema
+         WHERE type = 'table'
+           AND name NOT LIKE 'sqlite_%'
+           AND name <> '_sqlx_migrations'
+         ORDER BY name",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+
+    let mut documented_tables = standard
+        .lines()
+        .filter_map(|line| line.strip_prefix("### `"))
+        .filter_map(|line| line.strip_suffix('`'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    documented_tables.sort();
+    assert_eq!(documented_tables, tables, "documented table set drifted");
+
+    for table in tables {
+        let heading = format!("### `{table}`");
+        let section_start = standard.find(&heading).expect("documented table heading");
+        let after_heading = &standard[section_start + heading.len()..];
+        let next_h2 = after_heading.find("\n## ");
+        let next_h3 = after_heading.find("\n### ");
+        let section_end = match (next_h2, next_h3) {
+            (Some(h2), Some(h3)) => h2.min(h3),
+            (Some(end), None) | (None, Some(end)) => end,
+            (None, None) => after_heading.len(),
+        };
+        let documented_columns = after_heading[..section_end]
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|line| line.split_once("` |").map(|(name, _)| name.to_owned()))
+            .collect::<Vec<_>>();
+        let migrated_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+                .bind(&table)
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            documented_columns, migrated_columns,
+            "documented columns drifted for {table}"
+        );
+    }
+}
+
 fn sample_target(project: &str) -> TargetCandidate {
     TargetCandidate {
         id: Uuid::new_v4(),
@@ -312,6 +365,42 @@ async fn dedupe_crashes_collapses_same_run_and_signature() {
     // Idempotent: a second pass removes nothing.
     store.dedupe_crashes().await.unwrap();
     assert_eq!(store.list_crashes_by_run(run.id).await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn list_all_crashes_is_newest_first_by_insertion_order() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    let target_id = Uuid::new_v4();
+    let crash = |id: &str, summary: &str| Crash {
+        id: Uuid::parse_str(id).unwrap(),
+        run_id: run.id,
+        target_id,
+        input_path: PathBuf::from(format!("out/{summary}")),
+        stack_signature: summary.to_owned(),
+        kind: CrashKind::Asan,
+        summary: summary.to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    };
+
+    // IDs deliberately sort in the opposite order from insertion. `Crash`
+    // has no creation timestamp, so SQLite row insertion order is the only
+    // persisted definition of "newest" available to this API.
+    let oldest = crash("ffffffff-ffff-4fff-8fff-ffffffffffff", "oldest");
+    let middle = crash("88888888-8888-4888-8888-888888888888", "middle");
+    let newest = crash("00000000-0000-4000-8000-000000000000", "newest");
+    for item in [&oldest, &middle, &newest] {
+        store.upsert_crash(item).await.unwrap();
+    }
+
+    let listed = store.list_all_crashes().await.unwrap();
+    assert_eq!(
+        listed.iter().map(|item| item.id).collect::<Vec<_>>(),
+        [newest.id, middle.id, oldest.id]
+    );
 }
 
 fn sample_harness(target_id: Uuid) -> Harness {
@@ -815,6 +904,127 @@ async fn schedule_executions_round_trip_and_latest_fire() {
         .await
         .unwrap();
     assert_eq!(store.list_schedule_executions(10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn pruning_schedule_executions_is_scoped_deterministic_and_supports_zero() {
+    let (store, _dir) = temp_store().await;
+    for (id, schedule, triggered_at) in [
+        ("a-old", "schedule-a", "2026-07-01T01:00:00+00:00"),
+        ("a-tie-1", "schedule-a", "2026-07-01T02:00:00+00:00"),
+        ("a-tie-2", "schedule-a", "2026-07-01T02:00:00+00:00"),
+        ("b-only", "schedule-b", "2026-06-01T01:00:00+00:00"),
+    ] {
+        store
+            .upsert_schedule_execution(id, schedule, triggered_at, "completed", "{}")
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store
+            .prune_schedule_executions("schedule-a", 2)
+            .await
+            .unwrap(),
+        1
+    );
+    let remaining_a: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM schedule_executions
+         WHERE schedule_id = ?1 ORDER BY triggered_at DESC, id DESC",
+    )
+    .bind("schedule-a")
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(remaining_a, ["a-tie-2", "a-tie-1"]);
+    let remaining_b: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM schedule_executions WHERE schedule_id = 'schedule-b'")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(remaining_b, ["b-only"]);
+
+    assert_eq!(
+        store
+            .prune_schedule_executions("schedule-a", 0)
+            .await
+            .unwrap(),
+        2
+    );
+    let remaining_a: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'schedule-a'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(remaining_a, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'schedule-b'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn counting_schedule_starts_is_scoped_inclusive_and_excludes_skips() {
+    let (store, _dir) = temp_store().await;
+    for (id, schedule, triggered_at, status) in [
+        (
+            "a-before",
+            "schedule-a",
+            "2026-07-01T00:59:59+00:00",
+            "completed",
+        ),
+        (
+            "a-cutoff",
+            "schedule-a",
+            "2026-07-01T01:00:00+00:00",
+            "failed",
+        ),
+        (
+            "a-after",
+            "schedule-a",
+            "2026-07-01T01:30:00+00:00",
+            "running",
+        ),
+        (
+            "a-skipped",
+            "schedule-a",
+            "2026-07-01T01:45:00+00:00",
+            "skipped",
+        ),
+        (
+            "b-after",
+            "schedule-b",
+            "2026-07-01T01:30:00+00:00",
+            "completed",
+        ),
+    ] {
+        store
+            .upsert_schedule_execution(id, schedule, triggered_at, status, "{}")
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store
+            .count_schedule_executions_since("schedule-a", "2026-07-01T01:00:00+00:00")
+            .await
+            .unwrap(),
+        2,
+        "the cutoff is inclusive, skipped rows do not consume a start, and other schedules isolate"
+    );
+    assert_eq!(
+        store
+            .count_schedule_executions_since("schedule-b", "2026-07-01T01:00:00+00:00")
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -1020,12 +1020,15 @@ impl Store {
             .collect()
     }
 
-    /// List every persisted crash across all runs, newest-first by id order.
+    /// List every persisted crash across all runs, newest insertion first.
+    ///
+    /// [`Crash`] has no creation timestamp, so the table's stable `SQLite`
+    /// insertion order is the persisted chronology for this cross-run view.
     ///
     /// # Errors
     /// Returns an error on a SQL failure or malformed stored data.
     pub async fn list_all_crashes(&self) -> Result<Vec<Crash>, StorageError> {
-        let rows = sqlx::query("SELECT data_json FROM crashes")
+        let rows = sqlx::query("SELECT data_json FROM crashes ORDER BY rowid DESC")
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(|r| json_col(r, "data_json")).collect()
@@ -1060,13 +1063,71 @@ impl Store {
         Ok(())
     }
 
+    /// Retain only the newest `keep` executions for one schedule.
+    ///
+    /// Recency is ordered by `triggered_at`, with the execution id as a
+    /// deterministic tie-breaker. Passing zero removes every execution for
+    /// the selected schedule and never affects another schedule.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn prune_schedule_executions(
+        &self,
+        schedule_id: &str,
+        keep: usize,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM schedule_executions
+             WHERE schedule_id = ?1
+               AND id NOT IN (
+                   SELECT id FROM schedule_executions
+                   WHERE schedule_id = ?1
+                   ORDER BY triggered_at DESC, id DESC
+                   LIMIT ?2
+               )",
+        )
+        .bind(schedule_id)
+        .bind(i64::try_from(keep).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Count execution starts for one schedule at or after an RFC 3339 cutoff.
+    ///
+    /// Skipped records did not start work and therefore do not consume a rate
+    /// limit slot. Every other persisted status counts, including failures and
+    /// cancellations.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or an invalid negative aggregate.
+    pub async fn count_schedule_executions_since(
+        &self,
+        schedule_id: &str,
+        since: &str,
+    ) -> Result<u64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schedule_executions
+             WHERE schedule_id = ?1
+               AND triggered_at >= ?2
+               AND status <> 'skipped'",
+        )
+        .bind(schedule_id)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| StorageError::InvalidData("negative schedule execution count".to_owned()))
+    }
+
     /// The most recent persisted executions (their `data_json`), newest first.
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn list_schedule_executions(&self, limit: i64) -> Result<Vec<String>, StorageError> {
         let rows = sqlx::query(
-            "SELECT data_json FROM schedule_executions ORDER BY triggered_at DESC LIMIT ?1",
+            "SELECT data_json FROM schedule_executions
+             ORDER BY triggered_at DESC, id DESC LIMIT ?1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
