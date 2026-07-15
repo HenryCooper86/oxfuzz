@@ -12,7 +12,7 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_core::types::TokenUsage;
-use hf_harness::{compile, draft, smoke_fuzz, smoke_fuzz_in};
+use hf_harness::{compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -145,6 +145,25 @@ fn target() -> TargetCandidate {
         rationale: String::new(),
         reachable_functions: Vec::new(),
         accumulated_complexity: 0,
+    }
+}
+
+#[cfg(unix)]
+fn compiled_harness(engine: EngineKind) -> Harness {
+    Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: Vec::new(),
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
     }
 }
 
@@ -305,6 +324,43 @@ async fn smoke_fuzz_counts_a_fresh_artifact_even_without_a_log_marker() {
     assert!(!summary.passed);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn smoke_fuzz_rejects_symlinked_corpus_and_output_directories() {
+    let rt = MockRuntime {
+        exit_code: 0,
+        stdout: "stats: 5000 execs/sec".to_owned(),
+    };
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let outside = tempfile::tempdir().expect("outside workspace");
+    std::fs::create_dir_all(workspace.path().join("runs/smoke")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("runs/smoke/out")).unwrap();
+
+    let output_error = smoke_fuzz_in_paths(
+        compiled_harness(EngineKind::LibFuzzer),
+        &rt,
+        workspace.path(),
+        Path::new("runs/smoke/corpus"),
+        Path::new("runs/smoke/out"),
+    )
+    .await
+    .expect_err("a symlinked output directory must fail closed");
+    assert!(output_error.to_string().contains("output path"));
+
+    std::fs::remove_file(workspace.path().join("runs/smoke/out")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("runs/smoke/corpus")).unwrap();
+    let corpus_error = smoke_fuzz_in_paths(
+        compiled_harness(EngineKind::LibFuzzer),
+        &rt,
+        workspace.path(),
+        Path::new("runs/smoke/corpus"),
+        Path::new("runs/smoke/out"),
+    )
+    .await
+    .expect_err("a symlinked corpus directory must fail closed");
+    assert!(corpus_error.to_string().contains("corpus path"));
+}
+
 #[tokio::test]
 async fn smoke_fuzz_fails_on_zero_execs() {
     let rt = MockRuntime {
@@ -388,4 +444,8 @@ fn build_command_for_afl_uses_afl_compiler() {
         "fuzz_parse_value",
     );
     assert!(cmd.compiler.contains("afl"));
+    assert!(
+        cmd.args.contains(&"-fsanitize=fuzzer".to_owned()),
+        "AFL++ libFuzzer-compatible harnesses need AFLDriver linked"
+    );
 }

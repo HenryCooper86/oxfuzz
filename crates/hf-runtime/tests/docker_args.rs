@@ -168,6 +168,7 @@ fn build_exec_args_with_syzkaller_profile() {
         relax_hardening: true,
         devices: vec!["/dev/kvm".to_owned()],
         workspace_read_only: false,
+        max_file_size_bytes: None,
     };
     let args = hf_runtime::docker::build_exec_args_with(
         &cfg,
@@ -237,6 +238,28 @@ fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
     assert!(
         joined.contains("type=bind,source=/host/run-out,target=/work/runs/run-id/out"),
         "{joined}"
+    );
+}
+
+#[test]
+fn build_exec_args_applies_a_per_file_write_limit() {
+    let cfg = cfg_with(limits(2048, 1));
+    let opts = hf_core::runtime::SandboxOptions {
+        max_file_size_bytes: Some(64 * 1024 * 1024),
+        ..hf_core::runtime::SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(2048, 1),
+        &["fuzz_bin".to_owned()],
+        &opts,
+    );
+
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--ulimit=fsize=67108864:67108864"),
+        "missing per-file output limit: {}",
+        args.join(" ")
     );
 }
 
