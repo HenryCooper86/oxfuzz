@@ -118,6 +118,20 @@ Run-history presentation receives an opaque service-owned comparison key. This
 prevents desktop/web clients from calling adjacent runs a regression when they
 belong to another target or use incomparable execution conditions.
 
+### 4.3 Session Diagnostics
+
+The diagnostics recorder assigns a fresh identifier to each recorder instance.
+Its cost summary includes only generation traces carrying that identifier, even
+when the trace store is persistent and contains earlier sessions. Persisted
+traces remain available for retention, search, and historical reporting, but
+they are not presented as current-session spend.
+
+Summary reads are fail-closed. Trace or observation query failures propagate
+through the service API and presentation transports; callers may retain a last
+known value only while visibly reporting that diagnostics are unavailable. A
+storage failure must never be converted into a zero-call summary, because zero
+is a valid measurement and would conceal an observability outage.
+
 ## 5. Sub-Agents
 
 `hf-agent` owns only the model reason/act loop and depends on an inward
@@ -149,5 +163,7 @@ manifest tests enforce this boundary and prevent a service/agent cycle.
   lock, while independent sessions remain concurrent.
 - Presentation regression: successful turns, rollback, and branching reload the
   canonical display transcript instead of slicing optimistic local messages.
+- Diagnostics regression: a current-session summary excludes persisted traces
+  from earlier sessions, and storage read failures are surfaced to callers.
 - Contract: presentation manifests contain no direct domain, runtime, or agent
   dependencies.

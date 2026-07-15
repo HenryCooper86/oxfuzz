@@ -508,7 +508,10 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
     let container =
         ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_store(store);
 
-    let snap = container.system_snapshot().await;
+    let snap = container
+        .system_snapshot()
+        .await
+        .expect("diagnostics snapshot");
 
     // No provider pool -> no provider cards; agent pool empty by default.
     assert!(snap.providers.is_empty());
