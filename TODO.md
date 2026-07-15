@@ -85,15 +85,17 @@ Status legend: [x] done - [~] partial - [ ] not started.
   `CancellationToken` threaded through `hf-runtime`/`EngineRunner`;
   `ServiceContainer::cancel_run`/`cancel_all_runs`/`active_run_ids`; CLI Ctrl-C;
   `RunStatus::Cancelled`; GUI Stop button (`cancel_run` Tauri command +
-  RunView). syzkaller (separate streaming path) not yet cancellable.
+  RunView). Syzkaller campaigns register the same active-run cancellation token
+  and propagate cancellation through their streaming sandbox path.
 - [x] Diagnostics/Observability panels: LLM calls flow through
   `LlmProviderBridge` -> `DiagnosticsRecorder`, aggregated by
   `ServiceContainer::cost_summary` and surfaced via the `diagnostics_cost_summary`
   command; the DiagnosticsPanel renders real per-model cost/usage.
-- [ ] Agents/Skills/Knowledge GUI views: back with real data (needs `hf-skills`
-  command surface; `hf-knowledge` + sub-agent pools are still scaffolds).
-- [ ] Remaining scaffold crates: hf-mcp, hf-scheduler, hf-knowledge,
-  hf-skills (thin), hf-hooks, hf-tools (skeleton), hf-test-utils.
+- [ ] Agents/Skills/Knowledge GUI views: back with real data (needs an
+  `hf-skills` command surface and sub-agent pools; knowledge search is wired but
+  does not yet have a dedicated management view).
+- [ ] Review and either complete or remove the remaining thin extension
+  surfaces: hf-mcp, hf-skills, hf-hooks, and hf-test-utils.
 
 ## Integrations
 
@@ -112,21 +114,21 @@ Status legend: [x] done - [~] partial - [ ] not started.
 
 ## Audit backlog (refreshed 2026-07-15)
 
-A multi-crate audit fixed ~30 correctness/dead-code/doc issues (see git log).
-The following verified findings remain open, ranked by user impact. Each is real
-but larger or riskier than a drop-in fix.
+A multi-crate audit fixed dozens of correctness, safety, dead-code, and
+documentation issues (see git log). Completed findings are checked below; the
+unchecked findings remain verified follow-up work.
 
 ### Safety and security (highest impact)
-- [ ] Make promoted artifacts immutable at execution time: persist source and
-  binary digests, verify them immediately before launch, and split read-only
-  harness mounts from writable corpus/output mounts.
-- [ ] Bound Docker stdout/stderr capture and represent `Completed`, `TimedOut`,
-  and `Cancelled` separately; forced teardown currently synthesizes exit code 0.
-- [ ] Stage Syzkaller config and disk inputs into managed storage, use a
-  disposable disk overlay, and replace broad writable mounts/network/capability
-  exceptions with the minimum documented profile.
-- [ ] Default the web server to loopback, reject optional authentication on a
-  non-loopback bind, and return redacted provider/config DTOs from REST.
+- [x] Persist promoted source and binary digests, verify them immediately before
+  execution, and mount promoted harnesses read-only while keeping only
+  run-local corpus/output paths writable.
+- [x] Bound Docker stdout/stderr capture and preserve typed `Completed`,
+  `TimedOut`, and `Cancelled` termination states through forced teardown.
+- [x] Stage Syzkaller config and disk inputs under the managed workspace, use a
+  disposable rootfs, enforce live write budgets, and apply the documented
+  restricted network/device/capability profile.
+- [x] Default the web server to loopback, require authentication for non-loopback
+  binds, and return redacted provider/config DTOs from REST.
 - [x] Constrain Docker primary workspaces and runtime file I/O to the configured
   workspace root, including parent traversal and symlink escapes.
 - [x] Reject symlinked crash/corpus roots and entries; validate seed filenames
@@ -135,52 +137,54 @@ but larger or riskier than a drop-in fix.
   permissions on Unix. Rotate any credentials that predate this migration.
 - [x] Reject unsafe transcript session ids before file I/O and require persisted
   session metadata before loading model context or retaining a per-session lock.
+- [x] Build the production agent prompt through the bounded canonical
+  `hf-prompt` path with the real tool catalog, workspace identity, HITL rules,
+  and prompt-injection defenses.
 
 ### Correctness (highest impact)
 - [x] Target-scoped "latest run": reports, exports, triage, regression replay,
   and corpus absorption resolve runs through the persisted harness/target
   relationship and ignore newer runs for another target in the same project.
-- [ ] Give every fuzz/smoke execution its own output directory and propagate an
-  explicit run id into triage. Same-target overlapping runs still share
-  `workspace/out`, so process-level serialization alone would not preserve
-  durable attribution after a crash or restart.
-- [ ] `persist_corpus` is upsert-only: `corpus_prune`/`corpus_prune_coverage`/
-  `corpus_minimize` delete files but never remove persisted rows, so reported
-  corpus counts only grow. Reconcile rows against the survivor set.
+- [x] Give every fuzz/smoke execution its own output directory and propagate the
+  explicit run id through triage, crash ingestion, and retained evidence.
+- [x] Reconcile persisted corpus rows exactly against the target survivor set
+  after seed, prune, coverage-prune, minimize, absorb, and run discovery paths.
 - [x] `harness_smoke` records the qualified harness id and execution settings,
   keeping smoke findings attributable to the correct target.
-- [ ] AFL++ coverage: edge count is parsed from stdout (`count coverage :
-  2.55 bits/tuple` -> ~2) instead of `out/default/fuzzer_stats` (`edges_found`),
-  so AFL++ coverage/deltas/stagnation are wrong. Parse `fuzzer_stats`.
+- [x] Parse terminal AFL++ coverage and crash metrics from the run-local
+  `out/default/fuzzer_stats`; stdout parsing remains live telemetry only.
 - [ ] Crash minimization is unwired: `hf-crash::build_minimize_args` has no
   caller and `Crash.minimized` is always false. Wire a minimize step into triage.
 - [x] Prompt-protocol agent tool results use provider-compatible user messages;
   strict OpenAI-compatible relays no longer receive an orphan `tool` message.
-- [ ] Make chat turns and rollback durable across display transcript, context
-  transcript, metadata, and checkpoints. Append/rollback failures are currently
-  downgraded to successful responses, and branch/delete cleanup can be partial.
-- [ ] Serialize rollback, branch, and delete through the same per-session lock
-  as model turns, then render the backend transcript after mutation. The GUI's
-  local rollback indexes diverge when non-persisted tool events are present.
-- [ ] Rework scheduler restart recovery so more than 256 queued recoveries cannot
-  block startup, persisted `last_fire` is restored, and `MissedPolicy::Skip`
-  advances the schedule instead of firing it on the first interval tick.
-- [ ] Track scheduler campaign task handles through stop/cancel and account
-  actual completed iterations and fuzz duration. Current detached tasks outlive
-  scheduler stop and budget counters undercount retries while charging failures.
+- [x] Make chat turns and rollback durable across display/context transcripts,
+  metadata, and checkpoints; mutation failures now propagate instead of being
+  reported as successful responses.
+- [x] Serialize rollback, branch, and delete through the same per-session lock
+  as model turns and render the canonical backend transcript after mutation.
+- [x] Make scheduler restart recovery bounded and non-blocking, restore
+  persisted `last_fire`, and make `MissedPolicy::Skip` advance without firing.
+- [x] Track scheduler campaign task handles through stop/cancel and account
+  completed iterations and actual fuzz duration.
+- [x] Make the service-owned run WAL the sole recovery state model, serialize
+  writers that share a path, fsync/atomically compact it, and surface sticky
+  durability failures before new execution starts.
 
 ### REST/web parity
 - [ ] REST cannot start or observe a fuzz run (`run_fuzzer`/`run_syzkaller`/
   `cancel_all_runs` have no route) and the SSE `RunProgress`/`DockerStatus`
   channel is never fed. Add the routes + wire the SSE producer.
-- [ ] Web mode needs a `CorsLayer` and the frontend must send the `Authorization`
-  bearer header, or browser + token auth stay mutually exclusive.
+- [x] Apply an origin-bounded `CorsLayer` in web mode and send the configured
+  bearer token from both frontend HTTP and SSE transports.
 - [ ] REST handlers hardcode status codes; map `ClassifiedError` category to
   4xx/5xx instead.
-- [ ] Path safety: `discover`/`knowledge_*` REST handlers pass raw user paths to
-  the host FS (`knowledge_search` returns file snippets). Canonicalize + bound.
+- [x] Canonicalize and bound REST discovery/knowledge paths to the configured
+  workspace before host filesystem access or snippet return.
 
 ### Config knobs that silently no-op
+- [x] Remove the inert engines/runtime/guardrails/storage/session/tools config
+  sections from templates, APIs, and Settings rather than presenting controls
+  that do not affect runtime behavior.
 - [ ] Provider `cost_per_1k_input/output` never reaches `ProviderMetadata`, so
   `CostOptimized` routing degenerates to "first candidate".
 - [ ] Per-schedule `concurrency_policy` / `max_executions_per_hour` are persisted
@@ -199,15 +203,19 @@ but larger or riskier than a drop-in fix.
 - [ ] `list_all_crashes` doc claims newest-first but has no `ORDER BY`.
 - [ ] `container.rs` storage reads use `.await.unwrap_or_default()` (14 sites), so
   a DB error renders as "no data" (worst for the crash list). At least log the error.
-- [ ] Persist schedules and campaign budget state with atomic replace + fsync;
-  corrupt or truncated JSON currently degrades to an empty/default state and can
-  silently re-enable previously exhausted work.
+- [x] Persist schedules and campaign budget state with locked atomic replace,
+  file and parent-directory fsync, and explicit corrupt-state errors.
 
 ### Unwired subsystems (decide: roadmap or remove)
+- [x] Remove the unreachable high-risk tool registrar and its shell/file/task/
+  loop/workflow prototypes; the live agent catalog now contains only registered
+  inspection tools plus service-backed knowledge search.
+- [x] Remove the zero-consumer `hf-bot` scaffold and the duplicate `hf-journal`
+  state model; the service-owned durable WAL is the sole run-recovery journal.
 - [ ] `hf-mcp` (3.3k LOC) has zero dependents. Much of `hf-diagnostics`
   (subscriber/search/replay/langfuse/cost) is dead. Hook execution/blocking path
-  is never constructed. Per-tool `RateLimiter`, `PriorityScheduler`,
-  `LeaseManager` unused.
+  is never constructed. The per-tool `RateLimiter` and provider
+  `PriorityScheduler`/`LeaseManager` are unused.
 - [ ] Knowledge dedup fingerprints only the first 100 chars and keys on a
   never-written `l1_section_index`, so distinct chunks are dropped from RAG.
 - [ ] Cron `timezone` is dropped at evaluation (latent; creation forces UTC).
