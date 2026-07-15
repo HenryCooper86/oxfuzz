@@ -16,7 +16,6 @@ members = [
     "crates/hf-knowledge",
     "crates/hf-diagnostics",
     "crates/hf-guardrails",
-    "crates/hf-journal",
     "crates/hf-discovery",
     "crates/hf-harness",
     "crates/hf-engine",
@@ -150,7 +149,6 @@ hf-scheduler = { path = "crates/hf-scheduler" }
 hf-knowledge = { path = "crates/hf-knowledge" }
 hf-diagnostics = { path = "crates/hf-diagnostics" }
 hf-guardrails = { path = "crates/hf-guardrails" }
-hf-journal = { path = "crates/hf-journal" }
 hf-discovery = { path = "crates/hf-discovery" }
 hf-harness = { path = "crates/hf-harness" }
 hf-engine = { path = "crates/hf-engine" }

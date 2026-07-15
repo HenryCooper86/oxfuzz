@@ -2565,23 +2565,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hf-journal"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hf-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "hf-knowledge"
 version = "0.1.0"
 dependencies = [
@@ -2708,7 +2691,6 @@ dependencies = [
  "hf-engine",
  "hf-guardrails",
  "hf-harness",
- "hf-journal",
  "hf-knowledge",
  "hf-provider",
  "hf-runtime",
