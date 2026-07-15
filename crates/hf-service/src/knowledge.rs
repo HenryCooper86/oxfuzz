@@ -94,7 +94,6 @@ fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
         .to_ascii_lowercase()
         .as_str()
     {
-        "semantic" => SearchStrategy::SemanticSearch,
         "keyword" => SearchStrategy::KeywordSearch,
         _ => SearchStrategy::Hybrid,
     };
@@ -384,7 +383,7 @@ mod tests {
     #[test]
     fn retrieval_config_applies_strategy_threshold_and_weights() {
         let knowledge = KnowledgeConfig {
-            retrieval_strategy: "semantic".to_owned(),
+            retrieval_strategy: "hybrid".to_owned(),
             min_similarity_threshold: 0.42,
             bm25_weight: 2.5,
             vector_weight: 0.25,
@@ -393,7 +392,7 @@ mod tests {
 
         let retrieval = retrieval_config(&knowledge);
 
-        assert_eq!(retrieval.strategy, SearchStrategy::SemanticSearch);
+        assert_eq!(retrieval.strategy, SearchStrategy::Hybrid);
         assert!((retrieval.min_similarity_threshold - 0.42).abs() < f64::EPSILON);
         assert!((retrieval.bm25_weight - 2.5).abs() < f64::EPSILON);
         assert!((retrieval.vector_weight - 0.25).abs() < f64::EPSILON);

@@ -72,10 +72,11 @@ impl KnowledgeRuntimeConfig {
         }
         if !matches!(
             self.retrieval_strategy.trim().to_ascii_lowercase().as_str(),
-            "hybrid" | "keyword" | "semantic"
+            "hybrid" | "keyword"
         ) {
             return Err(
-                "knowledge.retrieval_strategy must be hybrid, keyword, or semantic".to_owned(),
+                "knowledge.retrieval_strategy must be hybrid or keyword; semantic requires an embedding pipeline"
+                    .to_owned(),
             );
         }
         for (name, value) in [
@@ -616,10 +617,26 @@ pub fn list_models() -> Vec<ModelInfo> {
 /// Load the provider pool as structured data for the settings form.
 #[must_use]
 pub fn get_providers() -> Vec<ProviderConfig> {
-    let raw = read_config("providers").unwrap_or_default();
-    toml::from_str::<hf_provider::ProviderPoolConfig>(&raw)
-        .map(|c| c.providers)
-        .unwrap_or_default()
+    match try_get_providers() {
+        Ok(providers) => providers,
+        Err(error) => {
+            tracing::warn!(%error, "provider config could not be loaded");
+            Vec::new()
+        }
+    }
+}
+
+fn parse_provider_config(raw: &str) -> Result<Vec<ProviderConfig>, String> {
+    let config: hf_provider::ProviderPoolConfig =
+        toml::from_str(raw).map_err(|error| format!("invalid provider config: {error}"))?;
+    config
+        .validate()
+        .map_err(|error| format!("invalid provider config: {error}"))?;
+    Ok(config.providers)
+}
+
+fn try_get_providers() -> Result<Vec<ProviderConfig>, String> {
+    parse_provider_config(&read_config("providers")?)
 }
 
 fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderConfig]) {
@@ -657,7 +674,7 @@ fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderC
 /// Returns an error when the provider config cannot be written.
 pub fn set_providers_preserving_secrets(providers: &[ProviderConfig]) -> Result<(), String> {
     let mut merged = providers.to_vec();
-    merge_provider_secrets(&mut merged, &get_providers());
+    merge_provider_secrets(&mut merged, &try_get_providers()?);
     set_providers(&merged)
 }
 
@@ -682,7 +699,7 @@ fn enum_str<T: Serialize>(v: &T) -> Option<String> {
 /// Returns an error string if the rendered TOML is invalid or cannot be written.
 #[allow(clippy::too_many_lines)]
 pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
-    let existing = read_config("providers").unwrap_or_default();
+    let existing = read_config("providers")?;
     let preamble = existing.find("[[providers]]").map_or_else(
         || {
             "# hobot_fuzz -- LLM Provider Pool Configuration\n\
@@ -787,7 +804,7 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     }
 
     let content = format!("{preamble}{body}");
-    toml::from_str::<toml::Value>(&content).map_err(|e| format!("invalid TOML: {e}"))?;
+    parse_provider_config(&content)?;
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     write_private_config_file(&dir.join("providers.toml"), &content)
@@ -969,6 +986,14 @@ cpus = 2\n";
     }
 
     #[test]
+    fn malformed_provider_config_is_not_treated_as_an_empty_secret_set() {
+        let error = parse_provider_config("[[providers]]\nid = [not valid toml")
+            .expect_err("malformed provider state must fail closed");
+
+        assert!(error.contains("invalid provider config"));
+    }
+
+    #[test]
     fn toml_to_json_empty_is_object() {
         assert_eq!(
             toml_to_json("   ").expect("empty"),
@@ -1030,6 +1055,7 @@ cpus = 2\n";
     fn hobot_config_rejects_invalid_runtime_values() {
         for raw in [
             "[knowledge]\nretrieval_strategy = \"unknown\"\n",
+            "[knowledge]\nretrieval_strategy = \"semantic\"\n",
             "[knowledge]\nbm25_weight = -1.0\n",
             "[knowledge]\nvector_weight = nan\n",
             "[scheduler]\nmax_concurrent_executions = 0\n",
