@@ -9,6 +9,15 @@ async fn init_scaffolds_missing_configs_and_db() {
     std::fs::write(cfg.join("engines.example.toml"), "y = 2\n").unwrap();
     // A pre-existing target file must not be overwritten.
     std::fs::write(cfg.join("engines.toml"), "preexisting = true\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            cfg.join("engines.toml"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
     let db = dir.path().join("data/test.db");
 
     let report = hf_service::init_at(&cfg, &db).await.unwrap();
@@ -21,6 +30,16 @@ async fn init_scaffolds_missing_configs_and_db() {
         std::fs::read_to_string(cfg.join("engines.toml")).unwrap(),
         "preexisting = true\n"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(cfg.join("engines.toml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     assert!(db.exists());
 
     // Idempotent: a second run materializes nothing new.

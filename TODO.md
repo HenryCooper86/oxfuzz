@@ -110,32 +110,64 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [~] Tests: storage, service, guardrails, agent covered; expand crash/triage
   and end-to-end coverage.
 
-## Audit backlog (2026-07-14)
+## Audit backlog (refreshed 2026-07-15)
 
 A multi-crate audit fixed ~30 correctness/dead-code/doc issues (see git log).
 The following verified findings remain open, ranked by user impact. Each is real
 but larger or riskier than a drop-in fix.
 
+### Safety and security (highest impact)
+- [ ] Make promoted artifacts immutable at execution time: persist source and
+  binary digests, verify them immediately before launch, and split read-only
+  harness mounts from writable corpus/output mounts.
+- [ ] Bound Docker stdout/stderr capture and represent `Completed`, `TimedOut`,
+  and `Cancelled` separately; forced teardown currently synthesizes exit code 0.
+- [ ] Stage Syzkaller config and disk inputs into managed storage, use a
+  disposable disk overlay, and replace broad writable mounts/network/capability
+  exceptions with the minimum documented profile.
+- [ ] Default the web server to loopback, reject optional authentication on a
+  non-loopback bind, and return redacted provider/config DTOs from REST.
+- [x] Constrain Docker primary workspaces and runtime file I/O to the configured
+  workspace root, including parent traversal and symlink escapes.
+- [x] Reject symlinked crash/corpus roots and entries; validate seed filenames
+  and atomically replace corpus destinations instead of following links.
+- [x] Write generated and edited config files atomically with owner-only `0600`
+  permissions on Unix. Rotate any credentials that predate this migration.
+- [x] Reject unsafe transcript session ids before file I/O and require persisted
+  session metadata before loading model context or retaining a per-session lock.
+
 ### Correctness (highest impact)
-- [ ] Target-scoped "latest run": `container.rs` resolves the latest run
-  project-scoped, not target-scoped, so `triage`/`generate_report`/`export_sarif`/
-  `push_to_defectdojo` can misattribute crashes across targets (and race between
-  the scheduler's concurrent campaigns). Add a target-scoped resolver and use it
-  in `triage`, `verify_regressions`, `corpus_absorb_crashes`, `crashes_for_latest_run`.
+- [x] Target-scoped "latest run": reports, exports, triage, regression replay,
+  and corpus absorption resolve runs through the persisted harness/target
+  relationship and ignore newer runs for another target in the same project.
+- [ ] Give every fuzz/smoke execution its own output directory and propagate an
+  explicit run id into triage. Same-target overlapping runs still share
+  `workspace/out`, so process-level serialization alone would not preserve
+  durable attribution after a crash or restart.
 - [ ] `persist_corpus` is upsert-only: `corpus_prune`/`corpus_prune_coverage`/
   `corpus_minimize` delete files but never remove persisted rows, so reported
   corpus counts only grow. Reconcile rows against the survivor set.
-- [ ] `harness_smoke` inserts a fresh config-less `RunRecord` per call, creating
-  orphan runs that shadow the real campaign run in Run History and feed the
-  latest-run bug above. Attach the qualified harness id or update in place.
+- [x] `harness_smoke` records the qualified harness id and execution settings,
+  keeping smoke findings attributable to the correct target.
 - [ ] AFL++ coverage: edge count is parsed from stdout (`count coverage :
   2.55 bits/tuple` -> ~2) instead of `out/default/fuzzer_stats` (`edges_found`),
   so AFL++ coverage/deltas/stagnation are wrong. Parse `fuzzer_stats`.
 - [ ] Crash minimization is unwired: `hf-crash::build_minimize_args` has no
   caller and `Crash.minimized` is always false. Wire a minimize step into triage.
-- [ ] Agent tool results are sent as `Role::Tool` with no `tool_call_id`, which
-  OpenAI/strict relays reject (openai-compat is the shipped default). Feed tool
-  results in a provider-accepted shape.
+- [x] Prompt-protocol agent tool results use provider-compatible user messages;
+  strict OpenAI-compatible relays no longer receive an orphan `tool` message.
+- [ ] Make chat turns and rollback durable across display transcript, context
+  transcript, metadata, and checkpoints. Append/rollback failures are currently
+  downgraded to successful responses, and branch/delete cleanup can be partial.
+- [ ] Serialize rollback, branch, and delete through the same per-session lock
+  as model turns, then render the backend transcript after mutation. The GUI's
+  local rollback indexes diverge when non-persisted tool events are present.
+- [ ] Rework scheduler restart recovery so more than 256 queued recoveries cannot
+  block startup, persisted `last_fire` is restored, and `MissedPolicy::Skip`
+  advances the schedule instead of firing it on the first interval tick.
+- [ ] Track scheduler campaign task handles through stop/cancel and account
+  actual completed iterations and fuzz duration. Current detached tasks outlive
+  scheduler stop and budget counters undercount retries while charging failures.
 
 ### REST/web parity
 - [ ] REST cannot start or observe a fuzz run (`run_fuzzer`/`run_syzkaller`/
@@ -166,6 +198,9 @@ but larger or riskier than a drop-in fix.
 - [ ] `list_all_crashes` doc claims newest-first but has no `ORDER BY`.
 - [ ] `container.rs` storage reads use `.await.unwrap_or_default()` (14 sites), so
   a DB error renders as "no data" (worst for the crash list). At least log the error.
+- [ ] Persist schedules and campaign budget state with atomic replace + fsync;
+  corrupt or truncated JSON currently degrades to an empty/default state and can
+  silently re-enable previously exhausted work.
 
 ### Unwired subsystems (decide: roadmap or remove)
 - [ ] `hf-mcp` (3.3k LOC) has zero dependents. Most of `hf-journal` (file_history/

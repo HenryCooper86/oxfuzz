@@ -19,6 +19,93 @@ fn isolate_workspace() {
     });
 }
 
+fn stored_target(project: &std::path::Path, symbol: &str) -> hf_core::target::TargetCandidate {
+    hf_core::target::TargetCandidate {
+        id: uuid::Uuid::new_v4(),
+        project_root: project.to_path_buf(),
+        language: hf_core::target::TargetLanguage::C,
+        symbol: symbol.to_owned(),
+        kind: hf_core::target::TargetKind::Parser,
+        location: hf_core::target::SourceLocation {
+            file: std::path::PathBuf::from(format!("{symbol}.c")),
+            line: 1,
+            col: 1,
+        },
+        signature: Some(format!("int {symbol}(const char *, size_t)")),
+        input_surface: hf_core::target::InputSurface::Bytes,
+        complexity: 1,
+        fit_score: 0.9,
+        sanitizers: vec![hf_core::target::Sanitizer::Address],
+        rationale: "test target".to_owned(),
+        reachable_functions: Vec::new(),
+        accumulated_complexity: 1,
+    }
+}
+
+fn stored_harness(target_id: uuid::Uuid, symbol: &str) -> hf_core::harness::Harness {
+    hf_core::harness::Harness {
+        id: uuid::Uuid::new_v4(),
+        target_id,
+        engine: hf_core::engine::EngineKind::LibFuzzer,
+        source: format!("int LLVMFuzzerTestOneInput(void) {{ return {symbol}[0]; }}"),
+        language: hf_core::target::TargetLanguage::C,
+        build_cmd: hf_core::harness::BuildCommand {
+            compiler: "clang".to_owned(),
+            args: Vec::new(),
+            output: std::path::PathBuf::from(format!("fuzz_{symbol}")),
+        },
+        sanitizer: hf_core::target::Sanitizer::Address,
+        status: hf_core::harness::HarnessStatus::Promoted,
+        smoke_run: Some(hf_core::harness::SmokeRunSummary {
+            duration_secs: 60,
+            execs_per_sec: 10.0,
+            crashes: 0,
+            passed: true,
+        }),
+    }
+}
+
+fn stored_run(
+    project: &std::path::Path,
+    harness_id: uuid::Uuid,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> hf_storage::RunRecord {
+    let mut run = hf_storage::RunRecord::new(
+        project.to_string_lossy(),
+        hf_core::engine::EngineKind::LibFuzzer,
+        Some(hf_core::engine::FuzzRunConfig {
+            harness_id,
+            engine: hf_core::engine::EngineKind::LibFuzzer,
+            duration: Some(std::time::Duration::from_mins(1)),
+            max_mem_mb: 512,
+            max_cpus: 1,
+            seed_corpus: None,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+        }),
+        started_at,
+    );
+    run.status = hf_storage::RunStatus::Done;
+    run.ended_at = Some(started_at);
+    run
+}
+
+fn stored_crash(run_id: uuid::Uuid, target_id: uuid::Uuid, marker: &str) -> hf_core::crash::Crash {
+    hf_core::crash::Crash {
+        id: uuid::Uuid::new_v4(),
+        run_id,
+        target_id,
+        input_path: std::path::PathBuf::from(format!("out/crash-{marker}")),
+        stack_signature: format!("stack-{marker}"),
+        kind: hf_core::crash::CrashKind::Asan,
+        summary: format!("{marker} crash summary"),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    }
+}
+
 /// A runtime whose streamed command blocks until the run is cancelled, so a
 /// test can observe and drive the cancellation path deterministically.
 struct BlockingRuntime;
@@ -519,6 +606,135 @@ async fn generate_report_produces_a_titled_markdown_doc() {
         md.contains("No crashes were found"),
         "honest empty findings"
     );
+}
+
+#[tokio::test]
+async fn target_scoped_exports_include_cancelled_run_and_ignore_newer_other_target() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("multi_target_project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("runs.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+
+    let target_a = stored_target(&project, "parse_a");
+    let target_b = stored_target(&project, "parse_b");
+    let harness_a = stored_harness(target_a.id, &target_a.symbol);
+    let harness_b = stored_harness(target_b.id, &target_b.symbol);
+    let mut run_a = stored_run(
+        &project,
+        harness_a.id,
+        chrono::Utc::now() - chrono::Duration::minutes(1),
+    );
+    run_a.status = hf_storage::RunStatus::Cancelled;
+    let run_b = stored_run(&project, harness_b.id, chrono::Utc::now());
+    let mut run_a_inflight = stored_run(
+        &project,
+        harness_a.id,
+        chrono::Utc::now() + chrono::Duration::minutes(1),
+    );
+    run_a_inflight.status = hf_storage::RunStatus::Running;
+    run_a_inflight.ended_at = None;
+    let workspace_a = hf_service::workspace_dir(&project, "parse_a");
+    let workspace_b = hf_service::workspace_dir(&project, "parse_b");
+    std::fs::create_dir_all(workspace_a.join("out")).unwrap();
+    std::fs::create_dir_all(workspace_b.join("out")).unwrap();
+    std::fs::write(workspace_a.join("fuzz_parse_a"), b"binary").unwrap();
+    let input_a = workspace_a.join("out").join("crash-TARGET_A");
+    let input_b = workspace_b.join("out").join("crash-TARGET_B");
+    std::fs::write(&input_a, b"target-a-input").unwrap();
+    std::fs::write(&input_b, b"target-b-input").unwrap();
+    let mut crash_a = stored_crash(run_a.id, target_a.id, "TARGET_A");
+    crash_a.input_path = input_a.clone();
+    let mut crash_b = stored_crash(run_b.id, target_b.id, "TARGET_B");
+    crash_b.input_path = input_b;
+
+    store
+        .upsert_target(&target_a, chrono::Utc::now())
+        .await
+        .unwrap();
+    store
+        .upsert_target(&target_b, chrono::Utc::now())
+        .await
+        .unwrap();
+    store.upsert_harness(&harness_a).await.unwrap();
+    store.upsert_harness(&harness_b).await.unwrap();
+    store.insert_run(&run_a).await.unwrap();
+    store.insert_run(&run_b).await.unwrap();
+    store.insert_run(&run_a_inflight).await.unwrap();
+    store.upsert_crash(&crash_a).await.unwrap();
+    store.upsert_crash(&crash_b).await.unwrap();
+
+    let report = container
+        .generate_report(&project, "parse_a")
+        .await
+        .unwrap();
+    assert!(report.contains("TARGET_A crash summary"));
+    assert!(!report.contains("TARGET_B crash summary"));
+
+    let sarif = container.export_sarif(&project, "parse_a").await.unwrap();
+    assert!(sarif.contains("TARGET_A crash summary"));
+    assert!(!sarif.contains("TARGET_B crash summary"));
+
+    let replays = container
+        .verify_regressions(&project, "parse_a")
+        .await
+        .unwrap();
+    assert_eq!(replays.len(), 1);
+    assert_eq!(std::path::Path::new(&replays[0].input), input_a);
+
+    let added = container
+        .corpus_absorb_crashes(&project, "parse_a")
+        .await
+        .unwrap();
+    assert_eq!(added, 1);
+    let corpus = container.corpus_list(&project, "parse_a").unwrap();
+    assert!(corpus
+        .entries
+        .iter()
+        .any(|entry| std::fs::read(&entry.path).unwrap() == b"target-a-input"));
+    assert!(!corpus
+        .entries
+        .iter()
+        .any(|entry| std::fs::read(&entry.path).unwrap() == b"target-b-input"));
+
+    std::fs::remove_dir_all(workspace_a).ok();
+    std::fs::remove_dir_all(workspace_b).ok();
+}
+
+#[tokio::test]
+async fn triage_rejects_crashes_without_a_completed_attributable_run() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("unattributed_triage_project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("triage.db"))
+            .await
+            .unwrap(),
+    );
+    let target = stored_target(&project, "parse_unattributed");
+    store
+        .upsert_target(&target, chrono::Utc::now())
+        .await
+        .unwrap();
+    let workspace = hf_service::workspace_dir(&project, &target.symbol);
+    std::fs::create_dir_all(workspace.join("out")).unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::clone(&store));
+
+    let error = container
+        .triage(&project, &target.symbol)
+        .await
+        .expect_err("persistent triage must not fabricate a run identity");
+    assert!(error.to_string().contains("terminal run"));
+
+    std::fs::remove_dir_all(workspace).ok();
 }
 
 #[tokio::test]

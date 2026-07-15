@@ -167,6 +167,7 @@ impl SessionManager {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<Message>, SessionManagerError> {
+        self.session_store.get(session_id).await?;
         self.transcript_store
             .read_all(session_id)
             .await
@@ -183,6 +184,7 @@ impl SessionManager {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<Message>, SessionManagerError> {
+        self.session_store.get(session_id).await?;
         self.display_transcript_store
             .read_all(session_id)
             .await
@@ -197,6 +199,7 @@ impl SessionManager {
         session_id: &SessionId,
         count: usize,
     ) -> Result<Vec<Message>, SessionManagerError> {
+        self.session_store.get(session_id).await?;
         self.transcript_store
             .read_last(session_id, count)
             .await
@@ -735,6 +738,16 @@ mod tests {
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].content, "hello");
         assert_eq!(transcript[1].content, "world");
+    }
+
+    #[tokio::test]
+    async fn test_manager_rejects_transcript_reads_for_unknown_sessions() {
+        let mgr = setup().await;
+        let unknown = SessionId::from_string("unknown-session");
+
+        assert!(mgr.read_transcript(&unknown).await.is_err());
+        assert!(mgr.read_display_transcript(&unknown).await.is_err());
+        assert!(mgr.read_last_messages(&unknown, 10).await.is_err());
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use tracing::instrument;
 use hf_core::session::{DisplayTranscriptStore, SessionError};
 use hf_core::types::{Message, SessionId};
 
-use crate::transcript::read_messages_from_file;
+use crate::transcript::{read_messages_from_file, transcript_file_stem};
 
 /// JSONL file-based display transcript store.
 ///
@@ -44,9 +44,11 @@ impl JsonlDisplayTranscriptStore {
     }
 
     /// Get the file path for a session's display transcript.
-    fn transcript_path(&self, session_id: &SessionId) -> PathBuf {
-        self.base_dir
-            .join(format!("{}.display.jsonl", session_id.as_str()))
+    fn transcript_path(&self, session_id: &SessionId) -> Result<PathBuf, SessionError> {
+        Ok(self.base_dir.join(format!(
+            "{}.display.jsonl",
+            transcript_file_stem(session_id)?
+        )))
     }
 
     /// Ensure the base directory exists.
@@ -63,9 +65,8 @@ impl JsonlDisplayTranscriptStore {
 impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
     #[instrument(skip(self, message), fields(session_id = %session_id))]
     async fn append(&self, session_id: &SessionId, message: &Message) -> Result<(), SessionError> {
+        let path = self.transcript_path(session_id)?;
         self.ensure_dir().await?;
-
-        let path = self.transcript_path(session_id);
         let mut line =
             serde_json::to_string(message).map_err(|e| SessionError::TranscriptError {
                 message: format!("serialize message: {e}"),
@@ -101,7 +102,7 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
 
     #[instrument(skip(self), fields(session_id = %session_id))]
     async fn read_all(&self, session_id: &SessionId) -> Result<Vec<Message>, SessionError> {
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
 
         if !path.exists() {
             return Ok(Vec::new());
@@ -112,7 +113,7 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
 
     #[instrument(skip(self), fields(session_id = %session_id))]
     async fn message_count(&self, session_id: &SessionId) -> Result<usize, SessionError> {
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
 
         if !path.exists() {
             return Ok(0);
@@ -164,7 +165,7 @@ impl DisplayTranscriptStore for JsonlDisplayTranscriptStore {
         let kept = &all[..keep_count];
 
         // Atomic rewrite: write to temp file, then rename.
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
         let tmp_path = path.with_extension("display.jsonl.tmp");
 
         let mut content = String::new();
@@ -298,6 +299,28 @@ mod tests {
 
         let removed = store.truncate(&session_id, 5).await.unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn display_session_id_cannot_escape_the_store_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("display");
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = dir.path().join("outside.display.jsonl");
+        let original = format!(
+            "{}\n",
+            serde_json::to_string(&test_message("secret")).unwrap()
+        );
+        std::fs::write(&outside, &original).unwrap();
+        let store = JsonlDisplayTranscriptStore::new(&base);
+        let escaped = SessionId::from_string("../outside");
+
+        assert!(store.read_all(&escaped).await.is_err());
+        assert!(store
+            .append(&escaped, &test_message("overwrite"))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), original);
     }
 
     #[tokio::test]
