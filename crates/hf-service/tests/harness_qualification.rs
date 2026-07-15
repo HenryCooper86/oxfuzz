@@ -137,6 +137,22 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
     assert_eq!(smoked.status, HarnessStatus::SmokePassed);
     assert!(smoked.smoke_run.as_ref().is_some_and(|run| run.passed));
 
+    let smoke_runs = store
+        .list_runs(Some(&project.path().to_string_lossy()))
+        .await
+        .unwrap();
+    assert_eq!(smoke_runs.len(), 1);
+    let smoke_config = smoke_runs[0]
+        .config
+        .as_ref()
+        .expect("a smoke run must remain attributable to its harness and target");
+    assert_eq!(smoke_config.harness_id, harness_id);
+    assert_eq!(smoke_config.engine, EngineKind::LibFuzzer);
+    assert_eq!(
+        smoke_config.duration,
+        Some(std::time::Duration::from_mins(1))
+    );
+
     let promoted = container
         .harness_promote(project.path(), "parse_entry", EngineKind::LibFuzzer)
         .await

@@ -23,6 +23,15 @@ use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, Store
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// Runs that reached a terminal state may own crash artifacts. Failed and
+/// cancelled campaigns can produce valid partial evidence before stopping.
+fn run_has_crash_evidence(status: RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Workspace resolution
 // ---------------------------------------------------------------------------
@@ -80,6 +89,25 @@ pub fn workspace_dir(project: &Path, target: &str) -> PathBuf {
 /// and the unit removed when a project is deleted.
 pub fn project_workspace_dir(project: &Path) -> PathBuf {
     workspace_root().join(project_slug(project))
+}
+
+/// Unique service-owned staging directory for one sandboxed document import.
+/// It must live below the runtime's approved workspace root, while remaining a
+/// sibling of target workspaces so a running fuzzer cannot mutate the input.
+fn document_staging_dir(project: &Path, import_id: Uuid) -> PathBuf {
+    project_workspace_dir(project)
+        .join(".service")
+        .join("document-import")
+        .join(import_id.to_string())
+}
+
+/// Remove a sensitive staging directory even if the async import is aborted.
+struct StagingDirectoryGuard(PathBuf);
+
+impl Drop for StagingDirectoryGuard {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
 }
 
 /// A human-readable `DefectDojo` product name for a project: its directory
@@ -384,8 +412,19 @@ fn is_crash_noise(path: &Path) -> bool {
         || name == "fuzzer_stats"
 }
 
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+fn is_regular_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
 fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
-    if std::fs::create_dir_all(staging).is_err() {
+    if !is_regular_directory(out_dir)
+        || std::fs::create_dir_all(staging).is_err()
+        || !is_regular_directory(staging)
+    {
         return 0;
     }
     let Ok(entries) = std::fs::read_dir(out_dir) else {
@@ -394,7 +433,7 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
     let mut staged = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        if !is_regular_file(&path) {
             continue;
         }
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -415,11 +454,14 @@ fn stage_crash_inputs(out_dir: &Path, staging: &Path) -> usize {
 /// down under `<instance>/crashes/` (AFL++ output layout).
 fn collect_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
     let mut inputs = Vec::new();
+    if !is_regular_directory(out_dir) {
+        return inputs;
+    }
     let push_files = |dir: &Path, inputs: &mut Vec<PathBuf>| {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && !is_crash_noise(&path) {
+                if is_regular_file(&path) && !is_crash_noise(&path) {
                     inputs.push(path);
                 }
             }
@@ -429,13 +471,55 @@ fn collect_crash_inputs(out_dir: &Path) -> Vec<PathBuf> {
     // AFL++ nests crashes under out/<instance>/crashes/.
     if let Ok(entries) = std::fs::read_dir(out_dir) {
         for entry in entries.flatten() {
-            let crashes = entry.path().join("crashes");
-            if crashes.is_dir() {
+            let instance = entry.path();
+            let crashes = instance.join("crashes");
+            if is_regular_directory(&instance) && is_regular_directory(&crashes) {
                 push_files(&crashes, &mut inputs);
             }
         }
     }
     inputs
+}
+
+#[cfg(test)]
+mod crash_input_boundary_tests {
+    use super::{collect_crash_inputs, stage_crash_inputs};
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_staging_and_collection_ignore_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let out = root.path().join("out");
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("crash-real"), b"real crash").unwrap();
+
+        let outside = root.path().join("outside-secret");
+        std::fs::write(&outside, b"must not be staged").unwrap();
+        symlink(&outside, out.join("crash-link")).unwrap();
+
+        let collected = collect_crash_inputs(&out);
+        assert_eq!(collected, vec![out.join("crash-real")]);
+        assert_eq!(stage_crash_inputs(&out, &staging), 1);
+        assert_eq!(
+            std::fs::read(staging.join("crash-real")).unwrap(),
+            b"real crash"
+        );
+        assert!(!staging.join("crash-link").exists());
+
+        let external_out = root.path().join("external-out");
+        std::fs::create_dir_all(&external_out).unwrap();
+        std::fs::write(external_out.join("crash-secret"), b"outside").unwrap();
+        let linked_out = root.path().join("linked-out");
+        symlink(&external_out, &linked_out).unwrap();
+        assert!(collect_crash_inputs(&linked_out).is_empty());
+        assert_eq!(
+            stage_crash_inputs(&linked_out, &root.path().join("linked-staging")),
+            0
+        );
+    }
 }
 
 /// Cache value: the signature the covered set was computed for + the set.
@@ -1979,9 +2063,9 @@ impl ServiceContainer {
         project: &Path,
         file: &Path,
     ) -> Result<crate::knowledge::KnowledgeStats, ClassifiedError> {
-        if !file.is_file() {
+        if !is_regular_file(file) {
             return Err(ClassifiedError::Validation(format!(
-                "document not found: {}",
+                "document is not a regular file: {}",
                 file.display()
             )));
         }
@@ -1990,12 +2074,13 @@ impl ServiceContainer {
             .and_then(|n| n.to_str())
             .ok_or_else(|| ClassifiedError::Validation("invalid document name".to_owned()))?;
 
-        // Stage the document in a clean dir mounted as /work, then convert it.
+        // Stage below the Docker runtime's approved workspace root, not in the
+        // durable knowledge directory (which lives elsewhere in app data).
         let docs = crate::knowledge::docs_dir(project);
-        let staging = docs.join(".staging");
-        let _ = std::fs::remove_dir_all(&staging);
+        let staging = document_staging_dir(project, Uuid::new_v4());
         std::fs::create_dir_all(&staging)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir staging: {e}")))?;
+        let staging_guard = StagingDirectoryGuard(staging.clone());
         std::fs::copy(file, staging.join(name))
             .map_err(|e| ClassifiedError::Internal(format!("stage document: {e}")))?;
 
@@ -2007,8 +2092,9 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
-        let result = self.runtime.run_command(&cmd, &staging, &limits).await?;
-        let _ = std::fs::remove_dir_all(&staging);
+        let result = self.runtime.run_command(&cmd, &staging, &limits).await;
+        drop(staging_guard);
+        let result = result?;
         if result.exit_code != 0 || result.stdout.trim().is_empty() {
             return Err(ClassifiedError::Internal(format!(
                 "markitdown failed (exit {}): {}",
@@ -2077,8 +2163,22 @@ impl ServiceContainer {
     /// missing database or API key degrades gracefully instead of failing.
     pub async fn bootstrap() -> Self {
         let runtime = runtime_from_env();
+        let config_dir = crate::init::config_dir();
+        let private_config_ready = crate::config::secure_config_directory(&config_dir).map_or_else(
+            |error| {
+                tracing::warn!(
+                    "ignoring file-based providers because private config validation failed in {}: {error}",
+                    config_dir.display()
+                );
+                false
+            },
+            |()| true,
+        );
         // Prefer the GUI-managed config/providers.toml; fall back to env vars.
-        let provider_pool = provider_pool_from_config().or_else(provider_pool_from_env);
+        let provider_pool = private_config_ready
+            .then(provider_pool_from_config)
+            .flatten()
+            .or_else(provider_pool_from_env);
         let store = match Store::connect_from_env().await {
             Ok(s) => Some(Arc::new(s)),
             Err(e) => {
@@ -2967,7 +3067,17 @@ impl ServiceContainer {
         let mut smoke_record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
-            None,
+            Some(FuzzRunConfig {
+                harness_id: smoked.id,
+                engine,
+                duration: Some(std::time::Duration::from_secs(summary.duration_secs)),
+                max_mem_mb: 2048,
+                max_cpus: 1,
+                seed_corpus: Some(workspace.join("corpus")),
+                sanitizer: smoked.sanitizer,
+                env: Vec::new(),
+                extra_args: Vec::new(),
+            }),
             Utc::now(),
         );
         smoke_record.status = RunStatus::Done;
@@ -3634,12 +3744,6 @@ impl ServiceContainer {
             log("Note: qemu runs under TCG emulation inside Docker (no KVM on this host) -- expect low exec rates.");
         }
 
-        let inner = format!(
-            "command -v syz-manager >/dev/null 2>&1 || {{ echo 'ERROR: syz-manager not found in the sandbox image. Rebuild the image with the syzkaller toolchain: open Settings > General and switch the sandbox Architecture (forces a rebuild), or remove the image with: docker image rm {sandbox_img}'; exit 3; }}; timeout {duration} syz-manager -config={cfg_in_container} 2>&1 || true",
-            sandbox_img = SANDBOX_IMAGE,
-            duration = opts.duration_secs,
-        );
-
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 4096,
             max_cpus: 4,
@@ -3699,11 +3803,23 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
-        let cmd = ["bash".to_owned(), "-c".to_owned(), inner];
+        let cmd = syzkaller_manager_command(&cfg_in_container, opts.duration_secs);
         let result = self
             .runtime
             .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox_opts, &cancel, &on_line)
             .await?;
+
+        // GNU `timeout` uses 124 when the requested campaign budget expires;
+        // that is the normal bounded completion path. Any other non-zero exit
+        // means the manager or its container setup failed and must not be
+        // presented as a successful campaign.
+        if !cancel.is_cancelled() && result.exit_code != 0 && result.exit_code != 124 {
+            let detail = result.stderr.lines().last().unwrap_or("no error output");
+            return Err(ClassifiedError::Sandbox(format!(
+                "syz-manager exited with {}: {detail}",
+                result.exit_code
+            )));
+        }
 
         on_progress(FuzzProgress::Done);
         Ok(SyzkallerSummary {
@@ -3736,10 +3852,18 @@ impl ServiceContainer {
         let out_dir = workspace.join("out");
         let target_id = self.resolve_target_id_any_language(project, target).await;
         // Link crashes to the run that produced them, and learn its engine to
-        // pick the right CASR driver. The most recent run for this project is the
-        // one whose `out` dir we are triaging; a fresh UUID would orphan every
-        // crash (crashes.run_id is NOT NULL and indexed for `list_crashes_by_run`).
-        let (run_id, engine) = self.latest_run(project).await;
+        // pick the right CASR driver. Resolve through the target's harness; a
+        // project-wide latest run can belong to another concurrent campaign,
+        // while a fresh UUID would orphan every crash.
+        let (run_id, engine) = match self.latest_run(project, target).await {
+            Some(run) => run,
+            None if self.store.is_some() => {
+                return Err(ClassifiedError::Validation(format!(
+                    "no terminal run for target '{target}' has attributable crash evidence; run smoke qualification or a campaign before triage"
+                )));
+            }
+            None => (Uuid::new_v4(), EngineKind::LibFuzzer),
+        };
 
         // Prefer CASR: it reproduces each crash, classifies exploitability and
         // severity, and clusters/deduplicates -- all in the sandbox. Fall back to
@@ -3840,13 +3964,14 @@ impl ServiceContainer {
         // (crash_id, input_path) pairs: persisted crashes first, else staged.
         let mut inputs: Vec<(String, PathBuf)> = Vec::new();
         if let Some(store) = &self.store {
-            let (run_id, _engine) = self.latest_run(project).await;
-            if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
-                inputs.extend(
-                    crashes
-                        .into_iter()
-                        .map(|c| (c.id.to_string(), c.input_path)),
-                );
+            if let Some((run_id, _engine)) = self.latest_run(project, target).await {
+                if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
+                    inputs.extend(
+                        crashes
+                            .into_iter()
+                            .map(|c| (c.id.to_string(), c.input_path)),
+                    );
+                }
             }
         }
         if inputs.is_empty() {
@@ -3858,7 +3983,7 @@ impl ServiceContainer {
 
         let mut results = Vec::with_capacity(inputs.len());
         for (crash_id, input) in inputs {
-            if !input.is_file() {
+            if !is_regular_file(&input) {
                 continue;
             }
             let trace = self.reproduce_crash(&workspace, target, &input).await;
@@ -4001,30 +4126,17 @@ impl ServiceContainer {
         }
     }
 
-    /// Compose a detailed Markdown campaign report for a target.
-    ///
-    /// Aggregates the discovered target, the most recent run, its triaged
-    /// crashes (with CASR severity + LLM bug reports), line/region coverage, and
-    /// corpus composition into a single self-contained Markdown document the
-    /// user can download and paste into any Markdown tool. Pulls persisted data
-    /// from the store and computes coverage live; degrades gracefully (honest
-    /// "not available" sections) when a store, run, or coverage tooling is
-    /// absent.
-    ///
-    /// # Errors
-    /// Returns `ClassifiedError` only on an unexpected internal failure; missing
-    /// data is rendered as empty sections rather than an error.
-    /// The persisted crashes for a project's most recent run (empty without a
-    /// store or runs).
-    async fn crashes_for_latest_run(&self, project: &Path) -> Vec<hf_core::crash::Crash> {
+    /// Persisted crashes for the most recent matching run (empty without a
+    /// store or matching runs). `target = None` selects project-wide history.
+    async fn crashes_for_latest_run(
+        &self,
+        project: &Path,
+        target: Option<&str>,
+    ) -> Vec<hf_core::crash::Crash> {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        let run = store
-            .list_runs(Some(&project.to_string_lossy()))
-            .await
-            .ok()
-            .and_then(|runs| runs.into_iter().next());
+        let run = self.latest_run_record(project, target).await;
         match run {
             // Guard against any pre-existing duplicate rows (e.g. crashes
             // persisted before the deterministic-id fix): collapse by signature.
@@ -4042,9 +4154,9 @@ impl ServiceContainer {
     pub async fn export_sarif(
         &self,
         project: &Path,
-        _target: &str,
+        target: &str,
     ) -> Result<String, ClassifiedError> {
-        let crashes = self.crashes_for_latest_run(project).await;
+        let crashes = self.crashes_for_latest_run(project, Some(target)).await;
         let sarif = crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"));
         serde_json::to_string_pretty(&sarif)
             .map_err(|e| ClassifiedError::Internal(format!("serialize sarif: {e}")))
@@ -4096,7 +4208,7 @@ impl ServiceContainer {
     ) -> Result<crate::defectdojo::PushOutcome, ClassifiedError> {
         let cfg = crate::defectdojo::load_config()?;
         let token = crate::defectdojo::resolve_token(&cfg)?;
-        let crashes = self.crashes_for_latest_run(project).await;
+        let crashes = self.crashes_for_latest_run(project, target).await;
         if crashes.is_empty() {
             return Err(ClassifiedError::Validation(
                 "no triaged crashes to push to DefectDojo".to_owned(),
@@ -4127,6 +4239,15 @@ impl ServiceContainer {
         client.import(&import, &findings).await
     }
 
+    /// Compose a detailed Markdown campaign report for a target.
+    ///
+    /// Aggregates the discovered target, the most recent run, its triaged
+    /// crashes (with CASR severity + LLM bug reports), line/region coverage, and
+    /// corpus composition into one self-contained document. Missing persistence
+    /// or tooling is represented honestly as unavailable data.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` only on an unexpected internal failure.
     pub async fn generate_report(
         &self,
         project: &Path,
@@ -4142,11 +4263,7 @@ impl ServiceContainer {
 
         // Latest run + its crashes from the store, when persistence is wired.
         let (run, crashes) = if let Some(store) = &self.store {
-            let run = store
-                .list_runs(Some(&project.to_string_lossy()))
-                .await
-                .ok()
-                .and_then(|runs| runs.into_iter().next());
+            let run = self.latest_run_record(project, Some(target)).await;
             let crashes = match &run {
                 // Collapse any pre-existing duplicate rows by signature so the
                 // report never lists the same crash twice.
@@ -4348,20 +4465,39 @@ impl ServiceContainer {
         }
     }
 
-    /// Most recent run id + engine for a project (defaults when none exists).
-    async fn latest_run(&self, project: &Path) -> (Uuid, EngineKind) {
-        match &self.store {
-            Some(store) => store
-                .list_runs(Some(&project.to_string_lossy()))
-                .await
-                .ok()
-                .and_then(|runs| runs.into_iter().next())
-                .map_or_else(
-                    || (Uuid::new_v4(), EngineKind::LibFuzzer),
-                    |run| (run.id, run.engine),
-                ),
-            None => (Uuid::new_v4(), EngineKind::LibFuzzer),
+    /// Most recent terminal persisted run in a project, optionally restricted to one
+    /// target through `run.config.harness_id -> harness.target_id`.
+    async fn latest_run_record(&self, project: &Path, target: Option<&str>) -> Option<RunRecord> {
+        let store = self.store.as_ref()?;
+        let runs = store
+            .list_runs(Some(&project.to_string_lossy()))
+            .await
+            .ok()?;
+        let Some(target) = target else {
+            return runs
+                .into_iter()
+                .find(|run| run_has_crash_evidence(run.status));
+        };
+        let target_id = self.resolve_target_id_any_language(project, target).await;
+        if target_id.is_nil() {
+            return None;
         }
+        for run in runs {
+            if !run_has_crash_evidence(run.status) {
+                continue;
+            }
+            if self.run_target_id(store, &run).await == Some(target_id) {
+                return Some(run);
+            }
+        }
+        None
+    }
+
+    /// Most recent terminal run id + engine for a target.
+    async fn latest_run(&self, project: &Path, target: &str) -> Option<(Uuid, EngineKind)> {
+        self.latest_run_record(project, Some(target))
+            .await
+            .map(|run| (run.id, run.engine))
     }
 
     /// Run CASR over the crash dir in the sandbox, returning one `Crash` per
@@ -4662,7 +4798,7 @@ impl ServiceContainer {
     /// Feed triaged crash reproducers back into the corpus.
     ///
     /// Closes the run -> triage -> corpus loop: every crash-triggering input
-    /// surfaced by the most recent triage (persisted crashes for the project's
+    /// surfaced by the most recent triage (persisted crashes for the target's
     /// latest run, falling back to scanning the run output directory) is copied
     /// into the corpus, deduplicated by content, so the harness keeps exercising
     /// the paths that already broke it. Returns the number of inputs newly
@@ -4682,9 +4818,10 @@ impl ServiceContainer {
         // fall back to whatever crash inputs are staged under the run output.
         let mut inputs: Vec<PathBuf> = Vec::new();
         if let Some(store) = &self.store {
-            let (run_id, _engine) = self.latest_run(project).await;
-            if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
-                inputs.extend(crashes.into_iter().map(|c| c.input_path));
+            if let Some((run_id, _engine)) = self.latest_run(project, target).await {
+                if let Ok(crashes) = store.list_crashes_by_run(run_id).await {
+                    inputs.extend(crashes.into_iter().map(|c| c.input_path));
+                }
             }
         }
         if inputs.is_empty() {
@@ -4819,7 +4956,10 @@ pub fn runtime_from_env() -> Arc<dyn RuntimeAdapter> {
     let use_docker = std::env::var("HF_USE_DOCKER").map_or(true, |v| v != "0" && v != "false");
     if use_docker && hf_runtime::docker_daemon_ready() {
         let cfg = RuntimeConfig::default();
-        Arc::new(hf_runtime::docker::DockerRuntime::new(cfg, Path::new(".")))
+        Arc::new(hf_runtime::docker::DockerRuntime::new(
+            cfg,
+            &workspace_root(),
+        ))
     } else {
         Arc::new(hf_runtime::StubRuntime)
     }
@@ -5236,6 +5376,22 @@ pub struct SyzkallerSummary {
     pub execs: f64,
     pub crashes: u64,
     pub exit_code: Option<i32>,
+}
+
+/// Build the syzkaller manager argv without a shell interpolation boundary.
+///
+/// `manager_cfg` is user-selected and may contain whitespace or shell
+/// metacharacters. Keeping it as one argv element makes those bytes data rather
+/// than executable syntax. The inner timeout ends the campaign at its requested
+/// budget; the runtime deadline remains a teardown backstop.
+fn syzkaller_manager_command(manager_cfg: &str, duration_secs: u64) -> Vec<String> {
+    vec![
+        "timeout".to_owned(),
+        "--signal=TERM".to_owned(),
+        duration_secs.to_string(),
+        "syz-manager".to_owned(),
+        format!("-config={manager_cfg}"),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -5662,7 +5818,10 @@ mod coverage_tests {
 
 #[cfg(test)]
 mod workspace_tests {
-    use super::{read_current_harness_source, workspace_dir, write_current_harness_source};
+    use super::{
+        document_staging_dir, project_workspace_dir, read_current_harness_source, workspace_dir,
+        write_current_harness_source,
+    };
     use std::path::{Component, Path};
 
     /// The per-project workspace base every resolved path must stay within.
@@ -5689,6 +5848,16 @@ mod workspace_tests {
         // An empty override falls back to the persistent default.
         let empty = super::workspace_root_from(Some(String::new().into()));
         assert!(empty.ends_with("workspaces"));
+    }
+
+    #[test]
+    fn document_conversion_staging_stays_inside_the_sandbox_workspace() {
+        let project = Path::new("/home/user/project");
+        let import_id = uuid::Uuid::new_v4();
+        let staging = document_staging_dir(project, import_id);
+
+        assert!(staging.starts_with(project_workspace_dir(project)));
+        assert!(staging.ends_with(import_id.to_string()));
     }
 
     #[test]
@@ -5813,6 +5982,29 @@ mod dictionary_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("empty.c"), "int f(){ return 0; }").unwrap();
         assert!(build_workspace_dictionary(dir.path(), "t.dict").is_none());
+    }
+}
+
+#[cfg(test)]
+mod syzkaller_command_tests {
+    use super::syzkaller_manager_command;
+
+    #[test]
+    fn manager_config_path_is_a_literal_argument_not_shell_source() {
+        let path = "/tmp/manager;touch /work/pwn.cfg";
+        let command = syzkaller_manager_command(path, 90);
+
+        assert_eq!(
+            command,
+            vec![
+                "timeout",
+                "--signal=TERM",
+                "90",
+                "syz-manager",
+                "-config=/tmp/manager;touch /work/pwn.cfg",
+            ]
+        );
+        assert!(!command.iter().any(|arg| arg == "bash" || arg == "-c"));
     }
 }
 

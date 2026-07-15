@@ -37,8 +37,10 @@ impl JsonlTranscriptStore {
     }
 
     /// Get the file path for a session's transcript.
-    fn transcript_path(&self, session_id: &SessionId) -> PathBuf {
-        self.base_dir.join(format!("{}.jsonl", session_id.as_str()))
+    fn transcript_path(&self, session_id: &SessionId) -> Result<PathBuf, SessionError> {
+        Ok(self
+            .base_dir
+            .join(format!("{}.jsonl", transcript_file_stem(session_id)?)))
     }
 
     /// Ensure the base directory exists.
@@ -55,9 +57,8 @@ impl JsonlTranscriptStore {
 impl TranscriptStore for JsonlTranscriptStore {
     #[instrument(skip(self, message), fields(session_id = %session_id))]
     async fn append(&self, session_id: &SessionId, message: &Message) -> Result<(), SessionError> {
+        let path = self.transcript_path(session_id)?;
         self.ensure_dir().await?;
-
-        let path = self.transcript_path(session_id);
         let mut line =
             serde_json::to_string(message).map_err(|e| SessionError::TranscriptError {
                 message: format!("serialize message: {e}"),
@@ -93,7 +94,7 @@ impl TranscriptStore for JsonlTranscriptStore {
 
     #[instrument(skip(self), fields(session_id = %session_id))]
     async fn read_all(&self, session_id: &SessionId) -> Result<Vec<Message>, SessionError> {
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
 
         if !path.exists() {
             return Ok(Vec::new());
@@ -108,7 +109,7 @@ impl TranscriptStore for JsonlTranscriptStore {
         session_id: &SessionId,
         count: usize,
     ) -> Result<Vec<Message>, SessionError> {
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -117,7 +118,7 @@ impl TranscriptStore for JsonlTranscriptStore {
 
     #[instrument(skip(self), fields(session_id = %session_id))]
     async fn message_count(&self, session_id: &SessionId) -> Result<usize, SessionError> {
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
 
         if !path.exists() {
             return Ok(0);
@@ -172,7 +173,7 @@ impl TranscriptStore for JsonlTranscriptStore {
         let kept = &all[..keep_count];
 
         // Atomic rewrite: write to temp file, then rename.
-        let path = self.transcript_path(session_id);
+        let path = self.transcript_path(session_id)?;
         let tmp_path = path.with_extension("jsonl.tmp");
 
         let mut content = String::new();
@@ -198,6 +199,26 @@ impl TranscriptStore for JsonlTranscriptStore {
 
         Ok(removed)
     }
+}
+
+/// Return a platform-independent safe filename stem for a session transcript.
+///
+/// Session ids are generated UUIDs, but presentation APIs accept strings. A
+/// strict portable alphabet prevents absolute paths, parent traversal, path
+/// separators, Windows prefixes, and control characters from reaching file I/O.
+pub(crate) fn transcript_file_stem(session_id: &SessionId) -> Result<&str, SessionError> {
+    let value = session_id.as_str();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(SessionError::TranscriptError {
+            message: "invalid session identifier for transcript storage".to_owned(),
+        });
+    }
+    Ok(value)
 }
 
 /// Read all messages from a JSONL file.
@@ -379,6 +400,28 @@ mod tests {
 
         let messages = store.read_all(&session_id).await.unwrap();
         assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transcript_session_id_cannot_escape_the_store_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("context");
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = dir.path().join("outside.jsonl");
+        let original = format!(
+            "{}\n",
+            serde_json::to_string(&test_message("secret")).unwrap()
+        );
+        std::fs::write(&outside, &original).unwrap();
+        let store = JsonlTranscriptStore::new(&base);
+        let escaped = SessionId::from_string("../outside");
+
+        assert!(store.read_all(&escaped).await.is_err());
+        assert!(store
+            .append(&escaped, &test_message("overwrite"))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), original);
     }
 
     #[tokio::test]
