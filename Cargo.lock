@@ -2306,6 +2306,7 @@ dependencies = [
  "hf-context",
  "hf-core",
  "hf-guardrails",
+ "hf-prompt",
  "hf-skills",
  "hf-tools",
  "serde",

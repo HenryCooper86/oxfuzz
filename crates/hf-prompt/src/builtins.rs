@@ -1,12 +1,13 @@
 //! Built-in prompt sections and default template.
 //!
 //! Provides factory functions for the built-in prompt sections defined in
-//! `prompt-design.md` and a default `PromptTemplate` referencing them.
+//! `docs/design/agent-prompt-security-design.md` and a default `PromptTemplate`
+//! referencing them.
 //!
 //! Prompt content is loaded from `config/prompts/*.txt` at compile time via
 //! `include_str!`. At runtime, users can override any prompt by placing a
 //! `.txt` file with the same name in their XDG config prompts directory
-//! (`~/.config/y-agent/prompts/`).
+//! (`~/.config/hobot_fuzz/prompts/`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,11 +22,11 @@ use crate::template::{ModeOverlay, PromptTemplate, SectionRef};
 // Compile-time prompt content (embedded from config/prompts/*.txt)
 // ---------------------------------------------------------------------------
 
-const PROMPT_IDENTITY: &str = include_str!("../../../config/prompts/core_identity.txt");
+pub(crate) const PROMPT_IDENTITY: &str = include_str!("../../../config/prompts/core_identity.txt");
 const PROMPT_DATETIME: &str = include_str!("../../../config/prompts/core_datetime.txt");
 const PROMPT_ENVIRONMENT: &str = include_str!("../../../config/prompts/core_environment.txt");
 const PROMPT_GUIDELINES: &str = include_str!("../../../config/prompts/core_guidelines.txt");
-const PROMPT_SECURITY: &str = include_str!("../../../config/prompts/core_security.txt");
+pub(crate) const PROMPT_SECURITY: &str = include_str!("../../../config/prompts/core_security.txt");
 pub const PROMPT_TOOL_PROTOCOL: &str =
     include_str!("../../../config/prompts/core_tool_protocol.txt");
 pub const PROMPT_TOOL_PROTOCOL_REMOTE: &str =
@@ -230,7 +231,7 @@ impl ConditionTag {
 
 /// Return the compiled tool-protocol prompt text for the given runtime backend.
 ///
-/// - `Native` -> dedicated-file-tool guidance (`FileRead`, `FileEdit`, ...)
+/// - `Native` -> model-neutral JSON step guidance for the local tool catalog
 /// - `Docker` / `Ssh` -> ShellExec-based guidance for remote targets
 pub fn tool_protocol_for(backend: RuntimeBackend) -> &'static str {
     match backend {
@@ -259,7 +260,7 @@ pub fn builtin_section_store() -> SectionStore {
 /// For each section, if `prompts_dir` is `Some` and a corresponding `.txt`
 /// file exists there, the file content is used instead of the compiled default.
 /// This allows users to customise prompts by editing files in their XDG config
-/// directory (`~/.config/y-agent/prompts/`).
+/// directory (`~/.config/hobot_fuzz/prompts/`).
 pub fn builtin_section_store_with_overrides(
     prompts_dir: Option<&Path>,
     runtime_backend: &RuntimeBackend,
@@ -325,8 +326,7 @@ pub const BUILTIN_PROMPT_FILES: &[(&str, &str)] = &[
 
 /// Create the default `PromptTemplate` referencing the built-in sections.
 ///
-/// Includes mode overlays for `plan` and `explore` modes as defined in
-/// `prompt-design.md`.
+/// Includes mode overlays for `plan` and `explore` modes.
 pub fn default_template() -> PromptTemplate {
     let sections = vec![
         section_ref("core.plan_mode_active"),
@@ -434,13 +434,14 @@ mod tests {
         // No override directory — should use compiled defaults.
         let store = builtin_section_store_with_overrides(None, &RuntimeBackend::Native);
         let content = store.load_content("core.identity").unwrap();
-        assert!(content.contains("y-agent"));
+        assert!(content.contains("hobot_fuzz"));
+        assert!(!content.contains("y-agent"));
     }
 
     #[test]
     fn test_builtin_store_with_overrides_loads_file() {
         // Create a temp dir with an override file.
-        let dir = std::env::temp_dir().join("y-agent-prompt-override-test");
+        let dir = std::env::temp_dir().join("hobot-fuzz-prompt-override-test");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("core_identity.txt"), "Custom identity prompt").unwrap();
 
@@ -460,9 +461,10 @@ mod tests {
     fn test_tool_protocol_native_variant_loaded_for_native_runtime() {
         let store = builtin_section_store_with_overrides(None, &RuntimeBackend::Native);
         let content = store.load_content("core.tool_protocol").unwrap();
-        // Native variant lists dedicated file tools.
-        assert!(content.contains("FileRead"));
-        assert!(content.contains("FileEdit"));
+        assert!(content.contains("prompt-based JSON steps"));
+        assert!(content.contains("EXACTLY ONE JSON object"));
+        assert!(!content.contains("ToolSearch"));
+        assert!(!content.contains("TodoWrite"));
         assert!(!content.contains("Remote Runtime"));
     }
 
@@ -484,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_tool_protocol_remote_override_file_takes_precedence() {
-        let dir = std::env::temp_dir().join("y-agent-prompt-remote-override-test");
+        let dir = std::env::temp_dir().join("hobot-fuzz-prompt-remote-override-test");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(
             dir.join("core_tool_protocol_remote.txt"),
@@ -501,7 +503,7 @@ mod tests {
         let native_store =
             builtin_section_store_with_overrides(Some(&dir), &RuntimeBackend::Native);
         let native_content = native_store.load_content("core.tool_protocol").unwrap();
-        assert!(native_content.contains("FileRead"));
+        assert!(native_content.contains("prompt-based JSON steps"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
