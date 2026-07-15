@@ -49,6 +49,21 @@ mutates process-global guardrail environment variables.
 5. Background: `corpus_ops` + `coverage_report` loop; on stagnation, propose
    new harness.
 
+Every engine-specific harness or execution entrypoint first resolves the
+service-owned fuzzing policy. A disabled engine, zero duration, or request above
+the configured duration ceiling fails before filesystem staging, database run
+reservation, recovery-journal mutation, or sandbox launch. Accepted runs use
+the resolved memory/CPU values in their persisted `FuzzRunConfig`; changing
+Settings affects subsequent operations without rewriting an active run.
+
+This preflight also covers smoke qualification and maintenance commands that
+invoke an engine. Smoke resolves its 60-second qualification request into the
+single `FuzzRunConfig` shared unchanged by persistence, `hf-harness`, the engine
+command, and the runtime deadline. AFL++ coverage
+pruning and libFuzzer corpus minimization validate their bounded operation
+durations and resolve sandbox resources before workspace preparation, corpus
+reads, artifact staging, or guardrail authorization.
+
 Every persisted execution, including smoke qualification, carries the harness
 identifier in its run configuration. Target-specific consumers resolve the run
 through `run.config.harness_id -> harness.target_id`; they never infer target
@@ -79,6 +94,23 @@ harness qualification cannot be deleted, and successful deletion removes only
 the validated, run-owned directory. A cancelled campaign stops orchestration
 immediately and is never reported to schedulers or presentation layers as a
 successful iteration.
+
+Whole-workspace cleanup is likewise service-owned and fail-closed. The service
+uses a canonical-root lease shared by independent containers, plus a
+root-digest-keyed advisory file lock outside the deletable workspace so separate
+CLI, GUI, TUI, and web processes share the same boundary. All workspace staging,
+build, smoke, fuzz, corpus, crash, coverage, export, and evidence operations hold
+a shared lease for their complete asynchronous lifetime, while whole-root
+cleanup requires the exclusive lease. Cleanup fails busy if an operation is
+already active, including the pre-registration window before a run appears in
+the cancellation registry; an operation arriving after cleanup began cannot
+enter and either waits on the process-local gate or fails busy on the file gate.
+Cleanup then deletes only a canonical, non-symlink workspace root whose
+versioned ownership manifest names that exact path.
+Environment overrides cannot authorize deletion of filesystem, home,
+repository, configuration, or data ancestors. The implicit per-user default may
+be marked during a legacy upgrade, while an unmarked non-empty environment
+override is preserved for explicit operator recovery.
 
 Campaign lifecycle recovery is fail-closed. Before creating run-owned files or
 launching the sandbox, the service rejects a recovery journal with a replay,
@@ -187,7 +219,37 @@ unreviewed host paths; mounting the selected rootfs writable lets a campaign
 modify the user's source artifact; and disabling the entire hardening profile
 grants qemu more privilege than its device contract requires.
 
-### 4.4 Session Diagnostics
+### 4.4 Automotive Protocol Orchestration
+
+The feature-gated `hf-automotive` crate owns only versioned DTOs, validation,
+and canonical evidence hashes. It does not grant a capability or perform an
+operation. Automotive workflows are service operations, not engine or
+presentation shortcuts.
+
+Before filesystem staging or operation persistence, `hf-service` checks the
+compile-time feature, runtime setting, schema, pinned-adapter contract,
+protocol, mode, artifact digest, and operation limits. Virtual execution also
+requires an allowlisted vcan interface. Physical-bench execution additionally
+requires a fresh human approval tied to the exact replay-plan digest, interface,
+arbitration/service allowlists, rate, and duration; an agent-supplied approval id
+is evidence to verify, never authority by itself.
+
+After preflight, the service takes the workspace operation lease, stages only
+immutable artifact references into an operation directory, persists recovery
+state, and invokes one bounded sidecar request through `hf-runtime`. It validates
+the correlated result/error envelope, declared output sizes, artifact hashes,
+and canonical transcript/state digests before marking the operation complete.
+Presentation layers receive redacted service-owned summaries and cannot
+construct JSONL, choose devices, or reinterpret state novelty as source
+coverage.
+
+Offline capture analysis, mutation generation, replay planning, virtual replay,
+physical replay, and state-corpus promotion are distinct operations with
+distinct policy and approval requirements. Failure before persistence leaves no
+operation record; failure after persistence is retained with a terminal status
+and redacted failure reason.
+
+### 4.5 Session Diagnostics
 
 The diagnostics recorder assigns a fresh identifier to each recorder instance.
 Its cost summary includes only generation traces carrying that identifier, even
@@ -230,9 +292,17 @@ manifest tests enforce this boundary and prevent a service/agent cycle.
   branch, and delete mutations return errors without reporting partial success.
 - Concurrency regression: every persistent mutation for one session shares a
   lock, while independent sessions remain concurrent.
+- Concurrency regression: whole-workspace cleanup cannot overlap pre-run
+  staging, builds, smoke, fuzz, corpus, crash, coverage, or evidence operations;
+  independent containers share the root gate and an advisory-file regression
+  proves the same exclusion primitive used by separate processes.
 - Presentation regression: successful turns, rollback, and branching reload the
   canonical display transcript instead of slicing optimistic local messages.
 - Diagnostics regression: a current-session summary excludes persisted traces
   from earlier sessions, and storage read failures are surfaced to callers.
 - Contract: presentation manifests contain no direct domain, runtime, or agent
   dependencies.
+- Automotive contract: feature-enabled pure tests cover schema/version,
+  protocol/mode/capability negotiation, replay validation, structured errors,
+  and canonical transcript/state hashing. Future service tests use fake runtime
+  envelopes and prove every invalid or unapproved request fails before staging.

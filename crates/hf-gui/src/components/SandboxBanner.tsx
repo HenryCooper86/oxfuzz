@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { getTransport } from "../lib";
 import type { SystemStatus } from "../types";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 // A persistent, actionable banner shown in the Docker-dependent views (Harness,
 // Run) when the sandbox can't execute -- so a first-run user learns *why* a

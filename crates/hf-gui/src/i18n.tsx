@@ -6,16 +6,13 @@
 // far; untranslated strings render their English fallback. Add keys to both
 // dictionaries to extend coverage.
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { enExtra, zhExtra } from "./i18n.extra";
-
-export type Locale = "en" | "zh";
-
-/** Locales offered in the language selector, in display order. */
-export const LOCALES: { value: Locale; label: string }[] = [
-  { value: "en", label: "English" },
-  { value: "zh", label: "简体中文" },
-];
+import {
+  I18nContext,
+  type Locale,
+  type TParams,
+} from "./i18nContext";
 
 const STORAGE_KEY = "hf_locale";
 
@@ -40,6 +37,7 @@ const en: Dict = {
   "nav.skills": "Skills",
   "nav.knowledge": "Knowledge",
   "nav.automation": "Automation",
+  "nav.automotive": "Automotive",
   "nav.defectdojo": "DefectDojo",
   "nav.help": "Help & Docs",
   "nav.settings": "Settings",
@@ -69,6 +67,7 @@ const en: Dict = {
   "title.skills": "Skills",
   "title.knowledge": "Knowledge",
   "title.automation": "Automation",
+  "title.automotive": "Automotive Protocols",
   "title.defectdojo": "DefectDojo",
   "title.help": "Help & Documentation",
 
@@ -92,7 +91,58 @@ const en: Dict = {
   "settings.back": "Back",
   "settings.save": "Save Changes",
   "settings.language": "Language",
+  "fuzzing.policyLoading": "Validating the operator fuzzing policy…",
+  "fuzzing.policyUnavailable": "Fuzzing policy unavailable. Fuzzing operations are disabled until the configuration is valid. {error}",
+  "settings.protected.configured": "Configured (value hidden)",
+  "settings.protected.notConfigured": "Not configured",
+  "settings.protected.pendingClear": "Will be cleared when you save",
+  "settings.protected.replace": "Replace",
+  "settings.protected.set": "Set value",
+  "settings.protected.undo": "Undo",
+  "settings.integrations.connection": "Connection and credentials",
+  "settings.integrations.url": "DefectDojo URL",
+  "settings.integrations.apiToken": "API token",
+  "settings.integrations.apiTokenDesc": "The stored value is never returned to the browser. Leave unchanged, replace it, or explicitly clear it.",
+  "settings.integrations.apiTokenEnv": "Token environment variable",
+  "settings.integrations.apiTokenEnvDesc": "The stored environment-variable name is hidden and preserved unless explicitly changed.",
+  "settings.integrations.verifyTls": "Verify TLS certificates",
+  "settings.integrations.destination": "Finding destination",
+  "settings.integrations.productName": "Product name",
+  "settings.integrations.productTypeName": "Product type name",
+  "settings.integrations.engagementName": "Engagement name",
+  "settings.integrations.autoCreate": "Create missing objects",
+  "settings.integrations.reimport": "Reimport repeat scans",
+  "settings.integrations.lifecycle": "Managed local instance",
+  "settings.integrations.lifecycleDesc": "Optional Docker Compose lifecycle settings for a locally managed DefectDojo instance.",
+  "settings.integrations.autostart": "Start on app launch",
+  "settings.integrations.composeProject": "Compose project",
+  "settings.integrations.composeFiles": "Compose files",
+  "settings.integrations.composeFilesDesc": "Stored paths are hidden. Enter one path per line only when replacing them.",
+  "settings.integrations.composeFilesPlaceholder": "/path/to/docker-compose.yml",
+  "settings.integrations.startupTimeout": "Startup timeout (seconds)",
+  "settings.issuetracker.repository": "Repository",
+  "settings.issuetracker.provider": "Provider",
+  "settings.issuetracker.disabled": "Disabled",
+  "settings.issuetracker.host": "Forge host",
+  "settings.issuetracker.hostDesc": "Leave blank for the provider's public service.",
+  "settings.issuetracker.repo": "Repository identifier",
+  "settings.issuetracker.repoDesc": "Use owner/repository or group/project, not a URL.",
+  "settings.issuetracker.username": "Attribution username",
+  "settings.issuetracker.usernameDesc": "Optional attribution only; it is not used as a password.",
+  "settings.issuetracker.labels": "Issue labels",
+  "settings.issuetracker.labelsDesc": "Comma-separated labels added to filed issues.",
+  "settings.issuetracker.authentication": "Authentication",
+  "settings.issuetracker.apiToken": "Personal access token",
+  "settings.issuetracker.apiTokenDesc": "The stored token is hidden and preserved unless explicitly replaced or cleared.",
+  "settings.issuetracker.apiTokenEnv": "Token environment variable",
+  "settings.issuetracker.apiTokenEnvDesc": "The stored environment-variable name is hidden and preserved unless explicitly changed.",
+  "settings.issuetracker.verifyTls": "Verify TLS certificates",
+  "settings.providers.configuredUnchanged": "Configured (unchanged)",
+  "settings.providers.hiddenValuePreserved": "The stored value is hidden in web mode and will be preserved unless you enter a replacement.",
+  "settings.providers.hiddenHeadersPreserved": "Stored headers are hidden in web mode and preserved. Add a header with the same name to replace it.",
   "settings.tab.general": "General",
+  "settings.tab.fuzzing": "Fuzzing",
+  "settings.tab.automotive": "Automotive",
   "settings.tab.providers": "Providers",
   "settings.tab.session": "Session",
   "settings.tab.runtime": "Runtime",
@@ -138,6 +188,7 @@ const zh: Dict = {
   "nav.skills": "技能",
   "nav.knowledge": "知识库",
   "nav.automation": "自动化",
+  "nav.automotive": "汽车协议",
   "nav.defectdojo": "DefectDojo",
   "nav.help": "帮助与文档",
   "nav.settings": "设置",
@@ -167,6 +218,7 @@ const zh: Dict = {
   "title.skills": "技能",
   "title.knowledge": "知识库",
   "title.automation": "自动化",
+  "title.automotive": "汽车协议",
   "title.defectdojo": "DefectDojo",
   "title.help": "帮助与文档",
 
@@ -190,7 +242,58 @@ const zh: Dict = {
   "settings.back": "返回",
   "settings.save": "保存更改",
   "settings.language": "语言",
+  "fuzzing.policyLoading": "正在验证操作员模糊测试策略…",
+  "fuzzing.policyUnavailable": "模糊测试策略不可用。在配置有效之前，模糊测试操作已禁用。{error}",
+  "settings.protected.configured": "已配置（值已隐藏）",
+  "settings.protected.notConfigured": "未配置",
+  "settings.protected.pendingClear": "保存时将清除",
+  "settings.protected.replace": "替换",
+  "settings.protected.set": "设置值",
+  "settings.protected.undo": "撤销",
+  "settings.integrations.connection": "连接和凭据",
+  "settings.integrations.url": "DefectDojo URL",
+  "settings.integrations.apiToken": "API 令牌",
+  "settings.integrations.apiTokenDesc": "存储的值绝不会返回浏览器。可保持不变、替换或明确清除。",
+  "settings.integrations.apiTokenEnv": "令牌环境变量",
+  "settings.integrations.apiTokenEnvDesc": "存储的环境变量名已隐藏，除非明确更改，否则会保留。",
+  "settings.integrations.verifyTls": "验证 TLS 证书",
+  "settings.integrations.destination": "发现项目标",
+  "settings.integrations.productName": "产品名称",
+  "settings.integrations.productTypeName": "产品类型名称",
+  "settings.integrations.engagementName": "参与名称",
+  "settings.integrations.autoCreate": "创建缺失对象",
+  "settings.integrations.reimport": "重新导入重复扫描",
+  "settings.integrations.lifecycle": "托管本地实例",
+  "settings.integrations.lifecycleDesc": "用于本地托管 DefectDojo 实例的可选 Docker Compose 生命周期设置。",
+  "settings.integrations.autostart": "应用启动时运行",
+  "settings.integrations.composeProject": "Compose 项目",
+  "settings.integrations.composeFiles": "Compose 文件",
+  "settings.integrations.composeFilesDesc": "存储路径已隐藏。仅在替换时每行输入一个路径。",
+  "settings.integrations.composeFilesPlaceholder": "/path/to/docker-compose.yml",
+  "settings.integrations.startupTimeout": "启动超时（秒）",
+  "settings.issuetracker.repository": "仓库",
+  "settings.issuetracker.provider": "提供方",
+  "settings.issuetracker.disabled": "已禁用",
+  "settings.issuetracker.host": "代码托管主机",
+  "settings.issuetracker.hostDesc": "留空以使用提供方的公共服务。",
+  "settings.issuetracker.repo": "仓库标识符",
+  "settings.issuetracker.repoDesc": "使用 owner/repository 或 group/project，而不是 URL。",
+  "settings.issuetracker.username": "署名用户名",
+  "settings.issuetracker.usernameDesc": "仅用于可选署名，不作为密码。",
+  "settings.issuetracker.labels": "问题标签",
+  "settings.issuetracker.labelsDesc": "以逗号分隔，提交问题时添加。",
+  "settings.issuetracker.authentication": "认证",
+  "settings.issuetracker.apiToken": "个人访问令牌",
+  "settings.issuetracker.apiTokenDesc": "存储的令牌已隐藏，除非明确替换或清除，否则会保留。",
+  "settings.issuetracker.apiTokenEnv": "令牌环境变量",
+  "settings.issuetracker.apiTokenEnvDesc": "存储的环境变量名已隐藏，除非明确更改，否则会保留。",
+  "settings.issuetracker.verifyTls": "验证 TLS 证书",
+  "settings.providers.configuredUnchanged": "已配置（保持不变）",
+  "settings.providers.hiddenValuePreserved": "在网页模式下，存储值已隐藏；除非输入替换值，否则将保留。",
+  "settings.providers.hiddenHeadersPreserved": "在网页模式下，存储的请求头已隐藏并保留。添加同名请求头可替换它。",
   "settings.tab.general": "常规",
+  "settings.tab.fuzzing": "模糊测试",
+  "settings.tab.automotive": "汽车协议",
   "settings.tab.providers": "提供方",
   "settings.tab.session": "会话",
   "settings.tab.runtime": "运行时",
@@ -265,22 +368,6 @@ const DICTS: Record<Locale, Dict> = {
   zh: { ...zhExtra, ...zh },
 };
 
-/** Values substituted into `{name}` placeholders in a translated string. */
-export type TParams = Record<string, string | number>;
-
-interface I18nContextValue {
-  locale: Locale;
-  setLocale: (l: Locale) => void;
-  /**
-   * Translate a key, falling back to English then the key itself. Optional
-   * `params` replace `{name}` placeholders -- passing `{ n: 3 }` for a value of
-   * "{n} items" yields "3 items".
-   */
-  t: (key: string, params?: TParams) => string;
-}
-
-const I18nContext = createContext<I18nContextValue | null>(null);
-
 function loadLocale(): Locale {
   try {
     return localStorage.getItem(STORAGE_KEY) === "zh" ? "zh" : "en";
@@ -320,12 +407,4 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo(() => ({ locale, setLocale, t }), [locale, setLocale, t]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
-}
-
-export function useI18n(): I18nContextValue {
-  const ctx = useContext(I18nContext);
-  if (!ctx) {
-    throw new Error("useI18n must be used within an I18nProvider");
-  }
-  return ctx;
 }

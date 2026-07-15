@@ -81,6 +81,46 @@ pub struct SandboxMount {
     pub read_only: bool,
 }
 
+/// Network namespace exposed to a sandboxed command.
+///
+/// The default is [`Self::None`]. Automotive physical-bench operations are the
+/// only current consumer of [`Self::Host`], and the service must approve that
+/// exceptional profile before it reaches the runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SandboxNetworkMode {
+    /// No container network devices other than loopback (`--network=none`).
+    #[default]
+    None,
+    /// Docker's isolated bridge network.
+    Bridge,
+    /// The host network namespace (`--network=host`).
+    Host,
+}
+
+/// A Linux capability that may be added back after the sandbox drops all
+/// capabilities.
+///
+/// This deliberately small enum prevents presentation or domain code from
+/// passing arbitrary capability strings to Docker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SandboxCapability {
+    /// Create and configure an isolated virtual network device such as vcan.
+    NetAdmin,
+    /// Open raw packet or CAN sockets.
+    NetRaw,
+}
+
+impl SandboxCapability {
+    /// Docker capability name.
+    #[must_use]
+    pub const fn as_docker_name(self) -> &'static str {
+        match self {
+            Self::NetAdmin => "NET_ADMIN",
+            Self::NetRaw => "NET_RAW",
+        }
+    }
+}
+
 impl SandboxMount {
     /// Construct a writable bind mount.
     #[must_use]
@@ -117,16 +157,25 @@ impl SandboxMount {
 pub struct SandboxOptions {
     /// Additional canonicalized Docker bind mounts. Empty by default.
     pub extra_mounts: Vec<SandboxMount>,
+    /// Optional pinned image selected by a service-owned specialized adapter.
+    /// The runtime validates its syntax and rejects unpinned `latest` values.
+    pub image: Option<String>,
     /// Target platform for the image (e.g. `"linux/amd64"`); maps to `--platform`.
     pub platform: Option<String>,
-    /// Enable container networking. When `false` the run is `--network=none`.
-    pub network_enabled: bool,
+    /// Network namespace exposed to the container. Defaults to no network.
+    pub network_mode: SandboxNetworkMode,
     /// Override the in-container working directory (defaults to the config's
     /// `container_workspace`).
     pub workdir: Option<String>,
     /// Skip the `cap-drop=ALL` / `no-new-privileges` baseline. Specialized
     /// callers must justify this independently; syzkaller leaves it `false`.
     pub relax_hardening: bool,
+    /// Minimal capabilities added back after `--cap-drop=ALL`.
+    pub capabilities: Vec<SandboxCapability>,
+    /// Optional bytes delivered to the container process over stdin. The
+    /// runtime applies a hard size ceiling and never places these bytes in the
+    /// Docker argument list.
+    pub stdin: Option<Vec<u8>>,
     /// Host device nodes to pass through with `--device`, e.g. `"/dev/kvm"` so
     /// an in-container qemu can use hardware virtualization. Empty by default.
     pub devices: Vec<String>,

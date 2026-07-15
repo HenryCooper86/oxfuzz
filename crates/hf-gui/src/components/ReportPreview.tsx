@@ -5,17 +5,8 @@ import { X, Download, Copy, Check, ChevronDown } from "lucide-react";
 import { Button } from "./ui";
 import { Mermaid } from "./Mermaid";
 import { useListboxNav } from "../hooks/useListboxNav";
-import { useI18n } from "../i18n";
-
-/**
- * Extract the language + text from a react-markdown `code` node so fenced
- * ```mermaid blocks can be rendered as diagrams and everything else as code.
- */
-export function codeInfo(className: unknown, children: unknown): { lang: string; text: string } {
-  const lang = typeof className === "string" ? (/language-(\w+)/.exec(className)?.[1] ?? "") : "";
-  const text = String(children ?? "").replace(/\n$/, "");
-  return { lang, text };
-}
+import { useI18n } from "../i18nContext";
+import { codeInfo } from "../lib/reportPreviewCode";
 
 /**
  * A modal that renders a Markdown report (GFM tables + Mermaid graphs) with

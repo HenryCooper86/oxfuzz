@@ -18,8 +18,8 @@ import { ArrowLeft, ExternalLink, Play, RotateCw, ShieldAlert } from "lucide-rea
 import { getTransport, isTauriEnvironment } from "../lib";
 import type { DefectDojoStatus } from "../types";
 import { Button, Spinner } from "../components/ui";
-import { useToast } from "../components/ui/Toast";
-import { useI18n } from "../i18n";
+import { useToast } from "../components/ui/toastContext";
+import { useI18n } from "../i18nContext";
 
 /// How often to re-check while the server is booting (uwsgi takes ~30-60s).
 const STARTING_POLL_MS = 3000;

@@ -19,7 +19,25 @@ const MAX_STREAM_LINE_BYTES: usize = 64 * 1024;
 const OUTPUT_TRUNCATION_MARKER: &str = "\n[output truncated]\n";
 const LINE_TRUNCATION_MARKER: &str = " [line truncated]";
 const PIPE_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_STDIN_BYTES: usize = 4 * 1024 * 1024;
 const CONTAINER_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn valid_pinned_image_reference(image: &str) -> bool {
+    if image.is_empty()
+        || image.len() > 256
+        || !image.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'.' | b'-' | b'_' | b'@')
+        })
+    {
+        return false;
+    }
+    if let Some((_, digest)) = image.rsplit_once("@sha256:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    image
+        .rsplit_once(':')
+        .is_some_and(|(_, tag)| !tag.is_empty() && tag != "latest" && !tag.contains('/'))
+}
 
 /// Best-effort cleanup when an in-flight runtime future is dropped or aborted.
 /// The Docker CLI child has `kill_on_drop`, but killing that client alone does
@@ -215,6 +233,10 @@ pub fn build_exec_args_with(
         format!("--cpus={}", limits.max_cpus),
     ];
 
+    if opts.stdin.is_some() {
+        args.push("-i".to_owned());
+    }
+
     if let Some(bytes) = opts.max_file_size_bytes {
         args.push(format!("--ulimit=fsize={bytes}:{bytes}"));
     }
@@ -284,10 +306,18 @@ pub fn build_exec_args_with(
             .unwrap_or_else(|| cfg.container_workspace.clone()),
     );
 
-    // Network: disabled by default. qemu user networking for syzkaller operates
-    // inside this outer boundary and does not require a Docker network.
-    if !opts.network_enabled {
-        args.push("--network=none".to_owned());
+    // Network access is explicit. qemu user networking for syzkaller operates
+    // inside the default `none` boundary and does not require a Docker network.
+    match opts.network_mode {
+        hf_core::runtime::SandboxNetworkMode::None => {
+            args.push("--network=none".to_owned());
+        }
+        hf_core::runtime::SandboxNetworkMode::Bridge => {
+            args.push("--network=bridge".to_owned());
+        }
+        hf_core::runtime::SandboxNetworkMode::Host => {
+            args.push("--network=host".to_owned());
+        }
     }
 
     // Hardening: drop all Linux capabilities by default (re-added per-run only
@@ -299,6 +329,14 @@ pub fn build_exec_args_with(
         args.push("--cap-drop=ALL".to_owned());
         args.push("--security-opt".to_owned());
         args.push("no-new-privileges".to_owned());
+    }
+    let capabilities = opts
+        .capabilities
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for capability in capabilities {
+        args.push(format!("--cap-add={}", capability.as_docker_name()));
     }
     args.push(format!("--pids-limit={}", cfg.max_pids));
 
@@ -312,7 +350,7 @@ pub fn build_exec_args_with(
     }
 
     // Image.
-    args.push(cfg.image.clone());
+    args.push(opts.image.clone().unwrap_or_else(|| cfg.image.clone()));
 
     // The command itself.
     args.extend_from_slice(command);
@@ -449,6 +487,24 @@ impl DockerRuntime {
         &self,
         opts: &hf_core::runtime::SandboxOptions,
     ) -> Result<hf_core::runtime::SandboxOptions, ClassifiedError> {
+        if opts
+            .image
+            .as_deref()
+            .is_some_and(|image| !valid_pinned_image_reference(image))
+        {
+            return Err(ClassifiedError::Sandbox(
+                "sandbox image override must be a pinned, safe image reference".to_owned(),
+            ));
+        }
+        if opts
+            .stdin
+            .as_ref()
+            .is_some_and(|stdin| stdin.len() > MAX_STDIN_BYTES)
+        {
+            return Err(ClassifiedError::Sandbox(format!(
+                "sandbox stdin exceeds the {MAX_STDIN_BYTES}-byte limit"
+            )));
+        }
         let mut validated = opts.clone();
         for mount in &mut validated.extra_mounts {
             let container_path = Path::new(&mount.container_path);
@@ -541,9 +597,10 @@ impl DockerRuntime {
         cwd: &Path,
         cancel: &tokio_util::sync::CancellationToken,
         on_line: &hf_core::runtime::LineSink<'_>,
+        stdin: Option<&[u8]>,
     ) -> Result<CommandResult, ClassifiedError> {
         use std::process::Stdio;
-        use tokio::io::AsyncReadExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::process::Command;
 
         enum Stop {
@@ -556,6 +613,11 @@ impl DockerRuntime {
         let mut docker = Command::new(crate::docker_bin());
         docker
             .args(args)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -563,6 +625,16 @@ impl DockerRuntime {
         let mut child = docker
             .spawn()
             .map_err(|e| ClassifiedError::Sandbox(format!("docker spawn: {e}")))?;
+        let child_stdin = if stdin.is_some() {
+            Some(
+                child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| ClassifiedError::Sandbox("no stdin pipe".to_owned()))?,
+            )
+        } else {
+            None
+        };
         let mut cleanup = ContainerCleanupGuard::new(container_name);
         let mut stdout = child
             .stdout
@@ -579,6 +651,16 @@ impl DockerRuntime {
         let mut stderr_buf = StreamOutput::new(MAX_CAPTURED_OUTPUT_BYTES, MAX_STREAM_LINE_BYTES);
         let mut out_done = false;
         let mut err_done = false;
+        let mut stdin_done = false;
+        let stdin_payload = stdin.map(<[u8]>::to_vec);
+        let stdin_writer = async move {
+            if let (Some(mut child_stdin), Some(input)) = (child_stdin, stdin_payload) {
+                child_stdin.write_all(&input).await?;
+                child_stdin.shutdown().await?;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        tokio::pin!(stdin_writer);
 
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
@@ -586,12 +668,16 @@ impl DockerRuntime {
         // Read both pipes line-by-line as the command runs. libFuzzer writes its
         // progress to stderr (unbuffered in C), so this surfaces live activity.
         let stop = loop {
-            if out_done && err_done {
+            if out_done && err_done && stdin_done {
                 break Stop::Completed;
             }
             tokio::select! {
                 () = cancel.cancelled() => break Stop::Cancelled,
                 () = &mut deadline => break Stop::TimedOut,
+                written = &mut stdin_writer, if !stdin_done => match written {
+                    Ok(()) => stdin_done = true,
+                    Err(error) => break Stop::Failed(format!("write docker stdin: {error}")),
+                },
                 read = stdout.read(&mut out_chunk), if !out_done => match read {
                     Ok(0) => out_done = true,
                     Ok(read) => stdout_buf.push(&out_chunk[..read], &mut |line| on_line(line)),
@@ -766,8 +852,16 @@ impl RuntimeAdapter for DockerRuntime {
         let opts = self.validate_sandbox_options(opts)?;
         let timeout = Duration::from_secs(limits.max_duration_secs);
         let (args, container_name) = self.prepare_stream_args(cmd, &cwd, limits, &opts);
-        Box::pin(self.stream_docker_run(&args, &container_name, timeout, &cwd, cancel, on_line))
-            .await
+        Box::pin(self.stream_docker_run(
+            &args,
+            &container_name,
+            timeout,
+            &cwd,
+            cancel,
+            on_line,
+            opts.stdin.as_deref(),
+        ))
+        .await
     }
 
     async fn write_file(&self, path: &Path, content: &str) -> Result<(), ClassifiedError> {

@@ -1,24 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getTransport } from "../lib";
-
-export type Theme = "dark" | "light";
-export type SandboxArch = "linux/arm64" | "linux/amd64";
-
-interface PrefsContextValue {
-  theme: Theme;
-  fontSize: number;
-  sendOnEnter: boolean;
-  customDecorations: boolean;
-  /** Docker platform the sandbox builds/runs for (matches the fuzz target ABI). */
-  sandboxArch: SandboxArch;
-  setTheme: (t: Theme) => void;
-  setFontSize: (n: number) => void;
-  setSendOnEnter: (v: boolean) => void;
-  setCustomDecorations: (v: boolean) => void;
-  setSandboxArch: (a: SandboxArch) => void;
-}
-
-const PrefsContext = createContext<PrefsContextValue | null>(null);
+import { PrefsContext, type SandboxArch, type Theme } from "./prefs";
 
 function isMacTauri(): boolean {
   if (typeof window === "undefined") return false;
@@ -143,23 +125,4 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <PrefsContext.Provider value={value}>{children}</PrefsContext.Provider>;
-}
-
-export function usePrefs(): PrefsContextValue {
-  const ctx = useContext(PrefsContext);
-  if (!ctx) {
-    return {
-      theme: "dark",
-      fontSize: 14,
-      sendOnEnter: true,
-      customDecorations: false,
-      sandboxArch: "linux/arm64",
-      setTheme: () => {},
-      setFontSize: () => {},
-      setSendOnEnter: () => {},
-      setCustomDecorations: () => {},
-      setSandboxArch: () => {},
-    };
-  }
-  return ctx;
 }

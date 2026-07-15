@@ -1,0 +1,57 @@
+{
+  "request": {
+    "schema_version": 1,
+    "request_id": "capabilities-fixture",
+    "operation": "capabilities",
+    "payload": {}
+  },
+  "runtime": {
+    "scapy_available": true,
+    "scapy_version": "2.7.0",
+    "python_can_available": false,
+    "python_can_version": null
+  },
+  "response": {
+    "schema_version": 1,
+    "request_id": "capabilities-fixture",
+    "ok": true,
+    "result": {
+      "result": "capabilities",
+      "data": {
+        "adapter_name": "scapy-sidecar",
+        "adapter_version": "0.1.0",
+        "schema_versions": [1],
+        "protocols": [
+          "can",
+          "can_fd",
+          "iso_tp",
+          "uds",
+          "gmlan",
+          "some_ip",
+          "some_ip_sd",
+          "do_ip",
+          "obd",
+          "ccp",
+          "xcp",
+          "bmw_hsfz",
+          "sec_oc"
+        ],
+        "modes": ["offline_pcap"],
+        "capabilities": [
+          "decode_capture",
+          "generate_mutations",
+          "build_replay_plan",
+          "state_feedback"
+        ],
+        "limits": {
+          "max_events": 4096,
+          "max_payload_bytes": 1048576,
+          "max_duration_ms": 300000,
+          "max_rate_per_second": 1000
+        }
+      }
+    },
+    "error": null,
+    "transcript_sha256": null
+  }
+}

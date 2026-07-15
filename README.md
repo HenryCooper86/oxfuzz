@@ -126,8 +126,11 @@ untrusted-execution point.
 
 ### Settings
 
-The Settings panel is the single source of truth for configuration: LLM provider
-pool, engines, sandbox/runtime limits, and guardrail policy.
+The Settings panel is the single source of truth for operator configuration:
+LLM providers, enabled fuzzing engines, run defaults, sandboxed campaign limits,
+storage cleanup, and external integrations. Mandatory sandboxing, blocked
+fuzzer networking, and human promotion before full campaigns are displayed as
+enforced guarantees rather than switches.
 
 ![Settings -- provider pool configuration](docs/screenshots/settings.png)
 
@@ -247,9 +250,42 @@ hobot-fuzz triage /path/to/project --target parse_value
 
 Engines: `afl++`, `honggfuzz`, `libfuzzer`, `clusterfuzzlite`, `syzkaller`.
 
-The REST API today exposes discovery, harness, corpus, triage, reporting, and
-management endpoints. Launching a fuzz run is available from the CLI and the
-desktop app; drive campaigns there rather than over REST.
+The REST API exposes discovery, harness, user-space run start/status/cancel,
+corpus, triage, reporting, and management endpoints. Syzkaller remains a
+trusted-local-desktop workflow because its kernel, rootfs, SSH, and VM inputs
+require a stronger boundary.
+
+### Optional automotive protocol workflows
+
+The `automotive-scapy` feature adds sandboxed automotive capture analysis,
+deterministic mutation and replay-plan generation, retained operation evidence,
+and state-signature corpus promotion. It is compile-time optional and also
+disabled at runtime by default. The Rust application never imports Scapy or
+runs host Python; Scapy 2.7.0 and optional `python-can` support live in a
+separately built GPL-2.0 sidecar image.
+
+```bash
+# Build the separately distributed, pinned sidecar image.
+./scripts/build-scapy-sidecar.sh
+
+# Build the CLI with the optional transport contract.
+cargo build -p hf-cli --features automotive-scapy
+
+# Inspect policy, then explicitly enable it.
+target/debug/hobot-fuzz automotive settings
+target/debug/hobot-fuzz automotive enable
+
+# Offline capture analysis never contacts a CAN interface.
+target/debug/hobot-fuzz automotive analyze /path/to/project \
+  --protocol uds --capture /path/to/capture.pcap
+```
+
+Offline analysis uses a network-disabled sandbox. Virtual CAN additionally
+requires an allowlisted `vcanN` interface and a high-risk guardrail approval.
+Physical-bench mode is excluded from the default policy and requires explicit
+enablement, an exact interface/arbitration/service allowlist, a fresh
+plan-scoped human approval, and stricter limits. No generated plan is executed
+on a host or vehicle as part of the normal test or build process.
 
 ---
 
@@ -259,17 +295,19 @@ Only settings consumed by the production service are exposed as editable
 configuration:
 
 - `providers.toml` -- LLM provider pool (routing tags, failover, freeze/thaw).
-- `hobot-fuzz.toml` -- coverage-stagnation and coverage-regression policy.
+- `hobot-fuzz.toml` -- enabled engines, run defaults/resource limits,
+  coverage-stagnation, scheduling/session, coverage-regression policy, and the
+  optional automotive sidecar policy.
 - `defectdojo.toml` -- DefectDojo connection and lifecycle settings.
 - `issue_tracker.toml` -- GitHub/GitLab crash issue integration.
 - `agents/*.toml` -- Sub-agent definitions (discovery, harness, triage).
 
-Sandbox, engine, storage, session, and tool-registry policy currently use
-service-owned safe defaults rather than editable TOML. Runtime locations are
-overridden with documented environment variables such as `HF_WORKSPACE_DIR`,
-`HF_DB_PATH`, and `HF_CONFIG_DIR`; see `.env.example`. Unsupported legacy
-section files are rejected by the config API instead of being accepted as
-apparently editable settings.
+Mandatory sandbox/approval/network policy, storage internals, and tool-registry
+policy use service-owned safe defaults rather than editable TOML. Runtime
+locations are overridden with documented environment variables such as
+`HF_WORKSPACE_DIR`, `HF_DB_PATH`, and `HF_CONFIG_DIR`; see `.env.example`.
+Unsupported legacy section files are rejected by the config API instead of
+being accepted as apparently editable settings.
 
 The REST API binds to loopback by default and is **fail-closed**: set
 `HF_WEB_TOKEN` to require a bearer token, or `HF_WEB_TOKEN_OPTIONAL=1` for

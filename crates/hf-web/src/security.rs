@@ -160,7 +160,14 @@ impl WebSecurityConfig {
     pub(crate) fn cors_layer(&self) -> CorsLayer {
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(self.cors_origins.iter().cloned()))
-            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
     }
 

@@ -97,3 +97,31 @@ fn sandbox_mounts_are_canonicalized_inside_the_workspace() {
         output.canonicalize().unwrap()
     );
 }
+
+#[test]
+fn sandbox_rejects_oversized_stdin_before_launch() {
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+    let options = SandboxOptions {
+        stdin: Some(vec![b'x'; 4 * 1024 * 1024 + 1]),
+        ..SandboxOptions::default()
+    };
+
+    assert!(runtime.validate_sandbox_options(&options).is_err());
+}
+
+#[test]
+fn sandbox_rejects_an_unsafe_image_override_before_launch() {
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+    let options = SandboxOptions {
+        image: Some("sidecar:2.7.0\n--privileged".to_owned()),
+        ..SandboxOptions::default()
+    };
+
+    assert!(runtime.validate_sandbox_options(&options).is_err());
+}

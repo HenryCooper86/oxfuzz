@@ -1187,6 +1187,14 @@ pub async fn schedule_concurrency_get(
     Ok(state.scheduler.max_concurrent())
 }
 
+/// Both scheduler concurrency caps and their effective fuzz-run ceiling.
+#[tauri::command]
+pub async fn schedule_concurrency_limits(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<hf_service::scheduler::CampaignConcurrencyLimits, String> {
+    Ok(state.scheduler.concurrency_limits())
+}
+
 /// Set the global concurrent-campaign cap; returns the applied value.
 #[tauri::command]
 pub async fn schedule_concurrency_set(
@@ -2467,6 +2475,291 @@ pub fn list_models() -> Vec<ModelInfo> {
 #[must_use]
 pub fn get_providers() -> Vec<ProviderConfig> {
     hf_service::config::get_providers()
+}
+
+/// Load the service-validated fuzzing policy used by subsequent operations.
+#[tauri::command]
+pub fn get_fuzzing_settings() -> Result<hf_service::config::FuzzingSettings, String> {
+    hf_service::config::effective_fuzzing_settings()
+}
+
+/// Load the typed automotive policy used by the next sandboxed sidecar call.
+#[tauri::command]
+pub fn get_automotive_settings() -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        hf_service::config::AutomotiveConfigStore::default()
+            .get()
+            .and_then(|settings| serde_json::to_value(settings).map_err(|error| error.to_string()))
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    Err(automotive_feature_unavailable())
+}
+
+/// Validate and persist only the typed automotive policy table.
+#[tauri::command]
+pub fn set_automotive_settings(settings: serde_json::Value) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let settings = serde_json::from_value(settings).map_err(|error| error.to_string())?;
+        hf_service::config::AutomotiveConfigStore::default()
+            .set(settings)
+            .and_then(|saved| serde_json::to_value(saved).map_err(|error| error.to_string()))
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        drop(settings);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Inspect capabilities of the configured pinned automotive sidecar.
+#[tauri::command]
+pub async fn automotive_capabilities(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let outcome = state
+            .container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::Capabilities,
+                approval: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Analyze one operator-selected capture through the sandboxed sidecar.
+#[tauri::command]
+pub async fn automotive_analyze_capture(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    protocol: String,
+    capture_path: PathBuf,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let protocol = serde_json::from_value(serde_json::Value::String(protocol))
+            .map_err(|error| error.to_string())?;
+        let outcome = state
+            .container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::AnalyzeCapture {
+                    protocol,
+                    capture_path,
+                },
+                approval: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, protocol, capture_path);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Generate deterministic automotive mutations through the sandboxed sidecar.
+#[tauri::command]
+pub async fn automotive_generate_mutations(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    protocol: String,
+    source_path: PathBuf,
+    deterministic_seed: u64,
+    mutation_count: u32,
+    media_type: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let protocol = serde_json::from_value(serde_json::Value::String(protocol))
+            .map_err(|error| error.to_string())?;
+        let outcome = state
+            .container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::GenerateMutations {
+                    protocol,
+                    source_path,
+                    deterministic_seed,
+                    mutation_count,
+                    media_type,
+                },
+                approval: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (
+            state,
+            project_root,
+            protocol,
+            source_path,
+            deterministic_seed,
+            mutation_count,
+            media_type,
+        );
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Build a typed automotive replay plan without contacting an interface.
+#[tauri::command]
+pub async fn automotive_build_replay_plan(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    protocol: String,
+    source_path: PathBuf,
+    target_mode: String,
+    deterministic_seed: u64,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let protocol = serde_json::from_value(serde_json::Value::String(protocol))
+            .map_err(|error| error.to_string())?;
+        let target_mode = serde_json::from_value(serde_json::Value::String(target_mode))
+            .map_err(|error| error.to_string())?;
+        let outcome = state
+            .container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::BuildReplayPlan {
+                    protocol,
+                    source_path,
+                    target_mode,
+                    deterministic_seed,
+                },
+                approval: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (
+            state,
+            project_root,
+            protocol,
+            source_path,
+            target_mode,
+            deterministic_seed,
+        );
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Execute a service-validated replay plan through the sandboxed sidecar.
+#[tauri::command]
+pub async fn automotive_execute_replay(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    mode: serde_json::Value,
+    plan: serde_json::Value,
+    approval: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let mode = serde_json::from_value(mode).map_err(|error| error.to_string())?;
+        let plan = serde_json::from_value(plan).map_err(|error| error.to_string())?;
+        let approval = approval
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        // Invoking this dedicated workflow command is the operator's approval
+        // for the bounded sandbox replay. Physical mode still requires the
+        // independent, plan-scoped approval evidence enforced by hf-service.
+        let container = state.container.clone().with_guardrails(Guardrails::new(
+            GuardrailPolicy::default(),
+            std::sync::Arc::new(AutoApproveGate),
+        ));
+        let outcome = container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::ExecuteReplay { mode, plan },
+                approval,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, mode, plan, approval);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// List public automotive operation summaries for one project.
+#[tauri::command]
+pub async fn list_automotive_operations(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let operations = state
+            .container
+            .list_automotive_operations(&project_root, limit.unwrap_or(50))
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(operations).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, limit);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+#[cfg(not(feature = "automotive-scapy"))]
+fn automotive_feature_unavailable() -> String {
+    "automotive Scapy support is not included in this application build".to_owned()
+}
+
+/// Load browser-compatible `DefectDojo` settings without returning protected values.
+#[tauri::command]
+pub fn get_defectdojo_config() -> Result<hf_service::config::DefectDojoPublicConfig, String> {
+    hf_service::config::IntegrationConfigStore::default().defectdojo()
+}
+
+/// Merge and persist a typed `DefectDojo` settings patch.
+#[tauri::command]
+pub fn patch_defectdojo_config(
+    patch: hf_service::config::DefectDojoConfigPatch,
+) -> Result<hf_service::config::DefectDojoPublicConfig, String> {
+    hf_service::config::IntegrationConfigStore::default().patch_defectdojo(patch)
+}
+
+/// Load browser-compatible issue-tracker settings without protected values.
+#[tauri::command]
+pub fn get_issue_tracker_config() -> Result<hf_service::config::IssueTrackerPublicConfig, String> {
+    hf_service::config::IntegrationConfigStore::default().issue_tracker()
+}
+
+/// Merge and persist a typed issue-tracker settings patch.
+#[tauri::command]
+pub fn patch_issue_tracker_config(
+    patch: hf_service::config::IssueTrackerConfigPatch,
+) -> Result<hf_service::config::IssueTrackerPublicConfig, String> {
+    hf_service::config::IntegrationConfigStore::default().patch_issue_tracker(patch)
 }
 
 /// Persist the provider pool from the settings form back to `providers.toml`,

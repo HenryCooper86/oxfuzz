@@ -10,5 +10,10 @@ export default defineConfig({
   },
   build: {
     target: "esnext",
+    manifest: true,
+    // Mermaid is deliberately lazy-loaded and contains diagram engines up to
+    // roughly 700 kB. The stricter project-wide limits are enforced by the
+    // manifest-aware bundle budget script after every production build.
+    chunkSizeWarningLimit: 900,
   },
 });

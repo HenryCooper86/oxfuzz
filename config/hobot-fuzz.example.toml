@@ -25,6 +25,52 @@ auto_revert_threshold_pct = 20.0
 # Override with HF_AUTO_REVERT_NOTIFY_ONLY.
 auto_revert_notify_only = false
 
+# Fuzzing engine policy and defaults. These values are resolved by hf-service
+# before every new harness operation or campaign. A Settings save therefore
+# affects the next operation without changing a campaign already in flight.
+[fuzzing]
+enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "clusterfuzzlite", "syzkaller"]
+default_engine = "libfuzzer"
+default_duration_secs = 60
+
+# Resource limits for harness-based fuzzing campaigns. The service rejects a
+# requested duration above this ceiling instead of silently clamping it.
+[fuzzing.sandbox]
+max_mem_mb = 2048
+max_cpus = 1
+max_duration_secs = 7200
+
+# Optional Scapy automotive protocol adapter. Compile-time support and this
+# runtime switch must both be enabled. The sidecar executes only in hf-runtime;
+# offline PCAP and isolated vcan are the normal modes.
+[automotive]
+enabled = false
+sidecar_image = "hobot/scapy-automotive:2.7.0"
+allowed_protocols = ["can", "can_fd", "iso_tp", "uds", "gmlan", "some_ip", "some_ip_sd", "do_ip", "obd", "ccp", "xcp", "bmw_hsfz", "sec_oc"]
+allowed_modes = ["offline_pcap", "virtual_can"]
+virtual_interfaces = ["vcan0"]
+
+[automotive.limits]
+max_packets = 10000
+max_input_bytes = 67108864
+max_payload_bytes = 1048576
+max_duration_secs = 300
+max_rate_per_second = 100
+max_output_bytes = 67108864
+max_mem_mb = 1024
+max_cpus = 1
+
+# Physical access remains disabled and empty by default. Enabling it also
+# requires adding "physical_bench" to allowed_modes. Every operation still
+# requires explicit approval and must match all three allowlists.
+[automotive.physical_bench]
+enabled = false
+require_approval = true
+interfaces = []
+arbitration_ids = []
+uds_services = []
+allow_dangerous_services = false
+
 # Project knowledge indexing and retrieval. Only settings consumed by the
 # production L2 project index are exposed here.
 [knowledge]

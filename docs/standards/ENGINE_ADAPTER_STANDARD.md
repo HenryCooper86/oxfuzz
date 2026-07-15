@@ -85,3 +85,18 @@ The service selects the built-in adapter by `EngineKind` and confirms runtime
 toolchain availability before use. Engine policy is not currently
 user-editable; a TOML registry must not be exposed until `hf-service` owns and
 applies a typed loader for it.
+
+## 7. Non-Engine Protocol Adapters
+
+Protocol decoders and transport sidecars do not implement `EngineAdapter` and
+must not add an `EngineKind`. In particular, the planned Scapy sidecar uses the
+feature-gated, versioned `hf-automotive` request/result/error envelopes. It is
+invoked only by a service-owned operation through `hf-runtime` after capability,
+limit, mode, allowlist, and approval preflight.
+
+Such adapters may emit canonical transcript hashes and protocol-state
+signatures. They may not emit those values as `FuzzProgress::EdgesCovered`,
+source coverage, or normalized engine crash directories unless a later service
+workflow independently validates and classifies an actual crash artifact. Raw
+sidecar commands, Python imports in Rust, host execution, and direct physical
+interface access are contract violations.

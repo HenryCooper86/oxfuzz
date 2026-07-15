@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 import { getTransport, pickFolder } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { usePipeline } from "../providers/PipelineContext";
-import { useTarget } from "../providers/TargetContext";
+import { useProject } from "../providers/project";
+import { usePipeline } from "../providers/pipeline";
+import { useTarget } from "../providers/target";
 import type { TargetInventory, HarnessReviewItem } from "../types";
 import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
@@ -12,6 +12,9 @@ import {
   CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare,
 } from "lucide-react";
 import { lineDiff } from "../lib/diff";
+import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
+import { enabledEngineOptions, fuzzingActionsEnabled } from "../lib/fuzzingSettings";
+import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 
 interface HarnessResult {
   source: string;
@@ -60,7 +63,16 @@ export function HarnessView({
   const { t } = useI18n();
   const { activeProject } = useProject();
   const { markDone } = usePipeline();
-  const { target: selectedTarget, setTarget: setSelectedTarget, engine, setEngine, lang, setLang, setCompiled } = useTarget();
+  const { target: selectedTarget, setTarget: setSelectedTarget, engine: selectedEngine, setEngine, lang, setLang, setCompiled } = useTarget();
+  const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
+  const fuzzingEnabled = fuzzingActionsEnabled(fuzzingSettings);
+  const engineOptions = fuzzingSettings
+    ? enabledEngineOptions(fuzzingSettings, { language: lang })
+    : [];
+  const engine = engineOptions.some((option) => option.value === selectedEngine)
+    ? selectedEngine
+    : (engineOptions.find((option) => option.value === fuzzingSettings?.default_engine)
+      ?? engineOptions[0])?.value ?? selectedEngine;
   // Embedded in the workflow, the project comes from the workflow's gate.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
@@ -154,6 +166,7 @@ export function HarnessView({
   }, [project, selectedTarget, harness, setCompiled, markDone]);
 
   async function generateHarness(target: string): Promise<HarnessResult | null> {
+    if (!fuzzingSettings) return null;
     const prior = harness?.source ?? null;
     setHarnessStatus("loading");
     setHarnessError(null);
@@ -189,6 +202,7 @@ export function HarnessView({
   // just produced without waiting for the `harness` state to settle (the old
   // setTimeout read a stale null and silently skipped compilation).
   async function compileHarness(source?: string): Promise<boolean> {
+    if (!fuzzingSettings) return false;
     const src = source ?? harness?.source;
     if (!src) return false;
     setCompileStatus("loading");
@@ -212,6 +226,7 @@ export function HarnessView({
   }
 
   async function smokeHarness(): Promise<boolean> {
+    if (!fuzzingSettings) return false;
     setSmokeStatus("loading");
     setPromotionStatus("idle");
     setPromotionResult(null);
@@ -236,6 +251,7 @@ export function HarnessView({
   }
 
   async function promoteHarness(): Promise<boolean> {
+    if (!fuzzingSettings) return false;
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote", {
@@ -256,6 +272,7 @@ export function HarnessView({
   }
 
   async function promoteWithFindings(): Promise<boolean> {
+    if (!fuzzingSettings) return false;
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote_with_findings", {
@@ -275,6 +292,7 @@ export function HarnessView({
   }
 
   async function generateSeeds() {
+    if (!fuzzingSettings) return;
     setSeedStatus("loading");
     setSeedError(null);
     try {
@@ -307,6 +325,9 @@ export function HarnessView({
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <SandboxBanner />
+      {!fuzzingSettings && (
+        <FuzzingPolicyNotice loaded={fuzzingPolicyLoaded} error={fuzzingPolicyError} />
+      )}
       {!embedded && (
         <>
           <ViewHeader
@@ -403,12 +424,7 @@ export function HarnessView({
             <Select
               value={engine}
               onChange={(v) => setEngine(v)}
-              options={[
-                { value: "libfuzzer", label: "libFuzzer" },
-                { value: "afl++", label: "AFL++" },
-                { value: "honggfuzz", label: "honggfuzz" },
-                { value: "clusterfuzzlite", label: "ClusterFuzzLite" },
-              ].filter((option) => lang !== "rust" || option.value === "libfuzzer" || option.value === "clusterfuzzlite")}
+              options={engineOptions}
             />
           </div>
           <div className="flex flex-col gap-1 w-32">
@@ -417,8 +433,11 @@ export function HarnessView({
               value={lang}
               onChange={(v) => {
                 setLang(v);
-                if (v === "rust" && engine !== "libfuzzer" && engine !== "clusterfuzzlite") {
-                  setEngine("libfuzzer");
+                const supported = fuzzingSettings
+                  ? enabledEngineOptions(fuzzingSettings, { language: v })
+                  : [];
+                if (!supported.some((option) => option.value === engine) && supported[0]) {
+                  setEngine(supported[0].value);
                 }
               }}
               options={[
@@ -431,7 +450,7 @@ export function HarnessView({
           <Button
             variant="primary"
             onClick={runAll}
-            disabled={!selectedTarget || harnessStatus === "loading"}
+            disabled={!selectedTarget || engineOptions.length === 0 || harnessStatus === "loading"}
             title={t("harness.buildSmokeTitle")}
           >
             <Sparkles size={14} />
@@ -453,6 +472,7 @@ export function HarnessView({
             status={harnessStatus}
             actionLabel={t("common.generate")}
             actionClick={() => generateHarness(selectedTarget)}
+            disabled={!fuzzingEnabled}
           >
             {harness && (
               <div className="mt-2">
@@ -512,7 +532,7 @@ export function HarnessView({
             status={compileStatus}
             actionLabel={t("harness.compile")}
             actionClick={() => compileHarness()}
-            disabled={!harness}
+            disabled={!fuzzingSettings || !harness}
           >
             {compileResult && (
               <div className="mt-2 flex items-center gap-2 text-xs">
@@ -537,7 +557,7 @@ export function HarnessView({
             status={smokeStatus}
             actionLabel={t("harness.runSmokeTest")}
             actionClick={smokeHarness}
-            disabled={compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed"))}
+            disabled={!fuzzingSettings || (compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
           >
             {smokeResult && (
               <div className="mt-2 flex items-center gap-2 text-xs">
@@ -570,6 +590,7 @@ export function HarnessView({
             actionLabel={smokeCrashed ? t("harness.approveWithFindings") : t("harness.approveForCampaigns")}
             actionClick={smokeCrashed ? promoteWithFindings : promoteHarness}
             disabled={
+              !fuzzingSettings ||
               promotionStatus === "done" ||
               (smokeCrashed ? false : !cleanApprovable)
             }
@@ -606,6 +627,7 @@ export function HarnessView({
             status={seedStatus}
             actionLabel={t("harness.generateSeeds")}
             actionClick={generateSeeds}
+            disabled={!fuzzingSettings}
           >
             {seeds && (
               <div className="mt-2">

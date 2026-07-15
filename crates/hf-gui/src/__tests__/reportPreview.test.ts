@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { codeInfo } from "../components/ReportPreview";
+import { codeInfo } from "../lib/reportPreviewCode";
 
 describe("codeInfo", () => {
   it("detects a mermaid fenced block by language class", () => {

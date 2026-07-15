@@ -2,14 +2,26 @@ interface SwitchProps {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
 }
 
-export function Switch({ checked, onChange, label }: SwitchProps) {
+export function Switch({ checked, onChange, label, ariaLabel, disabled = false }: SwitchProps) {
   return (
     <button
+      type="button"
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2 cursor-pointer outline-none focus-visible:[&>span]:outline-2 focus-visible:[&>span]:outline focus-visible:[&>span]:outline-[var(--accent)] focus-visible:[&>span]:outline-offset-2"
-      style={{ background: "transparent", border: "none", padding: 0 }}
+      disabled={disabled}
+      aria-pressed={checked}
+      aria-label={ariaLabel}
+      className="flex items-center gap-2 outline-none focus-visible:[&>span]:outline-2 focus-visible:[&>span]:outline focus-visible:[&>span]:outline-[var(--accent)] focus-visible:[&>span]:outline-offset-2"
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
+      }}
     >
       <span
         className="rounded-full border border-solid transition-all duration-200 relative inline-block"

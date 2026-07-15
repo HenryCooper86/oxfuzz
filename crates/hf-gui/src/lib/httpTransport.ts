@@ -82,6 +82,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   schedule_history_clear: { method: "POST", path: "/schedule/history/clear" },
   schedule_targets: { method: "POST", path: "/schedule/targets" },
   schedule_concurrency_get: { method: "GET", path: "/schedule/concurrency" },
+  schedule_concurrency_limits: { method: "GET", path: "/schedule/concurrency/limits" },
   schedule_concurrency_set: { method: "POST", path: "/schedule/concurrency" },
   schedule_delete: { method: "DELETE", path: "/schedule/{id}" },
   schedule_set_enabled: { method: "POST", path: "/schedule/{id}/enabled" },
@@ -103,8 +104,21 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   write_config: { method: "POST", path: "/config/write" },
   config_toml_to_value: { method: "POST", path: "/config/toml_to_value" },
   config_value_to_toml: { method: "POST", path: "/config/value_to_toml" },
+  get_fuzzing_settings: { method: "GET", path: "/config/fuzzing" },
+  get_automotive_settings: { method: "GET", path: "/config/automotive" },
+  set_automotive_settings: { method: "PUT", path: "/config/automotive" },
+  automotive_capabilities: { method: "POST", path: "/automotive/capabilities" },
+  automotive_analyze_capture: { method: "POST", path: "/automotive/analyze-capture" },
+  automotive_generate_mutations: { method: "POST", path: "/automotive/mutations" },
+  automotive_build_replay_plan: { method: "POST", path: "/automotive/replay-plan" },
+  automotive_execute_replay: { method: "POST", path: "/automotive/replay" },
+  list_automotive_operations: { method: "GET", path: "/automotive/operations" },
   get_providers: { method: "GET", path: "/config/providers" },
   set_providers: { method: "POST", path: "/config/providers" },
+  get_defectdojo_config: { method: "GET", path: "/config/defectdojo" },
+  patch_defectdojo_config: { method: "PATCH", path: "/config/defectdojo" },
+  get_issue_tracker_config: { method: "GET", path: "/config/issue-tracker" },
+  patch_issue_tracker_config: { method: "PATCH", path: "/config/issue-tracker" },
   provider_statuses: { method: "GET", path: "/providers/status" },
   diagnostics_cost_summary: { method: "GET", path: "/diagnostics/cost" },
   app_paths: { method: "GET", path: "/system/paths" },
@@ -137,6 +151,13 @@ function toWebArgs(args?: Record<string, unknown>): Record<string, unknown> | un
     mapped[webKey] = value;
   }
   return mapped;
+}
+
+function typedPatchBody(args?: Record<string, unknown>): Record<string, unknown> {
+  const patch = args?.patch;
+  return patch !== null && typeof patch === "object" && !Array.isArray(patch)
+    ? patch as Record<string, unknown>
+    : {};
 }
 
 /**
@@ -371,7 +392,10 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         // already `.catch()` this and degrade to an empty/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
-      return request<T>(endpoint, args);
+      const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"
+        ? typedPatchBody(args)
+        : args;
+      return request<T>(endpoint, requestArgs);
     },
     async listen<T = unknown>(event: string, callback: (event: { payload: T }) => void): Promise<UnlistenFn> {
       if (event === "run:progress" || event === "run:status") {

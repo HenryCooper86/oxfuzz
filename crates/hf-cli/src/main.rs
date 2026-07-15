@@ -249,6 +249,73 @@ enum Commands {
         #[command(subcommand)]
         op: SessionOp,
     },
+    /// Sandboxed automotive protocol analysis and replay preparation.
+    #[cfg(feature = "automotive-scapy")]
+    Automotive {
+        #[command(subcommand)]
+        op: AutomotiveOp,
+    },
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Subcommand)]
+enum AutomotiveOp {
+    /// Print the validated automotive policy as JSON.
+    Settings,
+    /// Enable the runtime automotive policy without changing its limits.
+    Enable,
+    /// Disable the runtime automotive policy.
+    Disable,
+    /// Inspect capabilities of the configured pinned sidecar.
+    Capabilities { project: PathBuf },
+    /// Analyze an immutable PCAP capture.
+    Analyze {
+        project: PathBuf,
+        #[arg(long)]
+        protocol: String,
+        #[arg(long)]
+        capture: PathBuf,
+    },
+    /// Generate a deterministic field-aware mutation artifact.
+    Mutate {
+        project: PathBuf,
+        #[arg(long)]
+        protocol: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long, default_value_t = 64)]
+        count: u32,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        #[arg(long, default_value = "application/octet-stream")]
+        media_type: String,
+    },
+    /// Build a typed replay plan without contacting an interface.
+    Plan {
+        project: PathBuf,
+        #[arg(long)]
+        protocol: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long, default_value = "virtual_can")]
+        mode: String,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
+    /// Execute a typed replay plan only on an allowlisted virtual CAN interface.
+    Replay {
+        project: PathBuf,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, default_value = "vcan0")]
+        interface: String,
+    },
+    /// List retained automotive evidence for a project.
+    Operations {
+        project: PathBuf,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1057,6 +1124,163 @@ async fn cmd_report(
     Ok(())
 }
 
+#[cfg(feature = "automotive-scapy")]
+fn parse_automotive_protocol(
+    value: &str,
+) -> anyhow::Result<hf_service::automotive::AutomotiveProtocol> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(|error| anyhow::anyhow!("invalid automotive protocol '{value}': {error}"))
+}
+
+#[cfg(feature = "automotive-scapy")]
+fn parse_automotive_mode(value: &str) -> anyhow::Result<hf_service::automotive::AutomotiveMode> {
+    let mode = serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(|error| anyhow::anyhow!("invalid automotive mode '{value}': {error}"))?;
+    if mode == hf_service::automotive::AutomotiveMode::OfflinePcap {
+        anyhow::bail!("replay plans must target virtual_can or physical_bench");
+    }
+    Ok(mode)
+}
+
+#[cfg(feature = "automotive-scapy")]
+fn parse_virtual_replay_plan(encoded: &str) -> anyhow::Result<hf_service::automotive::ReplayPlan> {
+    let plan: hf_service::automotive::ReplayPlan = serde_json::from_str(encoded)
+        .map_err(|error| anyhow::anyhow!("invalid automotive replay plan: {error}"))?;
+    if plan.mode != hf_service::automotive::AutomotiveMode::VirtualCan {
+        anyhow::bail!("the CLI replay command accepts only virtual_can plans");
+    }
+    Ok(plan)
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
+    use hf_service::automotive::{
+        AutomotiveCommand, AutomotiveOperationRequest, AutomotiveOperationSummary,
+    };
+
+    match op {
+        AutomotiveOp::Settings => {
+            let settings = hf_service::config::AutomotiveConfigStore::default()
+                .get()
+                .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&settings)?);
+        }
+        command @ (AutomotiveOp::Enable | AutomotiveOp::Disable) => {
+            let enabled = matches!(command, AutomotiveOp::Enable);
+            let store = hf_service::config::AutomotiveConfigStore::default();
+            let mut settings = store.get().map_err(anyhow::Error::msg)?;
+            settings.enabled = enabled;
+            let settings = store.set(settings).map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&settings)?);
+        }
+        AutomotiveOp::Capabilities { project } => {
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::Capabilities,
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Analyze {
+            project,
+            protocol,
+            capture,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::AnalyzeCapture {
+                        protocol: parse_automotive_protocol(&protocol)?,
+                        capture_path: capture,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Mutate {
+            project,
+            protocol,
+            source,
+            count,
+            seed,
+            media_type,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::GenerateMutations {
+                        protocol: parse_automotive_protocol(&protocol)?,
+                        source_path: source,
+                        deterministic_seed: seed,
+                        mutation_count: count,
+                        media_type,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Plan {
+            project,
+            protocol,
+            source,
+            mode,
+            seed,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::BuildReplayPlan {
+                        protocol: parse_automotive_protocol(&protocol)?,
+                        source_path: source,
+                        target_mode: parse_automotive_mode(&mode)?,
+                        deterministic_seed: seed,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Replay {
+            project,
+            plan,
+            interface,
+        } => {
+            let encoded = std::fs::read_to_string(&plan).map_err(|error| {
+                anyhow::anyhow!("read automotive replay plan {}: {error}", plan.display())
+            })?;
+            let plan = parse_virtual_replay_plan(&encoded)?;
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::ExecuteReplay {
+                        mode: hf_service::automotive::ModeConfig::VirtualCan { interface },
+                        plan,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Operations { project, limit } => {
+            let container = ServiceContainer::bootstrap().await;
+            let operations: Vec<AutomotiveOperationSummary> = container
+                .list_automotive_operations(&project, limit)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&operations)?);
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -1175,6 +1399,30 @@ async fn main() -> anyhow::Result<()> {
         Commands::Knowledge { op } => cmd_knowledge(op)?,
         Commands::Schedule { op } => cmd_schedule(op).await?,
         Commands::Session { op } => cmd_session(op).await?,
+        #[cfg(feature = "automotive-scapy")]
+        Commands::Automotive { op } => cmd_automotive(op).await?,
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "automotive-scapy"))]
+mod automotive_tests {
+    use super::parse_virtual_replay_plan;
+
+    fn plan(mode: &str) -> String {
+        format!(
+            r#"{{"protocol":"uds","mode":"{mode}","deterministic_seed":7,"steps":[{{"sequence":0,"delay_micros":0,"action":"send","message":{{"protocol":"uds","payload_hex":"221234","fields":{{"arbitration_id":"0x7e0","service":"0x22"}}}}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn cli_replay_accepts_only_typed_virtual_can_plans() {
+        let parsed = parse_virtual_replay_plan(&plan("virtual_can")).unwrap();
+        assert_eq!(parsed.steps.len(), 1);
+
+        let error = parse_virtual_replay_plan(&plan("physical_bench")).unwrap_err();
+        assert!(error.to_string().contains("virtual_can"));
+
+        assert!(parse_virtual_replay_plan("{not-json").is_err());
+    }
 }

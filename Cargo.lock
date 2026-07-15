@@ -2320,6 +2320,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hf-automotive"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "hf-cli"
 version = "0.1.0"
 dependencies = [
@@ -2635,6 +2645,7 @@ dependencies = [
  "comrak",
  "futures",
  "hf-agent",
+ "hf-automotive",
  "hf-core",
  "hf-corpus",
  "hf-coverage",

@@ -57,3 +57,10 @@ a generated harness on the host.
   `tests/fixtures/crashes/`.
 - Harness lifecycle tests must prove persisted `Compiled -> SmokePassed ->
   Promoted` transitions and the fail-closed full-run gate.
+- `hf-automotive` contract tests are pure, feature-enabled Rust tests. They
+  cover stable serde names, schema rejection, validation bounds, mode/approval
+  structure, replay consistency, structured errors, and canonical transcript
+  and state hashes. Default-feature builds must not require Scapy or Python.
+- Automotive sidecar and service tests use immutable PCAP fixtures and
+  fake JSONL/runtime transcripts. Default tests never invoke Python, open CAN or
+  SocketCAN interfaces, execute a real fuzzer, or contact a physical bench.

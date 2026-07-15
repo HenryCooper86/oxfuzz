@@ -2,10 +2,17 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
-import { useI18n } from "../i18n";
-import { useConfirm } from "../providers/ConfirmContext";
-import { useProject } from "../providers/ProjectContext";
-import { useTarget } from "../providers/TargetContext";
+import { useI18n } from "../i18nContext";
+import { useConfirm } from "../providers/confirm";
+import { useProject } from "../providers/project";
+import { useTarget } from "../providers/target";
+import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
+import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
+import {
+  campaignConcurrencyHierarchy,
+  parseCampaignConcurrencyLimits,
+  type CampaignConcurrencyLimits,
+} from "../lib/schedulerLimits";
 
 // ---------------------------------------------------------------------------
 // Agents
@@ -1172,11 +1179,13 @@ export function AutomationView() {
   const confirm = useConfirm();
   const { activeProject, recentProjects, addRecent } = useProject();
   const { target: contextTarget } = useTarget();
+  const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
   const [history, setHistory] = useState<ExecutionView[]>([]);
   const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
   const [triggerValue, setTriggerValue] = useState("3600");
-  const [duration, setDuration] = useState(60);
+  const [durationOverride, setDurationOverride] = useState<number | null>(null);
+  const duration = durationOverride ?? fuzzingSettings?.default_duration_secs ?? 0;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1190,8 +1199,13 @@ export function AutomationView() {
   // Budget (both optional): stop after N runs, or after M minutes of fuzzing.
   const [maxRuns, setMaxRuns] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
-  // Global cap on how many campaigns fuzz at once.
-  const [concurrency, setConcurrency] = useState(2);
+  // The live fuzz-campaign cap is editable. The independent scheduler
+  // workflow-dispatch cap is fixed at process startup, so both must remain
+  // visible along with their effective minimum.
+  const [concurrency, setConcurrency] = useState(1);
+  const [concurrencyLimits, setConcurrencyLimits] =
+    useState<CampaignConcurrencyLimits | null>(null);
+  const [concurrencyLimitsLoaded, setConcurrencyLimitsLoaded] = useState(false);
 
   const projects = useMemo(() => {
     const all = [project, activeProject, ...recentProjects].filter(Boolean);
@@ -1213,9 +1227,19 @@ export function AutomationView() {
     };
     tick();
     getTransport()
-      .invoke<number>("schedule_concurrency_get")
-      .then((n) => !cancelled && setConcurrency(n))
-      .catch(() => {});
+      .invoke<unknown>("schedule_concurrency_limits")
+      .then((value) => {
+        if (cancelled) return;
+        const limits = parseCampaignConcurrencyLimits(value);
+        setConcurrencyLimits(limits);
+        if (limits) setConcurrency(limits.active_fuzz_campaign_limit);
+        setConcurrencyLimitsLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setConcurrencyLimits(null);
+        setConcurrencyLimitsLoaded(true);
+      });
     const id = setInterval(tick, 10000);
     return () => {
       cancelled = true;
@@ -1258,7 +1282,7 @@ export function AutomationView() {
   }, [choices, picked, contextTarget]);
 
   const promotedCount = choices?.length ?? 0;
-  const canSave = !!project && promotedCount > 0 && (scopeAll || !!selected);
+  const canSave = !!fuzzingSettings && !!project && promotedCount > 0 && (scopeAll || !!selected);
 
   async function chooseFolder() {
     const path = await pickFolder();
@@ -1268,6 +1292,7 @@ export function AutomationView() {
   }
 
   async function applyConcurrency(n: number) {
+    if (!concurrencyLimits) return;
     const clamped = Math.max(1, Math.min(16, n));
     setConcurrency(clamped);
     try {
@@ -1275,8 +1300,18 @@ export function AutomationView() {
         maxConcurrent: clamped,
       });
       setConcurrency(applied);
+      setConcurrencyLimits({
+        active_fuzz_campaign_limit: applied,
+        scheduler_workflow_dispatch_limit:
+          concurrencyLimits.scheduler_workflow_dispatch_limit,
+        effective_max_concurrent_fuzz_runs: Math.min(
+          applied,
+          concurrencyLimits.scheduler_workflow_dispatch_limit,
+        ),
+      });
     } catch (e) {
       setError(String(e));
+      setConcurrency(concurrencyLimits.active_fuzz_campaign_limit);
     }
   }
 
@@ -1297,7 +1332,7 @@ export function AutomationView() {
   }
 
   async function save() {
-    if (!canSave) return;
+    if (!canSave || !fuzzingSettings) return;
     const invalid = validateTrigger();
     if (invalid) {
       setError(invalid);
@@ -1374,18 +1409,73 @@ export function AutomationView() {
       : triggerKind === "cron"
         ? t("automation.triggerPlaceholderCron")
         : t("automation.triggerPlaceholderOnce");
+  const limitHierarchy = concurrencyLimits
+    ? campaignConcurrencyHierarchy(concurrencyLimits)
+    : null;
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <ViewHeader title={t("automation.title")} description={t("automation.description")} />
-        <label className="text-xs text-text-muted flex items-center gap-1.5 shrink-0" title={t("automation.maxConcurrentTitle")}>
-          {t("automation.maxConcurrent")}
-          <Input mono type="number" min={1} max={16} value={concurrency}
-            onChange={(e) => void applyConcurrency(Number(e.target.value) || 1)}
-            className="w-14" />
-        </label>
+        <div className="surface-card flex items-stretch overflow-hidden" style={{ padding: 0 }}>
+          {limitHierarchy ? (
+            <>
+              <div
+                role="group"
+                className="flex flex-col justify-center"
+                style={{
+                  padding: "var(--space-sm) var(--space-md)",
+                  borderRight: "1px solid var(--border)",
+                  minWidth: 138,
+                }}
+                title={t("automation.effectiveLimitTitle")}
+                aria-label={t("automation.effectiveLimitTitle")}
+              >
+                <span className="text-xs text-text-secondary">
+                  {t("automation.effectiveLimit")}
+                </span>
+                <strong className="text-lg font-semibold" style={{ color: "var(--accent)" }}>
+                  {limitHierarchy.primary.value}
+                </strong>
+              </div>
+              <div
+                className="flex flex-col justify-center gap-1.5 text-xs text-text-muted"
+                style={{ padding: "var(--space-sm) var(--space-md)" }}
+              >
+                <label
+                  className="flex items-center justify-between gap-2"
+                  title={t("automation.activeCampaignLimitTitle")}
+                >
+                  <span>{t("automation.activeCampaignLimit")}</span>
+                  <Input
+                    mono
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={concurrency}
+                    aria-label={t("automation.activeCampaignLimit")}
+                    onChange={(e) => void applyConcurrency(Number(e.target.value) || 1)}
+                    className="w-14"
+                  />
+                </label>
+                <span title={t("automation.dispatchLimitTitle")}>
+                  {t("automation.dispatchLimit")} {limitHierarchy.supporting[1].value}
+                </span>
+              </div>
+            </>
+          ) : (
+            <span className="text-xs text-text-muted" style={{ padding: "var(--space-md)" }}>
+              {concurrencyLimitsLoaded
+                ? t("automation.concurrencyUnavailable")
+                : t("common.loading")}
+            </span>
+          )}
+        </div>
       </div>
+
+      {!fuzzingSettings && (
+        <FuzzingPolicyNotice loaded={fuzzingPolicyLoaded} error={fuzzingPolicyError} />
+      )}
 
       {/* New campaign form */}
       <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
@@ -1463,7 +1553,9 @@ export function AutomationView() {
             className="flex-1 min-w-[180px]" />
           <label className="text-xs text-text-muted flex items-center gap-1">
             {t("automation.runLabel")}
-            <Input mono type="number" min={10} value={duration} onChange={(e) => setDuration(Math.max(10, Number(e.target.value) || 60))}
+            <Input mono type="number" min={1} max={fuzzingSettings?.sandbox.max_duration_secs} value={duration}
+              disabled={!fuzzingSettings}
+              onChange={(e) => setDurationOverride(Math.max(1, Number(e.target.value) || fuzzingSettings?.default_duration_secs || 1))}
               className="w-16" />
             s
           </label>

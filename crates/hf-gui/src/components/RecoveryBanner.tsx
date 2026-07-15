@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { getTransport } from "../lib";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 interface InterruptedRun {
   run_id: string;

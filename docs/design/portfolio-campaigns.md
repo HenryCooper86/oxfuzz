@@ -64,8 +64,22 @@ surface are integration-tested.
 
 ## Concurrency setting + notifier
 
-- The global cap is persisted in the sidecar and applied live to the gate;
-  `CampaignScheduler::{max_concurrent,set_max_concurrent}` expose it.
+- The **active fuzz-campaign limit** is persisted in the sidecar and applied
+  live to the campaign gate; `CampaignScheduler::{max_concurrent,
+  set_max_concurrent}` expose it. A fire that cannot enter this gate is skipped
+  instead of queued.
+- The **scheduler workflow-dispatch limit** comes from
+  `SchedulerConfig.max_concurrent_executions` at scheduler startup. It bounds
+  manager-owned workflow tasks and is intentionally separate from the live
+  campaign gate.
+- Every active fuzz run holds one workflow-dispatch slot and one campaign-gate
+  slot, so the effective maximum number of concurrent fuzz runs is the minimum
+  of those two limits. `CampaignScheduler::concurrency_limits` returns the
+  read-only `CampaignConcurrencyLimits` DTO with
+  `active_fuzz_campaign_limit`, `scheduler_workflow_dispatch_limit`, and
+  `effective_max_concurrent_fuzz_runs`. Presentation layers must show the two
+  controls with these distinct meanings rather than presenting either one as
+  the sole global cap.
 - The crash notifier is a late-bound slot (`Arc<Mutex<Option<..>>>`): the desktop
   shell only has an `AppHandle` to emit with *after* the scheduler is built, so
   it calls `set_notifier` in Tauri `setup()` to emit `campaign:crash`. CLI/web
@@ -92,10 +106,10 @@ reconciles their execution records from `Running` to `Cancelled`. The service-le
 ## Schedule policy enforcement
 
 `SchedulerConfig` is resolved by `hf-service` at scheduler startup. Its global
-execution cap bounds active dispatches, its history limit applies per schedule
-(zero means unlimited), and its missed-fire/concurrency defaults are materialized
-when a schedule omits an override. Per-schedule policies are enforced before a
-workflow starts:
+workflow-dispatch cap bounds active scheduler tasks, its history limit applies
+per schedule (zero means unlimited), and its missed-fire/concurrency defaults
+are materialized when a schedule omits an override. Per-schedule policies are
+enforced before a workflow starts:
 
 - `allow` permits overlapping executions;
 - `skip_if_running` records a visible skipped execution;
@@ -125,9 +139,9 @@ with an operator warning.
 | Campaign logic | `hf-service/src/scheduler.rs` (`CampaignParams`, dispatcher, `CampaignScheduler`) |
 | Target set | `container.rs::schedulable_targets` (`SchedulableTarget` gains `fit_score`) |
 | CLI | `hf-cli`: `schedule create --target ""` (empty = portfolio), `--max-runs`, `--max-total-secs` |
-| Web | `hf-web`: `POST /schedule` (target optional + budget), `GET/POST /schedule/concurrency` |
-| Tauri | `commands.rs`: `schedule_create` (target `Option`, budget), `schedule_concurrency_get/set`; notifier bound in `lib.rs` setup |
-| GUI | Automation view: folder picker, scope toggle (all/single), budget inputs, header concurrency control, per-campaign progress; `campaign:crash` toaster in `App.tsx` |
+| Web | `hf-web`: `POST /schedule` (target optional + budget), `GET/POST /schedule/concurrency`, `GET /schedule/concurrency/limits` |
+| Tauri | `commands.rs`: `schedule_create` (target `Option`, budget), `schedule_concurrency_get/set/limits`; notifier bound in `lib.rs` setup |
+| GUI | Automation view: folder picker, scope toggle (all/single), budget inputs, editable active-campaign cap plus read-only dispatch/effective limits, per-campaign progress; `campaign:crash` toaster in `App.tsx` |
 
 ## Non-goals
 

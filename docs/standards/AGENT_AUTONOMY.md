@@ -38,3 +38,17 @@ Mandatory gates (user must approve):
 - Before writing a harness into the target project (vs. `fuzz_workspace/`).
 - Before any action that the service-owned guardrail policy classifies as
   requiring approval. Guardrail policy is not currently user-editable.
+
+## 5. Automotive Operations
+
+An agent may propose offline capture analysis, deterministic mutations, state
+interpretation, or a replay plan. It may not enable the automotive subsystem,
+claim an unavailable adapter capability, choose an unallowlisted interface,
+increase service-resolved limits, or manufacture approval evidence.
+
+Offline planning remains `Draft`; virtual-CAN execution is at most
+`Supervised`. Every physical-bench operation pauses for fresh human approval
+after the exact protocol, replay-plan digest, interface, allowlists, rate, and
+duration are known. Physical approval cannot be inherited from a prior plan or
+granted by `Autonomous` mode. Dangerous diagnostic services remain denied when
+the policy does not model an explicit approval path.

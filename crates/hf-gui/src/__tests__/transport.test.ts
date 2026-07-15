@@ -343,6 +343,92 @@ describe("transport", () => {
     }
   });
 
+  it("maps typed policy and integration settings without wrapping patch bodies", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const patch = { verify_tls: false, api_token: { operation: "clear" } };
+      await transport.invoke("get_fuzzing_settings");
+      await transport.invoke("get_defectdojo_config");
+      await transport.invoke("patch_defectdojo_config", { patch });
+      await transport.invoke("get_issue_tracker_config");
+      await transport.invoke("patch_issue_tracker_config", { patch });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        "http://localhost:8081/config/fuzzing",
+        "http://localhost:8081/config/defectdojo",
+        "http://localhost:8081/config/defectdojo",
+        "http://localhost:8081/config/issue-tracker",
+        "http://localhost:8081/config/issue-tracker",
+      ]);
+      expect(calls.map((call) => call.init.method)).toEqual(["GET", "GET", "PATCH", "GET", "PATCH"]);
+      expect(JSON.parse(String(calls[2].init.body))).toEqual(patch);
+      expect(JSON.parse(String(calls[4].init.body))).toEqual(patch);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("maps typed automotive commands and top-level Tauri arguments to web routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const settings = { enabled: false };
+      await transport.invoke("get_automotive_settings");
+      await transport.invoke("set_automotive_settings", { settings });
+      await transport.invoke("automotive_capabilities", { projectRoot: "/tmp/project" });
+      await transport.invoke("automotive_analyze_capture", {
+        projectRoot: "/tmp/project",
+        protocol: "uds",
+        capturePath: "/tmp/capture.pcap",
+      });
+      await transport.invoke("list_automotive_operations", {
+        projectRoot: "/tmp/project",
+        limit: 25,
+      });
+
+      expect(calls.map((call) => [call.init.method, call.url])).toEqual([
+        ["GET", "http://localhost:8081/config/automotive"],
+        ["PUT", "http://localhost:8081/config/automotive"],
+        ["POST", "http://localhost:8081/automotive/capabilities"],
+        ["POST", "http://localhost:8081/automotive/analyze-capture"],
+        [
+          "GET",
+          "http://localhost:8081/automotive/operations?project_root=%2Ftmp%2Fproject&limit=25",
+        ],
+      ]);
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ settings });
+      expect(JSON.parse(String(calls[2].init.body))).toEqual({
+        project_root: "/tmp/project",
+      });
+      expect(JSON.parse(String(calls[3].init.body))).toEqual({
+        project_root: "/tmp/project",
+        protocol: "uds",
+        capture_path: "/tmp/capture.pcap",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps report draft commands to the web API", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;
@@ -481,6 +567,38 @@ describe("transport", () => {
       await transport.invoke("diagnostics_cost_summary");
       expect(calls[0].url).toBe("http://localhost:8081/diagnostics/cost");
       expect(calls[0].init.method).toBe("GET");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("loads the independently enforced scheduler concurrency limits", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(
+        JSON.stringify({
+          active_fuzz_campaign_limit: 4,
+          scheduler_workflow_dispatch_limit: 2,
+          effective_max_concurrent_fuzz_runs: 2,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      const limits = await transport.invoke("schedule_concurrency_limits");
+
+      expect(limits).toEqual({
+        active_fuzz_campaign_limit: 4,
+        scheduler_workflow_dispatch_limit: 2,
+        effective_max_concurrent_fuzz_runs: 2,
+      });
+      expect(calls[0].url).toBe("http://localhost:8081/schedule/concurrency/limits");
+      expect(calls[0].init.method).toBe("GET");
+      expect(calls[0].init.body).toBeUndefined();
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -5,9 +5,9 @@
 import { useEffect, useState } from "react";
 import { Copy, Wand2 } from "lucide-react";
 import { getTransport } from "../../lib";
-import { usePrefs } from "../../providers/PrefsContext";
-import { useI18n, LOCALES } from "../../i18n";
-import { useToast } from "../ui/Toast";
+import { usePrefs } from "../../providers/prefs";
+import { LOCALES, useI18n } from "../../i18nContext";
+import { useToast } from "../ui/toastContext";
 import { Button, Input, Select, Switch } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
