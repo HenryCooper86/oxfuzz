@@ -214,6 +214,10 @@ pub fn build_exec_args_with(
         format!("--cpus={}", limits.max_cpus),
     ];
 
+    if let Some(bytes) = opts.max_file_size_bytes {
+        args.push(format!("--ulimit=fsize={bytes}:{bytes}"));
+    }
+
     // Target platform for the image (e.g. an arm64 host running a linux/amd64
     // syzkaller image under emulation).
     if let Some(platform) = &opts.platform {
