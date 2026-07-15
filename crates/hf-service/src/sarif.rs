@@ -6,7 +6,104 @@
 //! `security-severity` score (the 0-10 value `GitHub` uses to rank findings),
 //! derived from the crash kind and CASR's exploitability classification.
 
+use std::path::Path;
+
 use hf_core::crash::{Crash, CrashKind, CrashSeverity};
+use hf_core::engine::{EngineKind, FuzzProgress};
+use hf_core::error::ClassifiedError;
+use hf_guardrails::Guardrails;
+
+use crate::container::ServiceContainer;
+
+/// Input for the service-owned CI fuzzing gate.
+#[derive(Debug, Clone)]
+pub struct CiGateRequest<'a> {
+    /// Project whose promoted harness is executed.
+    pub project: &'a Path,
+    /// Promoted target symbol.
+    pub target: &'a str,
+    /// Fuzzing engine selected for this gate.
+    pub engine: EngineKind,
+    /// Bounded fuzz duration in seconds.
+    pub duration_secs: u64,
+}
+
+/// Presentation-safe crash summary emitted by a CI gate.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CiGateFinding {
+    /// Crash category rendered without exposing domain-crate types.
+    pub kind: String,
+    /// Human-readable triage summary.
+    pub summary: String,
+}
+
+/// Complete CI-gate result. SARIF is returned even when no crash is present so
+/// scanners can clear stale alerts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CiGateOutcome {
+    /// Triaged findings that decide the gate.
+    pub findings: Vec<CiGateFinding>,
+    /// Serialized SARIF 2.1.0 document.
+    pub sarif: String,
+    /// Non-fatal seed-generation warning, if seed enrichment failed.
+    pub seed_warning: Option<String>,
+}
+
+impl CiGateOutcome {
+    /// Whether the gate found no crashing inputs.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+impl ServiceContainer {
+    /// Run the non-interactive CI fuzzing gate under an operation-local
+    /// permissive guardrail policy.
+    ///
+    /// The normal promoted-harness and sandbox requirements remain enforced by
+    /// [`ServiceContainer::run_fuzzer`]. Only interactive approval is waived;
+    /// no process-global environment is changed.
+    ///
+    /// # Errors
+    /// Returns a classified service error if the fuzz run, triage, or SARIF
+    /// export fails.
+    pub async fn run_ci_gate(
+        &self,
+        request: CiGateRequest<'_>,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<CiGateOutcome, ClassifiedError> {
+        let ci = self.clone().with_guardrails(Guardrails::permissive());
+        let seed_warning = ci
+            .generate_seeds(request.project, request.target)
+            .await
+            .err()
+            .map(|error| error.to_string());
+
+        ci.run_fuzzer(
+            request.project,
+            request.target,
+            request.engine,
+            request.duration_secs,
+            on_progress,
+        )
+        .await?;
+        let crashes = ci.triage(request.project, request.target).await?;
+        let sarif = ci.export_sarif(request.project, request.target).await?;
+        let findings = crashes
+            .into_iter()
+            .map(|crash| CiGateFinding {
+                kind: format!("{:?}", crash.kind),
+                summary: crash.summary,
+            })
+            .collect();
+        Ok(CiGateOutcome {
+            findings,
+            sarif,
+            seed_warning,
+        })
+    }
+}
 
 /// A CWE classification for a crash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

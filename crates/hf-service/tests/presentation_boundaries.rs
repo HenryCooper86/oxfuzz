@@ -21,3 +21,20 @@ fn presentations_depend_on_internal_logic_only_through_service() {
         }
     }
 }
+
+#[test]
+fn cli_ci_gate_delegates_without_process_global_guardrail_mutation() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let cli = std::fs::read_to_string(crates_dir.join("hf-cli/src/main.rs")).unwrap();
+
+    assert!(
+        cli.contains("run_ci_gate"),
+        "CLI CI command must delegate orchestration to hf-service"
+    );
+    assert!(
+        !cli.contains("set_var(\"HF_GUARDRAILS\""),
+        "CLI must not mutate process-global guardrail configuration"
+    );
+}

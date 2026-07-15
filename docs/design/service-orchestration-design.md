@@ -28,6 +28,16 @@ dashboard DTO with state, score, blockers, and detail text instead of
 re-deriving readiness from raw counts. This keeps REST, Tauri, CLI, and future
 surfaces aligned on the same operational status.
 
+### 3.1 CI Gate Ownership
+
+The non-interactive CI pipeline is a service operation. `hf-service` selects an
+explicit permissive guardrail instance for that operation, requires an already
+smoke-qualified and human-promoted harness, attempts seed generation, runs the
+bounded campaign, triages its artifacts, and always produces SARIF. The CLI
+only parses input, renders progress/outcome, writes the service-produced SARIF
+to the requested destination, and chooses its process exit status. It never
+mutates process-global guardrail environment variables.
+
 ## 4. Orchestration Flow
 
 1. `discover` -> `TargetInventory` persisted; HITL selects targets.
