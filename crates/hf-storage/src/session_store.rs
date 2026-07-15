@@ -545,20 +545,20 @@ fn str_to_state(s: &str) -> Result<SessionState, SessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::StorageConfig;
-    use crate::migration::run_embedded_migrations;
-    use crate::pool::create_pool;
+    use crate::Store;
 
-    async fn setup() -> SqliteSessionStore {
-        let config = StorageConfig::in_memory();
-        let pool = create_pool(&config).await.unwrap();
-        run_embedded_migrations(&pool).await.unwrap();
-        SqliteSessionStore::new(pool)
+    async fn setup() -> (tempfile::TempDir, SqliteSessionStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::connect(dir.path().join("sessions.db"))
+            .await
+            .unwrap();
+        let session_store = SqliteSessionStore::new(store.pool().clone());
+        (dir, session_store)
     }
 
     #[tokio::test]
     async fn test_session_create_root() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let node = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -578,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_create_child() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let parent = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -607,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_create_branch() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let main = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -634,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_get_by_id() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let created = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -652,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_get_not_found() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let result = store.get(&SessionId::from_string("nonexistent")).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SessionError::NotFound { .. }));
@@ -660,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_list_by_state() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let s1 = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -697,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_list_by_agent() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let agent = AgentId::from_string("agent-1");
         let _s1 = store
             .create(CreateSessionOptions {
@@ -732,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_set_state() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let session = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -754,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_update_metadata() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let session = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -778,7 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_children() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let parent = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -815,7 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_ancestors() {
-        let store = setup().await;
+        let (_database, store) = setup().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,

@@ -8,18 +8,14 @@
 mod store;
 
 pub mod checkpoint_store;
-pub mod config;
-mod error;
-pub mod migration;
-pub mod pool;
 pub mod session_store;
 pub mod transcript;
 pub mod transcript_display;
 
 pub use checkpoint_store::SqliteChatCheckpointStore;
-pub use config::StorageConfig;
-pub use pool::create_pool;
 pub use session_store::SqliteSessionStore;
-pub use store::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, StorageError, Store};
+pub use store::{
+    AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError, Store,
+};
 pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;

@@ -210,6 +210,9 @@ enum Commands {
     },
     /// Start the web server (REST API).
     Serve {
+        /// IP address to listen on. Non-loopback addresses require `HF_WEB_TOKEN`.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
         /// Port to listen on.
         #[arg(long, default_value = "8081")]
         port: u16,
@@ -398,6 +401,7 @@ async fn cmd_agent(
                 session: None,
                 history_fallback: Vec::new(),
                 message: message.to_owned(),
+                display_message: None,
             },
             &sink,
         )
@@ -547,7 +551,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
 async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     match op {
-        SessionOp::New { title } => match container.create_chat_session(title).await {
+        SessionOp::New { title } => match container.create_chat_session(title).await? {
             Some(id) => println!("{id}"),
             None => {
                 println!("No database configured (set HF_DB_PATH); cannot persist sessions.");
@@ -555,25 +559,25 @@ async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
         },
         SessionOp::History { id } => {
             let sid = SessionId(id);
-            for m in container.chat_history(&sid).await {
+            for m in container.chat_history(&sid).await? {
                 println!("[{:?}] {}", m.role, m.content);
             }
         }
         SessionOp::Checkpoints { id } => {
             let sid = SessionId(id);
-            for c in container.chat_checkpoints(&sid).await {
+            for c in container.chat_checkpoints(&sid).await? {
                 println!("{c:?}");
             }
         }
         SessionOp::Branches { id } => {
             let sid = SessionId(id);
-            for b in container.chat_branches(&sid).await {
+            for b in container.chat_branches(&sid).await? {
                 println!("{b:?}");
             }
         }
         SessionOp::Rollback { id } => {
             let sid = SessionId(id);
-            let n = container.chat_rollback_last(&sid).await;
+            let n = container.chat_rollback_last(&sid).await?;
             println!("Rolled back {n} message(s).");
         }
     }
@@ -709,7 +713,7 @@ async fn cmd_run(
     let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
     // Ensure a seed corpus exists before running. A failure here is not fatal
     // (the engine can still run on an empty corpus) but must not be silent.
-    if let Err(e) = container.generate_seeds(&project, target) {
+    if let Err(e) = container.generate_seeds(&project, target).await {
         eprintln!("warning: could not generate seed corpus: {e}");
     }
 
@@ -797,7 +801,7 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             println!("Corpus now has {n} entries.");
         }
         "prune" => {
-            let n = container.corpus_prune(&project, target)?;
+            let n = container.corpus_prune(&project, target).await?;
             println!("Pruned to {n} entries.");
         }
         "cprune" => {
@@ -883,7 +887,7 @@ async fn cmd_ci(
     let container = ServiceContainer::bootstrap().await;
 
     println!("[ci] requiring a previously smoke-qualified and promoted harness for {target}...");
-    if let Err(e) = container.generate_seeds(&project, target) {
+    if let Err(e) = container.generate_seeds(&project, target).await {
         eprintln!("[ci] warning: seed generation failed: {e}");
     }
 
@@ -985,14 +989,20 @@ async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let still = results.iter().filter(|r| r.still_crashes).count();
+    let fixed = results
+        .iter()
+        .filter(|r| r.verified && !r.still_crashes)
+        .count();
+    let inconclusive = results.iter().filter(|r| !r.verified).count();
     println!(
-        "Replayed {} crash(es): {still} still crashing, {} fixed.",
+        "Replayed {} crash(es): {still} still crashing, {fixed} fixed, {inconclusive} inconclusive.",
         results.len(),
-        results.len() - still
     );
     for r in &results {
         let tag = if r.still_crashes {
             "STILL CRASHES"
+        } else if !r.verified {
+            "INCONCLUSIVE"
         } else {
             "fixed"
         };
@@ -1022,13 +1032,14 @@ async fn cmd_campaign(
         .run_campaign(&project, target, engine, lang, duration_secs, 2, iterations)
         .await?;
     println!(
-        "target={} harness={:?} repairs={} iterations={} edges={} crashes={}",
+        "target={} harness={:?} repairs={} iterations={} edges={} crashes={} termination={:?}",
         outcome.target,
         outcome.harness_status,
         outcome.repairs_used,
         outcome.iterations,
         outcome.edges,
-        outcome.crashes
+        outcome.crashes,
+        outcome.termination
     );
     Ok(())
 }
@@ -1148,11 +1159,13 @@ async fn main() -> anyhow::Result<()> {
             target,
             out,
         } => cmd_report(project, &target, out.as_deref()).await?,
-        Commands::Serve { port } => {
-            let app = hf_web::build_bootstrapped().await;
-            let addr = format!("0.0.0.0:{port}");
+        Commands::Serve { host, port } => {
+            let security = hf_web::WebSecurityConfig::from_env();
+            let addr = std::net::SocketAddr::new(host, port);
+            hf_web::validate_bind_addr(addr, security.token_configured())?;
+            let app = hf_web::build_bootstrapped_with_security(security).await;
             println!("hobot-fuzz web server listening on http://{addr}");
-            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;
         }
         Commands::Tui { project } => {

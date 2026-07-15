@@ -5,16 +5,15 @@
 //! chokepoint that sees the model + token usage of each response. The bridge
 //! reports each call here, where it is recorded as a diagnostics trace +
 //! generation observation (with cost computed from the configured per-model
-//! price). The GUI surfaces the aggregated session cost.
-//!
-//! The store is in-memory, so totals cover the current app session.
+//! price). The GUI surfaces the aggregated cost for the recorder's session,
+//! regardless of whether the backing store is ephemeral or persistent.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use hf_core::types::TokenUsage;
 use hf_diagnostics::types::{Observation, ObservationType, Trace};
-use hf_diagnostics::{InMemoryTraceStore, TraceStore};
+use hf_diagnostics::{InMemoryTraceStore, TraceStore, TraceStoreError};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -41,6 +40,14 @@ pub struct CostSummary {
     pub by_model: Vec<ModelCost>,
 }
 
+/// Failures while reading diagnostics aggregates.
+#[derive(Debug, thiserror::Error)]
+pub enum DiagnosticsError {
+    /// The backing trace store could not serve the summary query.
+    #[error("diagnostics store query failed: {0}")]
+    Store(#[from] TraceStoreError),
+}
+
 /// Records LLM generations as diagnostics traces and aggregates their cost.
 pub struct DiagnosticsRecorder {
     store: SharedTraceStore,
@@ -56,9 +63,10 @@ impl DiagnosticsRecorder {
         Self::with_store(costs, Arc::new(InMemoryTraceStore::new()))
     }
 
-    /// Build a recorder backed by a specific (e.g. `SQLite`) trace store, so
-    /// cost/usage persists across restarts. `summary` aggregates every trace in
-    /// the store -- i.e. cumulative across sessions when persisted.
+    /// Build a recorder backed by a specific (e.g. `SQLite`) trace store.
+    ///
+    /// Traces persist across restarts, while [`Self::summary`] remains scoped
+    /// to the fresh session identifier assigned to this recorder.
     #[must_use]
     pub fn with_store(costs: HashMap<String, (f64, f64)>, store: SharedTraceStore) -> Self {
         Self {
@@ -97,38 +105,35 @@ impl DiagnosticsRecorder {
     }
 
     /// Aggregate cost/usage across every recorded generation this session.
-    pub async fn summary(&self) -> CostSummary {
+    ///
+    /// Store failures are returned so callers do not mistake an observability
+    /// outage for a valid zero-cost session.
+    pub async fn summary(&self) -> Result<CostSummary, DiagnosticsError> {
         let traces = self
             .store
-            .list_traces(None, None, 100_000)
-            .await
-            .unwrap_or_default();
+            .list_traces_by_session(&self.session_id.to_string(), 100_000)
+            .await?;
+        let trace_ids = traces.iter().map(|trace| trace.id).collect::<Vec<_>>();
+        let observations = self.store.get_observations_by_trace_ids(&trace_ids).await?;
         let mut total = CostSummary::default();
         let mut by_model: HashMap<String, ModelCost> = HashMap::new();
-        for trace in traces {
-            let observations = self
-                .store
-                .get_observations(trace.id)
-                .await
-                .unwrap_or_default();
-            for obs in observations
-                .into_iter()
-                .filter(|o| o.obs_type == ObservationType::Generation)
-            {
-                total.calls += 1;
-                total.input_tokens += obs.input_tokens;
-                total.output_tokens += obs.output_tokens;
-                total.cost_usd += obs.cost_usd;
-                let model = obs.model.clone().unwrap_or_else(|| "unknown".to_owned());
-                let entry = by_model.entry(model.clone()).or_insert(ModelCost {
-                    model,
-                    ..ModelCost::default()
-                });
-                entry.calls += 1;
-                entry.input_tokens += obs.input_tokens;
-                entry.output_tokens += obs.output_tokens;
-                entry.cost_usd += obs.cost_usd;
-            }
+        for obs in observations
+            .into_iter()
+            .filter(|obs| obs.obs_type == ObservationType::Generation)
+        {
+            total.calls += 1;
+            total.input_tokens += obs.input_tokens;
+            total.output_tokens += obs.output_tokens;
+            total.cost_usd += obs.cost_usd;
+            let model = obs.model.unwrap_or_else(|| "unknown".to_owned());
+            let entry = by_model.entry(model.clone()).or_insert(ModelCost {
+                model,
+                ..ModelCost::default()
+            });
+            entry.calls += 1;
+            entry.input_tokens += obs.input_tokens;
+            entry.output_tokens += obs.output_tokens;
+            entry.cost_usd += obs.cost_usd;
         }
         total.by_model = by_model.into_values().collect();
         total.by_model.sort_by(|a, b| {
@@ -136,7 +141,7 @@ impl DiagnosticsRecorder {
                 .total_cmp(&a.cost_usd)
                 .then(b.calls.cmp(&a.calls))
         });
-        total
+        Ok(total)
     }
 }
 
@@ -162,7 +167,7 @@ mod tests {
         rec.record("triage", "gpt", &usage(2000, 1000)).await;
         rec.record("chat", "free-model", &usage(500, 500)).await;
 
-        let s = rec.summary().await;
+        let s = rec.summary().await.expect("summary");
         assert_eq!(s.calls, 3);
         assert_eq!(s.input_tokens, 3500);
         assert_eq!(s.output_tokens, 2000);
@@ -176,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn empty_summary_is_zero() {
         let rec = DiagnosticsRecorder::new(HashMap::new());
-        let s = rec.summary().await;
+        let s = rec.summary().await.expect("summary");
         assert_eq!(s.calls, 0);
         assert!(s.by_model.is_empty());
     }

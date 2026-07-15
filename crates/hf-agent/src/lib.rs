@@ -174,32 +174,22 @@ impl Agent {
     }
 
     fn system_prompt(&self) -> String {
-        let project = self
-            .project
-            .as_ref()
-            .map_or_else(|| "(none selected)".to_owned(), |p| p.display().to_string());
         let catalog = tools::catalog_for(&self.definition.allowed_tools);
         // Inject the playbooks the agent references. Built-in skills are always
         // available; user skills come from the repo's `skills/` directory.
-        let skills_block = if self.definition.skills.is_empty() {
-            String::new()
+        let skills = if self.definition.skills.is_empty() {
+            None
         } else {
             let registry = hf_skills::SkillRegistry::with_user_dir(self.backend.skills_dir());
-            registry
-                .render(&self.definition.skills)
-                .map(|s| format!("{s}\n\n"))
-                .unwrap_or_default()
+            registry.render(&self.definition.skills)
         };
-        format!(
-            "{role}\n\nThe active project is: {project}.\n\n{skills_block}{catalog}\n{inspection}\n\n\
-Respond with EXACTLY ONE JSON object and nothing else:\n\
-- To call a tool: {{\"thought\":\"<brief reasoning>\",\"tool\":\"<name>\",\"args\":{{...}}}}\n\
-- To answer the user: {{\"thought\":\"<brief reasoning>\",\"final\":\"<answer>\"}}\n\
-Do not wrap the JSON in code fences or add prose around it. After a tool runs \
-you receive its result and continue until you can give a final answer.",
-            role = self.definition.system_prompt.trim(),
-            inspection = agent_tools::INSPECTION_CATALOG,
-        )
+        hf_prompt::build_agent_system_prompt(hf_prompt::AgentPromptInput {
+            role_prompt: &self.definition.system_prompt,
+            project_workspace: self.project.as_deref(),
+            skills: skills.as_deref(),
+            tool_catalog: &catalog,
+            inspection_catalog: agent_tools::INSPECTION_CATALOG,
+        })
     }
 
     /// Run one agent turn: reason, optionally call tools, and produce a final

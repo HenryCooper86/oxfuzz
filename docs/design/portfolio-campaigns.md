@@ -33,21 +33,29 @@ loads unchanged:
 
 Rotation cursor and budget consumption live in `campaign_state.json` beside
 `schedules.json`, via `campaign_state::CampaignStateStore`. **This is deliberate.**
-`hf-storage`'s migration gate archives-and-recreates the whole database when a
-`REQUIRED_TABLES` entry is missing (`migration.rs::schema_shape_matches`), so
-adding a `campaign_state` table would wipe every existing user's
-targets/harnesses/runs/crashes on the next launch. State only the scheduler owns
-has no business forcing that risk on everything else.
+The state is private to the scheduler and is updated atomically with its
+schedule definitions, so storing it alongside those definitions keeps one
+durability boundary. Shared application data remains in `hf-storage`, whose
+single `Store::connect` initializer applies forward-only SQL migrations without
+archiving a user's database.
 
-`record_run` advances the cursor + budget; it is called **only on a real fuzz
-attempt**, never on a skipped fire, so both stay honest across restarts.
+`record_success` advances the target cursor once after a successful campaign
+outcome, adds every completed fuzz iteration to `runs_done`, and adds measured
+wall-clock campaign work to `secs_done`. Failed attempts and skipped fires do not
+consume the success budget.
+
+Both `campaign_state.json` and `schedules.json` use same-directory temporary
+files, file `fsync`, atomic replacement, and parent-directory `fsync`. A missing
+file is an empty initial state; an unreadable or corrupt existing file is a
+startup error and is preserved for recovery instead of silently resetting
+budgets or schedules.
 
 ## Each fire (`FuzzCampaignDispatcher::dispatch`)
 
 1. **Budget.** Spent -> record one skip, pause the schedule (via a `Weak<SchedulerManager>`, fire-and-forget so it cannot re-enter the store lock), return.
 2. **Concurrency.** `ConcurrencyGate::try_enter` (a resizable CAS-guarded counter). Full -> skip this fire. Skipped, never queued: a short interval over long runs would otherwise pile up unbounded background work.
 3. **Rotate.** `schedulable_targets(project)` -> `priority_order` (highest `fit_score` first) -> `rotate(cursor)` picks this fire's target. A single-target campaign narrows to its one target first.
-4. **Run** one promoted target through `run_campaign` (engine + language from the harness, never a guess), then `record_run` advances state on any real attempt.
+4. **Run** one promoted target through `run_campaign` (engine + language from the harness, never a guess), then atomically record the successful outcome's actual iterations and measured duration. A failed outcome leaves budget state unchanged.
 5. **On crashes:** best-effort auto-report (a "Needs Review" report draft), DefectDojo push if configured, and a `CampaignNotice` to the notifier. Failures here are logged, never fatal.
 
 The pure pieces -- `priority_order`, `rotate`, `budget_skip_reason`, the state
@@ -62,6 +70,24 @@ surface are integration-tested.
   shell only has an `AppHandle` to emit with *after* the scheduler is built, so
   it calls `set_notifier` in Tauri `setup()` to emit `campaign:crash`. CLI/web
   pass `None`. Mirrors the DefectDojo autostart `on_status` pattern.
+
+## Restart and shutdown durability
+
+Every changed `Schedule`, including `last_fire`, is written back to
+`schedules.json`. Existing installations whose schedule definitions predate
+that cursor are repaired once from persisted execution history before recovery
+is planned.
+
+Recovery creates compact batches rather than filling the trigger channel before
+its receiver exists. `Skip` advances to the latest due occurrence without
+dispatching, `CatchUp` queues one occurrence, and `Backfill` lazily submits every
+missed occurrence through the bounded channel. Backfills serialize per schedule;
+the scheduler-wide semaphore bounds active workflow execution.
+
+The scheduler retains every spawned workflow task. `stop` first stops trigger
+production and queue consumption, then aborts and joins active campaign tasks and
+reconciles their execution records from `Running` to `Failed`. The service-level
+`CampaignScheduler::stop` exposes this lifecycle boundary.
 
 ## Layering (AGENTS.md 2.9 -- all logic in hf-service)
 

@@ -89,18 +89,18 @@ mod tests {
     use super::*;
     use hf_core::session::{CreateSessionOptions, SessionType};
 
-    async fn setup_store() -> hf_storage::SqliteSessionStore {
-        let config = hf_storage::StorageConfig::in_memory();
-        let pool = hf_storage::create_pool(&config).await.unwrap();
-        hf_storage::migration::run_embedded_migrations(&pool)
+    async fn setup_store() -> (tempfile::TempDir, hf_storage::SqliteSessionStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = hf_storage::Store::connect(dir.path().join("sessions.db"))
             .await
             .unwrap();
-        hf_storage::SqliteSessionStore::new(pool)
+        let session_store = hf_storage::SqliteSessionStore::new(store.pool().clone());
+        (dir, session_store)
     }
 
     #[tokio::test]
     async fn test_find_root_from_child() {
-        let store = setup_store().await;
+        let (_database, store) = setup_store().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -127,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_root_from_root() {
-        let store = setup_store().await;
+        let (_database, store) = setup_store().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -144,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_to_root() {
-        let store = setup_store().await;
+        let (_database, store) = setup_store().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -186,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_leaves() {
-        let store = setup_store().await;
+        let (_database, store) = setup_store().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -235,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subtree_size() {
-        let store = setup_store().await;
+        let (_database, store) = setup_store().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,
@@ -272,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_depth() {
-        let store = setup_store().await;
+        let (_database, store) = setup_store().await;
         let root = store
             .create(CreateSessionOptions {
                 parent_id: None,

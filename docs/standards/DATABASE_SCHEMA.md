@@ -22,10 +22,15 @@ preserving full-fidelity round-trips as the models evolve.
 | id | TEXT (uuid) | PK |
 | project_root | TEXT | |
 | engine | TEXT | |
-| status | TEXT | pending/running/done/failed |
+| status | TEXT | pending/running/done/failed/cancelled |
 | started_at | TEXT | ISO8601 |
 | ended_at | TEXT | nullable |
 | config_json | TEXT | FuzzRunConfig |
+| run_kind | TEXT | campaign/smoke; defaults to campaign for legacy rows |
+| harness_rev | TEXT | nullable full SHA-256 of approved source |
+| binary_rev | TEXT | nullable full SHA-256 of staged executable |
+| evidence_dir | TEXT | nullable workspace-relative run output directory |
+| context_rev | TEXT | nullable SHA-256 of target sources, starting corpus, and runtime image |
 
 ### targets
 | column | type | notes |
@@ -69,6 +74,12 @@ preserving full-fidelity round-trips as the models evolve.
 | size | INTEGER | |
 | source | TEXT | seed/fuzzer/minimized/manual |
 | coverage_hash | TEXT | nullable |
+
+Corpus persistence is reconciled transactionally per target: rows absent from
+the latest on-disk snapshot are deleted, while retained rows keep their known
+source and coverage metadata when a filesystem rescan can only classify them as
+manual. Single-entry deletion is keyed by both `target_id` and `sha256`; a
+matching hash owned by another target is never deleted implicitly.
 
 ## 3. Migrations
 

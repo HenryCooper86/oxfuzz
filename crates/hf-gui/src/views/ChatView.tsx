@@ -9,13 +9,16 @@ import { useProject } from "../providers/ProjectContext";
 import { usePrefs } from "../providers/PrefsContext";
 import { useI18n } from "../i18n";
 import { useRunOutput } from "../providers/RunOutputContext";
-import { applyMode, normalizeAssistantContent, normalizeChatRole, type ChatMode } from "./chatHelpers";
+import {
+  applyMode,
+  normalizeAssistantContent,
+  toCanonicalChatMessages,
+  type CanonicalChatMessage,
+  type CanonicalChatTurn,
+  type ChatMode,
+} from "./chatHelpers";
 
-interface ChatMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-  timestamp: string;
-}
+type ChatMessage = CanonicalChatMessage;
 
 interface ModelInfo {
   id: string;
@@ -56,6 +59,11 @@ function setProjectSession(projectKey: string, sessionId: string | null) {
   } catch {
     /* ignore quota / private-mode errors */
   }
+}
+
+async function loadCanonicalHistory(sessionId: string): Promise<ChatMessage[]> {
+  const turns = await getTransport().invoke<CanonicalChatTurn[]>("chat_history", { sessionId });
+  return toCanonicalChatMessages(turns);
 }
 
 // A pending guardrail approval request (mirrors the backend payload).
@@ -163,39 +171,28 @@ export function ChatView() {
       const existing = loadProjectSessions()[projectKey];
       const T = getTransport();
       let id: string | null = existing ?? null;
-      try {
-        if (!id) {
+      let history: ChatMessage[] = [];
+      if (id) {
+        try {
+          history = await loadCanonicalHistory(id);
+        } catch {
+          // The cached id may point at a session deleted by another surface or
+          // a restored database. Forget it before creating a replacement.
+          setProjectSession(projectKey, null);
+          id = null;
+        }
+      }
+      if (!id) {
+        try {
           id = await T.invoke<string | null>("create_session");
           if (id) setProjectSession(projectKey, id);
+        } catch {
+          /* no DB configured; chat still works via replayed history */
         }
-      } catch {
-        /* no DB configured; chat still works via replayed history */
       }
       if (cancelled) return;
       setSessionId(id);
-      // Hydrate the transcript for this project's session (empty for a fresh one).
-      if (id && existing) {
-        try {
-          const hist = await T.invoke<{ role: string; content: string }[]>("chat_history", {
-            sessionId: id,
-          });
-          if (cancelled) return;
-          setMessages(
-            hist.map((turn) => {
-              const role = normalizeChatRole(turn.role);
-              return {
-                role,
-                content: role === "assistant" ? normalizeAssistantContent(turn.content) : turn.content,
-                timestamp: new Date().toISOString(),
-              };
-            }),
-          );
-        } catch {
-          if (!cancelled) setMessages([]);
-        }
-      } else {
-        setMessages([]);
-      }
+      setMessages(history);
     })();
     return () => {
       cancelled = true;
@@ -209,10 +206,17 @@ export function ChatView() {
     if (!(await confirm({ title: t("chat.clearHistoryTitle"), message: t("chat.clearHistoryMessage"), danger: true, confirmLabel: t("common.clear") }))) return;
     const projectKey = activeProject || "";
     const T = getTransport();
-    try {
-      if (sessionId) await T.invoke("delete_session", { sessionId });
-    } catch {
-      /* best-effort; still reset locally */
+    if (sessionId) {
+      try {
+        await T.invoke("delete_session", { sessionId });
+      } catch (error) {
+        toast({
+          title: t("chat.clearHistoryTitle"),
+          description: String(error),
+          variant: "error",
+        });
+        return;
+      }
     }
     setProjectSession(projectKey, null);
     setMessages([]);
@@ -223,7 +227,7 @@ export function ChatView() {
     } catch {
       setSessionId(null);
     }
-  }, [busy, activeProject, sessionId, confirm]);
+  }, [busy, activeProject, sessionId, confirm, toast, t]);
 
   // Populate the model selector from the actually-configured provider pool
   // (config/providers.toml). The chat uses that config, so the dropdown must
@@ -323,10 +327,11 @@ export function ChatView() {
     if (sessionId) {
       try {
         await getTransport().invoke("chat_rollback", { sessionId });
+        setMessages(await loadCanonicalHistory(sessionId));
       } catch (e) {
-        // The local undo still happens below; note the backend didn't persist it.
         toast({ title: t("chat.rollbackNotSaved"), description: String(e), variant: "error" });
       }
+      return;
     }
     setMessages((m) => m.slice(0, -2));
   }
@@ -348,11 +353,11 @@ export function ChatView() {
     if (sessionId) {
       try {
         await getTransport().invoke("chat_rollback_to", { sessionId, checkpointId: cp.checkpoint_id });
+        setMessages(await loadCanonicalHistory(sessionId));
       } catch (e) {
         toast({ title: t("chat.rollbackNotSaved"), description: String(e), variant: "error" });
       }
     }
-    setMessages((m) => m.slice(0, cp.message_count_before));
   }
 
   // Fork the current conversation into a new branch and switch to it. The
@@ -360,12 +365,15 @@ export function ChatView() {
   async function branchFromHere() {
     if (!sessionId || busy) return;
     try {
-      const id = await getTransport().invoke<string | null>("chat_branch", {
+      const id = await getTransport().invoke<string>("chat_branch", {
         sessionId,
-        forkCount: messages.length,
+        forkCount: messages.filter((message) => message.role !== "system").length,
         title: null,
       });
-      if (id) setSessionId(id);
+      const history = await loadCanonicalHistory(id);
+      setSessionId(id);
+      setProjectSession(activeProject || "", id);
+      setMessages(history);
     } catch (e) {
       toast({ title: t("chat.branchFailed"), description: String(e), variant: "error" });
     }
@@ -387,20 +395,10 @@ export function ChatView() {
     setBranchesOpen(false);
     if (b.active) return;
     try {
-      const hist = await getTransport().invoke<{ role: string; content: string }[]>("chat_history", {
-        sessionId: b.id,
-      });
+      const history = await loadCanonicalHistory(b.id);
       setSessionId(b.id);
-      setMessages(
-        hist.map((t) => {
-          const role = normalizeChatRole(t.role);
-          return {
-            role,
-            content: role === "assistant" ? normalizeAssistantContent(t.content) : t.content,
-            timestamp: new Date().toISOString(),
-          };
-        }),
-      );
+      setProjectSession(activeProject || "", b.id);
+      setMessages(history);
     } catch (e) {
       toast({ title: t("chat.switchBranchFailed"), description: String(e), variant: "error" });
     }
@@ -443,28 +441,55 @@ export function ChatView() {
 
       const responseText = await transport.invoke<string>("chat_agent", {
         message: applyMode(text, mode),
+        displayMessage: text,
         project: activeProject || null,
         history,
         sessionId,
         agentId,
       });
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          content:
-            (responseText ? normalizeAssistantContent(responseText) : "") ||
-            t("chat.noResponse"),
-          timestamp: now(),
-        },
-      ]);
+      if (sessionId) {
+        // The persisted display transcript is authoritative. Reloading also
+        // removes transient tool-progress rows from the visible conversation.
+        setMessages(await loadCanonicalHistory(sessionId));
+      } else {
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content:
+              (responseText ? normalizeAssistantContent(responseText) : "") ||
+              t("chat.noResponse"),
+            timestamp: now(),
+          },
+        ]);
+      }
     } catch (err) {
-      setMessages((m) => [
-        ...m,
+      let canonical: ChatMessage[] | null = null;
+      if (sessionId) {
+        try {
+          canonical = await loadCanonicalHistory(sessionId);
+        } catch {
+          const projectKey = activeProject || "";
+          setProjectSession(projectKey, null);
+          setSessionId(null);
+          try {
+            const replacement = await transport.invoke<string | null>("create_session");
+            setSessionId(replacement);
+            if (replacement) setProjectSession(projectKey, replacement);
+          } catch {
+            /* frontend-only fallback remains available */
+          }
+        }
+      }
+      const errorMessage: ChatMessage = {
+        role: "assistant",
+        content: t("chat.agentError", { error: err instanceof Error ? err.message : String(err) }),
+        timestamp: now(),
+      };
+      setMessages((current) => [
+        ...(canonical ?? current),
         {
-          role: "assistant",
-          content: t("chat.agentError", { error: err instanceof Error ? err.message : String(err) }),
-          timestamp: now(),
+          ...errorMessage,
         },
       ]);
     } finally {

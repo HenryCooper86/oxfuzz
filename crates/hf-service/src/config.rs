@@ -12,19 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::init::config_dir;
 
-/// The editable config sections. Each maps to a `config/<name>.toml` file.
-pub const CONFIG_SECTIONS: &[&str] = &[
-    "hobot-fuzz",
-    "providers",
-    "engines",
-    "runtime",
-    "guardrails",
-    "storage",
-    "session",
-    "tools",
-    "defectdojo",
-    "issue_tracker",
-];
+/// The editable config sections consumed by the production service.
+///
+/// A section must not be added here until service bootstrap or a service-owned
+/// integration loads and applies its typed configuration. This prevents the
+/// settings APIs from accepting files that have no runtime effect.
+pub const CONFIG_SECTIONS: &[&str] = &["hobot-fuzz", "providers", "defectdojo", "issue_tracker"];
 
 /// One editable config section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,12 +268,6 @@ fn bundled_example(section: &str) -> &'static str {
     match section {
         "hobot-fuzz" => include_str!("../../../config/hobot-fuzz.example.toml"),
         "providers" => include_str!("../../../config/providers.example.toml"),
-        "engines" => include_str!("../../../config/engines.example.toml"),
-        "runtime" => include_str!("../../../config/runtime.example.toml"),
-        "guardrails" => include_str!("../../../config/guardrails.example.toml"),
-        "storage" => include_str!("../../../config/storage.example.toml"),
-        "session" => include_str!("../../../config/session.example.toml"),
-        "tools" => include_str!("../../../config/tools.example.toml"),
         "defectdojo" => include_str!("../../../config/defectdojo.example.toml"),
         "issue_tracker" => include_str!("../../../config/issue_tracker.example.toml"),
         _ => "",
@@ -475,6 +462,45 @@ pub fn get_providers() -> Vec<ProviderConfig> {
     toml::from_str::<hf_provider::ProviderPoolConfig>(&raw)
         .map(|c| c.providers)
         .unwrap_or_default()
+}
+
+fn merge_provider_secrets(incoming: &mut [ProviderConfig], existing: &[ProviderConfig]) {
+    let existing: std::collections::HashMap<_, _> = existing
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+    for provider in incoming {
+        let Some(prior) = existing.get(provider.id.as_str()) else {
+            continue;
+        };
+        if provider.api_key.as_deref().is_none_or(str::is_empty) {
+            provider.api_key.clone_from(&prior.api_key);
+        }
+        if provider.api_key_env.as_deref().is_none_or(str::is_empty) {
+            provider.api_key_env.clone_from(&prior.api_key_env);
+        }
+        for (name, value) in &prior.headers {
+            provider
+                .headers
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+}
+
+/// Persist provider edits from a redacted presentation DTO without erasing
+/// existing credentials or secret headers omitted by that DTO.
+///
+/// Trusted local presentations that need to clear a credential explicitly use
+/// [`set_providers`] instead. An explicit non-empty incoming secret replaces the
+/// existing value.
+///
+/// # Errors
+/// Returns an error when the provider config cannot be written.
+pub fn set_providers_preserving_secrets(providers: &[ProviderConfig]) -> Result<(), String> {
+    let mut merged = providers.to_vec();
+    merge_provider_secrets(&mut merged, &get_providers());
+    set_providers(&merged)
 }
 
 /// Quote/escape a value as a TOML basic string.
@@ -753,6 +779,38 @@ cpus = 2\n";
     }
 
     #[test]
+    fn browser_provider_updates_preserve_opaque_secrets() {
+        let parse = |raw: &str| {
+            toml::from_str::<hf_provider::ProviderPoolConfig>(raw)
+                .unwrap()
+                .providers
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let existing = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai\"\nmodel = \"old\"\napi_key = \"secret\"\napi_key_env = \"HF_PROVIDER_KEY\"\n[providers.headers]\nX-Secret = \"hidden\"\n",
+        )];
+        let mut incoming = vec![parse(
+            "[[providers]]\nid = \"primary\"\nprovider_type = \"openai\"\nmodel = \"new\"\napi_key = \"\"\napi_key_env = \"\"\n[providers.headers]\nX-Public = \"new\"\n",
+        )];
+
+        merge_provider_secrets(&mut incoming, &existing);
+
+        assert_eq!(incoming[0].model, "new");
+        assert_eq!(incoming[0].api_key.as_deref(), Some("secret"));
+        assert_eq!(incoming[0].api_key_env.as_deref(), Some("HF_PROVIDER_KEY"));
+        assert_eq!(
+            incoming[0].headers.get("X-Secret").map(String::as_str),
+            Some("hidden")
+        );
+        assert_eq!(
+            incoming[0].headers.get("X-Public").map(String::as_str),
+            Some("new")
+        );
+    }
+
+    #[test]
     fn toml_to_json_empty_is_object() {
         assert_eq!(
             toml_to_json("   ").expect("empty"),
@@ -777,12 +835,71 @@ cpus = 2\n";
     }
 
     #[test]
-    fn embedded_engines_example_exposes_the_engines_array() {
-        // The settings form reads `value.engines`; the fallback must populate it
-        // (this is exactly what the empty-form bug needed).
-        let value = toml_to_json(bundled_example("engines")).expect("valid toml");
-        let engines = value["engines"].as_array().expect("engines array");
-        assert!(!engines.is_empty(), "embedded engines example is empty");
+    fn editable_sections_only_include_runtime_consumed_configuration() {
+        assert_eq!(
+            CONFIG_SECTIONS,
+            ["hobot-fuzz", "providers", "defectdojo", "issue_tracker"]
+        );
+
+        for retired in [
+            "engines",
+            "runtime",
+            "guardrails",
+            "storage",
+            "session",
+            "tools",
+        ] {
+            assert!(
+                validated_section(retired).is_err(),
+                "no-op section '{retired}' must not be editable"
+            );
+        }
+    }
+
+    #[test]
+    fn global_templates_only_document_consumed_settings() {
+        let expected = [
+            "auto_revert_enabled",
+            "auto_revert_notify_only",
+            "auto_revert_threshold_pct",
+            "coverage_stagnation_secs",
+        ];
+
+        for (label, raw) in [
+            ("example", bundled_example("hobot-fuzz")),
+            ("live", include_str!("../../../config/hobot-fuzz.toml")),
+        ] {
+            let value = toml_to_json(raw).expect("global template must be valid TOML");
+            let mut keys = value
+                .as_object()
+                .expect("global template must be a TOML table")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys, expected,
+                "{label} global config advertises no-op keys"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_template_uses_the_production_workspace_override() {
+        let template = include_str!("../../../.env.example");
+        assert!(template.contains("HF_WORKSPACE_DIR="));
+        assert!(!template.contains("HF_FUZZ_WORKSPACE"));
+        for unsupported in [
+            "HF_WEB_PORT",
+            "AFL_FUZZ_BIN",
+            "HONGGFUZZ_BIN",
+            "LIBFUZZER_LINK_FLAGS",
+        ] {
+            assert!(
+                !template.contains(unsupported),
+                "environment template advertises unsupported override {unsupported}"
+            );
+        }
     }
 
     #[test]

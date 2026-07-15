@@ -49,8 +49,11 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
     }
 
     let should_fire = match &schedule.trigger {
-        TriggerConfig::Cron { expression, .. } => {
-            let cron = CronSchedule::new(expression);
+        TriggerConfig::Cron {
+            expression,
+            timezone,
+        } => {
+            let cron = CronSchedule::new(expression).with_timezone(timezone);
             match schedule.last_fire {
                 Some(last) => cron.next_fire(last).is_some_and(|next| next <= now),
                 None => true, // Never fired; fire immediately.
@@ -141,6 +144,32 @@ mod tests {
 
         let result = evaluate_trigger(&schedule, Utc::now());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn trigger_engine_cron_honors_configured_timezone() {
+        use chrono::TimeZone;
+
+        let last_fire = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 2, 0, 0).unwrap();
+        let mut shanghai = Schedule::new(
+            "shanghai",
+            "shanghai",
+            TriggerConfig::Cron {
+                expression: "0 9 * * *".to_owned(),
+                timezone: "Asia/Shanghai".to_owned(),
+            },
+            "wf",
+        );
+        shanghai.last_fire = Some(last_fire);
+        let mut utc = shanghai.clone();
+        utc.id = "utc".to_owned();
+        if let TriggerConfig::Cron { timezone, .. } = &mut utc.trigger {
+            *timezone = "UTC".to_owned();
+        }
+
+        assert!(evaluate_trigger(&shanghai, now).is_some());
+        assert!(evaluate_trigger(&utc, now).is_none());
     }
 
     #[test]

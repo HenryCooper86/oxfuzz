@@ -61,6 +61,37 @@ fn afl_args_have_input_and_output_dirs() {
         joined.contains("/work/fuzz_bin"),
         "AFL++ must include the binary: {joined}"
     );
+    assert_eq!(
+        args.iter()
+            .skip_while(|arg| arg.as_str() != "--")
+            .skip(1)
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["/work/fuzz_bin", "@@"],
+        "AFL++ must use the generated harness's file-input contract"
+    );
+}
+
+#[test]
+fn afl_input_delivery_is_identical_across_lifecycle_builders() {
+    use hf_engine::afl::{build_reproduction_args, build_target_args, build_tmin_args, AflInput};
+
+    let fuzz_target = build_target_args("/work/fuzz_bin", AflInput::FuzzerFile);
+    let replay_target =
+        build_target_args("/work/fuzz_bin", AflInput::ConcreteFile("/work/crash-1"));
+    assert_eq!(fuzz_target, ["/work/fuzz_bin", "@@"]);
+    assert_eq!(
+        replay_target,
+        build_reproduction_args("/work/fuzz_bin", "/work/crash-1")
+    );
+
+    let showmap = hf_engine::showmap::build_showmap_args("/work/fuzz_bin", "/work/crash-1");
+    let showmap_separator = showmap.iter().position(|arg| arg == "--").unwrap();
+    assert_eq!(&showmap[showmap_separator + 1..], replay_target);
+
+    let tmin = build_tmin_args("/work/fuzz_bin", "/work/crash-1", "/work/minimized");
+    let tmin_separator = tmin.iter().position(|arg| arg == "--").unwrap();
+    assert_eq!(&tmin[tmin_separator + 1..], fuzz_target);
 }
 
 #[test]

@@ -114,26 +114,40 @@ This produces (names vary by distro/arch):
    - VM count (start with 1-2)
 3. Set a **Duration** and click **Launch Campaign**.
 
-hobot_fuzz mounts your artifacts into the sandbox container and writes a
-qemu `manager.cfg` for the selected architecture, then runs
+`hobot_fuzz` validates and copies your artifacts into a unique service-owned
+staging directory. It writes a qemu `manager.cfg` for the selected architecture,
+then runs
 `timeout <duration> syz-manager -config=...`. Live coverage / executed / crash
 counts stream to the UI; the raw `syz-manager` log appears below.
+
+The selected rootfs is never mounted writable. Each campaign runs against a
+disposable copy, while the kernel, SSH key, and manager config are mounted
+read-only. The container has no external Docker network and retains the normal
+capability-drop and no-new-privileges policy. On a compatible Linux host,
+`/dev/kvm` is the only additional device passed through.
+
+For host-disk safety, manager configs and SSH keys are limited to 1 MiB,
+kernels to 2 GiB, and rootfs images to 32 GiB. A campaign may grow its combined
+scratch/workdir trees by at most 4 GiB and 100,000 entries. Exceeding either
+limit, or creating a symlink/special entry there, cancels the campaign and
+returns a sandbox error. VM count and manager processes are clamped to four,
+even when a larger value appears in an existing config.
 
 The synthesized config looks like this (arm64 example):
 
 ```json
 {
   "target": "linux/arm64",
-  "http": "0.0.0.0:56741",
+  "http": "127.0.0.1:56741",
   "workdir": "/syzbench/workdir",
-  "image": "/syzbench/rootfs.img",
-  "sshkey": "/syzbench/id_rsa",
+  "image": "/syzbench/scratch/rootfs.img",
+  "sshkey": "/syzbench/inputs/id_rsa",
   "syzkaller": "/opt/syzkaller",
   "procs": 2,
   "type": "qemu",
   "vm": {
     "count": 2,
-    "kernel": "/syzbench/kernel",
+    "kernel": "/syzbench/inputs/kernel",
     "cpu": 2,
     "mem": 2048,
     "qemu_args": "-machine virt,accel=tcg -cpu max"
@@ -143,42 +157,37 @@ The synthesized config looks like this (arm64 example):
 
 Container path mapping (set up automatically):
 
-| Host artifact      | Container path           |
-| ------------------ | ------------------------ |
-| Kernel image       | `/syzbench/kernel` (ro)  |
-| Rootfs disk image  | `/syzbench/rootfs.img`   |
-| SSH key            | `/syzbench/id_rsa` (ro)  |
-| syzkaller toolchain| `/opt/syzkaller`         |
-| Working directory  | `/syzbench/workdir`      |
+| Staged artifact    | Container path                         |
+| ------------------ | -------------------------------------- |
+| Kernel image       | `/syzbench/inputs/kernel` (read-only)  |
+| Rootfs disk copy   | `/syzbench/scratch/rootfs.img`         |
+| SSH key            | `/syzbench/inputs/id_rsa` (read-only)  |
+| Manager config     | `/syzbench/inputs/manager.cfg` (read-only) |
+| syzkaller toolchain| `/opt/syzkaller`                       |
+| Working directory  | `/syzbench/workdir`                    |
 
 ### 4.2 Bring your own manager.cfg (advanced)
 
-If you supply **Existing manager.cfg (optional override)**, hobot_fuzz uses it
-verbatim and mounts the config's parent directory into the container at the
-**same absolute path**. So any paths inside your config must be valid host paths
-under that directory (they resolve to the same path inside the container). Point
-the config's `"syzkaller"` field at `/opt/syzkaller` (the toolchain baked into
-the image), and keep `"type": "qemu"` with `qemu_args` that force TCG when no
-KVM is available (see below).
+If you supply **Existing manager.cfg (optional override)**, `hobot_fuzz` parses
+and rewrites it instead of mounting its parent directory. The config must use
+`"type": "qemu"`. Its `image`, optional `sshkey`, and `vm.kernel` references
+may be relative to the config or point to regular files inside the config's
+directory. Implicit references outside that directory and symlinks are rejected.
+You may explicitly select kernel, rootfs, or key files in the artifact fields to
+override those references; explicit overrides are still copied into staging.
+
+The service fixes `syzkaller`, `workdir`, `image`, `sshkey`, and `vm.kernel` to
+the managed container locations shown above. Any other absolute or
+parent-traversing path in the supplied JSON is rejected so the config cannot
+expose undeclared host content.
 
 ## 5. Watch progress
 
-`syz-manager` serves a web dashboard inside the container at port `56741`
-(coverage, crashes, corpus). It is not published to the host by default; to view
-it, run with an explicit port mapping, e.g.:
-
-```bash
-docker run --rm -p 56741:56741 \
-  -v /abs/Image:/syzbench/kernel:ro \
-  -v /abs/rootfs.img:/syzbench/rootfs.img \
-  -v /abs/id_rsa:/syzbench/id_rsa:ro \
-  -v /abs/manager.cfg:/syzbench/manager.cfg:ro \
-  -v /abs/workdir:/syzbench/workdir \
-  hobot/fuzz-sandbox:latest \
-  syz-manager -config=/syzbench/manager.cfg
-```
-
-Then open <http://localhost:56741>.
+`syz-manager` still creates its HTTP dashboard inside the container, but the
+campaign container has networking disabled and does not publish the dashboard
+to the host. Progress needed by the application is streamed from manager output.
+Do not bypass the service staging boundary with a hand-written `docker run` for
+production campaigns.
 
 ## 6. Troubleshooting
 

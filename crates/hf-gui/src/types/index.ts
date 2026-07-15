@@ -43,6 +43,8 @@ export interface RunHistoryItem {
   edges: number | null;
   execs: number | null;
   harness_rev: string | null;
+  binary_rev: string | null;
+  evidence_dir: string | null;
 }
 
 export interface TargetCandidate {

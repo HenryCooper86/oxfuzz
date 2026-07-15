@@ -13,14 +13,13 @@ use hf_core::tool::{
     Tool, ToolCategory, ToolDefinition, ToolError, ToolInput, ToolOutput, ToolType,
 };
 use hf_core::types::{SessionId, ToolName};
-use hf_tools::builtin::{file_read, glob, grep, tool_search};
+use hf_tools::builtin::{file_read, glob, grep};
 use hf_tools::config::ToolRegistryConfig;
 use hf_tools::executor::ToolExecutor;
 use hf_tools::registry::ToolRegistryImpl;
 
 /// Names of the read-only inspection tools (exempt from the allowlist).
-pub const INSPECTION_TOOLS: &[&str] =
-    &["FileRead", "Glob", "Grep", "ToolSearch", "KnowledgeSearch"];
+pub const INSPECTION_TOOLS: &[&str] = &["FileRead", "Glob", "Grep", "KnowledgeSearch"];
 
 /// Build a well-formed `{"error": "..."}` tool result.
 ///
@@ -39,7 +38,6 @@ pub const INSPECTION_CATALOG: &str = "\
 - FileRead: read a source file. args: {\"path\":\"...\"}\n\
 - Glob: list files matching a glob. args: {\"pattern\":\"**/*.c\"}\n\
 - Grep: search file contents by regex. args: {\"pattern\":\"...\"}\n\
-- ToolSearch: find available tools by keyword. args: {\"query\":\"...\"}\n\
 - KnowledgeSearch: BM25 search the project's source for symbols/patterns. args: {\"query\":\"...\"}";
 
 /// Build the inspection-tool registry (read-only file/search tools).
@@ -59,10 +57,6 @@ pub async fn build_inspection_registry(
         (
             Arc::new(grep::GrepTool::new()),
             grep::GrepTool::tool_definition(),
-        ),
-        (
-            Arc::new(tool_search::ToolSearchTool::new()),
-            tool_search::ToolSearchTool::tool_definition(),
         ),
         (
             Arc::new(KnowledgeSearchTool::new(backend)),
@@ -287,6 +281,34 @@ mod tests {
     async fn registry_registers_all_inspection_tools() {
         let registry = build_inspection_registry(test_backend()).await;
         assert_eq!(registry.len().await, INSPECTION_TOOLS.len());
+
+        let advertised = INSPECTION_CATALOG
+            .lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .filter_map(|line| line.split_once(':').map(|(name, _)| name))
+            .collect::<Vec<_>>();
+        assert_eq!(advertised, INSPECTION_TOOLS);
+        for name in advertised {
+            assert!(
+                registry
+                    .get_tool(&ToolName::from_string(name))
+                    .await
+                    .is_some(),
+                "advertised inspection tool {name} has no executable registry entry"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn active_inspection_surface_does_not_advertise_tool_search() {
+        let registry = build_inspection_registry(test_backend()).await;
+
+        assert!(!INSPECTION_TOOLS.contains(&"ToolSearch"));
+        assert!(!INSPECTION_CATALOG.contains("ToolSearch"));
+        assert!(registry
+            .get_tool(&ToolName::from_string("ToolSearch"))
+            .await
+            .is_none());
     }
 
     #[tokio::test]

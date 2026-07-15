@@ -155,53 +155,121 @@ fn build_exec_args_adds_ptrace_caps_when_requested() {
 
 #[test]
 fn build_exec_args_with_syzkaller_profile() {
-    use hf_core::runtime::SandboxOptions;
+    use hf_core::runtime::{SandboxMount, SandboxOptions};
     let cfg = cfg_with(limits(4096, 4));
     let opts = SandboxOptions {
         extra_mounts: vec![
-            "/host/kernel:/syzbench/kernel:ro".to_owned(),
-            "/host/rootfs.img:/syzbench/rootfs.img".to_owned(),
+            SandboxMount::read_only("/host/inputs".into(), "/syzbench/inputs"),
+            SandboxMount::writable("/host/scratch".into(), "/syzbench/scratch"),
+            SandboxMount::writable("/host/workdir".into(), "/syzbench/workdir"),
         ],
         platform: Some("linux/amd64".to_owned()),
-        network_enabled: true,
+        network_enabled: false,
         workdir: Some("/syzbench".to_owned()),
-        relax_hardening: true,
+        relax_hardening: false,
         devices: vec!["/dev/kvm".to_owned()],
+        workspace_read_only: true,
+        max_file_size_bytes: None,
     };
     let args = hf_runtime::docker::build_exec_args_with(
         &cfg,
         &limits(4096, 4),
-        &["bash".to_owned(), "-c".to_owned(), "syz-manager".to_owned()],
+        &[
+            "syz-manager".to_owned(),
+            "-config=/syzbench/inputs/manager.cfg".to_owned(),
+        ],
         &opts,
     );
     let joined = args.join(" ");
-    // Platform, custom mounts, a custom workdir, and device passthrough present.
+    // Platform, staged mounts, a custom workdir, and device passthrough present.
     assert!(joined.contains("--platform linux/amd64"), "{joined}");
     assert!(joined.contains("--device=/dev/kvm"), "{joined}");
     assert!(
-        joined.contains("-v /host/kernel:/syzbench/kernel:ro"),
+        joined.contains("--mount type=bind,source=/host/inputs,target=/syzbench/inputs,readonly"),
         "{joined}"
     );
     assert!(
-        joined.contains("-v /host/rootfs.img:/syzbench/rootfs.img"),
+        joined.contains("--mount type=bind,source=/host/scratch,target=/syzbench/scratch"),
         "{joined}"
     );
     assert!(joined.contains("-w /syzbench"), "{joined}");
-    // Network is enabled and the qemu-incompatible hardening is relaxed.
     assert!(
-        !joined.contains("--network=none"),
-        "network should be enabled: {joined}"
+        joined.contains("--mount type=bind,source=/host/workdir,target=/syzbench/workdir"),
+        "{joined}"
+    );
+    assert!(joined.contains("/work:ro"), "{joined}");
+    // qemu runs inside the normal network and privilege boundary.
+    assert!(
+        joined.contains("--network=none"),
+        "network should be disabled: {joined}"
     );
     assert!(
-        !joined.contains("--cap-drop=ALL"),
-        "hardening should be relaxed: {joined}"
+        joined.contains("--cap-drop=ALL"),
+        "capabilities should be dropped: {joined}"
     );
     assert!(
-        !joined.contains("no-new-privileges"),
-        "hardening should be relaxed: {joined}"
+        joined.contains("no-new-privileges"),
+        "privilege escalation should be disabled: {joined}"
     );
-    // pids-limit is still applied even when hardening is relaxed.
+    // Process limits remain part of the hardened profile.
     assert!(joined.contains("--pids-limit=512"), "{joined}");
+}
+
+#[test]
+fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
+    use hf_core::runtime::{SandboxMount, SandboxOptions};
+
+    let cfg = cfg_with(limits(2048, 1));
+    let opts = SandboxOptions {
+        extra_mounts: vec![
+            SandboxMount::writable("/host/corpus".into(), "/work/corpus"),
+            SandboxMount::writable("/host/run-out".into(), "/work/runs/run-id/out"),
+        ],
+        workspace_read_only: true,
+        ..SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(2048, 1),
+        &["fuzz_bin".to_owned()],
+        &opts,
+    );
+    let joined = args.join(" ");
+
+    assert!(
+        joined.contains("/tmp/hobot_fuzz_workspace:/work:ro"),
+        "primary workspace must be immutable: {joined}"
+    );
+    assert!(
+        joined.contains("type=bind,source=/host/corpus,target=/work/corpus"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("type=bind,source=/host/run-out,target=/work/runs/run-id/out"),
+        "{joined}"
+    );
+}
+
+#[test]
+fn build_exec_args_applies_a_per_file_write_limit() {
+    let cfg = cfg_with(limits(2048, 1));
+    let opts = hf_core::runtime::SandboxOptions {
+        max_file_size_bytes: Some(64 * 1024 * 1024),
+        ..hf_core::runtime::SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(2048, 1),
+        &["fuzz_bin".to_owned()],
+        &opts,
+    );
+
+    assert!(
+        args.iter()
+            .any(|arg| arg == "--ulimit=fsize=67108864:67108864"),
+        "missing per-file output limit: {}",
+        args.join(" ")
+    );
 }
 
 #[test]

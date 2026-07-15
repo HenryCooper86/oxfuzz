@@ -94,7 +94,7 @@ Core:                          hf-core            ← traits, types, contracts
 - `hf-provider` — multi-provider LLM pool with tag-based routing, failover, freeze/thaw.
 - `hf-guardrails` — permission model, loop detection, risk scoring (the interception layer).
 - `hf-storage` — SQLite (sqlx) persistence; schema in `docs/standards/DATABASE_SCHEMA.md`.
-- `hf-journal` — WAL-based run journaling and replay.
+- `hf-service::recovery` — bounded, synced run WAL and interrupted-run replay.
 - `hf-skills` — self-evolving skill registry; bundled skill content in `crates/hf-skills/src/builtins/*/root.md`.
 
 ### Safety model (non-negotiable — `AGENTS.md` §2.5, §2.12)

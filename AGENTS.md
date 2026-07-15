@@ -20,9 +20,9 @@ full observability - WAL-based recoverability - self-evolving skills -
 **Core**: `hf-core`
 **Infrastructure**: `hf-provider` - `hf-session` - `hf-context` - `hf-storage` - `hf-knowledge` - `hf-diagnostics`
 **Middleware**: `hf-hooks` - `hf-guardrails` - `hf-prompt` - `hf-mcp`
-**Capabilities**: `hf-tools` - `hf-skills` - `hf-runtime` - `hf-scheduler` - `hf-journal`
+**Capabilities**: `hf-tools` - `hf-skills` - `hf-runtime` - `hf-scheduler`
 **Fuzzing Domain**: `hf-discovery` - `hf-harness` - `hf-engine` - `hf-crash` - `hf-corpus` - `hf-coverage`
-**Orchestration**: `hf-agent` - `hf-bot`
+**Orchestration**: `hf-agent`
 **Service**: `hf-service` (all business logic)
 **Presentation**: `hf-cli` (CLI + TUI) - `hf-web` (REST API) - `hf-gui` (Tauri desktop app, `crates/hf-gui/src-tauri`)
 **Testing**: `hf-test-utils`

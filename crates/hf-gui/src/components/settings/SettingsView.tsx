@@ -8,7 +8,7 @@
 // persists whichever view is active and clears dirty.
 
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Server, HardDrive, Crosshair, Shield, Database, Info, SlidersHorizontal, MessageSquare, Wrench, Share2, GitPullRequest } from "lucide-react";
+import { ArrowLeft, Server, Database, Info, SlidersHorizontal, Share2, GitPullRequest } from "lucide-react";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18n";
 import { useToast } from "../ui/Toast";
@@ -18,27 +18,11 @@ import { LoadingState } from "../ui";
 import { GeneralTab } from "./GeneralTab";
 import { ProvidersTab } from "./ProvidersTab";
 import { normalizeProvider, type Provider } from "./providerTypes";
-import { RuntimeTab } from "./RuntimeTab";
-import { EnginesTab } from "./EnginesTab";
-import { GuardrailsTab } from "./GuardrailsTab";
 import { StorageTab } from "./StorageTab";
-import { ObjectForm } from "./ObjectForm";
 import { IntegrationsTab } from "./IntegrationsTab";
 import { IssueTrackerTab } from "./IssueTrackerTab";
 import { AboutTab } from "./AboutTab";
-
-type SectionId =
-  | "general"
-  | "providers"
-  | "session"
-  | "runtime"
-  | "engines"
-  | "tools"
-  | "guardrails"
-  | "storage"
-  | "integrations"
-  | "issuetracker"
-  | "about";
+import { SETTINGS_SECTION_DEFINITIONS, type SectionId } from "./settingsSections";
 
 interface Section {
   id: SectionId;
@@ -48,19 +32,18 @@ interface Section {
   config: string | null;
 }
 
-const SECTIONS: Section[] = [
-  { id: "general", label: "General", icon: SlidersHorizontal, config: null },
-  { id: "providers", label: "Providers", icon: Server, config: "providers" },
-  { id: "session", label: "Session", icon: MessageSquare, config: "session" },
-  { id: "runtime", label: "Runtime", icon: HardDrive, config: "runtime" },
-  { id: "engines", label: "Engines", icon: Crosshair, config: "engines" },
-  { id: "tools", label: "Tools", icon: Wrench, config: "tools" },
-  { id: "guardrails", label: "Guardrails", icon: Shield, config: "guardrails" },
-  { id: "storage", label: "Storage", icon: Database, config: "storage" },
-  { id: "integrations", label: "Integrations", icon: Share2, config: "defectdojo" },
-  { id: "issuetracker", label: "Issue Tracker", icon: GitPullRequest, config: "issue_tracker" },
-  { id: "about", label: "About", icon: Info, config: null },
-];
+const SECTION_ICONS: Record<SectionId, React.ComponentType<{ size?: number }>> = {
+  general: SlidersHorizontal,
+  providers: Server,
+  storage: Database,
+  integrations: Share2,
+  issuetracker: GitPullRequest,
+  about: Info,
+};
+
+const SETTINGS_SECTIONS: readonly Section[] = SETTINGS_SECTION_DEFINITIONS.map(
+  (section) => ({ ...section, icon: SECTION_ICONS[section.id] }),
+);
 
 type Cfg = Record<string, unknown>;
 
@@ -113,7 +96,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
   const { toast } = useToast();
   const confirm = useConfirm();
 
-  const section = SECTIONS.find((s) => s.id === active)!;
+  const section = SETTINGS_SECTIONS.find((s) => s.id === active)!;
   const hasConfig = section.config !== null;
   const showRaw = hasConfig && mode === "raw";
 
@@ -153,9 +136,8 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
   // Reload whenever the selected section changes (mode is reset to FORM by the
   // nav handler / initial state, so the effect only synchronizes with disk).
   useEffect(() => {
-    // `load` sets loading state as it synchronizes the form with disk.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load(section);
+    const timeout = window.setTimeout(() => void load(section), 0);
+    return () => window.clearTimeout(timeout);
   }, [section, load]);
 
   // Serialize the current form `value` to TOML text (provider arrays are wrapped
@@ -236,21 +218,12 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
         return <AboutTab />;
       case "providers":
         return <ProvidersTab value={Array.isArray(value) ? (value as Provider[]) : []} onChange={onFormChange} />;
-      case "runtime":
-        return <RuntimeTab value={obj} onChange={onFormChange} />;
-      case "engines":
-        return <EnginesTab value={obj} onChange={onFormChange} />;
-      case "guardrails":
-        return <GuardrailsTab value={obj} onChange={onFormChange} />;
       case "storage":
-        return <StorageTab value={obj} onChange={onFormChange} />;
+        return <StorageTab />;
       case "integrations":
         return <IntegrationsTab value={obj} onChange={onFormChange} />;
       case "issuetracker":
         return <IssueTrackerTab value={obj} onChange={onFormChange} />;
-      case "session":
-      case "tools":
-        return <ObjectForm value={obj} onChange={onFormChange} />;
       default:
         return null;
     }
@@ -272,7 +245,7 @@ export function SettingsView({ onBack, onRunWizard }: { onBack?: () => void; onR
           </button>
         </div>
         <div className="flex-1 overflow-y-auto" style={{ padding: "6px 8px" }}>
-          {SECTIONS.map(({ id, icon: Icon }) => {
+          {SETTINGS_SECTIONS.map(({ id, icon: Icon }) => {
             const isActive = active === id;
             return (
               <button

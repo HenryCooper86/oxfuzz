@@ -19,6 +19,9 @@ pub struct AgentTurnRequest {
     pub session: Option<SessionId>,
     pub history_fallback: Vec<Message>,
     pub message: String,
+    /// User-visible text persisted in the transcript when `message` contains
+    /// an internal mode instruction. Defaults to `message` when absent.
+    pub display_message: Option<String>,
 }
 
 impl ServiceContainer {
@@ -32,17 +35,8 @@ impl ServiceContainer {
         request: AgentTurnRequest,
         sink: &dyn EventSink,
     ) -> Result<String, ClassifiedError> {
-        let has_session = request.session.is_some() && self.session_manager().is_some();
-        // Validate before inserting into the per-session lock map. Otherwise an
-        // unauthenticated stream of arbitrary ids can retain one mutex per id,
-        // even though no such persisted session exists.
-        if let (Some(id), Some(manager)) = (&request.session, self.session_manager()) {
-            manager.get_session(id).await.map_err(|_| {
-                ClassifiedError::Validation("unknown or invalid chat session".to_owned())
-            })?;
-        }
         let _turn_guard = match &request.session {
-            Some(id) if has_session => Some(self.session_turn_lock(id).lock_owned().await),
+            Some(id) => Some(self.chat_session_guard(id).await?),
             _ => None,
         };
 
@@ -54,8 +48,6 @@ impl ServiceContainer {
             } else {
                 request.history_fallback
             };
-        let message_count_before = u32::try_from(history.len()).unwrap_or(u32::MAX);
-
         let registry = AgentRegistry::with_user_dir(agent_definitions_dir());
         let definition = request
             .agent_id
@@ -67,18 +59,18 @@ impl ServiceContainer {
         let agent = Agent::with_definition(backend, request.project, definition);
         let answer = agent.run_turn(history, &request.message, sink).await?;
 
-        if has_session {
-            if let Some(id) = &request.session {
-                self.chat_create_checkpoint(id, message_count_before).await;
-                if let Some(manager) = self.session_manager() {
-                    let _ = manager
-                        .append_message(id, &Message::user(request.message))
-                        .await;
-                    let _ = manager
-                        .append_message(id, &Message::assistant(answer.clone()))
-                        .await;
-                }
-            }
+        if let Some(id) = &request.session {
+            let display_message = request
+                .display_message
+                .unwrap_or_else(|| request.message.clone());
+            self.persist_chat_turn_unlocked(
+                id,
+                &[
+                    Message::user(display_message),
+                    Message::assistant(answer.clone()),
+                ],
+            )
+            .await?;
         }
         Ok(answer)
     }
@@ -178,7 +170,10 @@ impl ServiceContainer {
                         "corpus now {} entries",
                         self.corpus_grow(project, target).await?
                     ),
-                    "prune" => format!("pruned to {} entries", self.corpus_prune(project, target)?),
+                    "prune" => format!(
+                        "pruned to {} entries",
+                        self.corpus_prune(project, target).await?
+                    ),
                     "list" => format!(
                         "{} entries",
                         self.corpus_list(project, target)?.entries.len()

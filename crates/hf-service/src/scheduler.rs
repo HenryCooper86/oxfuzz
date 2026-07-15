@@ -21,8 +21,12 @@ use hf_scheduler::{
 };
 use hf_storage::Store;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 
-use crate::campaign_state::{CampaignRuntimeState, CampaignStateStore, ConcurrencyGate};
+use crate::campaign_state::{
+    atomic_write_json, read_json_file, CampaignRuntimeState, CampaignStateStore, ConcurrencyGate,
+    StateFileError,
+};
 use crate::container::{SchedulableTarget, ServiceContainer};
 
 /// Notified to the presentation layer when a scheduled campaign finds crashes,
@@ -47,15 +51,58 @@ pub struct CampaignNotice {
     pub defectdojo_pushed: bool,
 }
 
-/// Persists scheduler executions to the database so history survives restarts.
-struct DbSchedulerPersistence {
-    store: Arc<Store>,
+/// Serialized, atomic repository for persisted schedule definitions.
+struct ScheduleFileStore {
+    path: PathBuf,
+    write_lock: AsyncMutex<()>,
 }
 
-impl DbSchedulerPersistence {
+impl ScheduleFileStore {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            write_lock: AsyncMutex::new(()),
+        }
+    }
+
+    fn load(&self) -> Result<Vec<Schedule>, StateFileError> {
+        load_schedules(&self.path)
+    }
+
+    async fn replace(&self, schedules: &[Schedule]) -> Result<(), StateFileError> {
+        let _guard = self.write_lock.lock().await;
+        atomic_write_schedules(&self.path, schedules)
+    }
+
+    async fn replace_from_manager(&self, manager: &SchedulerManager) -> Result<(), StateFileError> {
+        let _guard = self.write_lock.lock().await;
+        let schedules = manager.list_schedules().await;
+        atomic_write_schedules(&self.path, &schedules)
+    }
+
+    async fn upsert(&self, schedule: &Schedule) -> Result<(), StateFileError> {
+        let _guard = self.write_lock.lock().await;
+        let mut schedules = load_schedules(&self.path)?;
+        schedules.retain(|existing| existing.id != schedule.id);
+        schedules.push(schedule.clone());
+        atomic_write_schedules(&self.path, &schedules)
+    }
+}
+
+/// Persists scheduler definitions atomically and execution history to the
+/// database when one is configured.
+struct CampaignSchedulerPersistence {
+    store: Option<Arc<Store>>,
+    schedules: Arc<ScheduleFileStore>,
+}
+
+impl CampaignSchedulerPersistence {
     async fn upsert(&self, ex: &ScheduleExecution) -> Result<(), PersistenceError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
         let data = serde_json::to_string(ex).map_err(|e| PersistenceError::new(e.to_string()))?;
-        self.store
+        store
             .upsert_schedule_execution(
                 &ex.execution_id,
                 &ex.schedule_id,
@@ -69,7 +116,7 @@ impl DbSchedulerPersistence {
 }
 
 #[async_trait]
-impl SchedulerPersistence for DbSchedulerPersistence {
+impl SchedulerPersistence for CampaignSchedulerPersistence {
     async fn record_execution(
         &self,
         execution: &ScheduleExecution,
@@ -82,13 +129,11 @@ impl SchedulerPersistence for DbSchedulerPersistence {
     ) -> Result<(), PersistenceError> {
         self.upsert(execution).await
     }
-    async fn update_last_fire(
-        &self,
-        _schedule_id: &str,
-        _last_fire: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), PersistenceError> {
-        // last_fire is derived from the persisted executions, not stored separately.
-        Ok(())
+    async fn update_schedule(&self, schedule: &Schedule) -> Result<(), PersistenceError> {
+        self.schedules
+            .upsert(schedule)
+            .await
+            .map_err(|error| PersistenceError::new(error.to_string()))
     }
 }
 
@@ -124,7 +169,7 @@ pub struct CampaignParams {
     /// Budget: stop after this many completed runs (`None` = unbounded).
     #[serde(default)]
     pub max_runs: Option<u32>,
-    /// Budget: stop after this much cumulative fuzz time (`None` = unbounded).
+    /// Budget: stop after this much measured campaign work (`None` = unbounded).
     #[serde(default)]
     pub max_total_secs: Option<u64>,
     /// The owning schedule's id, injected at creation so the headless dispatcher
@@ -235,7 +280,7 @@ pub struct CampaignView {
     pub max_total_secs: Option<u64>,
     /// Completed runs so far (progress against the budget).
     pub runs_done: u32,
-    /// Cumulative fuzz seconds so far.
+    /// Cumulative measured campaign-work seconds so far.
     pub secs_done: u64,
     /// Last time the campaign fired (RFC3339), if ever.
     pub last_fire: Option<String>,
@@ -559,8 +604,8 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             targets.len(),
         );
 
-        // 4. Run one promoted target, then advance the rotation + budget (any
-        // real attempt counts; only skips above leave the state untouched).
+        // 4. Run one promoted target. Only a successful outcome advances the
+        // rotation and charges its actual iterations/measured elapsed time.
         let started = std::time::Instant::now();
         let result = self
             .container
@@ -574,13 +619,35 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                 3,
             )
             .await;
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let advanced = self
-            .state
-            .record_run(&params.schedule_id, params.duration_secs);
+        let elapsed = started.elapsed();
+        let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
 
         match result {
+            Ok(outcome)
+                if outcome.termination == hf_core::runtime::CommandTermination::Cancelled =>
+            {
+                Ok(DispatchResult {
+                    success: false,
+                    summary: format!("campaign cancelled on {}", outcome.target),
+                    output: serde_json::json!({
+                        "target": outcome.target,
+                        "edges": outcome.edges,
+                        "iterations": outcome.iterations,
+                        "termination": outcome.termination,
+                    }),
+                    duration_ms,
+                    error: Some("campaign cancelled".to_owned()),
+                })
+            }
             Ok(outcome) => {
+                let advanced = self
+                    .state
+                    .record_success(&params.schedule_id, outcome.iterations, elapsed)
+                    .map_err(|error| {
+                        DispatchError::Internal(format!(
+                            "campaign completed but progress could not be persisted: {error}"
+                        ))
+                    })?;
                 if outcome.crashes > 0 {
                     self.on_crashes(&params, &outcome.target, outcome.crashes)
                         .await;
@@ -607,6 +674,7 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                         "iterations": outcome.iterations,
                         "repairs_used": outcome.repairs_used,
                         "auto_reverts": outcome.auto_reverts,
+                        "termination": outcome.termination,
                         "runs_done": advanced.runs_done,
                     }),
                     duration_ms,
@@ -639,7 +707,7 @@ fn budget_note(state: &CampaignRuntimeState, params: &CampaignParams) -> String 
 /// schedules.
 pub struct CampaignScheduler {
     manager: Arc<SchedulerManager>,
-    store_path: PathBuf,
+    schedules: Arc<ScheduleFileStore>,
     /// Database for persisted execution history (when configured).
     store: Option<Arc<Store>>,
     /// Rotation cursor + budget consumption per campaign (JSON sidecar).
@@ -648,6 +716,20 @@ pub struct CampaignScheduler {
     gate: Arc<ConcurrencyGate>,
     /// Late-bound crash notifier (filled by the desktop shell after setup).
     notifier: NotifierSlot,
+}
+
+/// Durable scheduler startup or mutation error.
+#[derive(Debug, thiserror::Error)]
+pub enum CampaignSchedulerError {
+    /// Schedule or campaign sidecar I/O/JSON failure.
+    #[error(transparent)]
+    State(#[from] StateFileError),
+    /// Persisted execution history could not be inspected.
+    #[error("scheduler history error: {0}")]
+    History(String),
+    /// A persisted history timestamp was invalid.
+    #[error("invalid persisted last-fire timestamp for schedule {schedule_id}: {value}")]
+    InvalidLastFire { schedule_id: String, value: String },
 }
 
 /// The campaign runtime-state sidecar lives beside `schedules.json`.
@@ -665,16 +747,40 @@ impl CampaignScheduler {
     ///
     /// `notifier` (set by the desktop shell) is called when a scheduled run finds
     /// crashes, so the UI can toast; pass `None` for headless CLI/web.
+    ///
+    /// # Panics
+    /// Panics when persisted schedule, campaign, or execution-history state is
+    /// corrupt or unreadable. Use [`Self::try_start`] to handle the error.
     pub async fn start(
         container: ServiceContainer,
         store_path: PathBuf,
         notifier: Option<CampaignNotifier>,
     ) -> Self {
+        match Self::try_start(container, store_path, notifier).await {
+            Ok(scheduler) => scheduler,
+            Err(error) => panic!("campaign scheduler cannot start: {error}"),
+        }
+    }
+
+    /// Start the scheduler while returning corrupt or unreadable persisted state
+    /// to the caller instead of silently resetting it.
+    ///
+    /// # Errors
+    /// Returns a durable-state or history error before the scheduler begins
+    /// ticking.
+    pub async fn try_start(
+        container: ServiceContainer,
+        store_path: PathBuf,
+        notifier: Option<CampaignNotifier>,
+    ) -> Result<Self, CampaignSchedulerError> {
         let manager = Arc::new(SchedulerManager::with_defaults());
+        let schedules = Arc::new(ScheduleFileStore::new(store_path.clone()));
         // Grab the DB handle (for persisted execution history) before the
         // container is moved into the dispatcher.
         let store = container.store().cloned();
-        let state = Arc::new(CampaignStateStore::load(campaign_state_path(&store_path)));
+        let state = Arc::new(CampaignStateStore::try_load(campaign_state_path(
+            &store_path,
+        ))?);
         let gate = Arc::new(ConcurrencyGate::new(state.max_concurrent()));
         let notifier: NotifierSlot = Arc::new(Mutex::new(notifier));
         let dispatcher = Arc::new(FuzzCampaignDispatcher {
@@ -685,25 +791,50 @@ impl CampaignScheduler {
             manager: Arc::downgrade(&manager),
         });
         manager.set_dispatcher(dispatcher).await;
+        manager
+            .set_persistence(Arc::new(CampaignSchedulerPersistence {
+                store: store.clone(),
+                schedules: Arc::clone(&schedules),
+            }))
+            .await;
+
+        let mut loaded = schedules.load()?;
+        let mut restored = false;
         if let Some(store) = &store {
-            manager
-                .set_persistence(Arc::new(DbSchedulerPersistence {
-                    store: Arc::clone(store),
-                }))
-                .await;
+            let fires = store
+                .latest_schedule_fires()
+                .await
+                .map_err(|error| CampaignSchedulerError::History(error.to_string()))?;
+            let fires: std::collections::HashMap<_, _> = fires.into_iter().collect();
+            for schedule in &mut loaded {
+                if schedule.last_fire.is_none() {
+                    if let Some(value) = fires.get(&schedule.id) {
+                        schedule.last_fire = Some(value.parse().map_err(|_| {
+                            CampaignSchedulerError::InvalidLastFire {
+                                schedule_id: schedule.id.clone(),
+                                value: value.clone(),
+                            }
+                        })?);
+                        restored = true;
+                    }
+                }
+            }
         }
-        for schedule in load_schedules(&store_path) {
+        if restored {
+            schedules.replace(&loaded).await?;
+        }
+        for schedule in loaded {
             manager.register(schedule).await;
         }
         manager.start(TICK).await;
-        Self {
+        Ok(Self {
             manager,
-            store_path,
+            schedules,
             store,
             state,
             gate,
             notifier,
-        }
+        })
     }
 
     /// Bind the crash notifier after construction (the desktop shell only has an
@@ -721,9 +852,25 @@ impl CampaignScheduler {
     }
 
     /// Set the global concurrent-campaign cap (persisted; applies immediately).
+    ///
+    /// # Panics
+    /// Panics when the new limit cannot be persisted. Use
+    /// [`Self::try_set_max_concurrent`] to handle the error.
     pub fn set_max_concurrent(&self, n: usize) {
-        self.state.set_max_concurrent(n);
+        if let Err(error) = self.try_set_max_concurrent(n) {
+            panic!("campaign concurrency cannot be persisted: {error}");
+        }
+    }
+
+    /// Set the global concurrency cap transactionally.
+    ///
+    /// # Errors
+    /// Returns a state-file error without applying the new live limit when the
+    /// sidecar cannot be persisted.
+    pub fn try_set_max_concurrent(&self, n: usize) -> Result<(), CampaignSchedulerError> {
+        self.state.try_set_max_concurrent(n)?;
         self.gate.set_limit(self.state.max_concurrent());
+        Ok(())
     }
 
     /// All scheduled campaigns.
@@ -794,12 +941,33 @@ impl CampaignScheduler {
     }
 
     /// Create + register + persist a new campaign schedule.
+    ///
+    /// # Panics
+    /// Panics when the schedule cannot be persisted. Use [`Self::try_create`] to
+    /// handle the error.
     pub async fn create(
         &self,
         name: &str,
         params: &CampaignParams,
         trigger: TriggerConfig,
     ) -> Schedule {
+        match self.try_create(name, params, trigger).await {
+            Ok(schedule) => schedule,
+            Err(error) => panic!("campaign schedule cannot be created: {error}"),
+        }
+    }
+
+    /// Create, register, and atomically persist a campaign schedule.
+    ///
+    /// # Errors
+    /// Returns a state-file error and rolls the in-memory registration back when
+    /// persistence fails.
+    pub async fn try_create(
+        &self,
+        name: &str,
+        params: &CampaignParams,
+        trigger: TriggerConfig,
+    ) -> Result<Schedule, CampaignSchedulerError> {
         let id = uuid::Uuid::new_v4().to_string();
         let mut params = with_absolute_project(params);
         // Inject the id so the dispatcher (handed only the constant kind) can key
@@ -808,8 +976,11 @@ impl CampaignScheduler {
         let schedule = Schedule::new(id, name, trigger, CAMPAIGN_KIND)
             .with_params(serde_json::to_value(&params).unwrap_or_default());
         self.manager.register(schedule.clone()).await;
-        self.persist().await;
-        schedule
+        if let Err(error) = self.persist().await {
+            self.manager.remove(&schedule.id).await;
+            return Err(error.into());
+        }
+        Ok(schedule)
     }
 
     /// Clear the persisted execution history, returning how many rows went.
@@ -825,48 +996,96 @@ impl CampaignScheduler {
 
     /// Remove a schedule by id, discarding its rotation/budget state so a
     /// recreated campaign starts fresh.
+    ///
+    /// # Panics
+    /// Panics when the updated scheduler state cannot be persisted. Use
+    /// [`Self::try_remove`] to handle the error.
     pub async fn remove(&self, id: &str) -> bool {
+        match self.try_remove(id).await {
+            Ok(removed) => removed,
+            Err(error) => panic!("campaign schedule cannot be removed: {error}"),
+        }
+    }
+
+    /// Remove and atomically persist a schedule.
+    ///
+    /// # Errors
+    /// Returns a state-file error and restores the in-memory schedule if the
+    /// definition file cannot be replaced.
+    pub async fn try_remove(&self, id: &str) -> Result<bool, CampaignSchedulerError> {
+        let previous = self.manager.get_schedule(id).await;
         let removed = self.manager.remove(id).await;
         if removed {
-            self.state.forget(id);
-            self.persist().await;
+            if let Err(error) = self.persist().await {
+                if let Some(schedule) = previous {
+                    self.manager.register(schedule).await;
+                }
+                return Err(error.into());
+            }
+            self.state.try_forget(id)?;
         }
-        removed
+        Ok(removed)
     }
 
     /// Enable or disable a schedule by id.
+    ///
+    /// # Panics
+    /// Panics when the updated definition cannot be persisted. Use
+    /// [`Self::try_set_enabled`] to handle the error.
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> bool {
+        match self.try_set_enabled(id, enabled).await {
+            Ok(changed) => changed,
+            Err(error) => panic!("campaign schedule cannot be updated: {error}"),
+        }
+    }
+
+    /// Enable or disable a schedule and atomically persist the definition list.
+    ///
+    /// # Errors
+    /// Returns a state-file error if the durable definition cannot be replaced.
+    pub async fn try_set_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<bool, CampaignSchedulerError> {
+        let previous = self.manager.get_schedule(id).await;
         let ok = if enabled {
             self.manager.resume(id).await
         } else {
             self.manager.pause(id).await
         };
         if ok {
-            self.persist().await;
+            if let Err(error) = self.persist().await {
+                if let Some(previous) = previous {
+                    if previous.enabled {
+                        self.manager.resume(id).await;
+                    } else {
+                        self.manager.pause(id).await;
+                    }
+                }
+                return Err(error.into());
+            }
         }
-        ok
+        Ok(ok)
     }
 
-    async fn persist(&self) {
-        let schedules = self.manager.list_schedules().await;
-        let Ok(json) = serde_json::to_string_pretty(&schedules) else {
-            return;
-        };
-        if let Some(parent) = self.store_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&self.store_path, json) {
-            tracing::warn!("failed to persist schedules: {e}");
-        }
+    async fn persist(&self) -> Result<(), StateFileError> {
+        self.schedules.replace_from_manager(&self.manager).await
+    }
+
+    /// Stop trigger production and cancel all active campaign tasks.
+    pub async fn stop(&self) {
+        self.manager.stop().await;
     }
 }
 
-/// Load persisted schedules (best-effort; empty on missing/corrupt file).
-fn load_schedules(path: &Path) -> Vec<Schedule> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn atomic_write_schedules(path: &Path, schedules: &[Schedule]) -> Result<(), StateFileError> {
+    atomic_write_json(path, &schedules)
+}
+
+/// Load persisted schedules, treating absence as empty and damage as an error.
+fn load_schedules(path: &Path) -> Result<Vec<Schedule>, StateFileError> {
+    Ok(read_json_file(path)?.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -969,14 +1188,51 @@ mod tests {
             CAMPAIGN_KIND,
         )
         .with_params(serde_json::to_value(&params).unwrap());
-        std::fs::write(&path, serde_json::to_string(&vec![sched]).unwrap()).unwrap();
+        atomic_write_schedules(&path, &[sched]).unwrap();
 
-        let loaded = load_schedules(&path);
+        let loaded = load_schedules(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "nightly");
         let p: CampaignParams = serde_json::from_value(loaded[0].parameter_values.clone()).unwrap();
         assert_eq!(p.target.as_deref(), Some("t"));
         assert_eq!(p.duration_secs, 60);
+    }
+
+    #[test]
+    fn corrupt_schedule_file_is_reported_and_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedules.json");
+        std::fs::write(&path, "[{broken").unwrap();
+
+        let error = load_schedules(&path).expect_err("corrupt schedules must fail startup");
+
+        assert!(error.to_string().contains("decode"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "[{broken");
+    }
+
+    #[tokio::test]
+    async fn last_fire_update_is_written_back_to_schedule_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedules.json");
+        let mut schedule = Schedule::new(
+            "persisted-fire",
+            "persisted fire",
+            TriggerConfig::Interval { interval_secs: 60 },
+            CAMPAIGN_KIND,
+        );
+        atomic_write_schedules(&path, &[schedule.clone()]).unwrap();
+        let repository = Arc::new(ScheduleFileStore::new(path.clone()));
+        let persistence = CampaignSchedulerPersistence {
+            store: None,
+            schedules: repository,
+        };
+
+        let fired_at = chrono::Utc::now();
+        schedule.last_fire = Some(fired_at);
+        persistence.update_schedule(&schedule).await.unwrap();
+
+        let loaded = load_schedules(&path).unwrap();
+        assert_eq!(loaded[0].last_fire, Some(fired_at));
     }
 
     fn target(sym: &str, fit: f64) -> SchedulableTarget {

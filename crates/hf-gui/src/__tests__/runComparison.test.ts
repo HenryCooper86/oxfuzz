@@ -22,6 +22,8 @@ function run(
     edges,
     execs: 100,
     harness_rev: revision,
+    binary_rev: "binary-revision",
+    evidence_dir: `runs/${id}/out`,
   };
 }
 

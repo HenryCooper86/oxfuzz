@@ -5,7 +5,7 @@
 //! `httpTransport.ts` `COMMAND_MAP` used by the web-mode frontend.
 
 use axum::extract::{Json, Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,6 +16,12 @@ use tokio::sync::broadcast;
 
 use hf_service::{EngineKind, Message, Role, ServiceContainer, SessionId, TargetLanguage};
 
+use crate::security::{redact_config_text, redact_public_json};
+use crate::WebSecurityConfig;
+
+const SSE_CHANNEL_CAPACITY: usize = 256;
+const MAX_SSE_EVENT_BYTES: usize = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
@@ -24,7 +30,8 @@ use hf_service::{EngineKind, Message, Role, ServiceContainer, SessionId, TargetL
 #[derive(Clone)]
 pub struct AppState {
     pub container: ServiceContainer,
-    pub event_tx: broadcast::Sender<SseEvent>,
+    event_tx: broadcast::Sender<SseEvent>,
+    security: WebSecurityConfig,
     /// Campaign scheduler, when started (present in `build_bootstrapped`, absent
     /// in bare test states). Schedule endpoints degrade to empty results when
     /// `None`.
@@ -35,10 +42,11 @@ impl AppState {
     /// Create a new `AppState` with a service container (no scheduler).
     #[must_use]
     pub fn new(container: ServiceContainer) -> Self {
-        let (event_tx, _) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(SSE_CHANNEL_CAPACITY);
         Self {
             container,
             event_tx,
+            security: WebSecurityConfig::deny_all(),
             scheduler: None,
         }
     }
@@ -52,6 +60,73 @@ impl AppState {
         self.scheduler = Some(scheduler);
         self
     }
+
+    /// Publish one bounded SSE event.
+    ///
+    /// The event is serialized before entering the broadcast channel so a
+    /// single malformed log line cannot consume unbounded memory per receiver.
+    /// A missing receiver is not an error: producers may emit before a browser
+    /// subscribes.
+    ///
+    /// # Errors
+    /// Returns [`PublishEventError`] when the serialized event exceeds the
+    /// transport limit.
+    pub fn publish_event(&self, event: SseEvent) -> Result<(), PublishEventError> {
+        let mut size_writer = EventSizeWriter::new(MAX_SSE_EVENT_BYTES);
+        if serde_json::to_writer(&mut size_writer, &event).is_err() {
+            if size_writer.exceeded {
+                return Err(PublishEventError::TooLarge {
+                    size: size_writer.size,
+                    limit: MAX_SSE_EVENT_BYTES,
+                });
+            }
+            return Err(PublishEventError::Serialization);
+        }
+        let _ = self.event_tx.send(event);
+        Ok(())
+    }
+}
+
+struct EventSizeWriter {
+    size: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl EventSizeWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            size: 0,
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl std::io::Write for EventSizeWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.size = self.size.saturating_add(bytes.len());
+        if self.size > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::other("SSE event exceeds size limit"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Failure to enqueue a bounded SSE event.
+#[derive(Debug, thiserror::Error)]
+pub enum PublishEventError {
+    /// The event could not be serialized.
+    #[error("SSE event could not be serialized")]
+    Serialization,
+    /// The event exceeded the per-message transport limit.
+    #[error("SSE event is {size} bytes; limit is {limit} bytes")]
+    TooLarge { size: usize, limit: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -64,18 +139,27 @@ impl AppState {
 pub enum SseEvent {
     /// `run:progress` -- a fuzz run progress event.
     RunProgress {
+        /// Durable service-owned run id, when the producer has one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         kind: String,
         data: serde_json::Value,
     },
+    /// `run:status` -- one run changed lifecycle state.
+    RunStatus { run_id: String, status: String },
     /// `docker:status` -- Docker daemon / sandbox image build progress.
     DockerStatus { message: String },
+    /// `stream:lagged` -- this subscriber fell behind the bounded channel.
+    StreamLagged { dropped: u64 },
 }
 
 impl SseEvent {
     fn event_name(&self) -> &'static str {
         match self {
             SseEvent::RunProgress { .. } => "run:progress",
+            SseEvent::RunStatus { .. } => "run:status",
             SseEvent::DockerStatus { .. } => "docker:status",
+            SseEvent::StreamLagged { .. } => "stream:lagged",
         }
     }
 }
@@ -90,6 +174,7 @@ struct ErrorResponse {
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
+type ApiError = (StatusCode, Json<ErrorResponse>);
 
 fn map_err<E: std::fmt::Display>(
     status: StatusCode,
@@ -118,6 +203,14 @@ pub fn build() -> Router {
 /// [`ServiceContainer::bootstrap`]: Docker runtime, env-configured LLM provider
 /// pool, and `HF_DB_PATH` persistence -- the same container the CLI and GUI use.
 pub async fn build_bootstrapped() -> Router {
+    build_bootstrapped_with_security(WebSecurityConfig::from_env()).await
+}
+
+/// Build the production router with one already-resolved security policy.
+///
+/// The CLI uses this after validating its bind address, ensuring the socket
+/// check and router authentication use the exact same immutable policy.
+pub async fn build_bootstrapped_with_security(security: WebSecurityConfig) -> Router {
     let container = ServiceContainer::bootstrap().await;
     // Start the campaign scheduler so headless schedules fire and the schedule
     // endpoints are live (mirrors the desktop shell). Schedules persist under
@@ -126,25 +219,43 @@ pub async fn build_bootstrapped() -> Router {
     let scheduler = std::sync::Arc::new(
         hf_service::scheduler::CampaignScheduler::start(container.clone(), store_path, None).await,
     );
-    build_with_state(AppState::new(container).with_scheduler(scheduler))
+    build_with_state_and_security(AppState::new(container).with_scheduler(scheduler), security)
 }
 
 /// Build the router with a given `AppState` (for testing or custom containers).
 pub fn build_with_state(state: AppState) -> Router {
-    let policy = AuthPolicy::from_env();
-    match (&policy.token, policy.allow_open) {
-        (Some(_), _) => tracing::info!("hf-web: bearer-token auth enabled"),
-        (None, true) => tracing::warn!(
+    let security = WebSecurityConfig::from_env();
+    build_with_state_and_security(state, security)
+}
+
+/// Build the router with an explicit immutable security policy.
+///
+/// This is useful for an embedding server and keeps tests independent of
+/// process-global environment mutation.
+pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityConfig) -> Router {
+    state.security = security;
+    match (
+        state.security.token_configured(),
+        state.security.allows_open_access(),
+    ) {
+        (true, _) => tracing::info!("hf-web: bearer-token auth enabled"),
+        (false, true) => tracing::warn!(
             "hf-web: HF_WEB_TOKEN is not set and HF_WEB_TOKEN_OPTIONAL=1 -- \
              the API is UNAUTHENTICATED (local-dev mode)."
         ),
-        (None, false) => tracing::warn!(
+        (false, false) => tracing::warn!(
             "hf-web: HF_WEB_TOKEN is not set -- the API is FAIL-CLOSED and will \
              reject every request except /health with 401. Set HF_WEB_TOKEN to \
              require an Authorization: Bearer <token> header, or set \
              HF_WEB_TOKEN_OPTIONAL=1 to allow unauthenticated local-dev access."
         ),
     }
+    tracing::info!(
+        approved_project_roots = state.security.project_root_count(),
+        "hf-web project path policy loaded"
+    );
+    let security = state.security.clone();
+    let cors = state.security.cors_layer();
     Router::new()
         .route("/health", get(health))
         .route("/discover", post(discover))
@@ -168,6 +279,9 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/runs/coverage", post(run_coverage_series))
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
+        .route("/runs/start", post(run_start_unavailable))
+        .route("/runs/{id}/status", get(run_status))
+        .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .route(
             "/projects/auto-revert",
             post(project_auto_revert_override),
@@ -199,6 +313,7 @@ pub fn build_with_state(state: AppState) -> Router {
         .route("/runs/clear", post(clear_all_runs))
         .route("/projects/export", post(export_project_data))
         .route("/providers/status", get(provider_statuses))
+        .route("/diagnostics/cost", get(diagnostics_cost_summary))
         .route("/system/snapshot", get(system_snapshot))
         .route("/system/status", get(system_status))
         .route("/workbench/dashboard", post(workbench_dashboard))
@@ -254,44 +369,11 @@ pub fn build_with_state(state: AppState) -> Router {
         // before them). The policy is resolved once at build time and captured
         // by the middleware so per-request handling needs no env lookups.
         .layer(axum::middleware::from_fn(move |req, next| {
-            let policy = policy.clone();
-            async move { auth_audit(policy, req, next).await }
+            let security = security.clone();
+            async move { auth_audit(security, req, next).await }
         }))
+        .layer(cors)
         .with_state(state)
-}
-
-/// Resolved authentication policy for the REST API, derived once at router
-/// build time from the environment.
-#[derive(Clone, Debug)]
-struct AuthPolicy {
-    /// The required bearer token, when configured (`HF_WEB_TOKEN`).
-    token: Option<String>,
-    /// When no token is configured, whether to allow unauthenticated access
-    /// (`HF_WEB_TOKEN_OPTIONAL=1`). Defaults to `false` (fail-closed).
-    allow_open: bool,
-}
-
-impl AuthPolicy {
-    fn from_env() -> Self {
-        let token = std::env::var("HF_WEB_TOKEN").ok().filter(|t| !t.is_empty());
-        let allow_open = std::env::var("HF_WEB_TOKEN_OPTIONAL")
-            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        Self { token, allow_open }
-    }
-
-    /// Decide whether a request to `path` carrying `presented` (the value after
-    /// `Bearer `) is allowed. `/health` is always open for liveness probes.
-    fn authorize(&self, path: &str, presented: Option<&str>) -> bool {
-        if path == "/health" {
-            return true;
-        }
-        match &self.token {
-            // A token is configured: require an exact bearer match.
-            Some(expected) => presented == Some(expected.as_str()),
-            // No token: open only when explicitly opted in; else fail-closed.
-            None => self.allow_open,
-        }
-    }
 }
 
 /// Bearer-token auth + request audit middleware.
@@ -302,7 +384,7 @@ impl AuthPolicy {
 /// `/health`) unless `HF_WEB_TOKEN_OPTIONAL=1`. Every request is logged
 /// (method + path) as a lightweight audit trail.
 async fn auth_audit(
-    policy: AuthPolicy,
+    security: WebSecurityConfig,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
@@ -313,11 +395,38 @@ async fn auth_audit(
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|value| {
+            let (scheme, token) = value.split_once(' ')?;
+            (scheme.eq_ignore_ascii_case("Bearer")
+                && !token.is_empty()
+                && !token.chars().any(char::is_whitespace))
+            .then_some(token)
+        });
 
-    if !policy.authorize(&path, presented) {
+    if !security.origin_allowed(
+        req.headers().get(header::ORIGIN),
+        req.headers().get(header::HOST),
+    ) {
+        tracing::warn!(%method, %path, "hf-web: rejected cross-origin request");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "origin not allowed".to_owned(),
+            }),
+        )
+            .into_response();
+    }
+
+    if !security.auth.authorize(&path, presented) {
         tracing::warn!(%method, %path, "hf-web: rejected unauthorized request");
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
+            Json(ErrorResponse {
+                error: "unauthorized".to_owned(),
+            }),
+        )
+            .into_response();
     }
 
     tracing::info!(%method, %path, "hf-web request");
@@ -332,6 +441,27 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
+fn approved_project(state: &AppState, requested: &std::path::Path) -> Result<PathBuf, ApiError> {
+    state
+        .security
+        .approve_project(requested)
+        .map_err(map_err(StatusCode::FORBIDDEN))
+}
+
+fn approved_optional_project(
+    state: &AppState,
+    requested: Option<&String>,
+) -> Result<Option<PathBuf>, ApiError> {
+    requested
+        .filter(|path| !path.is_empty())
+        .map(|path| approved_project(state, std::path::Path::new(path)))
+        .transpose()
+}
+
+fn public_value<T: Serialize>(value: T) -> serde_json::Value {
+    redact_public_json(serde_json::to_value(value).unwrap_or(serde_json::Value::Null))
+}
+
 #[derive(Debug, Deserialize)]
 struct DiscoverRequest {
     project: PathBuf,
@@ -343,12 +473,13 @@ async fn discover(
     Json(req): Json<DiscoverRequest>,
 ) -> ApiResult<serde_json::Value> {
     let lang = parse_lang(&req.lang).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
     let inv = state
         .container
-        .discover(&req.project, lang)
+        .discover(&project, lang)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(serde_json::to_value(&inv).unwrap_or_default()))
+    Ok(Json(public_value(inv)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,13 +495,14 @@ async fn harness_draft(
     Json(req): Json<HarnessDraftRequest>,
 ) -> ApiResult<serde_json::Value> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
     let lang = match req.lang.as_deref() {
         Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
     };
     let draft = state
         .container
-        .harness_draft(&req.project, &req.target, engine, lang)
+        .harness_draft(&project, &req.target, engine, lang)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({
@@ -399,13 +531,14 @@ async fn harness_compile(
     Json(req): Json<HarnessCompileRequest>,
 ) -> ApiResult<serde_json::Value> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
     let lang = match req.lang.as_deref() {
         Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
     };
     match state
         .container
-        .harness_compile(req.source, &req.project, engine, &req.target, lang)
+        .harness_compile(req.source, &project, engine, &req.target, lang)
         .await
     {
         Ok(out) => Ok(Json(serde_json::json!({
@@ -432,13 +565,14 @@ async fn harness_smoke(
     Json(req): Json<HarnessQualificationRequest>,
 ) -> ApiResult<serde_json::Value> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
     let lang = match req.lang.as_deref() {
         Some(value) => parse_lang(value).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
     };
     let smoke = state
         .container
-        .harness_smoke(&req.project, &req.target, engine, lang)
+        .harness_smoke(&project, &req.target, engine, lang)
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(serde_json::json!({
@@ -456,9 +590,10 @@ async fn harness_promote(
     Json(req): Json<HarnessQualificationRequest>,
 ) -> ApiResult<serde_json::Value> {
     let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, &req.project)?;
     let harness = state
         .container
-        .harness_promote(&req.project, &req.target, engine)
+        .harness_promote(&project, &req.target, engine)
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(serde_json::json!({
@@ -482,11 +617,10 @@ async fn run_history(
     State(state): State<AppState>,
     Json(req): Json<WorkbenchRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let path = opt_project_path(req.project.as_ref());
-    Ok(Json(
-        serde_json::to_value(state.container.run_history(path).await)
-            .unwrap_or(serde_json::Value::Null),
-    ))
+    let project = approved_optional_project(&state, req.project.as_ref())?;
+    Ok(Json(public_value(
+        state.container.run_history(project.as_deref()).await,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -526,6 +660,70 @@ async fn revert_harness_from_run(
     })))
 }
 
+async fn run_start_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ErrorResponse {
+            error: "run start requires a service-owned durable run handle; use the CLI or desktop until that service contract is available".to_owned(),
+        }),
+    )
+}
+
+async fn run_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let run_id = uuid::Uuid::parse_str(&id).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let item = state
+        .container
+        .run_history(None)
+        .await
+        .into_iter()
+        .find(|run| run.id == run_id.to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "run not found".to_owned(),
+                }),
+            )
+        })?;
+    let mut value = public_value(item);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "active".to_owned(),
+            serde_json::Value::Bool(state.container.active_run_ids().contains(&run_id)),
+        );
+    }
+    Ok(Json(value))
+}
+
+async fn cancel_run_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let run_id = uuid::Uuid::parse_str(&id).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    if !state.container.cancel_run(run_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "run is not active".to_owned(),
+            }),
+        ));
+    }
+    let _ = state.publish_event(SseEvent::RunStatus {
+        run_id: run_id.to_string(),
+        status: "cancellation_requested".to_owned(),
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "run_id": run_id,
+            "accepted": true,
+        })),
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 struct SetProjectAutoRevertRequest {
     project: String,
@@ -538,13 +736,9 @@ async fn project_auto_revert_override(
     State(state): State<AppState>,
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let over = state
-        .container
-        .project_auto_revert_override(std::path::Path::new(&req.project))
-        .await;
-    Ok(Json(
-        serde_json::to_value(over).unwrap_or(serde_json::Value::Null),
-    ))
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let over = state.container.project_auto_revert_override(&project).await;
+    Ok(Json(public_value(over)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -559,53 +753,40 @@ async fn auto_revert_events(
     State(state): State<AppState>,
     Json(req): Json<AuditRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let project = req.project.filter(|p| !p.is_empty());
+    let requested = req.project.filter(|path| !path.is_empty());
+    let project = approved_optional_project(&state, requested.as_ref())?;
     let events = state
         .container
-        .auto_revert_events(
-            project.as_deref().map(std::path::Path::new),
-            req.limit.unwrap_or(200),
-        )
+        .auto_revert_events(project.as_deref(), req.limit.unwrap_or(200))
         .await;
-    Ok(Json(
-        serde_json::to_value(events).unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(public_value(events)))
 }
 
 async fn effective_auto_revert_policy(
     State(state): State<AppState>,
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let view = state
-        .container
-        .effective_auto_revert_view(std::path::Path::new(&req.project))
-        .await;
-    Ok(Json(
-        serde_json::to_value(view).unwrap_or(serde_json::Value::Null),
-    ))
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let view = state.container.effective_auto_revert_view(&project).await;
+    Ok(Json(public_value(view)))
 }
 
 async fn project_auto_revert_overrides(
     State(state): State<AppState>,
 ) -> ApiResult<serde_json::Value> {
-    Ok(Json(
-        serde_json::to_value(state.container.project_auto_revert_overrides().await)
-            .unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(public_value(
+        state.container.project_auto_revert_overrides().await,
+    )))
 }
 
 async fn set_project_auto_revert_override(
     State(state): State<AppState>,
     Json(req): Json<SetProjectAutoRevertRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .set_project_auto_revert_override(
-            std::path::Path::new(&req.project),
-            req.enabled,
-            req.threshold_pct,
-            req.notify_only,
-        )
+        .set_project_auto_revert_override(&project, req.enabled, req.threshold_pct, req.notify_only)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -615,9 +796,10 @@ async fn clear_project_auto_revert_override(
     State(state): State<AppState>,
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .clear_project_auto_revert_override(std::path::Path::new(&req.project))
+        .clear_project_auto_revert_override(&project)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -625,32 +807,25 @@ async fn clear_project_auto_revert_override(
 
 async fn all_crashes(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let crashes = state.container.all_crashes().await;
-    Ok(Json(
-        serde_json::to_value(&crashes).unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(public_value(crashes)))
 }
 
 async fn all_corpus(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let entries = state.container.all_corpus_entries().await;
-    Ok(Json(
-        serde_json::to_value(&entries).unwrap_or(serde_json::Value::Null),
-    ))
+    Ok(Json(public_value(entries)))
 }
 
 async fn export_project_data(
     State(state): State<AppState>,
     Json(req): Json<ExportProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let project = req
-        .project
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    Ok(Json(
+    let project = approved_optional_project(&state, req.project.as_ref())?;
+    Ok(Json(public_value(
         state
             .container
             .export_project_data(project.as_deref())
             .await,
-    ))
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,9 +837,11 @@ async fn generate_seeds(
     State(state): State<AppState>,
     Json(req): Json<GenerateSeedsRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let entries = state
         .container
-        .generate_seeds(std::path::Path::new(&req.project), &req.target)
+        .generate_seeds(&project, &req.target)
+        .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({"seeds": entries})))
 }
@@ -681,6 +858,7 @@ async fn generate_seeds_llm(
     State(state): State<AppState>,
     Json(req): Json<GenerateSeedsLlmRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let lang = match req.lang.as_deref() {
         Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
@@ -689,7 +867,7 @@ async fn generate_seeds_llm(
     let count = req.count.unwrap_or(12);
     let entries = state
         .container
-        .generate_seeds_llm(std::path::Path::new(&req.project), &req.target, lang, count)
+        .generate_seeds_llm(&project, &req.target, lang, count)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({"seeds": entries})))
@@ -706,20 +884,19 @@ async fn corpus(
     Path(op): Path<String>,
     Json(req): Json<CorpusRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     match op.as_str() {
         "list" => {
             let corpus = state
                 .container
-                .corpus_list(std::path::Path::new(&req.project), &req.target)
+                .corpus_list(&project, &req.target)
                 .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-            Ok(Json(
-                serde_json::to_value(&corpus.entries).unwrap_or_default(),
-            ))
+            Ok(Json(public_value(corpus.entries)))
         }
         "seed" => {
             let n = state
                 .container
-                .corpus_seed(std::path::Path::new(&req.project), &req.target)
+                .corpus_seed(&project, &req.target)
                 .await
                 .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
             Ok(Json(serde_json::json!({"seeded": n})))
@@ -727,7 +904,7 @@ async fn corpus(
         "grow" => {
             let n = state
                 .container
-                .corpus_grow(std::path::Path::new(&req.project), &req.target)
+                .corpus_grow(&project, &req.target)
                 .await
                 .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
             Ok(Json(serde_json::json!({"entries": n})))
@@ -735,7 +912,8 @@ async fn corpus(
         "prune" => {
             let n = state
                 .container
-                .corpus_prune(std::path::Path::new(&req.project), &req.target)
+                .corpus_prune(&project, &req.target)
+                .await
                 .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
             Ok(Json(serde_json::json!({"entries": n})))
         }
@@ -758,17 +936,31 @@ async fn triage(
     State(state): State<AppState>,
     Json(req): Json<TriageRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let deduped = state
         .container
-        .triage(std::path::Path::new(&req.project), &req.target)
+        .triage(&project, &req.target)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(serde_json::to_value(&deduped).unwrap_or_default()))
+    Ok(Json(public_value(deduped)))
 }
 
 async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
-    let snapshot = state.container.system_snapshot().await;
-    Ok(Json(serde_json::to_value(&snapshot).unwrap_or_default()))
+    let snapshot = state
+        .container
+        .system_snapshot()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(public_value(snapshot)))
+}
+
+async fn diagnostics_cost_summary(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    let summary = state
+        .container
+        .cost_summary()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(public_value(summary)))
 }
 
 async fn system_status(State(_): State<AppState>) -> Json<hf_service::SystemStatus> {
@@ -783,10 +975,6 @@ struct WorkbenchRequest {
     target: Option<String>,
 }
 
-fn opt_project_path(project: Option<&String>) -> Option<&std::path::Path> {
-    project.filter(|p| !p.is_empty()).map(std::path::Path::new)
-}
-
 fn opt_target(target: Option<&String>) -> Option<&str> {
     target.filter(|t| !t.is_empty()).map(String::as_str)
 }
@@ -794,31 +982,27 @@ fn opt_target(target: Option<&String>) -> Option<&str> {
 async fn workbench_dashboard(
     State(state): State<AppState>,
     Json(req): Json<WorkbenchRequest>,
-) -> ApiResult<hf_service::WorkbenchDashboard> {
-    Ok(Json(
+) -> ApiResult<serde_json::Value> {
+    let project = approved_optional_project(&state, req.project.as_ref())?;
+    Ok(Json(public_value(
         state
             .container
-            .workbench_dashboard(
-                opt_project_path(req.project.as_ref()),
-                opt_target(req.target.as_ref()),
-            )
+            .workbench_dashboard(project.as_deref(), opt_target(req.target.as_ref()))
             .await,
-    ))
+    )))
 }
 
 async fn harness_review_queue(
     State(state): State<AppState>,
     Json(req): Json<WorkbenchRequest>,
-) -> ApiResult<Vec<hf_service::HarnessReviewItem>> {
-    Ok(Json(
+) -> ApiResult<serde_json::Value> {
+    let project = approved_optional_project(&state, req.project.as_ref())?;
+    Ok(Json(public_value(
         state
             .container
-            .harness_review_queue(
-                opt_project_path(req.project.as_ref()),
-                opt_target(req.target.as_ref()),
-            )
+            .harness_review_queue(project.as_deref(), opt_target(req.target.as_ref()))
             .await,
-    ))
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,10 +1015,10 @@ async fn artifact_summary(
     State(state): State<AppState>,
     Json(req): Json<ArtifactSummaryRequest>,
 ) -> ApiResult<hf_service::ArtifactSummary> {
-    Ok(Json(state.container.artifact_summary(
-        std::path::Path::new(&req.project),
-        &req.target,
-    )))
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    Ok(Json(
+        state.container.artifact_summary(&project, &req.target),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -847,9 +1031,10 @@ async fn issue_export(
     State(state): State<AppState>,
     Json(req): Json<IssueExportRequest>,
 ) -> ApiResult<hf_service::IssueExport> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let export = state
         .container
-        .issue_export(std::path::Path::new(&req.project), &req.crash_id)
+        .issue_export(&project, &req.crash_id)
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(export))
@@ -896,9 +1081,10 @@ async fn defectdojo_push(
     State(state): State<AppState>,
     Json(req): Json<DefectDojoPushRequest>,
 ) -> ApiResult<hf_service::PushOutcome> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let outcome = state
         .container
-        .push_to_defectdojo(std::path::Path::new(&req.project), req.target.as_deref())
+        .push_to_defectdojo(&project, req.target.as_deref())
         .await
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(outcome))
@@ -935,14 +1121,12 @@ async fn defectdojo_stop(State(_): State<AppState>) -> ApiResult<hf_service::Def
         .map_err(map_err(StatusCode::BAD_REQUEST))
 }
 
-async fn list_report_drafts(
-    State(state): State<AppState>,
-) -> ApiResult<Vec<hf_service::ReportDraft>> {
+async fn list_report_drafts(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let reports = state
         .container
         .list_report_drafts()
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(reports))
+    Ok(Json(public_value(reports)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -960,7 +1144,7 @@ struct SaveReportDraftRequest {
 async fn save_report_draft(
     State(state): State<AppState>,
     Json(req): Json<SaveReportDraftRequest>,
-) -> ApiResult<hf_service::ReportDraft> {
+) -> ApiResult<serde_json::Value> {
     let report = state
         .container
         .save_report_draft(
@@ -972,7 +1156,7 @@ async fn save_report_draft(
             &req.content,
         )
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
-    Ok(Json(report))
+    Ok(Json(public_value(report)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1022,9 +1206,10 @@ async fn delete_project(
     State(state): State<AppState>,
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .delete_project(std::path::Path::new(&req.project))
+        .delete_project(&project)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({ "deleted": true })))
@@ -1050,6 +1235,7 @@ async fn delete_crash(
 #[derive(Debug, Deserialize)]
 struct CorpusEntryRequest {
     sha256: String,
+    path: String,
 }
 
 async fn delete_corpus_entry(
@@ -1058,7 +1244,7 @@ async fn delete_corpus_entry(
 ) -> ApiResult<bool> {
     state
         .container
-        .delete_corpus_entry(&req.sha256)
+        .delete_corpus_entry(&req.sha256, std::path::Path::new(&req.path))
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(true))
@@ -1095,9 +1281,10 @@ async fn clear_all_runs(State(state): State<AppState>) -> ApiResult<bool> {
 }
 
 async fn sarif(State(state): State<AppState>, Json(req): Json<TriageRequest>) -> ApiResult<String> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let doc = state
         .container
-        .export_sarif(std::path::Path::new(&req.project), &req.target)
+        .export_sarif(&project, &req.target)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(doc))
@@ -1107,9 +1294,10 @@ async fn report(
     State(state): State<AppState>,
     Json(req): Json<TriageRequest>,
 ) -> ApiResult<String> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let markdown = state
         .container
-        .generate_report(std::path::Path::new(&req.project), &req.target)
+        .generate_report(&project, &req.target)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(markdown))
@@ -1136,6 +1324,8 @@ async fn chat_send(
 struct ChatAgentRequest {
     message: String,
     #[serde(default)]
+    display_message: Option<String>,
+    #[serde(default)]
     project: Option<String>,
     #[serde(default)]
     agent_id: Option<String>,
@@ -1158,7 +1348,8 @@ async fn chat_agent(
     State(state): State<AppState>,
     Json(req): Json<ChatAgentRequest>,
 ) -> ApiResult<String> {
-    let project = req.project.filter(|p| !p.is_empty()).map(PathBuf::from);
+    let requested = req.project.filter(|path| !path.is_empty());
+    let project = approved_optional_project(&state, requested.as_ref())?;
     let session = req.session_id.filter(|s| !s.is_empty()).map(SessionId);
     let history_fallback: Vec<Message> = req
         .history
@@ -1174,6 +1365,7 @@ async fn chat_agent(
                 session,
                 history_fallback,
                 message: req.message,
+                display_message: req.display_message,
             },
             &hf_service::NullSink,
         )
@@ -1206,8 +1398,13 @@ struct CreateSessionRequest {
 async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
-) -> Json<Option<String>> {
-    Json(state.container.create_chat_session(req.title).await)
+) -> ApiResult<Option<String>> {
+    let id = state
+        .container
+        .create_chat_session(req.title)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(id))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1218,25 +1415,40 @@ struct SessionRequest {
 async fn chat_history(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<Message>> {
+) -> ApiResult<Vec<Message>> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_history(&id).await)
+    let history = state
+        .container
+        .chat_history(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(history))
 }
 
 async fn delete_session(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<bool> {
+) -> ApiResult<bool> {
     let id = SessionId(req.session_id);
-    Json(state.container.delete_chat_session(&id).await)
+    let deleted = state
+        .container
+        .delete_chat_session(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(deleted))
 }
 
 async fn chat_rollback(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<usize> {
+) -> ApiResult<usize> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_rollback_last(&id).await)
+    let removed = state
+        .container
+        .chat_rollback_last(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(removed))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1248,22 +1460,27 @@ struct RollbackToRequest {
 async fn chat_rollback_to(
     State(state): State<AppState>,
     Json(req): Json<RollbackToRequest>,
-) -> Json<usize> {
+) -> ApiResult<usize> {
     let id = SessionId(req.session_id);
-    Json(
-        state
-            .container
-            .chat_rollback_to(&id, &req.checkpoint_id)
-            .await,
-    )
+    let removed = state
+        .container
+        .chat_rollback_to(&id, &req.checkpoint_id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(removed))
 }
 
 async fn chat_checkpoints(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<hf_service::checkpoints::CheckpointView>> {
+) -> ApiResult<Vec<hf_service::checkpoints::CheckpointView>> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_checkpoints(&id).await)
+    let checkpoints = state
+        .container
+        .chat_checkpoints(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(checkpoints))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1277,26 +1494,31 @@ struct BranchRequest {
 async fn chat_branch(
     State(state): State<AppState>,
     Json(req): Json<BranchRequest>,
-) -> Json<Option<String>> {
+) -> ApiResult<String> {
     let id = SessionId(req.session_id);
-    Json(
-        state
-            .container
-            .chat_branch(
-                &id,
-                req.fork_message_count,
-                req.title.filter(|t| !t.is_empty()),
-            )
-            .await,
-    )
+    let branch = state
+        .container
+        .chat_branch(
+            &id,
+            req.fork_message_count,
+            req.title.filter(|t| !t.is_empty()),
+        )
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(branch))
 }
 
 async fn chat_branches(
     State(state): State<AppState>,
     Json(req): Json<SessionRequest>,
-) -> Json<Vec<hf_service::checkpoints::BranchView>> {
+) -> ApiResult<Vec<hf_service::checkpoints::BranchView>> {
     let id = SessionId(req.session_id);
-    Json(state.container.chat_branches(&id).await)
+    let branches = state
+        .container
+        .chat_branches(&id)
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(branches))
 }
 
 // -- Knowledge base --------------------------------------------------------
@@ -1307,12 +1529,13 @@ struct ProjectRequest {
 }
 
 async fn knowledge_index(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<hf_service::knowledge::KnowledgeStats> {
-    let stats = hf_service::knowledge::index_project(std::path::Path::new(&req.project))
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let knowledge_stats = hf_service::knowledge::index_project(&project)
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(stats))
+    Ok(Json(knowledge_stats))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1325,12 +1548,16 @@ async fn knowledge_ingest(
     State(state): State<AppState>,
     Json(req): Json<IngestRequest>,
 ) -> ApiResult<hf_service::knowledge::KnowledgeStats> {
-    let ingested = state
-        .container
-        .ingest_document(
+    let (project, document) = state
+        .security
+        .approve_document(
             std::path::Path::new(&req.project),
             std::path::Path::new(&req.file),
         )
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    let ingested = state
+        .container
+        .ingest_document(&project, &document)
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(ingested))
@@ -1345,22 +1572,19 @@ struct KnowledgeSearchRequest {
 }
 
 async fn knowledge_search(
-    State(_): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<KnowledgeSearchRequest>,
-) -> Json<Vec<hf_service::knowledge::KnowledgeHit>> {
+) -> ApiResult<serde_json::Value> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     // Index-on-demand so a server restarted since the last `index` call does not
     // silently return nothing. The tree walk is blocking, so run it off the
     // async runtime.
     let hits = tokio::task::spawn_blocking(move || {
-        hf_service::knowledge::search_project_ensured(
-            std::path::Path::new(&req.project),
-            &req.query,
-            req.limit.unwrap_or(10),
-        )
+        hf_service::knowledge::search_project_ensured(&project, &req.query, req.limit.unwrap_or(10))
     })
     .await
     .unwrap_or_default();
-    Json(hits)
+    Ok(Json(public_value(hits)))
 }
 
 // -- Campaign scheduling ---------------------------------------------------
@@ -1368,13 +1592,12 @@ async fn knowledge_search(
 // Endpoints degrade to empty results when no scheduler is attached (e.g. a
 // bare test state).
 
-async fn schedule_list(
-    State(state): State<AppState>,
-) -> Json<Vec<hf_service::scheduler::CampaignView>> {
-    match &state.scheduler {
-        Some(s) => Json(s.list_views().await),
-        None => Json(Vec::new()),
-    }
+async fn schedule_list(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let views = match &state.scheduler {
+        Some(scheduler) => scheduler.list_views().await,
+        None => Vec::new(),
+    };
+    Json(public_value(views))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1386,11 +1609,12 @@ struct HistoryQuery {
 async fn schedule_history(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
-) -> Json<Vec<hf_service::scheduler::ExecutionView>> {
-    match &state.scheduler {
-        Some(s) => Json(s.recent_executions(q.limit.unwrap_or(20)).await),
-        None => Json(Vec::new()),
-    }
+) -> Json<serde_json::Value> {
+    let views = match &state.scheduler {
+        Some(scheduler) => scheduler.recent_executions(q.limit.unwrap_or(20)).await,
+        None => Vec::new(),
+    };
+    Json(public_value(views))
 }
 
 async fn schedule_history_clear(State(state): State<AppState>) -> Json<u64> {
@@ -1409,9 +1633,10 @@ async fn schedule_targets(
     State(state): State<AppState>,
     Json(req): Json<ScheduleTargetsRequest>,
 ) -> ApiResult<Vec<hf_service::SchedulableTarget>> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     state
         .container
-        .schedulable_targets(std::path::Path::new(&req.project))
+        .schedulable_targets(&project)
         .await
         .map(Json)
         .map_err(map_err(StatusCode::BAD_REQUEST))
@@ -1448,14 +1673,15 @@ fn default_campaign_lang() -> String {
 async fn schedule_create(
     State(state): State<AppState>,
     Json(req): Json<ScheduleCreateRequest>,
-) -> ApiResult<Vec<hf_service::scheduler::CampaignView>> {
+) -> ApiResult<serde_json::Value> {
     let Some(scheduler) = &state.scheduler else {
-        return Ok(Json(Vec::new()));
+        return Ok(Json(serde_json::json!([])));
     };
     let trigger = hf_service::scheduler::parse_trigger(&req.trigger_kind, &req.trigger_value)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let params = hf_service::scheduler::CampaignParams {
-        project: req.project,
+        project: project.to_string_lossy().into_owned(),
         target: req.target.filter(|t| !t.is_empty()),
         engine: req.engine,
         lang: req.lang,
@@ -1465,7 +1691,7 @@ async fn schedule_create(
         schedule_id: String::new(),
     };
     scheduler.create(&req.name, &params, trigger).await;
-    Ok(Json(scheduler.list_views().await))
+    Ok(Json(public_value(scheduler.list_views().await)))
 }
 
 async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> {
@@ -1493,13 +1719,13 @@ async fn schedule_concurrency_set(
 async fn schedule_delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Vec<hf_service::scheduler::CampaignView>> {
+) -> Json<serde_json::Value> {
     match &state.scheduler {
         Some(s) => {
             s.remove(&id).await;
-            Json(s.list_views().await)
+            Json(public_value(s.list_views().await))
         }
-        None => Json(Vec::new()),
+        None => Json(serde_json::json!([])),
     }
 }
 
@@ -1512,13 +1738,13 @@ async fn schedule_set_enabled(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SetEnabledRequest>,
-) -> Json<Vec<hf_service::scheduler::CampaignView>> {
+) -> Json<serde_json::Value> {
     match &state.scheduler {
         Some(s) => {
             s.set_enabled(&id, req.enabled).await;
-            Json(s.list_views().await)
+            Json(public_value(s.list_views().await))
         }
-        None => Json(Vec::new()),
+        None => Json(serde_json::json!([])),
     }
 }
 
@@ -1546,7 +1772,8 @@ async fn read_config(
 ) -> ApiResult<String> {
     let content =
         hf_service::config::read_config(&req.name).map_err(map_err(StatusCode::BAD_REQUEST))?;
-    Ok(Json(content))
+    let redacted = redact_config_text(&content).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(redacted))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1559,6 +1786,14 @@ async fn write_config(
     State(_): State<AppState>,
     Json(req): Json<WriteConfigRequest>,
 ) -> ApiResult<()> {
+    if req.content.contains("<redacted>") || req.content.contains("<redacted-path>") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "redaction markers cannot be written; supply a new value or edit through the trusted desktop settings".to_owned(),
+            }),
+        ));
+    }
     hf_service::config::write_config(&req.name, &req.content)
         .map_err(map_err(StatusCode::BAD_REQUEST))?;
     Ok(Json(()))
@@ -1593,14 +1828,59 @@ async fn config_value_to_toml(
 }
 
 async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!(hf_service::config::get_providers()))
+    let providers = hf_service::config::get_providers()
+        .into_iter()
+        .map(|provider| {
+            let api_key_configured = provider
+                .api_key
+                .as_ref()
+                .is_some_and(|value| !value.is_empty())
+                || provider
+                    .api_key_env
+                    .as_ref()
+                    .is_some_and(|value| !value.is_empty());
+            let headers_configured = !provider.headers.is_empty();
+            let mut value = public_value(provider);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "api_key_configured".to_owned(),
+                    serde_json::Value::Bool(api_key_configured),
+                );
+                object.insert(
+                    "headers_configured".to_owned(),
+                    serde_json::Value::Bool(headers_configured),
+                );
+            }
+            value
+        })
+        .collect();
+    Json(serde_json::Value::Array(providers))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SetProvidersRequest {
+    Wrapped {
+        providers: Vec<hf_service::config::ProviderConfig>,
+    },
+    Bare(Vec<hf_service::config::ProviderConfig>),
+}
+
+impl SetProvidersRequest {
+    fn into_providers(self) -> Vec<hf_service::config::ProviderConfig> {
+        match self {
+            Self::Wrapped { providers } | Self::Bare(providers) => providers,
+        }
+    }
 }
 
 async fn set_providers(
     State(state): State<AppState>,
-    Json(req): Json<Vec<hf_service::config::ProviderConfig>>,
+    Json(req): Json<SetProvidersRequest>,
 ) -> ApiResult<()> {
-    hf_service::config::set_providers(&req).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let providers = req.into_providers();
+    hf_service::config::set_providers_preserving_secrets(&providers)
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
     // Apply the new providers to the live pool so the change takes effect without
     // restarting the server.
     state.container.reload_providers();
@@ -1610,7 +1890,7 @@ async fn set_providers(
 // -- System endpoints ------------------------------------------------------
 
 async fn app_paths(State(_): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!(hf_service::config::app_paths()))
+    Json(public_value(hf_service::config::app_paths()))
 }
 
 async fn host_arch() -> Json<String> {
@@ -1634,6 +1914,12 @@ async fn event_stream(State(state): State<AppState>) -> Response {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(lagged = n, "SSE client fell behind, skipped events");
+                    let event = SseEvent::StreamLagged { dropped: n };
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        yield Ok::<_, std::convert::Infallible>(
+                            Event::default().event(event.event_name()).data(json),
+                        );
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     break;
@@ -1659,51 +1945,13 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
 }
 
 #[cfg(test)]
-mod auth_tests {
-    use super::AuthPolicy;
-
-    fn with_token(tok: &str) -> AuthPolicy {
-        AuthPolicy {
-            token: Some(tok.to_owned()),
-            allow_open: false,
-        }
-    }
+mod request_tests {
+    use super::SetProvidersRequest;
 
     #[test]
-    fn health_is_always_open() {
-        let fail_closed = AuthPolicy {
-            token: None,
-            allow_open: false,
-        };
-        assert!(fail_closed.authorize("/health", None));
-        assert!(with_token("secret").authorize("/health", None));
-    }
-
-    #[test]
-    fn no_token_is_fail_closed_by_default() {
-        let policy = AuthPolicy {
-            token: None,
-            allow_open: false,
-        };
-        assert!(!policy.authorize("/discover", None));
-        assert!(!policy.authorize("/harness/compile", Some("anything")));
-    }
-
-    #[test]
-    fn no_token_with_opt_out_is_open() {
-        let policy = AuthPolicy {
-            token: None,
-            allow_open: true,
-        };
-        assert!(policy.authorize("/discover", None));
-        assert!(policy.authorize("/harness/compile", None));
-    }
-
-    #[test]
-    fn configured_token_requires_exact_bearer_match() {
-        let policy = with_token("secret");
-        assert!(policy.authorize("/discover", Some("secret")));
-        assert!(!policy.authorize("/discover", Some("wrong")));
-        assert!(!policy.authorize("/discover", None));
+    fn provider_write_accepts_the_browser_transport_wrapper() {
+        let request: SetProvidersRequest =
+            serde_json::from_str(r#"{"providers":[]}"#).expect("wrapped provider request");
+        assert!(request.into_providers().is_empty());
     }
 }

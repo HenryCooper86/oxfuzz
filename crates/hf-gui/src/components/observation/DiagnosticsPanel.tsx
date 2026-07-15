@@ -1,7 +1,8 @@
 // Diagnostics panel -- live LLM cost/usage for this session, backed by
 // hf-service::diagnostics (the DiagnosticsRecorder that every LLM call -- rank,
 // harness drafting, triage bug reports, chat -- reports into). Totals are
-// in-memory and cover the current app session.
+// filtered by the recorder's session id, so a persistent trace store cannot
+// make historical calls look like current-session spend.
 
 import { useCallback, useEffect, useState } from "react";
 import { Activity, Loader2, RotateCw } from "lucide-react";
@@ -41,7 +42,10 @@ export function DiagnosticsPanel() {
         setData(d);
         setError(null);
       })
-      .catch((e) => setError(String(e)))
+      .catch((e) => {
+        setData(null);
+        setError(String(e));
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -57,9 +61,14 @@ export function DiagnosticsPanel() {
             setError(null);
           }
         })
-        // Keep the last good data on a transient failure; surface the error
-        // rather than showing "no calls yet" for a broken query.
-        .catch((e) => !cancelled && setError(String(e)))
+        // A stale value must not remain labeled as the current session after
+        // the service reports that its diagnostics query failed.
+        .catch((e) => {
+          if (!cancelled) {
+            setData(null);
+            setError(String(e));
+          }
+        })
         .finally(() => !cancelled && setLoading(false));
     };
     tick();
