@@ -2023,7 +2023,7 @@ fn build_session_managers(
         Arc::clone(&session_store),
         Arc::clone(&transcript),
         Arc::clone(&display),
-        hf_session::SessionConfig::default(),
+        crate::config::effective_session_config(),
     ));
     let checkpoints = Arc::new(hf_session::ChatCheckpointManager::new(
         transcript,
