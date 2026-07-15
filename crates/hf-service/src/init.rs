@@ -143,6 +143,9 @@ pub async fn init_at(config_dir: &Path, db_path: &Path) -> Result<InitReport, Cl
         let Some(stem) = name.strip_suffix(".example.toml") else {
             continue;
         };
+        if crate::config::validated_section(stem).is_err() {
+            continue;
+        }
         let target = config_dir.join(format!("{stem}.toml"));
         if crate::config::copy_private_config_if_missing(&entry.path(), &target)
             .map_err(|e| ClassifiedError::Internal(format!("create {name}: {e}")))?
@@ -180,5 +183,25 @@ mod tests {
         let resolved = writable_or_temp(file.path().to_path_buf());
 
         assert_eq!(resolved, std::env::temp_dir().join("hobot_fuzz"));
+    }
+
+    #[tokio::test]
+    async fn init_ignores_templates_for_unsupported_config_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let database = dir.path().join("data.db");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("providers.example.toml"),
+            "providers = []\n",
+        )
+        .unwrap();
+        std::fs::write(config_dir.join("session.example.toml"), "max_depth = 10\n").unwrap();
+
+        let report = init_at(&config_dir, &database).await.unwrap();
+
+        assert_eq!(report.created_configs, ["providers.toml"]);
+        assert!(config_dir.join("providers.toml").is_file());
+        assert!(!config_dir.join("session.toml").exists());
     }
 }
