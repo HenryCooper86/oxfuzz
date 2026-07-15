@@ -30,7 +30,7 @@ auto_revert_notify_only = false
 [knowledge]
 l2_max_tokens = 450
 min_similarity_threshold = 0.65
-retrieval_strategy = "hybrid" # hybrid | keyword | semantic
+retrieval_strategy = "hybrid" # hybrid | keyword; semantic needs embeddings
 bm25_weight = 1.0
 vector_weight = 1.0
 
