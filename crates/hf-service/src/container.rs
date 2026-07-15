@@ -3987,30 +3987,32 @@ impl ServiceContainer {
         }
     }
 
-    /// Resolve a target symbol to its discovered candidate id, falling back to
-    /// the nil UUID when discovery fails or the symbol is unknown. Shared by
+    /// Resolve a target symbol to its discovered candidate id, using the nil
+    /// UUID only when discovery succeeds but the symbol is absent. Shared by
     /// harness compilation and triage so persisted records key off the same id.
-    async fn resolve_target_id(&self, project: &Path, target: &str, lang: TargetLanguage) -> Uuid {
+    async fn resolve_target_id(
+        &self,
+        project: &Path,
+        target: &str,
+        lang: TargetLanguage,
+    ) -> Result<Uuid, ClassifiedError> {
         if let Some(store) = &self.store {
-            if let Ok(targets) = store.list_targets(&project.to_string_lossy()).await {
-                if let Some(candidate) = targets
-                    .iter()
-                    .find(|candidate| candidate.symbol == target && candidate.language == lang)
-                {
-                    return candidate.id;
-                }
+            let targets = store.list_targets(&project.to_string_lossy()).await?;
+            if let Some(candidate) = targets
+                .iter()
+                .find(|candidate| candidate.symbol == target && candidate.language == lang)
+            {
+                return Ok(candidate.id);
             }
         }
-        self.discover(project, lang)
-            .await
-            .ok()
-            .and_then(|inv| {
-                inv.candidates
-                    .iter()
-                    .find(|c| c.symbol == target)
-                    .map(|c| c.id)
-            })
-            .unwrap_or_default()
+        Ok(self
+            .discover(project, lang)
+            .await?
+            .candidates
+            .iter()
+            .find(|c| c.symbol == target)
+            .map(|c| c.id)
+            .unwrap_or_default())
     }
 
     /// Targets in `project` that a scheduled campaign can legally run: those a
@@ -4036,7 +4038,7 @@ impl ServiceContainer {
         let targets = store
             .list_targets(&project.to_string_lossy())
             .await
-            .map_err(|e| ClassifiedError::Internal(format!("list targets: {e}")))?;
+            .map_err(ClassifiedError::from)?;
 
         let mut schedulable = Vec::new();
         for candidate in targets {
@@ -4065,23 +4067,26 @@ impl ServiceContainer {
     /// authoritative; only missing projects are scanned across supported
     /// languages. This prevents run, triage, and corpus records for Rust/C++
     /// targets from being silently attached to the nil UUID.
-    async fn resolve_target_id_any_language(&self, project: &Path, target: &str) -> Uuid {
-        self.resolve_target_candidate_any_language(project, target)
-            .await
-            .map_or_else(Uuid::nil, |candidate| candidate.id)
+    async fn resolve_target_id_any_language(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Result<Uuid, ClassifiedError> {
+        Ok(self
+            .resolve_target_candidate_any_language(project, target)
+            .await?
+            .map_or_else(Uuid::nil, |candidate| candidate.id))
     }
 
     async fn resolve_target_candidate_any_language(
         &self,
         project: &Path,
         target: &str,
-    ) -> Option<TargetCandidate> {
+    ) -> Result<Option<TargetCandidate>, ClassifiedError> {
         if let Some(store) = &self.store {
-            if let Ok(targets) = store.list_targets(&project.to_string_lossy()).await {
-                if let Some(candidate) = targets.iter().find(|candidate| candidate.symbol == target)
-                {
-                    return Some(candidate.clone());
-                }
+            let targets = store.list_targets(&project.to_string_lossy()).await?;
+            if let Some(candidate) = targets.iter().find(|candidate| candidate.symbol == target) {
+                return Ok(Some(candidate.clone()));
             }
         }
         for language in [
@@ -4097,11 +4102,11 @@ impl ServiceContainer {
                     .into_iter()
                     .find(|candidate| candidate.symbol == target)
                 {
-                    return Some(candidate);
+                    return Ok(Some(candidate));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Resolve the persisted record for the binary/source revision currently
@@ -4143,7 +4148,7 @@ impl ServiceContainer {
             return Ok(harness);
         }
 
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let harnesses = store
             .list_harnesses(target_id)
             .await
@@ -4275,7 +4280,7 @@ impl ServiceContainer {
         let build_cmd = hf_harness::build_command(engine, lang, &harness_binary_name(target));
         let harness = Harness {
             id: Uuid::new_v4(),
-            target_id: self.resolve_target_id(project, target, lang).await,
+            target_id: self.resolve_target_id(project, target, lang).await?,
             engine,
             source,
             language: lang,
@@ -4900,7 +4905,7 @@ impl ServiceContainer {
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let seeds = generate_target_seeds(target);
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
         self.persist_corpus(target_id, &hf_corpus::list(&corpus_dir)?)
             .await?;
@@ -4992,7 +4997,7 @@ impl ServiceContainer {
         // and survive as persisted rows -- previously LLM seeds only landed on
         // disk. Listing the dir also folds in any pre-existing entries; the
         // exact target reconciliation stays idempotent.
-        let target_id = self.resolve_target_id(project, target, lang).await;
+        let target_id = self.resolve_target_id(project, target, lang).await?;
         let generated = hf_corpus::seed(target_id, &corpus_dir, named_seeds).await?;
         let entries = generated
             .entries
@@ -5837,7 +5842,7 @@ impl ServiceContainer {
         if run.project_root != project.to_string_lossy()
             || !run_has_crash_evidence(run.status)
             || self.run_target_id(store, &run).await?
-                != Some(self.resolve_target_id_any_language(project, target).await)
+                != Some(self.resolve_target_id_any_language(project, target).await?)
         {
             return Err(ClassifiedError::Validation(format!(
                 "run {run_id} does not own terminal evidence for target '{target}'"
@@ -5881,7 +5886,7 @@ impl ServiceContainer {
 
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let run_id = run.id;
         let engine = run.engine;
         let out_dir = run_output_dir(&workspace, &run)?;
@@ -6098,13 +6103,12 @@ impl ServiceContainer {
         let latest_run = self.latest_run_record(project, Some(target)).await?;
         if let Some(store) = &self.store {
             if let Some(run) = &latest_run {
-                if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
-                    inputs.extend(
-                        crashes
-                            .into_iter()
-                            .map(|c| (c.id.to_string(), c.input_path)),
-                    );
-                }
+                let crashes = store.list_crashes_by_run(run.id).await?;
+                inputs.extend(
+                    crashes
+                        .into_iter()
+                        .map(|c| (c.id.to_string(), c.input_path)),
+                );
             }
         }
         if inputs.is_empty() {
@@ -6415,7 +6419,7 @@ impl ServiceContainer {
         // Resolve the target candidate (best-effort) and its id.
         let candidate = self
             .resolve_target_candidate_any_language(project, target)
-            .await;
+            .await?;
         let target_id = candidate.as_ref().map_or_else(Uuid::nil, |c| c.id);
 
         // Latest run + its crashes from the store, when persistence is wired.
@@ -6647,7 +6651,7 @@ impl ServiceContainer {
                 .into_iter()
                 .find(|run| run_has_crash_evidence(run.status)));
         };
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         if target_id.is_nil() {
             return Ok(None);
         }
@@ -6904,7 +6908,7 @@ impl ServiceContainer {
             (b"{}".to_vec(), "seed_empty".to_owned()),
             (b"[1,2,3]".to_vec(), "seed_array".to_owned()),
         ];
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         let corpus = hf_corpus::seed(target_id, &corpus_dir, seeds).await?;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(corpus.entries.len())
@@ -6927,7 +6931,7 @@ impl ServiceContainer {
             None => workspace.join("out"),
         };
         let mut corpus = hf_corpus::grow(&corpus_dir, &out_dir)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         corpus.target_id = target_id;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(corpus.entries.len())
@@ -6946,7 +6950,7 @@ impl ServiceContainer {
         let corpus_dir = workspace.join("corpus");
         let corpus = hf_corpus::list(&corpus_dir)?;
         let pruned = hf_corpus::prune(corpus)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         self.persist_corpus(target_id, &pruned).await?;
         Ok(pruned.entries.len())
     }
@@ -7103,7 +7107,7 @@ impl ServiceContainer {
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         if target_id.is_nil()
             || run.project_root != project.to_string_lossy()
             || !run_has_crash_evidence(run.status)
@@ -7131,9 +7135,8 @@ impl ServiceContainer {
         let mut inputs: Vec<PathBuf> = Vec::new();
         if let Some(store) = &self.store {
             if let Some(run) = &run {
-                if let Ok(crashes) = store.list_crashes_by_run(run.id).await {
-                    inputs.extend(crashes.into_iter().map(|c| c.input_path));
-                }
+                let crashes = store.list_crashes_by_run(run.id).await?;
+                inputs.extend(crashes.into_iter().map(|c| c.input_path));
             }
         }
         if inputs.is_empty() {
@@ -7148,7 +7151,7 @@ impl ServiceContainer {
         }
 
         let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await;
+        let target_id = self.resolve_target_id_any_language(project, target).await?;
         corpus.target_id = target_id;
         self.persist_corpus(target_id, &corpus).await?;
         Ok(added)
