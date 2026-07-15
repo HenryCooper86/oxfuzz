@@ -1,8 +1,12 @@
 //! Tests for corpus management operations.
 
 use hf_core::corpus::CorpusSource;
-use hf_corpus::{absorb, grow, list, merge, minimize, prune, seed};
-use std::fs;
+use hf_corpus::{
+    absorb, grow, list, list_with_limits, merge, merge_snapshot, merge_snapshot_with_limits,
+    minimize, prune, seed, seed_with_limits, snapshot, snapshot_with_limits, CorpusLimits,
+    DEFAULT_CORPUS_LIMITS,
+};
+use std::fs::{self, File};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -75,6 +79,47 @@ async fn seed_rejects_names_that_escape_the_corpus_root() {
 
     assert!(result.is_err());
     assert!(!dir.path().join("escaped-seed").exists());
+}
+
+#[tokio::test]
+async fn seed_rejects_inputs_outside_the_corpus_budget() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let oversized = vec![0; DEFAULT_CORPUS_LIMITS.max_input_bytes as usize + 1];
+
+    let result = seed(
+        target_id(),
+        &corpus_root,
+        vec![(oversized, "too-large".to_owned())],
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(!corpus_root.join("too-large").exists());
+}
+
+#[tokio::test]
+async fn seed_preflights_the_resulting_corpus_budget_before_writing() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::write(corpus_root.join("existing"), b"old").unwrap();
+    let limits = CorpusLimits {
+        max_total_bytes: 5,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    let result = seed_with_limits(
+        target_id(),
+        &corpus_root,
+        vec![(b"new".to_vec(), "new".to_owned())],
+        limits,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(!corpus_root.join("new").exists());
+    assert_eq!(fs::read(corpus_root.join("existing")).unwrap(), b"old");
 }
 
 #[tokio::test]
@@ -151,6 +196,44 @@ async fn grow_pulls_afl_queue_and_skips_artifacts() {
 }
 
 #[tokio::test]
+async fn grow_rejects_an_oversized_engine_input_without_copying_it() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let engine_out = dir.path().join("out");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&engine_out).unwrap();
+    let oversized = File::create(engine_out.join("oversized-input")).unwrap();
+    oversized
+        .set_len(DEFAULT_CORPUS_LIMITS.max_input_bytes + 1)
+        .unwrap();
+
+    let result = grow(&corpus_root, &engine_out);
+
+    assert!(result.is_err());
+    assert!(fs::read_dir(&corpus_root).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn grow_processes_engine_inputs_in_filename_order() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let engine_out = dir.path().join("out");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&engine_out).unwrap();
+    fs::write(engine_out.join("z-input"), b"z").unwrap();
+    fs::write(engine_out.join("a-input"), b"a").unwrap();
+
+    let names: Vec<_> = grow(&corpus_root, &engine_out)
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| entry.path.file_name().unwrap().to_owned())
+        .collect();
+
+    assert_eq!(names, ["a-input", "z-input"]);
+}
+
+#[tokio::test]
 async fn prune_removes_duplicate_coverage_entries() {
     let dir = TempDir::new().unwrap();
     let corpus_root = dir.path().join("corpus");
@@ -168,6 +251,25 @@ async fn prune_removes_duplicate_coverage_entries() {
     let pruned = prune(corpus).unwrap();
     // a and b share hash1 -> one removed. c kept. => 2 entries.
     assert_eq!(pruned.entries.len(), 2, "should prune to 2");
+}
+
+#[tokio::test]
+async fn prune_never_deletes_a_path_outside_the_corpus_root() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::write(corpus_root.join("a"), b"aaa").unwrap();
+    fs::write(corpus_root.join("b"), b"bbb").unwrap();
+    let outside = dir.path().join("outside");
+    fs::write(&outside, b"must survive").unwrap();
+    let mut corpus = list(&corpus_root).unwrap();
+    corpus.entries[0].coverage_hash = Some("same-coverage".to_owned());
+    corpus.entries[1].coverage_hash = Some("same-coverage".to_owned());
+    corpus.entries[1].path = outside.clone();
+
+    let _ = prune(corpus).unwrap();
+
+    assert_eq!(fs::read(outside).unwrap(), b"must survive");
 }
 
 #[tokio::test]
@@ -220,6 +322,28 @@ async fn minimize_swaps_in_the_minimized_set_and_tags_it() {
             .iter()
             .all(|e| matches!(e.source, CorpusSource::Minimized)),
         "survivors tagged Minimized"
+    );
+}
+
+#[tokio::test]
+async fn minimize_rejects_oversized_output_before_deleting_the_live_corpus() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let minimized = dir.path().join("corpus_min");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&minimized).unwrap();
+    fs::write(corpus_root.join("retained"), b"must survive").unwrap();
+    File::create(minimized.join("oversized"))
+        .unwrap()
+        .set_len(DEFAULT_CORPUS_LIMITS.max_input_bytes + 1)
+        .unwrap();
+
+    let result = minimize(&corpus_root, &minimized);
+
+    assert!(result.is_err());
+    assert_eq!(
+        fs::read(corpus_root.join("retained")).unwrap(),
+        b"must survive"
     );
 }
 
@@ -286,6 +410,25 @@ async fn absorb_keeps_distinct_inputs_that_share_a_basename() {
 }
 
 #[tokio::test]
+async fn absorb_rejects_an_oversized_crash_input_without_copying_it() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let crash_dir = dir.path().join("crashes");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&crash_dir).unwrap();
+    let crash = crash_dir.join("crash-oversized");
+    File::create(&crash)
+        .unwrap()
+        .set_len(DEFAULT_CORPUS_LIMITS.max_input_bytes + 1)
+        .unwrap();
+
+    let result = absorb(&corpus_root, &[crash]);
+
+    assert!(result.is_err());
+    assert!(fs::read_dir(&corpus_root).unwrap().next().is_none());
+}
+
+#[tokio::test]
 async fn list_returns_correct_metadata() {
     let dir = TempDir::new().unwrap();
     let corpus_root = dir.path().join("corpus");
@@ -297,6 +440,204 @@ async fn list_returns_correct_metadata() {
     assert_eq!(entry.size, 5);
     assert!(!entry.sha256.is_empty());
     assert!(matches!(entry.source, CorpusSource::Manual));
+}
+
+#[tokio::test]
+async fn list_orders_entries_deterministically() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    for name in ["z-last", "a-first", "m-middle"] {
+        fs::write(corpus_root.join(name), name).unwrap();
+    }
+
+    let names: Vec<_> = list(&corpus_root)
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| entry.path.file_name().unwrap().to_owned())
+        .collect();
+
+    assert_eq!(names, ["a-first", "m-middle", "z-last"]);
+}
+
+#[tokio::test]
+async fn list_rejects_oversized_inputs_before_allocating_their_contents() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    File::create(corpus_root.join("sparse-oversized"))
+        .unwrap()
+        .set_len(DEFAULT_CORPUS_LIMITS.max_input_bytes + 1)
+        .unwrap();
+
+    assert!(list(&corpus_root).is_err());
+}
+
+#[tokio::test]
+async fn list_rejects_directories_with_excessive_entries() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    for name in ["a", "b", "c"] {
+        fs::write(corpus_root.join(name), name).unwrap();
+    }
+    let limits = CorpusLimits {
+        max_entries: 2,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    assert!(list_with_limits(&corpus_root, limits).is_err());
+}
+
+#[tokio::test]
+async fn explicit_limits_cannot_raise_the_corpus_safety_ceiling() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    let limits = CorpusLimits {
+        max_input_bytes: DEFAULT_CORPUS_LIMITS.max_input_bytes + 1,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    assert!(list_with_limits(&corpus_root, limits).is_err());
+}
+
+#[tokio::test]
+async fn merge_snapshot_adds_only_new_regular_inputs() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let snapshot = dir.path().join("run-corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&snapshot).unwrap();
+    fs::write(corpus_root.join("retained"), b"existing").unwrap();
+    fs::write(snapshot.join("retained-copy"), b"existing").unwrap();
+    fs::write(snapshot.join("new-input"), b"new coverage").unwrap();
+    let (merged, added) = merge_snapshot(&corpus_root, &snapshot).unwrap();
+
+    assert_eq!(added, 1);
+    assert_eq!(merged.entries.len(), 2);
+    assert!(merged
+        .entries
+        .iter()
+        .any(|entry| entry.source == CorpusSource::Fuzzer
+            && fs::read(&entry.path).unwrap() == b"new coverage"));
+}
+
+#[tokio::test]
+async fn snapshot_copies_a_flat_corpus_in_deterministic_order() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let run_root = dir.path().join("run-corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&run_root).unwrap();
+    fs::write(corpus_root.join("z"), b"last").unwrap();
+    fs::write(corpus_root.join("a"), b"first").unwrap();
+
+    let copied = snapshot(&corpus_root, &run_root).unwrap();
+    let names: Vec<_> = copied
+        .entries
+        .iter()
+        .map(|entry| entry.path.file_name().unwrap())
+        .collect();
+
+    assert_eq!(names, ["a", "z"]);
+    assert_eq!(fs::read(run_root.join("a")).unwrap(), b"first");
+    assert_eq!(fs::read(run_root.join("z")).unwrap(), b"last");
+}
+
+#[tokio::test]
+async fn snapshot_preflights_limits_before_writing() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let run_root = dir.path().join("run-corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&run_root).unwrap();
+    fs::write(corpus_root.join("a"), b"one").unwrap();
+    fs::write(corpus_root.join("b"), b"two").unwrap();
+    let limits = CorpusLimits {
+        max_total_bytes: 5,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    let result = snapshot_with_limits(&corpus_root, &run_root, limits);
+
+    assert!(result.is_err());
+    assert!(fs::read_dir(&run_root).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn snapshot_rejects_a_nonempty_run_destination() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let run_root = dir.path().join("run-corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&run_root).unwrap();
+    fs::write(corpus_root.join("source"), b"source").unwrap();
+    fs::write(run_root.join("stale"), b"stale").unwrap();
+
+    assert!(snapshot(&corpus_root, &run_root).is_err());
+    assert_eq!(fs::read(run_root.join("stale")).unwrap(), b"stale");
+    assert!(!run_root.join("source").exists());
+}
+
+#[tokio::test]
+async fn snapshot_and_merge_reject_non_regular_entries() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let run_root = dir.path().join("run-corpus");
+    fs::create_dir_all(corpus_root.join("nested-directory")).unwrap();
+    fs::create_dir_all(&run_root).unwrap();
+
+    assert!(snapshot(&corpus_root, &run_root).is_err());
+
+    fs::remove_dir(corpus_root.join("nested-directory")).unwrap();
+    fs::create_dir(run_root.join("nested-directory")).unwrap();
+    assert!(merge_snapshot(&corpus_root, &run_root).is_err());
+    assert!(fs::read_dir(&corpus_root).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn merge_snapshot_obeys_the_combined_corpus_budget() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let snapshot = dir.path().join("run-corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&snapshot).unwrap();
+    fs::write(corpus_root.join("existing"), b"a").unwrap();
+    fs::write(snapshot.join("new"), b"b").unwrap();
+    let limits = CorpusLimits {
+        max_entries: 1,
+        ..DEFAULT_CORPUS_LIMITS
+    };
+
+    let result = merge_snapshot_with_limits(&corpus_root, &snapshot, limits);
+
+    assert!(result.is_err());
+    assert!(!corpus_root.join("new").exists());
+}
+
+#[tokio::test]
+async fn merge_snapshot_never_overwrites_a_same_named_retained_input() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let snapshot = dir.path().join("run-corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&snapshot).unwrap();
+    fs::write(corpus_root.join("same-name"), b"retained").unwrap();
+    fs::write(snapshot.join("same-name"), b"new discovery").unwrap();
+
+    let (merged, added) = merge_snapshot(&corpus_root, &snapshot).unwrap();
+
+    assert_eq!(added, 1);
+    assert_eq!(
+        fs::read(corpus_root.join("same-name")).unwrap(),
+        b"retained"
+    );
+    assert!(merged
+        .entries
+        .iter()
+        .any(|entry| fs::read(&entry.path).unwrap() == b"new discovery"));
 }
 
 #[cfg(unix)]
@@ -317,6 +658,16 @@ async fn corpus_operations_ignore_symlinked_inputs() {
         list(&corpus_root).unwrap().entries.is_empty(),
         "corpus listing followed a symlink"
     );
+    let snapshot_destination = dir.path().join("snapshot-destination");
+    fs::create_dir_all(&snapshot_destination).unwrap();
+    assert!(
+        snapshot(&corpus_root, &snapshot_destination).is_err(),
+        "snapshot accepted a symlink in the retained corpus"
+    );
+    assert!(fs::read_dir(&snapshot_destination)
+        .unwrap()
+        .next()
+        .is_none());
 
     let engine_out = dir.path().join("out");
     fs::create_dir_all(&engine_out).unwrap();
@@ -352,6 +703,18 @@ async fn corpus_operations_ignore_symlinked_inputs() {
     symlink(&external_corpus, &linked_engine_out).unwrap();
     let grown = grow(&corpus_root, &linked_engine_out).unwrap();
     assert!(grown.entries.is_empty());
+
+    let clean_corpus = dir.path().join("clean-corpus");
+    fs::create_dir_all(&clean_corpus).unwrap();
+    let run_snapshot = dir.path().join("run-snapshot");
+    fs::create_dir_all(&run_snapshot).unwrap();
+    symlink(&host_file, run_snapshot.join("linked-discovery")).unwrap();
+    fs::create_dir(run_snapshot.join("nested-directory")).unwrap();
+    assert!(
+        merge_snapshot(&clean_corpus, &run_snapshot).is_err(),
+        "snapshot merge accepted a symlink"
+    );
+    assert!(fs::read_dir(&clean_corpus).unwrap().next().is_none());
 
     let minimized = dir.path().join("minimized");
     fs::create_dir_all(&minimized).unwrap();
