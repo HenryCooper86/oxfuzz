@@ -4,6 +4,63 @@ use std::sync::Arc;
 
 use hf_service::ServiceContainer;
 
+#[tokio::test]
+async fn delete_corpus_entry_removes_the_managed_file_and_exact_row() {
+    isolate_workspace();
+    let project = tempfile::tempdir().unwrap();
+    let workspace = hf_service::workspace_dir(project.path(), "delete_target");
+    let corpus_dir = workspace.join("corpus");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    let corpus_path = corpus_dir.join("seed");
+    std::fs::write(&corpus_path, b"managed corpus input").unwrap();
+    let corpus = hf_corpus::list(&corpus_dir).unwrap();
+    let entry = corpus.entries.first().unwrap().clone();
+    let target_id = uuid::Uuid::new_v4();
+    let other_workspace = hf_service::workspace_dir(project.path(), "other_delete_target");
+    let other_corpus_dir = other_workspace.join("corpus");
+    std::fs::create_dir_all(&other_corpus_dir).unwrap();
+    let other_path = other_corpus_dir.join("same-seed");
+    std::fs::write(&other_path, b"managed corpus input").unwrap();
+    let other_entry = hf_corpus::list(&other_corpus_dir)
+        .unwrap()
+        .entries
+        .remove(0);
+    let other_target_id = uuid::Uuid::new_v4();
+
+    let db_dir = tempfile::tempdir().unwrap();
+    let store = hf_storage::Store::connect(&db_dir.path().join("service.db"))
+        .await
+        .unwrap();
+    store.upsert_corpus_entry(target_id, &entry).await.unwrap();
+    store
+        .upsert_corpus_entry(other_target_id, &other_entry)
+        .await
+        .unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+        .with_store(Arc::new(store.clone()));
+
+    container
+        .delete_corpus_entry(&entry.sha256, &entry.path)
+        .await
+        .unwrap();
+
+    assert!(!corpus_path.exists());
+    assert!(store
+        .list_corpus_entries(target_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(other_path.is_file());
+    assert_eq!(
+        store
+            .list_corpus_entries(other_target_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// Redirect the fuzz workspace to a temp dir for the duration of the test
 /// process, so tests that compile harnesses / seed corpora don't pollute (or
 /// collide with) the real per-user data dir now that the workspace is
@@ -182,6 +239,66 @@ impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
     }
 }
 
+struct DiscoveryRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for DiscoveryRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "DONE cov: 8 exec/s: 64".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn run_command_streaming_opts(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        _cancel: &tokio_util::sync::CancellationToken,
+        on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        let corpus = opts
+            .extra_mounts
+            .iter()
+            .find(|mount| mount.container_path.ends_with("/corpus"))
+            .expect("run-local corpus mount");
+        std::fs::write(corpus.host_path.join("discovered"), b"new coverage input").unwrap();
+        on_line("#1 cov: 8 exec/s: 64");
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "#1 cov: 8 exec/s: 64".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
 #[tokio::test]
 async fn cancel_run_stops_an_in_flight_fuzz_run() {
     use std::fs;
@@ -296,13 +413,96 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
     assert!(profile
         .extra_mounts
         .iter()
-        .any(|mount| mount.container_path == "/work/corpus"));
+        .any(|mount| mount.container_path == format!("/work/runs/{run_id}/corpus")));
+    assert!(
+        profile
+            .extra_mounts
+            .iter()
+            .all(|mount| { mount.host_path != corpus || mount.read_only }),
+        "retained corpus must not be exposed writable"
+    );
     assert!(profile
         .extra_mounts
         .iter()
         .any(|mount| mount.container_path == format!("/work/runs/{run_id}/out")));
 
     let _ = fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn completed_run_merges_discoveries_without_writable_live_corpus() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("merge-corpus-project");
+    std::fs::create_dir_all(&project).unwrap();
+    let target = "parse_merge";
+    std::fs::write(
+        project.join("parse.c"),
+        "int parse_merge(const unsigned char *data, unsigned long size) { return size && data[0]; }",
+    )
+    .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("seed"), b"retained seed").unwrap();
+    std::fs::write(workspace.join(format!("fuzz_{target}")), b"approved binary").unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("merge.db"))
+            .await
+            .unwrap(),
+    );
+    let container =
+        ServiceContainer::new(Arc::new(DiscoveryRuntime), None).with_store(Arc::clone(&store));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+
+    let summary = container
+        .run_fuzzer(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            1,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(corpus.join("discovered")).unwrap(),
+        b"new coverage input"
+    );
+    let persisted = store.list_all_corpus_entries_with_targets().await.unwrap();
+    let discovered = std::fs::canonicalize(corpus.join("discovered")).unwrap();
+    assert!(
+        persisted.iter().any(|(_, entry)| entry.path == discovered),
+        "persisted corpus rows: {persisted:?}"
+    );
+    assert_eq!(
+        store.get_run(summary.run_id).await.unwrap().unwrap().status,
+        hf_storage::RunStatus::Done
+    );
 }
 
 #[tokio::test]
@@ -465,34 +665,200 @@ async fn provider_pool_swap_is_visible_across_container_clones() {
     );
 }
 
+#[derive(Default)]
+struct CorpusMinimizeRuntime {
+    saw_minimize: std::sync::atomic::AtomicBool,
+    saw_hardened_mounts: std::sync::atomic::AtomicBool,
+    minimize_run_root: std::sync::Mutex<Option<std::path::PathBuf>>,
+}
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for CorpusMinimizeRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: "DONE exec/s: 64".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn run_command_streaming_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        limits: &hf_core::runtime::ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+        _cancel: &tokio_util::sync::CancellationToken,
+        _on_line: &hf_core::runtime::LineSink<'_>,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        if cmd.iter().any(|arg| arg == "-merge=1") {
+            self.saw_minimize
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            assert_ne!(cmd.first().map(String::as_str), Some("sh"));
+            let output_container = cmd.get(2).expect("merge output argument");
+            let corpus_container = cmd.get(3).expect("merge corpus argument");
+            let output = opts
+                .extra_mounts
+                .iter()
+                .find(|mount| &mount.container_path == output_container)
+                .expect("run-owned merge output mount");
+            let corpus = opts
+                .extra_mounts
+                .iter()
+                .find(|mount| &mount.container_path == corpus_container)
+                .expect("run-owned corpus snapshot mount");
+            self.saw_hardened_mounts.store(
+                opts.workspace_read_only
+                    && corpus.read_only
+                    && !output.read_only
+                    && opts.max_file_size_bytes == Some(16 * 1024 * 1024),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            *self.minimize_run_root.lock().unwrap() = output.host_path.parent().map(Into::into);
+            std::fs::write(
+                output.host_path.join("survivor"),
+                std::fs::read(corpus.host_path.join("a")).unwrap(),
+            )
+            .unwrap();
+        }
+        self.run_command(cmd, cwd, limits).await
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
 #[tokio::test]
-async fn corpus_minimize_leaves_corpus_untouched_when_sandbox_unavailable() {
+async fn corpus_minimize_rejects_an_unqualified_harness() {
     use std::fs;
     isolate_workspace();
 
-    // A unique project name keeps this test's workspace isolated.
     let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("minimize_fallback_proj");
+    let project = dir.path().join("minimize_unqualified_proj");
     fs::create_dir_all(&project).unwrap();
-    let target = "parse_entry";
+    let target = "parse_unqualified";
 
-    // Lay down a workspace with a harness and a two-entry corpus.
     let workspace = hf_service::workspace_dir(&project, target);
     let corpus = workspace.join("corpus");
     fs::create_dir_all(&corpus).unwrap();
     fs::write(workspace.join("harness.c"), b"int main(){return 0;}").unwrap();
     fs::write(corpus.join("a"), b"aaa").unwrap();
-    fs::write(corpus.join("b"), b"bbb").unwrap();
 
-    // The stub runtime errors on every sandbox command, so minimization cannot
-    // run; the corpus must be preserved rather than wiped.
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let error = container
+        .corpus_minimize(&project, target)
+        .await
+        .expect_err("minimization must require persisted qualification");
+
+    assert!(error.to_string().contains("persistent service store"));
+    assert!(corpus.join("a").exists());
+
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("minimize_isolated_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_minimize";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_minimize(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(corpus.join("a"), b"aaa").unwrap();
+    fs::write(corpus.join("b"), b"bbb").unwrap();
+    fs::write(
+        workspace.join(format!("fuzz_{target}")),
+        b"qualified binary",
+    )
+    .unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("minimize.db"))
+            .await
+            .unwrap(),
+    );
+    let runtime = Arc::new(CorpusMinimizeRuntime::default());
+    let container = ServiceContainer::new(runtime.clone(), None).with_store(Arc::clone(&store));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .unwrap();
+    let promoted = container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .unwrap();
+
     let outcome = container.corpus_minimize(&project, target).await.unwrap();
 
     assert_eq!(outcome.before, 2);
-    assert_eq!(outcome.after, 2, "corpus preserved on tooling failure");
-    assert!(corpus.join("a").exists());
-    assert!(corpus.join("b").exists());
+    assert_eq!(outcome.after, 1);
+    assert!(runtime
+        .saw_minimize
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(runtime
+        .saw_hardened_mounts
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(fs::read(corpus.join("a")).unwrap(), b"aaa");
+    assert!(!corpus.join("survivor").exists());
+    assert!(!corpus.join("b").exists());
+    assert_eq!(hf_corpus::list(&corpus).unwrap().entries.len(), 1);
+    assert_eq!(
+        store
+            .list_corpus_entries(promoted.target_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let minimize_run_root = runtime.minimize_run_root.lock().unwrap().clone().unwrap();
+    assert!(
+        !minimize_run_root.exists(),
+        "disposable minimization staging should be removed"
+    );
 
     let _ = fs::remove_dir_all(&workspace);
 }

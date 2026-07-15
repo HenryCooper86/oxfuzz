@@ -325,6 +325,28 @@ async fn minimize_swaps_in_the_minimized_set_and_tags_it() {
     );
 }
 
+#[test]
+fn minimize_does_not_duplicate_a_survivor_when_the_merge_renames_it() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let minimized = dir.path().join("corpus_min");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&minimized).unwrap();
+    fs::write(corpus_root.join("original"), b"surviving bytes").unwrap();
+    fs::write(corpus_root.join("redundant"), b"drop these bytes").unwrap();
+    fs::write(minimized.join("renamed"), b"surviving bytes").unwrap();
+
+    let result = minimize(&corpus_root, &minimized).unwrap();
+    let on_disk = list(&corpus_root).unwrap();
+
+    assert_eq!(result.entries.len(), 1);
+    assert_eq!(on_disk.entries.len(), 1, "one survivor must remain on disk");
+    assert_eq!(result.entries[0].path, corpus_root.join("original"));
+    assert_eq!(on_disk.entries[0].path, corpus_root.join("original"));
+    assert!(!corpus_root.join("renamed").exists());
+    assert!(!corpus_root.join("redundant").exists());
+}
+
 #[tokio::test]
 async fn minimize_rejects_oversized_output_before_deleting_the_live_corpus() {
     let dir = TempDir::new().unwrap();

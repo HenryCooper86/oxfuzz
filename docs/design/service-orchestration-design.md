@@ -60,6 +60,15 @@ the validated, run-owned directory. A cancelled campaign stops orchestration
 immediately and is never reported to schedulers or presentation layers as a
 successful iteration.
 
+Campaign lifecycle recovery is fail-closed. Before creating run-owned files or
+launching the sandbox, the service rejects a recovery journal with a replay,
+compaction, or append durability error. Opening and closing a run are synced WAL
+events. The database becomes terminal only after metrics and coverage samples
+are durable; if the final journal close cannot be confirmed, the database row
+is downgraded to failed and later campaigns remain blocked. WAL replay is
+bounded and preserves malformed input for operator recovery instead of
+compacting ambiguous evidence away.
+
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist
 before the service loads model context or retains a per-session turn lock. Raw

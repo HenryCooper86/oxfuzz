@@ -913,6 +913,7 @@ async fn corpus(
             let n = state
                 .container
                 .corpus_prune(&project, &req.target)
+                .await
                 .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
             Ok(Json(serde_json::json!({"entries": n})))
         }
@@ -1234,6 +1235,7 @@ async fn delete_crash(
 #[derive(Debug, Deserialize)]
 struct CorpusEntryRequest {
     sha256: String,
+    path: String,
 }
 
 async fn delete_corpus_entry(
@@ -1242,7 +1244,7 @@ async fn delete_corpus_entry(
 ) -> ApiResult<bool> {
     state
         .container
-        .delete_corpus_entry(&req.sha256)
+        .delete_corpus_entry(&req.sha256, std::path::Path::new(&req.path))
         .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(true))

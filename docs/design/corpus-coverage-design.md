@@ -72,6 +72,18 @@ Engine discoveries are normalized before the retained merge:
 Crash artifacts and engine bookkeeping are excluded by `grow`; they remain in
 the run-owned output tree for crash ingestion and evidence retention.
 
+Coverage-guided minimization is an execution workflow, not a direct corpus
+filesystem operation. The service accepts only the exact promoted libFuzzer
+harness revision, verifies its persisted smoke evidence, and requires the
+high-risk execution guardrail before launch. It stages the qualified source,
+binary, and a bounded corpus snapshot below a unique run directory. The
+primary workspace and snapshot are mounted read-only; only the empty,
+run-owned merge output is writable. Live and terminal budgets bound both trees.
+Only a successfully completed `-merge=1` command may feed the output through
+the bounded `minimize` API and exact database reconciliation. Qualification,
+sandbox, timeout, output, or persistence failures leave the retained corpus
+untouched and are returned to the caller.
+
 Whole-directory transactions were rejected: they require platform-specific
 directory exchange primitives and do not compose with a retained directory
 that may be observed by the UI. Instead, all validation is front-loaded and

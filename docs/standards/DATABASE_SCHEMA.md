@@ -75,6 +75,12 @@ preserving full-fidelity round-trips as the models evolve.
 | source | TEXT | seed/fuzzer/minimized/manual |
 | coverage_hash | TEXT | nullable |
 
+Corpus persistence is reconciled transactionally per target: rows absent from
+the latest on-disk snapshot are deleted, while retained rows keep their known
+source and coverage metadata when a filesystem rescan can only classify them as
+manual. Single-entry deletion is keyed by both `target_id` and `sha256`; a
+matching hash owned by another target is never deleted implicitly.
+
 ## 3. Migrations
 
 Migrations live in `crates/hf-storage/migrations/`. Forward-only.

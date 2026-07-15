@@ -79,8 +79,8 @@ export function ArtifactsView() {
   async function deleteCorpus(e: CorpusEntry) {
     if (!(await confirm({ title: t("artifacts.deleteCorpusTitle"), message: t("artifacts.deleteCorpusMessage", { name: e.path.split("/").pop() ?? "" }), danger: true, confirmLabel: t("common.delete") }))) return;
     try {
-      await getTransport().invoke("delete_corpus_entry", { sha256: e.sha256 });
-      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256));
+      await getTransport().invoke("delete_corpus_entry", { sha256: e.sha256, path: e.path });
+      setCorpus((cs) => cs.filter((x) => x.sha256 !== e.sha256 || x.path !== e.path));
       emitDataChanged();
     } catch (err) {
       toast({ title: t("artifacts.deleteFailed"), description: String(err), variant: "error" });

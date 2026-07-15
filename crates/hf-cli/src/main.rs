@@ -713,7 +713,7 @@ async fn cmd_run(
     let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
     // Ensure a seed corpus exists before running. A failure here is not fatal
     // (the engine can still run on an empty corpus) but must not be silent.
-    if let Err(e) = container.generate_seeds(&project, target) {
+    if let Err(e) = container.generate_seeds(&project, target).await {
         eprintln!("warning: could not generate seed corpus: {e}");
     }
 
@@ -801,7 +801,7 @@ async fn cmd_corpus(project: PathBuf, target: &str, op: &str) -> anyhow::Result<
             println!("Corpus now has {n} entries.");
         }
         "prune" => {
-            let n = container.corpus_prune(&project, target)?;
+            let n = container.corpus_prune(&project, target).await?;
             println!("Pruned to {n} entries.");
         }
         "cprune" => {
@@ -887,7 +887,7 @@ async fn cmd_ci(
     let container = ServiceContainer::bootstrap().await;
 
     println!("[ci] requiring a previously smoke-qualified and promoted harness for {target}...");
-    if let Err(e) = container.generate_seeds(&project, target) {
+    if let Err(e) = container.generate_seeds(&project, target).await {
         eprintln!("[ci] warning: seed generation failed: {e}");
     }
 

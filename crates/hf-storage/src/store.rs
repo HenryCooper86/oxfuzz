@@ -798,15 +798,25 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a single corpus entry by its content hash.
+    /// Delete one target's corpus entry by its content hash.
     ///
     /// # Errors
     /// Returns a storage error on a database failure.
-    pub async fn delete_corpus_entry(&self, sha256: &str) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM corpus_entries WHERE sha256 = ?1")
+    pub async fn delete_corpus_entry(
+        &self,
+        target_id: Uuid,
+        sha256: &str,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query("DELETE FROM corpus_entries WHERE target_id = ?1 AND sha256 = ?2")
+            .bind(target_id.to_string())
             .bind(sha256)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::NotFound(format!(
+                "corpus entry {target_id}/{sha256}"
+            )));
+        }
         Ok(())
     }
 
@@ -1135,6 +1145,82 @@ impl Store {
         .bind(serde_json::to_string(e)?)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Transactionally replace the persisted corpus snapshot for one target.
+    ///
+    /// Rows absent from `entries` are removed. When a filesystem rescan reports
+    /// a retained entry as `Manual`, its stronger persisted source is kept; a
+    /// missing coverage hash is likewise filled from the prior row.
+    ///
+    /// # Errors
+    /// Returns an error on duplicate hashes, SQL failure, malformed stored
+    /// data, or serialization failure.
+    pub async fn replace_corpus_entries(
+        &self,
+        target_id: Uuid,
+        entries: &[CorpusEntry],
+    ) -> Result<(), StorageError> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut tx = self.pool.begin().await?;
+        let existing_rows =
+            sqlx::query("SELECT data_json FROM corpus_entries WHERE target_id = ?1")
+                .bind(target_id.to_string())
+                .fetch_all(&mut *tx)
+                .await?;
+        let existing = existing_rows
+            .iter()
+            .map(|row| json_col::<CorpusEntry>(row, "data_json"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|entry| (entry.sha256.clone(), entry))
+            .collect::<HashMap<_, _>>();
+
+        let mut seen = HashSet::with_capacity(entries.len());
+        let mut replacements = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !seen.insert(entry.sha256.clone()) {
+                return Err(StorageError::InvalidData(format!(
+                    "duplicate corpus hash for target {target_id}: {}",
+                    entry.sha256
+                )));
+            }
+            let mut merged = entry.clone();
+            if let Some(previous) = existing.get(&entry.sha256) {
+                if merged.source == hf_core::corpus::CorpusSource::Manual {
+                    merged.source = previous.source;
+                }
+                if merged.coverage_hash.is_none() {
+                    merged.coverage_hash.clone_from(&previous.coverage_hash);
+                }
+            }
+            let json = serde_json::to_string(&merged)?;
+            replacements.push((merged, json));
+        }
+
+        sqlx::query("DELETE FROM corpus_entries WHERE target_id = ?1")
+            .bind(target_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for (entry, json) in replacements {
+            sqlx::query(
+                "INSERT INTO corpus_entries
+                    (id, target_id, sha256, size, source, coverage_hash, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(target_id.to_string())
+            .bind(&entry.sha256)
+            .bind(i64::try_from(entry.size).unwrap_or(i64::MAX))
+            .bind(enum_str(&entry.source))
+            .bind(entry.coverage_hash.clone())
+            .bind(json)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
