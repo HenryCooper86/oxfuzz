@@ -109,10 +109,10 @@ impl SandboxMount {
 /// The harness/fuzz path leaves this at [`SandboxOptions::default`], which is
 /// equivalent to the historical behavior: network-isolated, all capabilities
 /// dropped, workspace mounted at the config's `container_workspace`. Syzkaller
-/// kernel fuzzing needs custom bind mounts (kernel image, rootfs, config), a
-/// target `platform`, network access for the managed VM, and a relaxed
-/// capability profile for qemu -- expressed here rather than by shelling out to
-/// `docker` from a presentation layer.
+/// kernel fuzzing uses service-staged bind mounts, a target `platform`, and an
+/// optional `/dev/kvm` device while retaining that hardened baseline. These
+/// options remain in the runtime boundary rather than letting a presentation
+/// layer shell out to `docker`.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxOptions {
     /// Additional canonicalized Docker bind mounts. Empty by default.
@@ -124,8 +124,8 @@ pub struct SandboxOptions {
     /// Override the in-container working directory (defaults to the config's
     /// `container_workspace`).
     pub workdir: Option<String>,
-    /// Skip the `cap-drop=ALL` / `no-new-privileges` baseline. Required for
-    /// qemu-based syzkaller runs; leave `false` for everything else.
+    /// Skip the `cap-drop=ALL` / `no-new-privileges` baseline. Specialized
+    /// callers must justify this independently; syzkaller leaves it `false`.
     pub relax_hardening: bool,
     /// Host device nodes to pass through with `--device`, e.g. `"/dev/kvm"` so
     /// an in-container qemu can use hardware virtualization. Empty by default.

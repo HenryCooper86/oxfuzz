@@ -159,50 +159,59 @@ fn build_exec_args_with_syzkaller_profile() {
     let cfg = cfg_with(limits(4096, 4));
     let opts = SandboxOptions {
         extra_mounts: vec![
-            SandboxMount::read_only("/host/kernel".into(), "/syzbench/kernel"),
-            SandboxMount::writable("/host/rootfs.img".into(), "/syzbench/rootfs.img"),
+            SandboxMount::read_only("/host/inputs".into(), "/syzbench/inputs"),
+            SandboxMount::writable("/host/scratch".into(), "/syzbench/scratch"),
+            SandboxMount::writable("/host/workdir".into(), "/syzbench/workdir"),
         ],
         platform: Some("linux/amd64".to_owned()),
-        network_enabled: true,
+        network_enabled: false,
         workdir: Some("/syzbench".to_owned()),
-        relax_hardening: true,
+        relax_hardening: false,
         devices: vec!["/dev/kvm".to_owned()],
-        workspace_read_only: false,
+        workspace_read_only: true,
         max_file_size_bytes: None,
     };
     let args = hf_runtime::docker::build_exec_args_with(
         &cfg,
         &limits(4096, 4),
-        &["bash".to_owned(), "-c".to_owned(), "syz-manager".to_owned()],
+        &[
+            "syz-manager".to_owned(),
+            "-config=/syzbench/inputs/manager.cfg".to_owned(),
+        ],
         &opts,
     );
     let joined = args.join(" ");
-    // Platform, custom mounts, a custom workdir, and device passthrough present.
+    // Platform, staged mounts, a custom workdir, and device passthrough present.
     assert!(joined.contains("--platform linux/amd64"), "{joined}");
     assert!(joined.contains("--device=/dev/kvm"), "{joined}");
     assert!(
-        joined.contains("--mount type=bind,source=/host/kernel,target=/syzbench/kernel,readonly"),
+        joined.contains("--mount type=bind,source=/host/inputs,target=/syzbench/inputs,readonly"),
         "{joined}"
     );
     assert!(
-        joined.contains("--mount type=bind,source=/host/rootfs.img,target=/syzbench/rootfs.img"),
+        joined.contains("--mount type=bind,source=/host/scratch,target=/syzbench/scratch"),
         "{joined}"
     );
     assert!(joined.contains("-w /syzbench"), "{joined}");
-    // Network is enabled and the qemu-incompatible hardening is relaxed.
     assert!(
-        !joined.contains("--network=none"),
-        "network should be enabled: {joined}"
+        joined.contains("--mount type=bind,source=/host/workdir,target=/syzbench/workdir"),
+        "{joined}"
+    );
+    assert!(joined.contains("/work:ro"), "{joined}");
+    // qemu runs inside the normal network and privilege boundary.
+    assert!(
+        joined.contains("--network=none"),
+        "network should be disabled: {joined}"
     );
     assert!(
-        !joined.contains("--cap-drop=ALL"),
-        "hardening should be relaxed: {joined}"
+        joined.contains("--cap-drop=ALL"),
+        "capabilities should be dropped: {joined}"
     );
     assert!(
-        !joined.contains("no-new-privileges"),
-        "hardening should be relaxed: {joined}"
+        joined.contains("no-new-privileges"),
+        "privilege escalation should be disabled: {joined}"
     );
-    // pids-limit is still applied even when hardening is relaxed.
+    // Process limits remain part of the hardened profile.
     assert!(joined.contains("--pids-limit=512"), "{joined}");
 }
 

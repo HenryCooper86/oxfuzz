@@ -26,6 +26,7 @@ pub mod report_store;
 pub mod sarif;
 pub mod scheduler;
 pub mod system;
+mod syzkaller;
 pub mod workbench;
 
 pub use hf_agent::{
