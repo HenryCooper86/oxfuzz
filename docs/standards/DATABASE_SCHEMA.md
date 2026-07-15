@@ -313,3 +313,16 @@ Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 | `0011_project_settings.sql` | creates per-project auto-revert settings |
 | `0012_auto_revert_events.sql` | creates the auto-revert audit trail |
 | `0013_run_evidence.sql` | adds binary, evidence, run-kind, and context fields |
+
+## 7. Read failure contract
+
+An unconfigured optional store may produce an explicitly documented empty or
+unavailable view. Once a store is configured, a SQL, pool, or deserialization
+failure is never converted into a successful empty collection.
+
+Service APIs with a fallible presentation boundary return
+`ClassifiedError::Storage`. Composite views abort instead of combining defaults
+with partial database state. CLI, REST, and Tauri adapters translate that error
+without re-reading storage or inventing substitute data. Best-effort internal
+maintenance may continue only when it emits a structured error and its result
+cannot be mistaken for an authoritative persisted-data view.
