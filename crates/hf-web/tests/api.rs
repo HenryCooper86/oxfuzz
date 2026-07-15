@@ -208,6 +208,29 @@ async fn system_status_returns_json_flags() {
 }
 
 #[tokio::test]
+async fn diagnostics_cost_summary_reports_the_current_web_session() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/diagnostics/cost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["calls"], 0);
+    assert_eq!(json["cost_usd"], 0.0);
+    assert!(json["by_model"].is_array());
+}
+
+#[tokio::test]
 async fn knowledge_search_unindexed_returns_empty_array() {
     let (status, json) = post_json(
         "/knowledge/search",

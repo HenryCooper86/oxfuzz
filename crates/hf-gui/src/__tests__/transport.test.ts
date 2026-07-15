@@ -229,4 +229,31 @@ describe("transport", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("routes the diagnostics summary to the session-scoped web endpoint", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(
+        JSON.stringify({
+          calls: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cost_usd: 0,
+          by_model: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("diagnostics_cost_summary");
+      expect(calls[0].url).toBe("http://localhost:8081/diagnostics/cost");
+      expect(calls[0].init.method).toBe("GET");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

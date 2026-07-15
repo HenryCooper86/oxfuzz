@@ -96,6 +96,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   get_providers: { method: "GET", path: "/config/providers" },
   set_providers: { method: "POST", path: "/config/providers" },
   provider_statuses: { method: "GET", path: "/providers/status" },
+  diagnostics_cost_summary: { method: "GET", path: "/diagnostics/cost" },
   app_paths: { method: "GET", path: "/system/paths" },
   host_arch: { method: "GET", path: "/system/arch" },
   knowledge_index: { method: "POST", path: "/knowledge/index" },
