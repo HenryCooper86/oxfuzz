@@ -623,6 +623,22 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
 
         match result {
+            Ok(outcome)
+                if outcome.termination == hf_core::runtime::CommandTermination::Cancelled =>
+            {
+                Ok(DispatchResult {
+                    success: false,
+                    summary: format!("campaign cancelled on {}", outcome.target),
+                    output: serde_json::json!({
+                        "target": outcome.target,
+                        "edges": outcome.edges,
+                        "iterations": outcome.iterations,
+                        "termination": outcome.termination,
+                    }),
+                    duration_ms,
+                    error: Some("campaign cancelled".to_owned()),
+                })
+            }
             Ok(outcome) => {
                 let advanced = self
                     .state
@@ -658,6 +674,7 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                         "iterations": outcome.iterations,
                         "repairs_used": outcome.repairs_used,
                         "auto_reverts": outcome.auto_reverts,
+                        "termination": outcome.termination,
                         "runs_done": advanced.runs_done,
                     }),
                     duration_ms,

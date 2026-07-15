@@ -40,6 +40,7 @@ impl hf_core::runtime::RuntimeAdapter for ShowmapRuntime {
             stdout,
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
         })
     }
 

@@ -49,11 +49,17 @@ pub struct FuzzRunConfig {
 ## 5. Run Lifecycle
 
 1. `build` -- compile harness in sandbox -> `BuildArtifact` (binary path).
-2. `run` -- launch engine in sandbox under resource limits -> `FuzzRunHandle`
-   streaming progress (execs/sec, edges, crashes).
+2. `run` -- allocate a unique run directory, verify the persisted source and
+   binary digests, then launch the engine in a read-only sandbox workspace with
+   only that run's corpus/output mounts writable -> `FuzzRunHandle` streaming
+   progress (execs/sec, edges, crashes).
 3. On crash -> `hf-crash` ingests artifacts.
 4. `coverage` -- post-run coverage report for `hf-coverage`.
 5. `minimize` -- reduce a crash input.
+
+Every consumer resolves output through the persisted run id. Target-wide flat
+output directories are legacy read-only fallbacks and are never launch targets
+for new runs.
 
 ## 6. Open Questions
 

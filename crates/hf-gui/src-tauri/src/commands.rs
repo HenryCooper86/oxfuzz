@@ -7,8 +7,9 @@
 use std::path::PathBuf;
 
 use hf_service::{
-    Action, ApprovalGate, EngineKind, FuzzProgress, GuardrailPolicy, Guardrails, Message, Role,
-    SessionId, SkillDefinition, SkillRegistry, TargetLanguage, TrustTier,
+    Action, ApprovalGate, CommandTermination, EngineKind, FuzzProgress, GuardrailPolicy,
+    Guardrails, Message, Role, SessionId, SkillDefinition, SkillRegistry, TargetLanguage,
+    TrustTier,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -1673,7 +1674,14 @@ pub async fn run_fuzzer(
             "LogLine",
             serde_json::json!("[syzkaller] guidance complete (exit 0)"),
         );
-        return Ok(serde_json::json!({ "edges": 0, "crashes": 0, "execs": 0.0, "exit_code": 0 }));
+        return Ok(serde_json::json!({
+            "run_id": serde_json::Value::Null,
+            "edges": 0,
+            "crashes": 0,
+            "execs": 0.0,
+            "termination": "completed",
+            "exit_code": 0
+        }));
     }
 
     if !hf_service::docker_daemon_ready() {
@@ -1742,10 +1750,9 @@ pub async fn run_fuzzer(
         )
         .await;
 
-    emit("Done", serde_json::Value::Null);
-
     match result {
         Ok(summary) => Ok(serde_json::json!({
+            "run_id": summary.run_id,
             "edges": summary.edges,
             "crashes": summary.crashes,
             "execs": summary.execs,
@@ -1757,7 +1764,8 @@ pub async fn run_fuzzer(
             // this run's revision regressed coverage past the threshold; null
             // otherwise. Lets the UI surface the automatic action.
             "auto_revert": summary.auto_revert,
-            "exit_code": 0,
+            "termination": summary.termination,
+            "exit_code": (summary.termination == CommandTermination::Completed).then_some(0),
         })),
         Err(e) => Err(e.to_string()),
     }

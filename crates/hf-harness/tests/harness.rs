@@ -12,7 +12,7 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_core::types::TokenUsage;
-use hf_harness::{compile, draft, smoke_fuzz};
+use hf_harness::{compile, draft, smoke_fuzz, smoke_fuzz_in};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -72,6 +72,35 @@ struct MockRuntime {
     stdout: String,
 }
 
+struct ArtifactRuntime;
+
+#[async_trait::async_trait]
+impl RuntimeAdapter for ArtifactRuntime {
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &Path,
+        _limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        std::fs::write(cwd.join("runs/smoke/out/crash-late"), b"crash").unwrap();
+        Ok(CommandResult {
+            exit_code: 77,
+            stdout: "stats: 5000 execs/sec".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
 #[async_trait::async_trait]
 impl RuntimeAdapter for MockRuntime {
     async fn run_command(
@@ -85,6 +114,7 @@ impl RuntimeAdapter for MockRuntime {
             stdout: self.stdout.clone(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
         })
     }
     async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
@@ -223,17 +253,56 @@ async fn smoke_fuzz_passes_with_positive_execs() {
     // writes crashes into. `/work` is where the *sandbox* mounts the workspace,
     // not a path that exists on the host.
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let smoked = smoke_fuzz(harness, &rt, workspace.path())
-        .await
-        .expect("smoke should succeed");
+    let smoked = smoke_fuzz_in(
+        harness,
+        &rt,
+        workspace.path(),
+        std::path::Path::new("runs/smoke/out"),
+    )
+    .await
+    .expect("smoke should succeed");
     assert_eq!(smoked.status, HarnessStatus::SmokePassed);
     let sr = smoked.smoke_run.expect("smoke run summary should be set");
     assert!(sr.passed);
     assert!(sr.execs_per_sec > 0.0);
     assert!(
-        workspace.path().join("out").is_dir(),
-        "smoke fuzz must create the out/ dir the fuzzer writes crashes into"
+        workspace.path().join("runs/smoke/out").is_dir(),
+        "smoke fuzz must create the run-owned output directory"
     );
+    assert!(!workspace.path().join("out").exists());
+}
+
+#[tokio::test]
+async fn smoke_fuzz_counts_a_fresh_artifact_even_without_a_log_marker() {
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let workspace = tempfile::tempdir().expect("temp workspace");
+
+    let smoked = smoke_fuzz_in(
+        harness,
+        &ArtifactRuntime,
+        workspace.path(),
+        Path::new("runs/smoke/out"),
+    )
+    .await
+    .unwrap();
+
+    let summary = smoked.smoke_run.unwrap();
+    assert_eq!(summary.crashes, 1);
+    assert!(!summary.passed);
 }
 
 #[tokio::test]

@@ -309,7 +309,10 @@ pub async fn try_compile(
         env: std::collections::HashMap::new(),
         ptrace: false,
     };
-    let result = rt.run_command(&cmd, workspace, &limits).await?;
+    let result = rt
+        .run_command(&cmd, workspace, &limits)
+        .await?
+        .require_completed("harness compile")?;
     if result.exit_code != 0 {
         return Ok(CompileResult::Failed(CompileFailure {
             exit_code: result.exit_code,
@@ -393,7 +396,10 @@ async fn try_compile_cargo_fuzz(
         env: std::collections::HashMap::new(),
         ptrace: false,
     };
-    let result = rt.run_command(&cmd, workspace, &limits).await?;
+    let result = rt
+        .run_command(&cmd, workspace, &limits)
+        .await?
+        .require_completed("cargo-fuzz harness compile")?;
     if result.exit_code != 0 {
         return Ok(CompileResult::Failed(CompileFailure {
             exit_code: result.exit_code,
@@ -417,27 +423,58 @@ async fn try_compile_cargo_fuzz(
 /// Returns `ClassifiedError` if the sandbox command fails or no fuzzer activity
 /// is detected in the output.
 pub async fn smoke_fuzz(
-    mut harness: Harness,
+    harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
 ) -> Result<Harness, ClassifiedError> {
+    smoke_fuzz_in(harness, rt, workspace, Path::new("out")).await
+}
+
+/// Run a bounded smoke fuzz with artifacts written below a caller-owned,
+/// workspace-relative output directory.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the output path is unsafe, the sandbox command
+/// fails or is force-stopped, or no fuzzer activity is detected.
+pub async fn smoke_fuzz_in(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    output_relative: &Path,
+) -> Result<Harness, ClassifiedError> {
+    if output_relative.as_os_str().is_empty()
+        || output_relative.is_absolute()
+        || !output_relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Harness(format!(
+            "smoke fuzz: output path must stay inside the workspace: {}",
+            output_relative.display()
+        )));
+    }
     // Reference the binary by its container-internal path: the runtime mounts
     // the workspace at `/work` (matching `EngineRunner`), so the host path is
     // not valid inside the sandbox.
-    let binary_name = harness
+    let binary_relative = harness
         .build_cmd
         .output
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("fuzz_target")
-        .to_string();
-    let binary = format!("/work/{binary_name}");
+        .strip_prefix(workspace)
+        .ok()
+        .filter(|path| {
+            path.components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        })
+        .map(Path::to_path_buf)
+        .or_else(|| harness.build_cmd.output.file_name().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("fuzz_target"));
+    let binary = format!("/work/{}", binary_relative.display());
 
     // Every engine writes crash artifacts into the canonical `out` directory
     // so the subsequent Triage action can ingest the exact smoke findings.
     // LibFuzzer otherwise defaults to the process working directory, which
     // made Smoke Test report a crash while Triage appeared empty.
-    let out_dir = workspace.join("out");
+    let out_dir = workspace.join(output_relative);
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| ClassifiedError::Harness(format!("smoke fuzz: cannot create out dir: {e}")))?;
 
@@ -445,15 +482,15 @@ pub async fn smoke_fuzz(
     // also needs an input directory on the mounted workspace. Create it (and
     // an AFL++ seed, which the driver requires) before launching.
     let corpus_container = "/work/corpus";
-    let out_container = "/work/out";
+    let out_container = format!("/work/{}", output_relative.display());
+    let corpus_dir = workspace.join("corpus");
+    std::fs::create_dir_all(&corpus_dir).map_err(|e| {
+        ClassifiedError::Harness(format!("smoke fuzz: cannot create corpus dir: {e}"))
+    })?;
     if matches!(
         harness.engine,
         EngineKind::AflPlusPlus | EngineKind::Honggfuzz
     ) {
-        let corpus_dir = workspace.join("corpus");
-        std::fs::create_dir_all(&corpus_dir).map_err(|e| {
-            ClassifiedError::Harness(format!("smoke fuzz: cannot create corpus dir: {e}"))
-        })?;
         // AFL++ refuses to start with an empty input dir; ensure one seed.
         let seed = corpus_dir.join("seed");
         if !seed.exists() {
@@ -463,12 +500,15 @@ pub async fn smoke_fuzz(
         }
     }
 
-    let mut cmd = smoke_command(harness.engine, &binary, corpus_container, out_container)?;
+    let mut cmd = smoke_command(harness.engine, &binary, corpus_container, &out_container)?;
     if matches!(
         harness.engine,
         EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
     ) {
-        cmd.push("-artifact_prefix=/work/out/".to_owned());
+        cmd.push(format!(
+            "-artifact_prefix={}/",
+            out_container.trim_end_matches('/')
+        ));
     }
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: 2048,
@@ -477,11 +517,34 @@ pub async fn smoke_fuzz(
         env: std::collections::HashMap::new(),
         ptrace: false,
     };
-    let result = rt.run_command(&cmd, workspace, &limits).await?;
+    let sandbox = hf_core::runtime::SandboxOptions {
+        extra_mounts: vec![
+            hf_core::runtime::SandboxMount::writable(corpus_dir, corpus_container),
+            hf_core::runtime::SandboxMount::writable(out_dir.clone(), out_container.clone()),
+        ],
+        workspace_read_only: true,
+        ..hf_core::runtime::SandboxOptions::default()
+    };
+    let result = rt
+        .run_command_opts(&cmd, workspace, &limits, &sandbox)
+        .await?;
+    match result.termination {
+        hf_core::runtime::CommandTermination::Completed => {}
+        hf_core::runtime::CommandTermination::TimedOut => {
+            return Err(ClassifiedError::Harness(
+                "smoke fuzz: sandbox wall-clock limit expired".to_owned(),
+            ));
+        }
+        hf_core::runtime::CommandTermination::Cancelled => {
+            return Err(ClassifiedError::Harness(
+                "smoke fuzz: execution was cancelled".to_owned(),
+            ));
+        }
+    }
     // Fuzzers write progress/crashes to stderr (libFuzzer) or stdout; parse both.
     let combined = format!("{}\n{}", result.stdout, result.stderr);
     let execs = parse_execs_per_sec(&combined);
-    let crashes = parse_crashes(&combined);
+    let crashes = parse_crashes(&combined).max(count_smoke_artifacts(harness.engine, &out_dir));
     // The harness is valid only if the fuzzer actually exercised the target. A
     // crash (even at 0 exec/s, found immediately) proves it did. Otherwise we
     // require measured throughput. HARNESS_STANDARD requires execs/sec > 0: a
@@ -519,6 +582,9 @@ pub async fn smoke_fuzz(
         execs_per_sec: execs,
         crashes,
         passed,
+        source_sha256: None,
+        binary_sha256: None,
+        run_id: None,
     };
     harness.smoke_run = Some(summary);
     // `SmokePassed` means the harness is viable -- it built and the fuzzer
@@ -530,6 +596,13 @@ pub async fn smoke_fuzz(
     // returned `Err` above.
     harness.status = HarnessStatus::SmokePassed;
     Ok(harness)
+}
+
+fn count_smoke_artifacts(engine: EngineKind, out_dir: &Path) -> u32 {
+    hf_crash::ingest_for_engine(out_dir, engine, uuid::Uuid::nil(), uuid::Uuid::nil())
+        .map_or(0, |result| {
+            u32::try_from(result.crashes.len()).unwrap_or(u32::MAX)
+        })
 }
 
 /// Bounded smoke-fuzz duration, in seconds.
@@ -875,6 +948,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: self.stderr.clone(),
                 workspace: cwd.to_path_buf(),
+                termination: hf_core::runtime::CommandTermination::Completed,
             })
         }
         async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
@@ -1047,6 +1121,30 @@ Iterations : 12345
     Timeouts : 0
  Corpus Size : 42";
         assert_eq!(parse_crashes(honggfuzz), 0);
+    }
+
+    #[test]
+    fn smoke_artifacts_use_engine_specific_crash_names() {
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("coverage-corpus-entry"), b"coverage").unwrap();
+        std::fs::write(out.path().join("HONGGFUZZ.REPORT.TXT"), b"report").unwrap();
+        assert_eq!(count_smoke_artifacts(EngineKind::Honggfuzz, out.path()), 0);
+
+        std::fs::write(out.path().join("SIGSEGV.PC.1234.fuzz"), b"crash").unwrap();
+        assert_eq!(count_smoke_artifacts(EngineKind::Honggfuzz, out.path()), 1);
+
+        let afl_crashes = out.path().join("default/crashes");
+        std::fs::create_dir_all(&afl_crashes).unwrap();
+        std::fs::write(afl_crashes.join("README.txt"), b"metadata").unwrap();
+        assert_eq!(
+            count_smoke_artifacts(EngineKind::AflPlusPlus, out.path()),
+            0
+        );
+        std::fs::write(afl_crashes.join("id:000001,sig:06"), b"crash").unwrap();
+        assert_eq!(
+            count_smoke_artifacts(EngineKind::AflPlusPlus, out.path()),
+            1
+        );
     }
 
     #[test]

@@ -10,7 +10,9 @@ use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
-use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, Store};
+use hf_storage::{
+    AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError, Store,
+};
 use uuid::Uuid;
 
 async fn temp_store() -> (Store, tempfile::TempDir) {
@@ -18,6 +20,19 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+#[test]
+fn applied_run_revision_migration_remains_byte_for_byte_immutable() {
+    // sqlx stores a checksum for every applied migration. Editing an old SQL
+    // file, including its comments, prevents existing databases from opening.
+    assert_eq!(
+        include_str!("../migrations/0009_run_harness_rev.sql"),
+        "-- Record which harness revision a run used, as a short content hash of the\n\
+         -- harness source. Lets run history tie a coverage jump to the harness change\n\
+         -- that produced it. Nullable; forward-only.\n\
+         ALTER TABLE runs ADD COLUMN harness_rev TEXT;\n"
+    );
 }
 
 fn sample_target(project: &str) -> TargetCandidate {
@@ -327,6 +342,7 @@ async fn run_roundtrip_and_status_update() {
     let fetched = store.get_run(id).await.unwrap().expect("run exists");
     assert_eq!(fetched.id, id);
     assert_eq!(fetched.status, RunStatus::Pending);
+    assert_eq!(fetched.kind, RunKind::Campaign);
     assert_eq!(fetched.engine, EngineKind::AflPlusPlus);
 
     let ended = Utc::now();
@@ -835,11 +851,48 @@ async fn run_samples_roundtrip() {
 async fn run_harness_rev_roundtrips() {
     let (store, _dir) = temp_store().await;
     let mut run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
-    run.harness_rev = Some("abc123def456".to_owned());
+    run.harness_rev = Some("a".repeat(64));
+    run.binary_rev = Some("b".repeat(64));
+    run.evidence_dir = Some("runs/7b6f2c7f/out".to_owned());
+    run.kind = RunKind::Smoke;
+    run.context_rev = Some("c".repeat(64));
     let id = run.id;
     store.insert_run(&run).await.unwrap();
     let got = store.get_run(id).await.unwrap().unwrap();
-    assert_eq!(got.harness_rev.as_deref(), Some("abc123def456"));
+    assert_eq!(got.harness_rev.as_deref(), Some("a".repeat(64).as_str()));
+    assert_eq!(got.binary_rev.as_deref(), Some("b".repeat(64).as_str()));
+    assert_eq!(got.evidence_dir.as_deref(), Some("runs/7b6f2c7f/out"));
+    assert_eq!(got.kind, RunKind::Smoke);
+    assert_eq!(got.context_rev.as_deref(), Some("c".repeat(64).as_str()));
+}
+
+#[tokio::test]
+async fn run_mutations_fail_when_the_run_does_not_exist() {
+    let (store, _dir) = temp_store().await;
+    let missing = Uuid::new_v4();
+
+    assert!(matches!(
+        store
+            .set_run_status(missing, RunStatus::Failed, Some(Utc::now()))
+            .await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.set_run_stats(missing, 1, 1.0, 0).await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.set_run_samples(missing, "[]").await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.set_run_harness_source(missing, "source").await,
+        Err(StorageError::NotFound(_))
+    ));
+    assert!(matches!(
+        store.delete_run(&missing.to_string()).await,
+        Err(StorageError::NotFound(_))
+    ));
 }
 
 #[tokio::test]
