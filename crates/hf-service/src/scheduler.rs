@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hf_core::engine::EngineKind;
+use hf_core::error::ClassifiedError;
 use hf_core::target::TargetLanguage;
 use hf_guardrails::Guardrails;
 use hf_scheduler::dispatcher::{DispatchError, DispatchResult, WorkflowDispatcher};
@@ -94,6 +95,7 @@ impl ScheduleFileStore {
 struct CampaignSchedulerPersistence {
     store: Option<Arc<Store>>,
     schedules: Arc<ScheduleFileStore>,
+    history_retention_limit: usize,
 }
 
 impl CampaignSchedulerPersistence {
@@ -111,7 +113,14 @@ impl CampaignSchedulerPersistence {
                 &data,
             )
             .await
-            .map_err(|e| PersistenceError::new(e.to_string()))
+            .map_err(|e| PersistenceError::new(e.to_string()))?;
+        if self.history_retention_limit > 0 {
+            store
+                .prune_schedule_executions(&ex.schedule_id, self.history_retention_limit)
+                .await
+                .map_err(|e| PersistenceError::new(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -132,6 +141,20 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
     async fn update_schedule(&self, schedule: &Schedule) -> Result<(), PersistenceError> {
         self.schedules
             .upsert(schedule)
+            .await
+            .map_err(|error| PersistenceError::new(error.to_string()))
+    }
+
+    async fn executions_started_since(
+        &self,
+        schedule_id: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, PersistenceError> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+        store
+            .count_schedule_executions_since(schedule_id, &since.to_rfc3339())
             .await
             .map_err(|error| PersistenceError::new(error.to_string()))
     }
@@ -295,7 +318,7 @@ pub struct ExecutionView {
     pub campaign: String,
     /// When the trigger fired (RFC3339).
     pub triggered_at: String,
-    /// "pending" | "running" | "completed" | "failed" | "skipped".
+    /// "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled".
     pub status: String,
     /// Result summary (e.g. "3 crashes, 120 edges") or the error message.
     pub summary: String,
@@ -383,12 +406,37 @@ pub fn parse_trigger(kind: &str, value: &str) -> Result<TriggerConfig, String> {
             })
         }
         "cron" => {
-            if value.trim().is_empty() {
+            let value = value.trim();
+            if value.is_empty() {
                 return Err("cron expression is empty".to_owned());
             }
+            let (timezone, expression) = if let Some(rest) = value.strip_prefix("CRON_TZ=") {
+                let Some((timezone, expression)) = rest.split_once(char::is_whitespace) else {
+                    return Err(
+                        "timezone cron must use CRON_TZ=<IANA zone> <expression>".to_owned()
+                    );
+                };
+                let timezone = timezone.trim();
+                let expression = expression.trim();
+                if timezone.is_empty() || expression.is_empty() {
+                    return Err(
+                        "timezone cron must use CRON_TZ=<IANA zone> <expression>".to_owned()
+                    );
+                }
+                (timezone, expression)
+            } else {
+                ("UTC", value)
+            };
+            let cron = hf_scheduler::CronSchedule::new(expression).with_timezone(timezone);
+            if !cron.is_timezone_valid() {
+                return Err(format!("unknown cron timezone: {timezone}"));
+            }
+            if !cron.is_valid() {
+                return Err(format!("invalid cron expression: {expression:?}"));
+            }
             Ok(TriggerConfig::Cron {
-                expression: value.trim().to_owned(),
-                timezone: "UTC".to_owned(),
+                expression: expression.to_owned(),
+                timezone: timezone.to_owned(),
             })
         }
         "once" => {
@@ -732,6 +780,12 @@ pub enum CampaignSchedulerError {
     InvalidLastFire { schedule_id: String, value: String },
 }
 
+impl From<CampaignSchedulerError> for ClassifiedError {
+    fn from(error: CampaignSchedulerError) -> Self {
+        Self::Storage(error.to_string())
+    }
+}
+
 /// The campaign runtime-state sidecar lives beside `schedules.json`.
 fn campaign_state_path(schedules_path: &Path) -> PathBuf {
     schedules_path.parent().map_or_else(
@@ -773,7 +827,9 @@ impl CampaignScheduler {
         store_path: PathBuf,
         notifier: Option<CampaignNotifier>,
     ) -> Result<Self, CampaignSchedulerError> {
-        let manager = Arc::new(SchedulerManager::with_defaults());
+        let scheduler_config = crate::config::effective_scheduler_config();
+        let history_retention_limit = scheduler_config.history_retention_limit;
+        let manager = Arc::new(SchedulerManager::new(scheduler_config));
         let schedules = Arc::new(ScheduleFileStore::new(store_path.clone()));
         // Grab the DB handle (for persisted execution history) before the
         // container is moved into the dispatcher.
@@ -795,6 +851,7 @@ impl CampaignScheduler {
             .set_persistence(Arc::new(CampaignSchedulerPersistence {
                 store: store.clone(),
                 schedules: Arc::clone(&schedules),
+                history_retention_limit,
             }))
             .await;
 
@@ -881,18 +938,22 @@ impl CampaignScheduler {
     /// All scheduled campaigns as GUI-friendly views. After a restart the
     /// in-memory `last_fire` is gone, so it is back-filled from the latest
     /// persisted execution per schedule.
-    pub async fn list_views(&self) -> Vec<CampaignView> {
+    ///
+    /// # Errors
+    /// Returns a history error when the configured database cannot supply the
+    /// persisted last-fire cursors.
+    pub async fn list_views(&self) -> Result<Vec<CampaignView>, CampaignSchedulerError> {
         let schedules = self.manager.list_schedules().await;
         let fires: std::collections::HashMap<String, String> = match &self.store {
             Some(store) => store
                 .latest_schedule_fires()
                 .await
-                .unwrap_or_default()
+                .map_err(|error| CampaignSchedulerError::History(error.to_string()))?
                 .into_iter()
                 .collect(),
             None => std::collections::HashMap::new(),
         };
-        schedules
+        Ok(schedules
             .iter()
             .map(|s| {
                 let mut view = view_of(s);
@@ -904,23 +965,32 @@ impl CampaignScheduler {
                 view.secs_done = progress.secs_done;
                 view
             })
-            .collect()
+            .collect())
     }
 
     /// Recent campaign executions, newest first. Reads persisted history (which
     /// survives restarts) when a database is configured, else the in-memory log.
-    pub async fn recent_executions(&self, limit: usize) -> Vec<ExecutionView> {
+    ///
+    /// # Errors
+    /// Returns a history error when configured storage cannot be read or a row
+    /// cannot be decoded as a scheduler execution.
+    pub async fn recent_executions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExecutionView>, CampaignSchedulerError> {
         if let Some(store) = &self.store {
-            if let Ok(rows) = store
-                .list_schedule_executions(i64::try_from(limit).unwrap_or(50))
+            let rows = store
+                .list_schedule_executions(i64::try_from(limit).unwrap_or(i64::MAX))
                 .await
-            {
-                return rows
-                    .iter()
-                    .filter_map(|j| serde_json::from_str::<ScheduleExecution>(j).ok())
-                    .map(|ex| view_of_execution(&ex, ""))
-                    .collect();
-            }
+                .map_err(|error| CampaignSchedulerError::History(error.to_string()))?;
+            return rows
+                .iter()
+                .map(|json| {
+                    serde_json::from_str::<ScheduleExecution>(json)
+                        .map(|execution| view_of_execution(&execution, ""))
+                        .map_err(|error| CampaignSchedulerError::History(error.to_string()))
+                })
+                .collect();
         }
         // In-memory fallback (no database configured).
         let schedules = self.manager.list_schedules().await;
@@ -937,7 +1007,7 @@ impl CampaignScheduler {
         }
         all.sort_by(|a, b| b.triggered_at.cmp(&a.triggered_at));
         all.truncate(limit);
-        all
+        Ok(all)
     }
 
     /// Create + register + persist a new campaign schedule.
@@ -987,11 +1057,17 @@ impl CampaignScheduler {
     ///
     /// History outlives the schedule that produced it, so a campaign deleted
     /// months ago can still be the only thing an operator sees in "Recent runs".
-    pub async fn clear_history(&self) -> u64 {
+    ///
+    /// # Errors
+    /// Returns a history error when configured storage cannot clear the rows.
+    pub async fn clear_history(&self) -> Result<u64, CampaignSchedulerError> {
         let Some(store) = &self.store else {
-            return 0;
+            return Ok(0);
         };
-        store.clear_schedule_executions().await.unwrap_or(0)
+        store
+            .clear_schedule_executions()
+            .await
+            .map_err(|error| CampaignSchedulerError::History(error.to_string()))
     }
 
     /// Remove a schedule by id, discarding its rotation/budget state so a
@@ -1170,6 +1246,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_trigger_preserves_and_validates_cron_timezone() {
+        let trigger = parse_trigger("cron", "CRON_TZ=Asia/Shanghai 0 9 * * *").unwrap();
+        assert!(matches!(
+            trigger,
+            TriggerConfig::Cron { expression, timezone }
+                if expression == "0 9 * * *" && timezone == "Asia/Shanghai"
+        ));
+        assert!(parse_trigger("cron", "CRON_TZ=Mars/Olympus 0 9 * * *").is_err());
+        assert!(parse_trigger("cron", "CRON_TZ=Asia/Shanghai invalid").is_err());
+        assert!(parse_trigger("cron", "CRON_TZ= 0 9 * * *").is_err());
+    }
+
+    #[test]
+    fn scheduler_state_errors_use_the_storage_transport_classification() {
+        let classified = ClassifiedError::from(CampaignSchedulerError::History("closed".into()));
+        assert!(matches!(classified, ClassifiedError::Storage(_)));
+    }
+
+    #[test]
     fn schedules_round_trip_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schedules.json");
@@ -1225,6 +1320,7 @@ mod tests {
         let persistence = CampaignSchedulerPersistence {
             store: None,
             schedules: repository,
+            history_retention_limit: 100,
         };
 
         let fired_at = chrono::Utc::now();
@@ -1233,6 +1329,86 @@ mod tests {
 
         let loaded = load_schedules(&path).unwrap();
         assert_eq!(loaded[0].last_fire, Some(fired_at));
+    }
+
+    #[tokio::test]
+    async fn scheduler_persistence_prunes_old_history_beyond_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::connect(dir.path().join("history.db")).await.unwrap());
+        let repository = Arc::new(ScheduleFileStore::new(dir.path().join("schedules.json")));
+        let persistence = CampaignSchedulerPersistence {
+            store: Some(Arc::clone(&store)),
+            schedules: repository,
+            history_retention_limit: 2,
+        };
+        let now = chrono::Utc::now();
+        for index in 0..3 {
+            let at = if index == 0 {
+                now - chrono::Duration::hours(2)
+            } else {
+                now + chrono::Duration::seconds(index)
+            };
+            let execution = ScheduleExecution {
+                execution_id: format!("retained-{index}"),
+                schedule_id: "limited".to_owned(),
+                triggered_at: at,
+                started_at: Some(at),
+                completed_at: Some(at),
+                status: hf_scheduler::ExecutionStatus::Completed,
+                workflow_execution_id: None,
+                request_summary: serde_json::Value::Null,
+                response_summary: serde_json::Value::Null,
+                error_message: None,
+            };
+            persistence.record_execution(&execution).await.unwrap();
+        }
+
+        let rows = store.list_schedule_executions(10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows.iter().any(|row| row.contains("retained-0")));
+    }
+
+    #[tokio::test]
+    async fn scheduler_history_read_and_clear_errors_are_propagated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::connect(dir.path().join("closed.db")).await.unwrap());
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store));
+        let scheduler =
+            CampaignScheduler::try_start(container, dir.path().join("schedules.json"), None)
+                .await
+                .unwrap();
+        store
+            .upsert_schedule_execution(
+                "malformed",
+                "schedule",
+                &chrono::Utc::now().to_rfc3339(),
+                "completed",
+                "{not-json",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            scheduler.recent_executions(10).await,
+            Err(CampaignSchedulerError::History(_))
+        ));
+        assert_eq!(scheduler.clear_history().await.unwrap(), 1);
+
+        store.pool().close().await;
+
+        assert!(matches!(
+            scheduler.list_views().await,
+            Err(CampaignSchedulerError::History(_))
+        ));
+        assert!(matches!(
+            scheduler.recent_executions(10).await,
+            Err(CampaignSchedulerError::History(_))
+        ));
+        assert!(matches!(
+            scheduler.clear_history().await,
+            Err(CampaignSchedulerError::History(_))
+        ));
+        scheduler.stop().await;
     }
 
     fn target(sym: &str, fit: f64) -> SchedulableTarget {

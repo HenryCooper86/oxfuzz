@@ -48,6 +48,13 @@ impl CronSchedule {
         self.parsed().is_some()
     }
 
+    /// Whether the configured timezone is UTC or a recognized IANA timezone.
+    #[must_use]
+    pub fn is_timezone_valid(&self) -> bool {
+        let name = self.timezone.trim();
+        name.is_empty() || name.eq_ignore_ascii_case("utc") || name.parse::<chrono_tz::Tz>().is_ok()
+    }
+
     /// Get the next fire time after `after`.
     ///
     /// The cron fields are interpreted in the schedule's `timezone` (e.g.
