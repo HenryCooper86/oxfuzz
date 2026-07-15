@@ -179,13 +179,14 @@ hobot-fuzz init
 hobot-fuzz init --non-interactive --provider openai
 ```
 
-This scaffolds the configuration tree (`config/*.toml`, `.env`) and creates the
-database.
+This materializes the supported `config/*.example.toml` templates and creates
+the database. Environment overrides remain explicit in `.env.example`; `init`
+does not create or modify `.env`.
 
 ### 2. Configure at least one LLM provider
 
 Copy `config/providers.example.toml` to `config/providers.toml` and fill it in,
-then set the matching key in `.env`:
+then export the matching key in the environment that launches `hobot-fuzz`:
 
 ```toml
 [[providers]]
@@ -195,6 +196,10 @@ model = "gpt-4o"
 tags = ["reasoning", "general"]
 api_key_env = "OPENAI_API_KEY"
 ```
+
+`.env.example` is a variable reference, not an automatically loaded file. If
+you keep local values in `.env`, export them before launching the process (for
+example, `set -a; source .env; set +a` in a POSIX shell).
 
 ### 3. Run a campaign
 
@@ -250,13 +255,21 @@ desktop app; drive campaigns there rather than over REST.
 
 ## Configuration Reference
 
-See `config/*.example.toml` for the full reference. Key files:
+Only settings consumed by the production service are exposed as editable
+configuration:
 
 - `providers.toml` -- LLM provider pool (routing tags, failover, freeze/thaw).
-- `engines.toml` -- Fuzzing engine registry and defaults.
-- `runtime.toml` -- Sandbox (Docker or native) and resource limits.
-- `guardrails.toml` -- Permission model, loop detection, risk scoring.
+- `hobot-fuzz.toml` -- coverage-stagnation and coverage-regression policy.
+- `defectdojo.toml` -- DefectDojo connection and lifecycle settings.
+- `issue_tracker.toml` -- GitHub/GitLab crash issue integration.
 - `agents/*.toml` -- Sub-agent definitions (discovery, harness, triage).
+
+Sandbox, engine, storage, session, and tool-registry policy currently use
+service-owned safe defaults rather than editable TOML. Runtime locations are
+overridden with documented environment variables such as `HF_WORKSPACE_DIR`,
+`HF_DB_PATH`, and `HF_CONFIG_DIR`; see `.env.example`. Unsupported legacy
+section files are rejected by the config API instead of being accepted as
+apparently editable settings.
 
 The REST API binds to loopback by default and is **fail-closed**: set
 `HF_WEB_TOKEN` to require a bearer token, or `HF_WEB_TOKEN_OPTIONAL=1` for

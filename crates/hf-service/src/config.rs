@@ -12,19 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::init::config_dir;
 
-/// The editable config sections. Each maps to a `config/<name>.toml` file.
-pub const CONFIG_SECTIONS: &[&str] = &[
-    "hobot-fuzz",
-    "providers",
-    "engines",
-    "runtime",
-    "guardrails",
-    "storage",
-    "session",
-    "tools",
-    "defectdojo",
-    "issue_tracker",
-];
+/// The editable config sections consumed by the production service.
+///
+/// A section must not be added here until service bootstrap or a service-owned
+/// integration loads and applies its typed configuration. This prevents the
+/// settings APIs from accepting files that have no runtime effect.
+pub const CONFIG_SECTIONS: &[&str] = &["hobot-fuzz", "providers", "defectdojo", "issue_tracker"];
 
 /// One editable config section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,12 +268,6 @@ fn bundled_example(section: &str) -> &'static str {
     match section {
         "hobot-fuzz" => include_str!("../../../config/hobot-fuzz.example.toml"),
         "providers" => include_str!("../../../config/providers.example.toml"),
-        "engines" => include_str!("../../../config/engines.example.toml"),
-        "runtime" => include_str!("../../../config/runtime.example.toml"),
-        "guardrails" => include_str!("../../../config/guardrails.example.toml"),
-        "storage" => include_str!("../../../config/storage.example.toml"),
-        "session" => include_str!("../../../config/session.example.toml"),
-        "tools" => include_str!("../../../config/tools.example.toml"),
         "defectdojo" => include_str!("../../../config/defectdojo.example.toml"),
         "issue_tracker" => include_str!("../../../config/issue_tracker.example.toml"),
         _ => "",
@@ -848,12 +835,71 @@ cpus = 2\n";
     }
 
     #[test]
-    fn embedded_engines_example_exposes_the_engines_array() {
-        // The settings form reads `value.engines`; the fallback must populate it
-        // (this is exactly what the empty-form bug needed).
-        let value = toml_to_json(bundled_example("engines")).expect("valid toml");
-        let engines = value["engines"].as_array().expect("engines array");
-        assert!(!engines.is_empty(), "embedded engines example is empty");
+    fn editable_sections_only_include_runtime_consumed_configuration() {
+        assert_eq!(
+            CONFIG_SECTIONS,
+            ["hobot-fuzz", "providers", "defectdojo", "issue_tracker"]
+        );
+
+        for retired in [
+            "engines",
+            "runtime",
+            "guardrails",
+            "storage",
+            "session",
+            "tools",
+        ] {
+            assert!(
+                validated_section(retired).is_err(),
+                "no-op section '{retired}' must not be editable"
+            );
+        }
+    }
+
+    #[test]
+    fn global_templates_only_document_consumed_settings() {
+        let expected = [
+            "auto_revert_enabled",
+            "auto_revert_notify_only",
+            "auto_revert_threshold_pct",
+            "coverage_stagnation_secs",
+        ];
+
+        for (label, raw) in [
+            ("example", bundled_example("hobot-fuzz")),
+            ("live", include_str!("../../../config/hobot-fuzz.toml")),
+        ] {
+            let value = toml_to_json(raw).expect("global template must be valid TOML");
+            let mut keys = value
+                .as_object()
+                .expect("global template must be a TOML table")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys, expected,
+                "{label} global config advertises no-op keys"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_template_uses_the_production_workspace_override() {
+        let template = include_str!("../../../.env.example");
+        assert!(template.contains("HF_WORKSPACE_DIR="));
+        assert!(!template.contains("HF_FUZZ_WORKSPACE"));
+        for unsupported in [
+            "HF_WEB_PORT",
+            "AFL_FUZZ_BIN",
+            "HONGGFUZZ_BIN",
+            "LIBFUZZER_LINK_FLAGS",
+        ] {
+            assert!(
+                !template.contains(unsupported),
+                "environment template advertises unsupported override {unsupported}"
+            );
+        }
     }
 
     #[test]

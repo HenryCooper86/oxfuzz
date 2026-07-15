@@ -81,5 +81,7 @@ Each adapter must normalize crash artifacts into a directory layout:
 
 ## 6. Registration
 
-Engines register in `config/engines.toml`. The `hf-engine` registry loads
-adapters by `EngineKind`.
+The service selects the built-in adapter by `EngineKind` and confirms runtime
+toolchain availability before use. Engine policy is not currently
+user-editable; a TOML registry must not be exposed until `hf-service` owns and
+applies a typed loader for it.
