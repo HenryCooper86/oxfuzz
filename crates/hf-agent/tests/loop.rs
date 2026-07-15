@@ -30,6 +30,8 @@ struct ScriptedPool {
     replies: Mutex<VecDeque<String>>,
     /// The `temperature` on the most recent request (to assert it was applied).
     last_temperature: Mutex<Option<f64>>,
+    /// Complete requests in call order, for provider-protocol assertions.
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl ScriptedPool {
@@ -37,6 +39,7 @@ impl ScriptedPool {
         Self {
             replies: Mutex::new(replies.into_iter().map(str::to_owned).collect()),
             last_temperature: Mutex::new(None),
+            requests: Mutex::new(Vec::new()),
         }
     }
 }
@@ -49,6 +52,7 @@ impl ProviderPool for ScriptedPool {
         _route: &RouteRequest,
     ) -> Result<ChatResponse, ProviderError> {
         *self.last_temperature.lock().await = request.temperature;
+        self.requests.lock().await.push(request.clone());
         let content = self
             .replies
             .lock()
@@ -96,6 +100,7 @@ impl ProviderPool for ScriptedPool {
 struct TestBackend {
     pool: Option<Arc<dyn ProviderPool>>,
     approve: bool,
+    tool_result: Option<String>,
     usage: Mutex<Vec<hf_core::types::TokenUsage>>,
 }
 
@@ -104,6 +109,16 @@ impl TestBackend {
         Arc::new(Self {
             pool,
             approve: true,
+            tool_result: None,
+            usage: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn with_tool_result(pool: Arc<dyn ProviderPool>, tool_result: String) -> Arc<Self> {
+        Arc::new(Self {
+            pool: Some(pool),
+            approve: true,
+            tool_result: Some(tool_result),
             usage: Mutex::new(Vec::new()),
         })
     }
@@ -112,6 +127,7 @@ impl TestBackend {
         Arc::new(Self {
             pool: Some(pool),
             approve: false,
+            tool_result: None,
             usage: Mutex::new(Vec::new()),
         })
     }
@@ -142,6 +158,9 @@ impl AgentBackend for TestBackend {
         name: &str,
         _args: &serde_json::Value,
     ) -> Result<String, hf_core::error::ClassifiedError> {
+        if let Some(result) = &self.tool_result {
+            return Ok(result.clone());
+        }
         Err(hf_core::error::ClassifiedError::Validation(format!(
             "unknown tool: {name}"
         )))
@@ -337,6 +356,72 @@ async fn tool_call_then_final() {
     assert!(events
         .iter()
         .any(|e| matches!(e, AgentEvent::Complete { content } if content == "all set")));
+}
+
+#[tokio::test]
+async fn prompt_protocol_tool_results_are_valid_provider_messages() {
+    use hf_core::provider::ToolCallingMode;
+    use hf_core::types::Role;
+
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"bogus","args":{"x":1}}"#,
+        r#"{"final":"recovered"}"#,
+    ]));
+    let captured = Arc::clone(&pool);
+    let provider: Arc<dyn ProviderPool> = pool;
+    let agent = Agent::new(TestBackend::new(Some(provider)), Some(std::env::temp_dir()));
+    let sink = CollectingSink::new();
+
+    let answer = agent.run_turn(Vec::new(), "go", &sink).await.unwrap();
+    assert_eq!(answer, "recovered");
+
+    let requests = captured.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.tool_calling_mode == ToolCallingMode::PromptBased));
+    let follow_up = &requests[1].messages;
+    assert!(
+        follow_up.iter().all(|message| message.role != Role::Tool),
+        "prompt-based results must not be serialized as native tool messages"
+    );
+    let result = follow_up.last().expect("tool result feedback");
+    assert_eq!(result.role, Role::User);
+    assert!(result.content.contains("result of bogus"));
+}
+
+#[tokio::test]
+async fn tight_context_budget_does_not_send_an_orphaned_large_tool_result() {
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"discover","args":{}}"#,
+        r#"{"final":"recovered"}"#,
+    ]));
+    let captured = Arc::clone(&pool);
+    let provider: Arc<dyn ProviderPool> = pool;
+    let large_result = format!("large-result-marker:{}", "r".repeat(300_000));
+    let backend = TestBackend::with_tool_result(provider, large_result);
+    let agent = Agent::new(backend, Some(std::env::temp_dir()));
+    let sink = CollectingSink::new();
+
+    // The large current query plus the still-larger tool result leave room for
+    // the newest result but not its originating user turn. Context assembly
+    // must discard the orphan pair before prompt-mode role conversion.
+    let user_message = "u".repeat(100_000);
+    let answer = agent
+        .run_turn(Vec::new(), &user_message, &sink)
+        .await
+        .unwrap();
+    assert_eq!(answer, "recovered");
+
+    let requests = captured.requests.lock().await;
+    let follow_up = &requests[1].messages;
+    let first_non_system = follow_up
+        .iter()
+        .find(|message| message.role != hf_core::types::Role::System);
+    assert!(
+        first_non_system.is_none_or(|message| !message.content.contains("large-result-marker")),
+        "provider request started with a tool result whose originating turn was trimmed"
+    );
 }
 
 #[tokio::test]

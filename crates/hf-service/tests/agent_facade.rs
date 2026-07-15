@@ -79,3 +79,34 @@ async fn run_chat_turn_is_available_through_service() {
 
     assert_eq!(answer, "service facade works");
 }
+
+#[tokio::test]
+async fn run_chat_turn_rejects_an_unknown_persistent_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("chat.db"))
+            .await
+            .unwrap(),
+    );
+    let container = ServiceContainer::new(
+        Arc::new(hf_runtime::StubRuntime),
+        Some(Arc::new(AnswerPool)),
+    )
+    .with_store(store);
+    let sink = CollectingSink::new();
+
+    let result = container
+        .run_chat_turn(
+            AgentTurnRequest {
+                project: None,
+                agent_id: None,
+                session: Some(hf_core::types::SessionId::from_string("../outside")),
+                history_fallback: Vec::new(),
+                message: "hello".to_owned(),
+            },
+            &sink,
+        )
+        .await;
+
+    assert!(result.is_err());
+}

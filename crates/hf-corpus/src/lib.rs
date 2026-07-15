@@ -1,7 +1,7 @@
 //! hf-corpus: Corpus management -- seed, grow, prune, merge, list.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use hf_core::corpus::{Corpus, CorpusEntry, CorpusSource};
 use hf_core::error::ClassifiedError;
@@ -19,15 +19,23 @@ pub async fn seed(
     corpus_root: &Path,
     inputs: Vec<(Vec<u8>, String)>,
 ) -> Result<Corpus, ClassifiedError> {
-    tokio::fs::create_dir_all(corpus_root)
+    let corpus_root = corpus_root.to_path_buf();
+    tokio::task::spawn_blocking(move || seed_blocking(target_id, &corpus_root, inputs))
         .await
-        .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
+        .map_err(|error| ClassifiedError::Internal(format!("seed task failed: {error}")))?
+}
+
+fn seed_blocking(
+    target_id: Uuid,
+    corpus_root: &Path,
+    inputs: Vec<(Vec<u8>, String)>,
+) -> Result<Corpus, ClassifiedError> {
+    ensure_regular_directory(corpus_root)?;
     let mut entries = Vec::new();
     for (data, name) in inputs {
-        let path = corpus_root.join(&name);
-        tokio::fs::write(&path, &data)
-            .await
-            .map_err(|e| ClassifiedError::Internal(format!("write: {e}")))?;
+        let name = safe_entry_name(&name)?;
+        let path = corpus_root.join(name);
+        atomic_write(&path, &data)?;
         entries.push(make_entry(&path, &data, CorpusSource::Seed));
     }
     Ok(Corpus {
@@ -69,7 +77,7 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
             continue;
         }
         let dest = grow_dest_path(corpus_root, &path, &hash);
-        std::fs::copy(&path, &dest).map_err(|e| ClassifiedError::Internal(format!("copy: {e}")))?;
+        atomic_write(&dest, &data)?;
         entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
     }
     Ok(Corpus {
@@ -86,12 +94,18 @@ pub fn grow(corpus_root: &Path, engine_out: &Path) -> Result<Corpus, ClassifiedE
 /// rather than crash artifacts or bookkeeping.
 fn collect_candidate_inputs(engine_out: &Path) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
+    if !is_regular_directory(engine_out) {
+        return candidates;
+    }
 
     let mut queue_dirs = vec![engine_out.join("queue")];
     if let Ok(entries) = std::fs::read_dir(engine_out) {
         for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
             let queue = entry.path().join("queue");
-            if queue.is_dir() {
+            if is_regular_directory(&queue) {
                 queue_dirs.push(queue);
             }
         }
@@ -100,7 +114,7 @@ fn collect_candidate_inputs(engine_out: &Path) -> Vec<std::path::PathBuf> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() {
+                if entry.file_type().is_ok_and(|kind| kind.is_file()) {
                     candidates.push(path);
                 }
             }
@@ -110,7 +124,9 @@ fn collect_candidate_inputs(engine_out: &Path) -> Vec<std::path::PathBuf> {
     if let Ok(entries) = std::fs::read_dir(engine_out) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && is_coverage_input_name(&entry.file_name().to_string_lossy()) {
+            if entry.file_type().is_ok_and(|kind| kind.is_file())
+                && is_coverage_input_name(&entry.file_name().to_string_lossy())
+            {
                 candidates.push(path);
             }
         }
@@ -138,6 +154,73 @@ fn is_coverage_input_name(name: &str) -> bool {
     }
     // honggfuzz crash files: SIG<signal>.PC.<...>.
     !(name.starts_with("SIG") && name.contains(".PC."))
+}
+
+/// Whether `path` is a real directory rather than a symlink to one.
+fn is_regular_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+/// Whether `path` is a real file rather than a symlink to one.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+/// Create a directory if needed, then reject symlinks and non-directories.
+fn ensure_regular_directory(path: &Path) -> Result<(), ClassifiedError> {
+    std::fs::create_dir_all(path)
+        .map_err(|e| ClassifiedError::Internal(format!("mkdir {}: {e}", path.display())))?;
+    if is_regular_directory(path) {
+        Ok(())
+    } else {
+        Err(ClassifiedError::Validation(format!(
+            "corpus path is not a regular directory: {}",
+            path.display()
+        )))
+    }
+}
+
+/// Accept one filename component only; absolute paths and traversal escape the
+/// corpus boundary and are never valid seed names.
+fn safe_entry_name(name: &str) -> Result<&std::ffi::OsStr, ClassifiedError> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => Ok(name),
+        _ => Err(ClassifiedError::Validation(format!(
+            "corpus entry name must be one path component: {name}"
+        ))),
+    }
+}
+
+/// Replace a corpus entry through a fresh inode so an attacker-planted
+/// destination symlink is replaced rather than followed.
+fn atomic_write(path: &Path, data: &[u8]) -> Result<(), ClassifiedError> {
+    use std::io::Write as _;
+
+    let parent = path.parent().ok_or_else(|| {
+        ClassifiedError::Validation(format!("corpus entry has no parent: {}", path.display()))
+    })?;
+    if !is_regular_directory(parent) {
+        return Err(ClassifiedError::Validation(format!(
+            "corpus entry parent is not a regular directory: {}",
+            parent.display()
+        )));
+    }
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".hobot-fuzz-corpus-")
+        .tempfile_in(parent)
+        .map_err(|e| ClassifiedError::Internal(format!("create corpus temp: {e}")))?;
+    temporary
+        .write_all(data)
+        .map_err(|e| ClassifiedError::Internal(format!("write corpus temp: {e}")))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|e| ClassifiedError::Internal(format!("sync corpus temp: {e}")))?;
+    temporary
+        .persist(path)
+        .map_err(|e| ClassifiedError::Internal(format!("commit corpus entry: {}", e.error)))?;
+    Ok(())
 }
 
 /// Destination path for a pulled input: keep the source filename, falling back
@@ -199,14 +282,13 @@ pub fn absorb(
     corpus_root: &Path,
     inputs: &[std::path::PathBuf],
 ) -> Result<(Corpus, usize), ClassifiedError> {
-    std::fs::create_dir_all(corpus_root)
-        .map_err(|e| ClassifiedError::Internal(format!("mkdir corpus: {e}")))?;
+    ensure_regular_directory(corpus_root)?;
     let existing = list(corpus_root)?;
     let mut seen: HashSet<String> = existing.entries.iter().map(|e| e.sha256.clone()).collect();
     let mut entries = existing.entries;
     let mut added = 0usize;
     for input in inputs {
-        if !input.is_file() {
+        if !is_regular_file(input) {
             continue;
         }
         let data = std::fs::read(input)
@@ -231,8 +313,7 @@ pub fn absorb(
         } else {
             preferred
         };
-        std::fs::write(&dest, &data)
-            .map_err(|e| ClassifiedError::Internal(format!("write absorbed: {e}")))?;
+        atomic_write(&dest, &data)?;
         entries.push(make_entry(&dest, &data, CorpusSource::Fuzzer));
         added += 1;
     }
@@ -274,12 +355,12 @@ pub fn minimize(corpus_root: &Path, minimized_dir: &Path) -> Result<Corpus, Clas
     let mut entries = Vec::new();
     for entry in kept.entries {
         let dest = corpus_root.join(entry.path.file_name().unwrap_or(entry.path.as_os_str()));
-        if !dest.exists() {
-            std::fs::copy(&entry.path, &dest)
-                .map_err(|e| ClassifiedError::Internal(format!("copy minimized: {e}")))?;
-        }
-        let data = std::fs::read(&dest)
+        let data = std::fs::read(&entry.path)
             .map_err(|e| ClassifiedError::Internal(format!("read minimized: {e}")))?;
+        // Always replace the destination through a fresh inode. Besides fixing
+        // stale same-name collisions, this replaces an attacker-planted
+        // symlink instead of reading or writing through it.
+        atomic_write(&dest, &data)?;
         entries.push(make_entry(&dest, &data, CorpusSource::Minimized));
     }
     Ok(Corpus {
@@ -313,13 +394,27 @@ pub fn merge(a: Corpus, b: Corpus) -> Result<Corpus, ClassifiedError> {
 /// Returns `ClassifiedError` if the directory cannot be read.
 pub fn list(corpus_root: &Path) -> Result<Corpus, ClassifiedError> {
     let mut entries = Vec::new();
-    if !corpus_root.is_dir() {
-        return Ok(Corpus {
-            id: Uuid::new_v4(),
-            target_id: Uuid::nil(),
-            root: corpus_root.to_path_buf(),
-            entries,
-        });
+    match std::fs::symlink_metadata(corpus_root) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(ClassifiedError::Validation(format!(
+                "corpus path is not a regular directory: {}",
+                corpus_root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Corpus {
+                id: Uuid::new_v4(),
+                target_id: Uuid::nil(),
+                root: corpus_root.to_path_buf(),
+                entries,
+            });
+        }
+        Err(error) => {
+            return Err(ClassifiedError::Internal(format!(
+                "inspect corpus: {error}"
+            )));
+        }
     }
     let dir = corpus_root
         .read_dir()
@@ -327,7 +422,7 @@ pub fn list(corpus_root: &Path) -> Result<Corpus, ClassifiedError> {
     for entry in dir {
         let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
         let path = entry.path();
-        if !path.is_file() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
         let data =
