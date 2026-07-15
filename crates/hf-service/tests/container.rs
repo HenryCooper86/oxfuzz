@@ -430,6 +430,142 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
 }
 
 #[tokio::test]
+async fn background_start_returns_a_durable_cancellable_run_id() {
+    use std::fs;
+
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("background_start_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "parse_background";
+    fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_background(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+
+    let workspace = hf_service::workspace_dir(&project, target);
+    fs::create_dir_all(workspace.join("corpus")).unwrap();
+    fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
+
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("background.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = ServiceContainer::new(Arc::new(BlockingRuntime::default()), None)
+        .with_store(Arc::clone(&store));
+    container
+        .harness_compile(
+            "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return size && data[0]; }".to_owned(),
+            &project,
+            hf_core::engine::EngineKind::LibFuzzer,
+            target,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("compile harness");
+    container
+        .harness_smoke(
+            &project,
+            target,
+            hf_core::engine::EngineKind::LibFuzzer,
+            hf_core::target::TargetLanguage::C,
+        )
+        .await
+        .expect("smoke harness");
+    container
+        .harness_promote(&project, target, hf_core::engine::EngineKind::LibFuzzer)
+        .await
+        .expect("promote harness");
+
+    let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+    let terminal_tx = Arc::new(std::sync::Mutex::new(Some(terminal_tx)));
+    let statuses = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let status_sink = {
+        let statuses = Arc::clone(&statuses);
+        let terminal_tx = Arc::clone(&terminal_tx);
+        Arc::new(
+            move |run_id: uuid::Uuid, status: hf_service::RunLifecycleStatus| {
+                statuses.lock().unwrap().push((run_id, status));
+                if status != hf_service::RunLifecycleStatus::Running {
+                    if let Some(sender) = terminal_tx.lock().unwrap().take() {
+                        let _ = sender.send((run_id, status));
+                    }
+                }
+            },
+        )
+    };
+    let run_id = container
+        .start_fuzzer(
+            project.clone(),
+            target.to_owned(),
+            hf_core::engine::EngineKind::LibFuzzer,
+            60,
+            Arc::new(|_, _| {}),
+            status_sink,
+        )
+        .await
+        .expect("background run should reserve and start");
+
+    let durable = store
+        .get_run(run_id)
+        .await
+        .unwrap()
+        .expect("returned id must already be durable");
+    assert_eq!(durable.status, hf_storage::RunStatus::Running);
+    let status = container
+        .run_control_status(run_id)
+        .await
+        .unwrap()
+        .expect("run status");
+    assert_eq!(status.status, hf_service::RunLifecycleStatus::Running);
+    assert!(status.active);
+    assert_eq!(
+        container.request_run_cancel(run_id).await.unwrap(),
+        hf_service::RunCancelOutcome::Accepted
+    );
+
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), terminal_rx)
+        .await
+        .expect("terminal callback should arrive")
+        .expect("terminal sender should remain alive");
+    assert_eq!(
+        terminal,
+        (run_id, hf_service::RunLifecycleStatus::Cancelled)
+    );
+    let finished = container
+        .run_control_status(run_id)
+        .await
+        .unwrap()
+        .expect("finished run status");
+    assert_eq!(finished.status, hf_service::RunLifecycleStatus::Cancelled);
+    assert!(!finished.active);
+    assert_eq!(
+        container.request_run_cancel(run_id).await.unwrap(),
+        hf_service::RunCancelOutcome::Inactive
+    );
+    assert_eq!(
+        container
+            .request_run_cancel(uuid::Uuid::new_v4())
+            .await
+            .unwrap(),
+        hf_service::RunCancelOutcome::NotFound
+    );
+
+    let observed = statuses.lock().unwrap();
+    assert_eq!(
+        observed.first(),
+        Some(&(run_id, hf_service::RunLifecycleStatus::Running))
+    );
+    assert_eq!(
+        observed.last(),
+        Some(&(run_id, hf_service::RunLifecycleStatus::Cancelled))
+    );
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
 async fn completed_run_merges_discoveries_without_writable_live_corpus() {
     isolate_workspace();
     let dir = tempfile::tempdir().unwrap();
