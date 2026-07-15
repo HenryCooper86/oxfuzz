@@ -160,9 +160,14 @@ export function ObservabilityPanel() {
             setError(null);
           }
         })
-        // Keep the last good snapshot on a transient poll failure; only surface
-        // an error (instead of an eternal "Loading...") when we have nothing.
-        .catch((e) => !cancelled && setError(String(e)));
+        // The snapshot includes session cost. Do not keep a stale value labeled
+        // as live state after the service reports a diagnostics read failure.
+        .catch((e) => {
+          if (!cancelled) {
+            setSnap(null);
+            setError(String(e));
+          }
+        });
     };
     tick();
     const id = setInterval(tick, 5000);

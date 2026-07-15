@@ -33,10 +33,12 @@ all under human-in-the-loop supervision.
 | Corpus management | hf-corpus | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
 | Sandbox / runtime | hf-runtime | `RuntimeAdapter` | runtime-design.md |
-| Tool registry | hf-tools | `Tool`, `ToolRegistry` | (reuse y-agent) |
+| Tool registry | hf-tools | `Tool`, `ToolRegistry` | ../standards/TOOL_CALL_PROTOCOL.md |
 | Skill evolution | hf-skills | `SkillRegistry` | (reuse y-agent) |
+| Agent prompt security | hf-prompt | - | agent-prompt-security-design.md |
 | Service orchestration | hf-service | - | service-orchestration-design.md |
-| Agent loop | hf-agent | `AgentDelegator` | (reuse y-agent) |
+| Agent loop | hf-agent | `AgentDelegator` | agent-prompt-security-design.md |
+| Web API security / transport | hf-web | - | web-api-security-design.md |
 
 ## 4. Crate Dependency Rules
 

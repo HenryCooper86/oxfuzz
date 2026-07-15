@@ -1,9 +1,8 @@
 //! The agent definition: the single source of truth for what an agent is.
 //!
-//! Mirrors the y-agent design (one flat-TOML struct fully determines an agent's
-//! prompt, tools, model routing, and limits) but scoped to the fuzzing domain.
-//! A definition is parsed from a `config/agents/<id>.toml` file or from a
-//! built-in embedded in the binary; the same struct models both.
+//! One flat-TOML struct determines an agent's role prompt, tools, model routing,
+//! and limits. A definition is parsed from a `config/agents/<id>.toml` file or
+//! from a built-in embedded in the binary; the same struct models both.
 
 use serde::{Deserialize, Serialize};
 
@@ -92,8 +91,9 @@ pub struct AgentDefinition {
     /// Optional short icon/emoji for the GUI.
     #[serde(default)]
     pub icon: Option<String>,
-    /// The behavior-defining system prompt. The runtime appends the active
-    /// project, the allowed-tool catalog, and the tool-call protocol.
+    /// The role-specific prompt. The runtime wraps it with the invariant
+    /// identity and security rules, active project boundary, selected skills,
+    /// executable tool catalogs, and tool-call protocol.
     pub system_prompt: String,
     /// The tool names this agent may call (must match the runtime roster:
     /// `discover`, `harness`, `run`, `triage`, `corpus`).

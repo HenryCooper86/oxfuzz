@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
 
 use hf_core::session::{
     ChatCheckpoint, ChatCheckpointStore, DisplayTranscriptStore, SessionError, SessionStore,
@@ -35,6 +35,13 @@ pub struct ChatCheckpointManager {
     display_transcript_store: Arc<dyn DisplayTranscriptStore>,
     checkpoint_store: Arc<dyn ChatCheckpointStore>,
     session_store: Arc<dyn SessionStore>,
+}
+
+struct RollbackSnapshot {
+    context: Vec<hf_core::types::Message>,
+    display: Vec<hf_core::types::Message>,
+    token_count: u32,
+    message_count: u32,
 }
 
 impl ChatCheckpointManager {
@@ -71,6 +78,7 @@ impl ChatCheckpointManager {
         message_count_before: u32,
         journal_scope_id: String,
     ) -> Result<ChatCheckpoint, SessionError> {
+        self.session_store.get(session_id).await?;
         let checkpoint = ChatCheckpoint {
             checkpoint_id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.clone(),
@@ -151,39 +159,53 @@ impl ChatCheckpointManager {
             .map(|cp| cp.journal_scope_id.clone())
             .collect();
 
-        // Truncate display transcript to the pre-turn state.
-        if let Err(e) = self
-            .display_transcript_store
-            .truncate(session_id, target.message_count_before as usize)
-            .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %e,
-                "failed to truncate display transcript during rollback"
-            );
+        let snapshot = self.rollback_snapshot(session_id).await?;
+        let keep_count = usize::try_from(target.message_count_before).unwrap_or(usize::MAX);
+        if keep_count > snapshot.context.len() || keep_count > snapshot.display.len() {
+            return Err(SessionError::Other {
+                message: format!(
+                    "checkpoint {} expects {} messages, but transcripts contain {} context and {} display messages",
+                    target.checkpoint_id,
+                    keep_count,
+                    snapshot.context.len(),
+                    snapshot.display.len()
+                ),
+            });
         }
-
-        // Truncate context transcript to the pre-turn state.
-        let messages_removed = self
-            .transcript_store
-            .truncate(session_id, target.message_count_before as usize)
-            .await?;
-
-        // Update session metadata with new message count.
-        if let Err(e) = self
-            .session_store
-            .update_metadata(session_id, None, 0, target.message_count_before)
-            .await
-        {
-            warn!(error = %e, "failed to update session metadata after rollback");
+        let mutation = async {
+            self.display_transcript_store
+                .truncate(session_id, keep_count)
+                .await?;
+            let messages_removed = self
+                .transcript_store
+                .truncate(session_id, keep_count)
+                .await?;
+            self.session_store
+                .update_metadata(
+                    session_id,
+                    None,
+                    snapshot.token_count,
+                    target.message_count_before,
+                )
+                .await?;
+            let invalidated = self
+                .checkpoint_store
+                .invalidate_after(session_id, target.turn_number.saturating_sub(1))
+                .await?;
+            Ok::<_, SessionError>((messages_removed, invalidated))
         }
-
-        // Invalidate target checkpoint and all newer ones.
-        let invalidated = self
-            .checkpoint_store
-            .invalidate_after(session_id, target.turn_number.saturating_sub(1))
-            .await?;
+        .await;
+        let (messages_removed, invalidated) = match mutation {
+            Ok(result) => result,
+            Err(error) => {
+                let compensation = self.restore_rollback_snapshot(session_id, &snapshot).await;
+                return Err(compensated_session_error(
+                    "rollback chat transcript",
+                    &error,
+                    compensation,
+                ));
+            }
+        };
 
         info!(
             messages_removed,
@@ -200,6 +222,74 @@ impl ChatCheckpointManager {
         })
     }
 
+    async fn rollback_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<RollbackSnapshot, SessionError> {
+        let session = self.session_store.get(session_id).await?;
+        let context = self.transcript_store.read_all(session_id).await?;
+        let display = self.display_transcript_store.read_all(session_id).await?;
+        Ok(RollbackSnapshot {
+            context,
+            display,
+            token_count: session.token_count,
+            message_count: session.message_count,
+        })
+    }
+
+    async fn restore_rollback_snapshot(
+        &self,
+        session_id: &SessionId,
+        snapshot: &RollbackSnapshot,
+    ) -> Result<(), SessionError> {
+        let mut errors = Vec::new();
+        match self.display_transcript_store.truncate(session_id, 0).await {
+            Ok(_) => {
+                for message in &snapshot.display {
+                    if let Err(error) = self
+                        .display_transcript_store
+                        .append(session_id, message)
+                        .await
+                    {
+                        errors.push(format!("restore display transcript: {error}"));
+                        break;
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("reset display transcript: {error}")),
+        }
+        match self.transcript_store.truncate(session_id, 0).await {
+            Ok(_) => {
+                for message in &snapshot.context {
+                    if let Err(error) = self.transcript_store.append(session_id, message).await {
+                        errors.push(format!("restore context transcript: {error}"));
+                        break;
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("reset context transcript: {error}")),
+        }
+        if let Err(error) = self
+            .session_store
+            .update_metadata(
+                session_id,
+                None,
+                snapshot.token_count,
+                snapshot.message_count,
+            )
+            .await
+        {
+            errors.push(format!("restore session metadata: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SessionError::Other {
+                message: errors.join("; "),
+            })
+        }
+    }
+
     /// Get a reference to the underlying checkpoint store.
     pub fn checkpoint_store(&self) -> &dyn ChatCheckpointStore {
         &*self.checkpoint_store
@@ -214,11 +304,33 @@ impl ChatCheckpointManager {
         Ok(all.into_iter().filter(|cp| !cp.invalidated).collect())
     }
 
-    /// Get the current turn number for a session (based on checkpoint count).
+    /// Get the highest turn number ever assigned for a session.
+    ///
+    /// Invalidated checkpoints remain in durable storage and participate in a
+    /// unique `(session_id, turn_number)` constraint, so turn numbers are
+    /// monotonic and never reused after rollback.
     pub async fn current_turn(&self, session_id: &SessionId) -> Result<u32, SessionError> {
-        let latest = self.checkpoint_store.latest(session_id).await?;
-        Ok(latest.map_or(0, |cp| cp.turn_number))
+        let checkpoints = self.checkpoint_store.list_by_session(session_id).await?;
+        Ok(checkpoints
+            .into_iter()
+            .map(|checkpoint| checkpoint.turn_number)
+            .max()
+            .unwrap_or(0))
     }
+}
+
+fn compensated_session_error(
+    operation: &str,
+    original: &SessionError,
+    compensation: Result<(), SessionError>,
+) -> SessionError {
+    let message = match compensation {
+        Ok(()) => format!("{operation} failed and was rolled back: {original}"),
+        Err(rollback) => {
+            format!("{operation} failed: {original}; compensation also failed: {rollback}")
+        }
+    };
+    SessionError::Other { message }
 }
 
 impl std::fmt::Debug for ChatCheckpointManager {
@@ -240,6 +352,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct MockChatCheckpointStore {
         data: std::sync::RwLock<Vec<ChatCheckpoint>>,
+        fail_invalidation: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -294,6 +407,14 @@ mod tests {
             session_id: &SessionId,
             turn_number: u32,
         ) -> Result<u32, SessionError> {
+            if self
+                .fail_invalidation
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(SessionError::StorageError {
+                    message: "injected checkpoint invalidation failure".to_owned(),
+                });
+            }
             let mut data = self.data.write().unwrap();
             let mut count = 0;
             for cp in data.iter_mut() {
@@ -309,7 +430,11 @@ mod tests {
         }
     }
 
-    async fn setup() -> (ChatCheckpointManager, SessionId) {
+    async fn setup() -> (
+        ChatCheckpointManager,
+        SessionId,
+        Arc<MockChatCheckpointStore>,
+    ) {
         let session_store = Arc::new(MockSessionStore::new());
         let transcript_store = Arc::new(MockTranscriptStore::new());
         let display_transcript_store = Arc::new(MockDisplayTranscriptStore::new());
@@ -329,16 +454,16 @@ mod tests {
         let mgr = ChatCheckpointManager::new(
             transcript_store,
             display_transcript_store,
-            checkpoint_store,
+            checkpoint_store.clone(),
             session_store,
         );
-        (mgr, session.id)
+        (mgr, session.id, checkpoint_store)
     }
 
     // T-CP-10: end_turn creates checkpoint with correct message_count_before.
     #[tokio::test]
     async fn test_create_checkpoint() {
-        let (mgr, sid) = setup().await;
+        let (mgr, sid, _) = setup().await;
 
         let cp = mgr
             .create_checkpoint(&sid, 1, 0, "scope-turn-1".into())
@@ -354,31 +479,29 @@ mod tests {
     // T-CP-11: rollback_last truncates transcript.
     #[tokio::test]
     async fn test_rollback_last() {
-        let (mgr, sid) = setup().await;
+        let (mgr, sid, _) = setup().await;
 
         // Simulate turn 1: user + assistant messages.
-        mgr.transcript_store
-            .append(&sid, &make_user_message("hello"))
-            .await
-            .unwrap();
-        mgr.transcript_store
-            .append(&sid, &make_assistant_message("hi"))
-            .await
-            .unwrap();
+        for message in [make_user_message("hello"), make_assistant_message("hi")] {
+            mgr.transcript_store.append(&sid, &message).await.unwrap();
+            mgr.display_transcript_store
+                .append(&sid, &message)
+                .await
+                .unwrap();
+        }
 
         mgr.create_checkpoint(&sid, 1, 0, "scope-1".into())
             .await
             .unwrap();
 
         // Simulate turn 2: user + assistant messages.
-        mgr.transcript_store
-            .append(&sid, &make_user_message("more"))
-            .await
-            .unwrap();
-        mgr.transcript_store
-            .append(&sid, &make_assistant_message("sure"))
-            .await
-            .unwrap();
+        for message in [make_user_message("more"), make_assistant_message("sure")] {
+            mgr.transcript_store.append(&sid, &message).await.unwrap();
+            mgr.display_transcript_store
+                .append(&sid, &message)
+                .await
+                .unwrap();
+        }
 
         mgr.create_checkpoint(&sid, 2, 2, "scope-2".into())
             .await
@@ -400,19 +523,21 @@ mod tests {
     // T-CP-12: rollback to specific checkpoint with multi-turn gap.
     #[tokio::test]
     async fn test_rollback_multi_turn() {
-        let (mgr, sid) = setup().await;
+        let (mgr, sid, _) = setup().await;
 
         // 3 turns, 2 messages each.
         for turn in 1..=3 {
             let before = ((turn - 1) * 2) as u32;
-            mgr.transcript_store
-                .append(&sid, &make_user_message(&format!("user-{turn}")))
-                .await
-                .unwrap();
-            mgr.transcript_store
-                .append(&sid, &make_assistant_message(&format!("asst-{turn}")))
-                .await
-                .unwrap();
+            for message in [
+                make_user_message(&format!("user-{turn}")),
+                make_assistant_message(&format!("asst-{turn}")),
+            ] {
+                mgr.transcript_store.append(&sid, &message).await.unwrap();
+                mgr.display_transcript_store
+                    .append(&sid, &message)
+                    .await
+                    .unwrap();
+            }
             mgr.create_checkpoint(&sid, turn as u32, before, format!("scope-{turn}"))
                 .await
                 .unwrap();
@@ -439,14 +564,25 @@ mod tests {
     // T-CP-13: Rollback with no checkpoints returns error.
     #[tokio::test]
     async fn test_rollback_no_checkpoints() {
-        let (mgr, sid) = setup().await;
+        let (mgr, sid, _) = setup().await;
         let result = mgr.rollback_last(&sid).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
+    async fn test_current_turn_does_not_reuse_invalidated_turn_number() {
+        let (mgr, sid, checkpoints) = setup().await;
+        mgr.create_checkpoint(&sid, 1, 0, "scope-1".into())
+            .await
+            .unwrap();
+        checkpoints.invalidate_after(&sid, 0).await.unwrap();
+
+        assert_eq!(mgr.current_turn(&sid).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn test_rollback_to_rejects_checkpoint_from_other_session() {
-        let (mgr, sid) = setup().await;
+        let (mgr, sid, _) = setup().await;
         let other_session = mgr
             .session_store
             .create(hf_core::session::CreateSessionOptions {
@@ -468,5 +604,70 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rollback_rejects_checkpoint_beyond_transcript_length() {
+        let (mgr, sid, _) = setup().await;
+        let message = make_user_message("only message");
+        mgr.transcript_store.append(&sid, &message).await.unwrap();
+        mgr.display_transcript_store
+            .append(&sid, &message)
+            .await
+            .unwrap();
+        mgr.create_checkpoint(&sid, 1, 2, "scope-1".into())
+            .await
+            .unwrap();
+
+        let result = mgr.rollback_last(&sid).await;
+
+        assert!(result.is_err());
+        assert_eq!(mgr.transcript_store.read_all(&sid).await.unwrap().len(), 1);
+        assert_eq!(
+            mgr.display_transcript_store
+                .read_all(&sid)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rollback_restores_transcripts_when_checkpoint_invalidation_fails() {
+        let (mgr, sid, checkpoints) = setup().await;
+        for message in [make_user_message("hello"), make_assistant_message("hi")] {
+            mgr.transcript_store.append(&sid, &message).await.unwrap();
+            mgr.display_transcript_store
+                .append(&sid, &message)
+                .await
+                .unwrap();
+        }
+        mgr.session_store
+            .update_metadata(&sid, None, 7, 2)
+            .await
+            .unwrap();
+        mgr.create_checkpoint(&sid, 1, 0, "scope-1".into())
+            .await
+            .unwrap();
+        checkpoints
+            .fail_invalidation
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let result = mgr.rollback_last(&sid).await;
+
+        assert!(result.is_err());
+        assert_eq!(mgr.transcript_store.read_all(&sid).await.unwrap().len(), 2);
+        assert_eq!(
+            mgr.display_transcript_store
+                .read_all(&sid)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let session = mgr.session_store.get(&sid).await.unwrap();
+        assert_eq!(session.message_count, 2);
+        assert_eq!(session.token_count, 7);
     }
 }

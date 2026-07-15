@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { applyMode, normalizeAssistantContent, normalizeChatRole } from "../views/chatHelpers";
+import {
+  applyMode,
+  normalizeAssistantContent,
+  normalizeChatRole,
+  toCanonicalChatMessages,
+} from "../views/chatHelpers";
 
 describe("applyMode", () => {
   it("sends the message unchanged in auto mode", () => {
@@ -35,5 +40,23 @@ describe("applyMode", () => {
       '{"thought":"ask for project","final":"Hi!\n\nWhat would you like to fuzz?"}',
     );
     expect(out).toBe("Hi!\n\nWhat would you like to fuzz?");
+  });
+
+  it("rebuilds visible chat exclusively from canonical backend turns", () => {
+    const out = toCanonicalChatMessages(
+      [
+        { role: "User", content: "hello" },
+        {
+          role: "Assistant",
+          content: '{"thought":"hidden","final":"canonical answer"}',
+        },
+      ],
+      () => "now",
+    );
+
+    expect(out).toEqual([
+      { role: "user", content: "hello", timestamp: "now" },
+      { role: "assistant", content: "canonical answer", timestamp: "now" },
+    ]);
   });
 });

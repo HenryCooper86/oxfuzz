@@ -1,6 +1,7 @@
-//! y-tools: Tool Registry, lazy loading, JSON Schema validation, LRU activation.
+//! `hobot_fuzz` tool registry, JSON Schema validation, and execution support.
 //!
-//! This crate provides the tool management system for y-agent:
+//! This crate provides the reusable tool-management infrastructure for the
+//! agent:
 //!
 //! - [`ToolRegistryImpl`] — manages tool registration, lookup, and search
 //! - [`ToolIndex`] — compact entries for LLM context (name+description only)
@@ -10,14 +11,17 @@
 //! - [`DynamicToolManager`] — CRUD lifecycle for agent-created tools
 //! - [`RateLimiter`] — per-tool token-bucket rate limiting
 //! - [`ResultFormatter`] — formats tool output for LLM consumption
-//! - [`builtin::tool_search`] — meta-tool for lazy tool loading
-//! - [`builtin::register_builtin_tools`] — registers all built-in tools
+//! - [`builtin::file_read`], [`builtin::glob`], and [`builtin::grep`] — the
+//!   project-scoped, read-only inspection tools used by the active agent
 //!
-//! # Lazy Loading Design
+//! # Executable surface
 //!
-//! Tools are not loaded into context until the LLM needs them. The compact
-//! index is always present, and the LLM calls `ToolSearch` to activate
-//! specific tools' full definitions. This saves 60-90% of token usage.
+//! A registry starts empty. Its owner must register each executable tool
+//! explicitly and advertise only those entries. `hf-agent` registers the
+//! three inspection tools above plus its service-backed `KnowledgeSearch`.
+//! Shell execution, file mutation, delegation, workflow mutation, and fuzzing
+//! actions are not generic built-ins; those operations remain behind the
+//! service's guardrail, approval, and sandbox boundaries.
 
 pub mod activation;
 pub mod builtin;

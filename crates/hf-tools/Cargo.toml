@@ -3,7 +3,7 @@ name = "hf-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Tool registry: lazy loading, JSON Schema validation, builtin tools"
+description = "Tool registry, validation, and project-scoped read-only inspection tools"
 
 [dependencies]
 hf-core = { workspace = true }
