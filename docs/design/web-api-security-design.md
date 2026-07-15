@@ -22,8 +22,8 @@ to logs, URLs, error bodies, or tracing fields.
 
 Browser cross-origin access is denied except for exact origins in
 `HF_WEB_CORS_ORIGINS`. The default allowlist contains only the standard local
-Vite origins. CORS permits the minimum methods and headers used by the API,
-including `Authorization`; it never uses a wildcard origin. Actual requests
+Vite origins. CORS permits `GET`, `POST`, `PATCH`, `DELETE`, and `OPTIONS`, plus
+the `Authorization` and `Content-Type` headers; it never uses a wildcard origin. Actual requests
 carrying an unlisted cross-origin `Origin` header are rejected before handler
 execution, so CORS is not treated as response-only CSRF protection.
 
@@ -48,6 +48,23 @@ values. Path-bearing service records retain their shape where browser parity
 requires it, but absolute path values are replaced by an explicit redaction
 marker. Provider and raw-config reads clear secret fields. Desktop commands are
 not changed; their trusted local presentation can continue to show local paths.
+
+DefectDojo and issue-tracker settings use dedicated typed GET/PATCH routes. Their
+public DTOs replace secrets, secret environment names, and compose-file paths
+with configured-state booleans. An omitted protected patch field means preserve;
+replacement and clearing are explicit operations. The service performs the
+merge, semantic validation, and atomic private-file write. Generic raw browser
+writes are rejected for these sections, preventing a redacted read from becoming
+a destructive write.
+
+Potentially path-shaped Compose project and repository values use a public
+`configured`/optional-`value` state. Absolute legacy values produce no value and
+no redaction marker; clients must keep, explicitly replace, or explicitly clear
+them. Same-directory patch transactions are serialized within one process.
+
+`GET /config/fuzzing` returns the service-validated `FuzzingSettings` policy.
+Presentation clients do not reconstruct this policy by parsing redacted raw
+TOML and must propagate an invalid-policy error instead of substituting defaults.
 
 ## 5. Run Control and Events
 
@@ -89,7 +106,8 @@ for the same service error category.
 
 - Unit tests cover loopback/non-loopback bind decisions and bearer semantics.
 - Router tests cover exact-origin preflight, unauthorized responses, and
-  redacted config/path DTOs.
+  redacted config/path DTOs, typed integration preservation, explicit protected
+  value updates, and fail-closed integration writes.
 - Filesystem tests cover outside-root and symlink escape rejection.
 - Run-route tests cover invalid ids, mapped preflight failures,
   missing/inactive runs, event-size bounds, and lag notification. Service tests

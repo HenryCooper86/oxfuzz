@@ -282,6 +282,22 @@ fn with_absolute_project(params: &CampaignParams) -> CampaignParams {
     pinned
 }
 
+fn validate_campaign_fuzzing_policy(params: &CampaignParams) -> Result<(), CampaignSchedulerError> {
+    let engine = if params.engine.trim().is_empty() {
+        None
+    } else {
+        Some(
+            params
+                .engine
+                .parse::<EngineKind>()
+                .map_err(CampaignSchedulerError::Validation)?,
+        )
+    };
+    crate::config::resolve_fuzzing_run(engine, Some(params.duration_secs))
+        .map(|_| ())
+        .map_err(CampaignSchedulerError::Validation)
+}
+
 /// A presentation-friendly view of a scheduled campaign for the GUI.
 #[derive(Debug, Clone, Serialize)]
 pub struct CampaignView {
@@ -751,6 +767,19 @@ fn budget_note(state: &CampaignRuntimeState, params: &CampaignParams) -> String 
     }
 }
 
+/// Read-only concurrency limits safe to expose through presentation transports.
+/// The two source limits remain independent; the effective fuzz-run ceiling is
+/// their minimum because every active fuzz run consumes one slot from each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CampaignConcurrencyLimits {
+    /// Live, sidecar-persisted limit enforced by the campaign gate.
+    pub active_fuzz_campaign_limit: usize,
+    /// Startup limit enforced by the scheduler workflow-dispatch semaphore.
+    pub scheduler_workflow_dispatch_limit: usize,
+    /// Maximum concurrent fuzz runs permitted by both independent limits.
+    pub effective_max_concurrent_fuzz_runs: usize,
+}
+
 /// Manages scheduled fuzz campaigns: a background tick loop plus JSON-persisted
 /// schedules.
 pub struct CampaignScheduler {
@@ -760,8 +789,10 @@ pub struct CampaignScheduler {
     store: Option<Arc<Store>>,
     /// Rotation cursor + budget consumption per campaign (JSON sidecar).
     state: Arc<CampaignStateStore>,
-    /// Global cap on concurrent campaign runs.
+    /// Live cap on active fuzz-campaign runs.
     gate: Arc<ConcurrencyGate>,
+    /// Scheduler workflow-dispatch cap resolved once at startup.
+    scheduler_workflow_dispatch_limit: usize,
     /// Late-bound crash notifier (filled by the desktop shell after setup).
     notifier: NotifierSlot,
 }
@@ -769,6 +800,9 @@ pub struct CampaignScheduler {
 /// Durable scheduler startup or mutation error.
 #[derive(Debug, thiserror::Error)]
 pub enum CampaignSchedulerError {
+    /// A schedule requests an invalid or disabled fuzzing policy value.
+    #[error("invalid campaign settings: {0}")]
+    Validation(String),
     /// Schedule or campaign sidecar I/O/JSON failure.
     #[error(transparent)]
     State(#[from] StateFileError),
@@ -782,7 +816,10 @@ pub enum CampaignSchedulerError {
 
 impl From<CampaignSchedulerError> for ClassifiedError {
     fn from(error: CampaignSchedulerError) -> Self {
-        Self::Storage(error.to_string())
+        match error {
+            CampaignSchedulerError::Validation(message) => Self::Validation(message),
+            other => Self::Storage(other.to_string()),
+        }
     }
 }
 
@@ -829,6 +866,7 @@ impl CampaignScheduler {
     ) -> Result<Self, CampaignSchedulerError> {
         let scheduler_config = crate::config::effective_scheduler_config();
         let history_retention_limit = scheduler_config.history_retention_limit;
+        let scheduler_workflow_dispatch_limit = scheduler_config.max_concurrent_executions.max(1);
         let manager = Arc::new(SchedulerManager::new(scheduler_config));
         let schedules = Arc::new(ScheduleFileStore::new(store_path.clone()));
         // Grab the DB handle (for persisted execution history) before the
@@ -890,6 +928,7 @@ impl CampaignScheduler {
             store,
             state,
             gate,
+            scheduler_workflow_dispatch_limit,
             notifier,
         })
     }
@@ -902,13 +941,26 @@ impl CampaignScheduler {
         }
     }
 
-    /// The global concurrent-campaign cap.
+    /// The live active fuzz-campaign limit enforced by the campaign gate.
     #[must_use]
     pub fn max_concurrent(&self) -> usize {
         self.gate.limit()
     }
 
-    /// Set the global concurrent-campaign cap (persisted; applies immediately).
+    /// Return both independently configured concurrency limits and the
+    /// effective ceiling that applies to active fuzz runs.
+    #[must_use]
+    pub fn concurrency_limits(&self) -> CampaignConcurrencyLimits {
+        let active_fuzz_campaign_limit = self.gate.limit();
+        CampaignConcurrencyLimits {
+            active_fuzz_campaign_limit,
+            scheduler_workflow_dispatch_limit: self.scheduler_workflow_dispatch_limit,
+            effective_max_concurrent_fuzz_runs: active_fuzz_campaign_limit
+                .min(self.scheduler_workflow_dispatch_limit),
+        }
+    }
+
+    /// Set the active fuzz-campaign limit (persisted; applies immediately).
     ///
     /// # Panics
     /// Panics when the new limit cannot be persisted. Use
@@ -919,7 +971,7 @@ impl CampaignScheduler {
         }
     }
 
-    /// Set the global concurrency cap transactionally.
+    /// Set the active fuzz-campaign limit transactionally.
     ///
     /// # Errors
     /// Returns a state-file error without applying the new live limit when the
@@ -1038,6 +1090,7 @@ impl CampaignScheduler {
         params: &CampaignParams,
         trigger: TriggerConfig,
     ) -> Result<Schedule, CampaignSchedulerError> {
+        validate_campaign_fuzzing_policy(params)?;
         let id = uuid::Uuid::new_v4().to_string();
         let mut params = with_absolute_project(params);
         // Inject the id so the dispatcher (handed only the constant kind) can key
@@ -1225,6 +1278,29 @@ mod tests {
     }
 
     #[test]
+    fn schedule_creation_rejects_invalid_engine_and_duration_policy() {
+        let mut params = CampaignParams {
+            project: "/p".to_owned(),
+            target: Some("t".to_owned()),
+            engine: "not-an-engine".to_owned(),
+            lang: "c".to_owned(),
+            duration_secs: 60,
+            ..CampaignParams::default()
+        };
+        assert!(matches!(
+            validate_campaign_fuzzing_policy(&params),
+            Err(CampaignSchedulerError::Validation(_))
+        ));
+
+        params.engine = "libfuzzer".to_owned();
+        params.duration_secs = 7201;
+        assert!(matches!(
+            validate_campaign_fuzzing_policy(&params),
+            Err(CampaignSchedulerError::Validation(_))
+        ));
+    }
+
+    #[test]
     fn parse_trigger_handles_each_kind() {
         assert!(matches!(
             parse_trigger("interval", "3600"),
@@ -1262,6 +1338,45 @@ mod tests {
     fn scheduler_state_errors_use_the_storage_transport_classification() {
         let classified = ClassifiedError::from(CampaignSchedulerError::History("closed".into()));
         assert!(matches!(classified, ClassifiedError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn scheduler_concurrency_limits_report_both_caps_and_the_live_effective_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_dispatch_limit =
+            crate::config::effective_scheduler_config().max_concurrent_executions;
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+        let scheduler =
+            CampaignScheduler::try_start(container, dir.path().join("schedules.json"), None)
+                .await
+                .unwrap();
+
+        let campaign_limit = workflow_dispatch_limit.saturating_add(3);
+        scheduler.try_set_max_concurrent(campaign_limit).unwrap();
+        let limits = scheduler.concurrency_limits();
+        assert_eq!(limits.active_fuzz_campaign_limit, campaign_limit);
+        assert_eq!(
+            limits.scheduler_workflow_dispatch_limit,
+            workflow_dispatch_limit
+        );
+        assert_eq!(
+            limits.effective_max_concurrent_fuzz_runs,
+            campaign_limit.min(workflow_dispatch_limit)
+        );
+        assert_eq!(
+            serde_json::to_value(limits).unwrap(),
+            serde_json::json!({
+                "active_fuzz_campaign_limit": campaign_limit,
+                "scheduler_workflow_dispatch_limit": workflow_dispatch_limit,
+                "effective_max_concurrent_fuzz_runs": campaign_limit.min(workflow_dispatch_limit),
+            })
+        );
+
+        scheduler.try_set_max_concurrent(1).unwrap();
+        let changed = scheduler.concurrency_limits();
+        assert_eq!(changed.active_fuzz_campaign_limit, 1);
+        assert_eq!(changed.effective_max_concurrent_fuzz_runs, 1);
+        scheduler.stop().await;
     }
 
     #[test]

@@ -2,6 +2,8 @@
 //! (`corpus_prune_coverage`): inputs with identical edge coverage collapse even
 //! when their bytes differ.
 
+mod common;
+
 use std::sync::Arc;
 
 use hf_service::ServiceContainer;
@@ -9,10 +11,25 @@ use hf_service::ServiceContainer;
 fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_covprune_it_workspace"),
-        );
+        let workspace = common::install_managed_workspace("hobot_fuzz_covprune_it");
+        let config = workspace.parent().unwrap().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("hobot-fuzz.toml"),
+            r#"
+[fuzzing]
+enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "clusterfuzzlite", "syzkaller"]
+default_engine = "libfuzzer"
+default_duration_secs = 60
+
+[fuzzing.sandbox]
+max_mem_mb = 3072
+max_cpus = 3
+max_duration_secs = 7200
+"#,
+        )
+        .unwrap();
+        std::env::set_var("HF_CONFIG_DIR", config);
     });
 }
 
@@ -20,6 +37,7 @@ fn isolate_workspace() {
 /// inputs `a` and `b` cover the same edges; `c` covers an extra edge.
 struct ShowmapRuntime {
     saw_read_only: std::sync::atomic::AtomicBool,
+    showmap_limits: std::sync::Mutex<Option<hf_core::runtime::ResourceLimits>>,
     fail_showmap: bool,
 }
 
@@ -67,6 +85,7 @@ impl hf_core::runtime::RuntimeAdapter for ShowmapRuntime {
                 opts.workspace_read_only,
                 std::sync::atomic::Ordering::Relaxed,
             );
+            *self.showmap_limits.lock().unwrap() = Some(limits.clone());
         }
         self.run_command(cmd, cwd, limits).await
     }
@@ -95,16 +114,6 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
     std::fs::create_dir_all(&project).unwrap();
     let target = "parse_entry";
 
-    let workspace = hf_service::workspace_dir(&project, target);
-    let corpus = workspace.join("corpus");
-    std::fs::create_dir_all(&corpus).unwrap();
-    // Three distinct-content inputs, so content-dedup alone would keep all 3.
-    std::fs::write(corpus.join("a"), b"input-aaaa").unwrap();
-    std::fs::write(corpus.join("b"), b"input-bbbb").unwrap();
-    std::fs::write(corpus.join("c"), b"input-cccc").unwrap();
-    // The compiled harness must exist for coverage measurement to run.
-    std::fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
-
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("coverage.db"))
             .await
@@ -112,6 +121,7 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
     );
     let runtime = Arc::new(ShowmapRuntime {
         saw_read_only: std::sync::atomic::AtomicBool::new(false),
+        showmap_limits: std::sync::Mutex::new(None),
         fail_showmap: false,
     });
     let container = ServiceContainer::new(runtime.clone(), None).with_store(store);
@@ -125,6 +135,15 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
         )
         .await
         .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    // Three distinct-content inputs, so content-dedup alone would keep all 3.
+    std::fs::write(corpus.join("a"), b"input-aaaa").unwrap();
+    std::fs::write(corpus.join("b"), b"input-bbbb").unwrap();
+    std::fs::write(corpus.join("c"), b"input-cccc").unwrap();
+    // The compiled harness must exist for coverage measurement to run.
+    std::fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
     container
         .harness_smoke(
             &project,
@@ -149,6 +168,10 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
     assert!(runtime
         .saw_read_only
         .load(std::sync::atomic::Ordering::Relaxed));
+    let limits = runtime.showmap_limits.lock().unwrap().clone().unwrap();
+    assert_eq!(limits.max_mem_mb, 3072);
+    assert_eq!(limits.max_cpus, 3);
+    assert_eq!(limits.max_duration_secs, 10);
 }
 
 #[tokio::test]
@@ -158,12 +181,6 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
     let project = dir.path().join("covprune-failure-project");
     std::fs::create_dir_all(&project).unwrap();
     let target = "parse_failure";
-    let workspace = hf_service::workspace_dir(&project, target);
-    let corpus = workspace.join("corpus");
-    std::fs::create_dir_all(&corpus).unwrap();
-    std::fs::write(corpus.join("a"), b"first distinct input").unwrap();
-    std::fs::write(corpus.join("b"), b"second distinct input").unwrap();
-    std::fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
 
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("failure.db"))
@@ -172,6 +189,7 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
     );
     let runtime = Arc::new(ShowmapRuntime {
         saw_read_only: std::sync::atomic::AtomicBool::new(false),
+        showmap_limits: std::sync::Mutex::new(None),
         fail_showmap: true,
     });
     let container = ServiceContainer::new(runtime, None).with_store(store);
@@ -185,6 +203,12 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
         )
         .await
         .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("a"), b"first distinct input").unwrap();
+    std::fs::write(corpus.join("b"), b"second distinct input").unwrap();
+    std::fs::write(workspace.join(format!("fuzz_{target}")), b"#!/bin/true").unwrap();
     container
         .harness_smoke(
             &project,

@@ -1,63 +1,19 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { useProject } from "./ProjectContext";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useProject } from "./project";
 import { pruneToKeys } from "../lib/projectState";
+import {
+  CORE_STAGES,
+  PIPELINE_STAGES,
+  PipelineContext,
+  type CoreStageProgress,
+  type StageId,
+} from "./pipeline";
 
 // The canonical fuzzing flow, expressed once. Granular `steps` are the source
 // of truth for markDone/isDone; they roll up into the 4 CORE_STAGES that the
 // Fuzzing Workflow and the Progress panel both render, so the two never disagree
 // on count, numbering, or "done" (previously the panel showed x/6 while the
 // workflow showed step x of 4, and neither tracked the approval gate).
-export const CORE_STAGES = [
-  { id: "discover", label: "Discover targets", steps: ["discover"] },
-  {
-    id: "harness",
-    label: "Generate harness",
-    // Draft -> compile -> smoke-test -> review & approve -> seed corpus.
-    steps: ["harness", "compile", "smoke", "approve", "seeds"],
-  },
-  { id: "run", label: "Run fuzzer", steps: ["run"] },
-  { id: "triage", label: "Triage crashes", steps: ["triage"] },
-] as const;
-
-export type CoreStageId = (typeof CORE_STAGES)[number]["id"];
-
-/** The flattened granular stage list, in order. */
-export const PIPELINE_STAGES = CORE_STAGES.flatMap((c) =>
-  c.steps.map((id) => ({ id, group: c.id })),
-);
-
-export type StageId = (typeof PIPELINE_STAGES)[number]["id"];
-
-/** One core stage's rolled-up progress, for the Workflow + Progress panels. */
-export interface CoreStageProgress {
-  id: CoreStageId;
-  label: string;
-  /** All of the stage's granular steps are complete. */
-  done: boolean;
-  /** Every completed step was skipped (nothing was actually done). */
-  skipped: boolean;
-  /** The first not-yet-complete core stage. */
-  current: boolean;
-  /** Completed granular steps / total, for a "(3/5)" sub-progress hint. */
-  doneSteps: number;
-  totalSteps: number;
-}
-
-interface PipelineContextValue {
-  completed: StageId[];
-  isDone: (id: StageId) => boolean;
-  /** The first stage not yet completed -- the "current" step. Null when all done. */
-  currentStage: StageId | null;
-  /** The 4 core stages with rolled-up done/current/sub-progress. */
-  coreStages: CoreStageProgress[];
-  isSkipped: (id: StageId) => boolean;
-  markDone: (id: StageId) => void;
-  /** Mark a stage as not needed (e.g. Triage when a run found no crashes). It
-   * counts toward completion but renders as "Skipped". */
-  markSkipped: (id: StageId) => void;
-  reset: () => void;
-}
-
 interface Progress {
   completed: StageId[];
   skipped: StageId[];
@@ -76,8 +32,6 @@ function loadProgress(): Record<string, Progress> {
     return {};
   }
 }
-
-const PipelineContext = createContext<PipelineContextValue | null>(null);
 
 export function PipelineProvider({ children }: { children: React.ReactNode }) {
   // Progress is kept per fuzzing target (project path), so switching between
@@ -163,30 +117,4 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <PipelineContext.Provider value={value}>{children}</PipelineContext.Provider>;
-}
-
-/** Access pipeline progress. Safe outside a provider (returns inert defaults). */
-export function usePipeline(): PipelineContextValue {
-  const ctx = useContext(PipelineContext);
-  if (!ctx) {
-    return {
-      completed: [],
-      isDone: () => false,
-      isSkipped: () => false,
-      currentStage: "discover",
-      coreStages: CORE_STAGES.map((c, i) => ({
-        id: c.id,
-        label: c.label,
-        done: false,
-        skipped: false,
-        current: i === 0,
-        doneSteps: 0,
-        totalSteps: c.steps.length,
-      })),
-      markDone: () => {},
-      markSkipped: () => {},
-      reset: () => {},
-    };
-  }
-  return ctx;
 }

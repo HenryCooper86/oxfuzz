@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import type { ViewType } from "../types";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 // Views reachable from the palette, in a sensible order.
 const VIEWS: ViewType[] = [
@@ -22,6 +22,7 @@ const VIEWS: ViewType[] = [
   "skills",
   "knowledge",
   "automation",
+  "automotive",
   "defectdojo",
   "help",
   "settings",

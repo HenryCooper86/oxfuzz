@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Copy, Check, FolderSearch, ExternalLink } from "lucide-react";
 import { getTransport, isTauriEnvironment } from "../lib";
-import { useToast } from "./ui/Toast";
+import { useToast } from "./ui/toastContext";
 import { IconButton } from "./ui/IconButton";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 // A compact row of actions for a filesystem path: copy, reveal in the OS file
 // manager, and open with the default app. Reveal/open are desktop-only (they

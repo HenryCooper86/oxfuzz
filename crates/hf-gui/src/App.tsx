@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { ViewType } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { Header } from "./components/Header";
@@ -7,7 +7,8 @@ import { RecoveryBanner } from "./components/RecoveryBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConfirmProvider } from "./providers/ConfirmContext";
 import { TooltipProvider } from "./components/ui/Tooltip";
-import { ToastProvider, useToast } from "./components/ui/Toast";
+import { ToastProvider } from "./components/ui/Toast";
+import { useToast } from "./components/ui/toastContext";
 import { getTransport } from "./lib";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
 import { ObservabilityPanel } from "./components/observation/ObservabilityPanel";
@@ -30,17 +31,28 @@ import { AuditView } from "./views/AuditView";
 import { DefectDojoView } from "./views/DefectDojoView";
 import { CommandPalette } from "./components/CommandPalette";
 import { AgentsView, SkillsView, KnowledgeView, AutomationView } from "./views/FeatureViews";
-import { HelpView } from "./views/HelpView";
-import { ProjectProvider, useProject } from "./providers/ProjectContext";
+import { LoadingState } from "./components/ui/Loading";
+import { ProjectProvider } from "./providers/ProjectContext";
+import { useProject } from "./providers/project";
 import { PipelineProvider } from "./providers/PipelineContext";
-import { PrefsProvider, usePrefs } from "./providers/PrefsContext";
-import { I18nProvider, useI18n } from "./i18n";
+import { PrefsProvider } from "./providers/PrefsContext";
+import { usePrefs } from "./providers/prefs";
+import { I18nProvider } from "./i18n";
+import { useI18n } from "./i18nContext";
 import { RunStatusProvider } from "./providers/RunStatusContext";
 import { RunOutputProvider } from "./providers/RunOutputContext";
 import { TargetProvider } from "./providers/TargetContext";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { isTauriEnvironment, pickFolder } from "./lib";
-import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy } from "lucide-react";
+import { MessageSquare, Crosshair, Play, Bug, Database, Settings, FileCode, FileText, History, Activity, Gauge, Info, FolderOpen, Boxes, ListChecks, Bot, Puzzle, BookOpen, Zap, LayoutDashboard, ScrollText, ShieldCheck, LifeBuoy, CarFront } from "lucide-react";
+
+const AutomotiveView = lazy(() =>
+  import("./views/AutomotiveView").then(({ AutomotiveView: View }) => ({ default: View })),
+);
+
+const HelpView = lazy(() =>
+  import("./views/HelpView").then(({ HelpView: View }) => ({ default: View })),
+);
 
 /** Detect the host OS for platform-conditional window chrome. */
 function detectPlatform(): "macos" | "windows" | "linux" | "unknown" {
@@ -233,9 +245,18 @@ function AppInner() {
                     <AutomationView />
                   </div>
                 )}
+                {activeView === "automotive" && (
+                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                    <Suspense fallback={<LoadingState />}>
+                      <AutomotiveView />
+                    </Suspense>
+                  </div>
+                )}
                 {activeView === "help" && (
                   <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
-                    <HelpView />
+                    <Suspense fallback={<LoadingState />}>
+                      <HelpView />
+                    </Suspense>
                   </div>
                 )}
                 {activeView === "defectdojo" && <DefectDojoView onBack={() => navigate("dashboard")} />}
@@ -378,6 +399,7 @@ const viewIcons: Record<ViewType, React.ReactNode> = {
   skills: <Puzzle size={18} />,
   knowledge: <BookOpen size={18} />,
   automation: <Zap size={18} />,
+  automotive: <CarFront size={18} />,
   defectdojo: <ShieldCheck size={18} />,
   help: <LifeBuoy size={18} />,
 };

@@ -41,3 +41,18 @@ Tree-sitter node counts (branches + loops + operators).
 
 A 0.0..=1.0 score combining: input surface, complexity, sanitizer
 applicability, absence of existing harness, and LLM rationale.
+
+## 7. Automotive Protocol Targets
+
+Automotive protocol work is not represented as a new `TargetLanguage` or
+source `TargetKind`. The optional `hf-automotive` contract identifies a
+protocol (CAN, CAN FD, ISO-TP, UDS, GMLAN, SOME/IP, SOME/IP-SD, DoIP, OBD, CCP,
+XCP, BMW HSFZ, or SecOC), an offline/virtual/physical mode, and opaque staged
+artifacts or replay messages.
+
+Its feedback surface is protocol state: canonical transcript hashes and
+protocol-scoped state signatures. These values may guide a separate corpus
+promotion policy but must never be stored or displayed as source edges, lines,
+functions, regions, sanitizer findings, or source-target fit. A workflow that
+correlates an automotive state with a source target retains both identities and
+evidence types explicitly.

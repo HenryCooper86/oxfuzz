@@ -16,7 +16,7 @@ const MAX_MINIMIZED_CRASH_BYTES: u64 = hf_corpus::DEFAULT_CORPUS_LIMITS.max_inpu
 pub(crate) enum PreparedMinimization {
     Unsupported,
     Complete(PathBuf),
-    Run(MinimizationRun),
+    Run(Box<MinimizationRun>),
 }
 
 /// One sandbox command and its unpublished derived output.
@@ -148,7 +148,7 @@ pub(crate) fn prepare(
     )
     .ok_or_else(|| ClassifiedError::Validation("engine has no crash minimizer".to_owned()))?;
     let minimized_container = container_path(&workspace, &minimized)?;
-    Ok(PreparedMinimization::Run(MinimizationRun {
+    Ok(PreparedMinimization::Run(Box::new(MinimizationRun {
         command,
         sandbox: SandboxOptions {
             extra_mounts: vec![SandboxMount::writable(minimized, minimized_container)],
@@ -159,7 +159,7 @@ pub(crate) fn prepare(
         partial_path,
         final_path,
         published: false,
-    }))
+    })))
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ClassifiedError> {

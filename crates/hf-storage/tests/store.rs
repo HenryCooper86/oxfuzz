@@ -11,7 +11,9 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_storage::{
-    AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError, Store,
+    AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
+    AutomotiveStateCorpusRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError,
+    Store,
 };
 use uuid::Uuid;
 
@@ -20,6 +22,239 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+#[tokio::test]
+async fn automotive_operation_evidence_round_trips_and_updates_terminal_state() {
+    let (store, _dir) = temp_store().await;
+    let id = Uuid::new_v4();
+    let started_at = Utc::now();
+    let operation = AutomotiveOperationRecord {
+        id,
+        project_root: "/projects/vehicle-parser".to_owned(),
+        operation: "analyze_pcap".to_owned(),
+        mode: "offline_pcap".to_owned(),
+        protocol: Some("uds".to_owned()),
+        status: AutomotiveOperationStatus::Running,
+        started_at,
+        ended_at: None,
+        request_hash: "request-sha256".to_owned(),
+        transcript_hash: None,
+        artifact_dir: "automotive/operation-id".to_owned(),
+        approval_json: None,
+        result_json: None,
+        error: None,
+    };
+
+    store.insert_automotive_operation(&operation).await.unwrap();
+    assert_eq!(
+        store.automotive_operation(id).await.unwrap(),
+        Some(operation.clone())
+    );
+
+    let ended_at = Utc::now();
+    store
+        .complete_automotive_operation(
+            id,
+            AutomotiveOperationStatus::Done,
+            ended_at,
+            Some("transcript-sha256"),
+            Some(r#"{"state_findings":["session:extended"]}"#),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let completed = store
+        .automotive_operation(id)
+        .await
+        .unwrap()
+        .expect("persisted operation");
+    assert_eq!(completed.status, AutomotiveOperationStatus::Done);
+    assert_eq!(completed.ended_at, Some(ended_at));
+    assert_eq!(
+        completed.transcript_hash.as_deref(),
+        Some("transcript-sha256")
+    );
+    assert!(completed
+        .result_json
+        .as_deref()
+        .is_some_and(|value| value.contains("state_findings")));
+}
+
+#[tokio::test]
+async fn automotive_operation_completion_rejects_non_terminal_status() {
+    let (store, _dir) = temp_store().await;
+    let error = store
+        .complete_automotive_operation(
+            Uuid::new_v4(),
+            AutomotiveOperationStatus::Running,
+            Utc::now(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+}
+
+#[tokio::test]
+async fn automotive_state_corpus_is_idempotent_and_project_scoped() {
+    let (store, _dir) = temp_store().await;
+    let source_operation_id = Uuid::new_v4();
+    let started_at = Utc::now();
+    store
+        .insert_automotive_operation(&AutomotiveOperationRecord {
+            id: source_operation_id,
+            project_root: "/projects/vehicle-parser".to_owned(),
+            operation: "analyze_capture".to_owned(),
+            mode: "offline_pcap".to_owned(),
+            protocol: Some("uds".to_owned()),
+            status: AutomotiveOperationStatus::Running,
+            started_at,
+            ended_at: None,
+            request_hash: "11".repeat(32),
+            transcript_hash: None,
+            artifact_dir: "projects/vehicle/.service/automotive/source".to_owned(),
+            approval_json: None,
+            result_json: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    let transcript_hash = "22".repeat(32);
+    store
+        .complete_automotive_operation(
+            source_operation_id,
+            AutomotiveOperationStatus::Done,
+            Utc::now(),
+            Some(&transcript_hash),
+            Some(r#"{"result":"capture_analysis"}"#),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let created_at = Utc::now();
+    let record = AutomotiveStateCorpusRecord {
+        project_root: "/projects/vehicle-parser".to_owned(),
+        protocol: "uds".to_owned(),
+        state_digest: "33".repeat(32),
+        artifact_sha256: "44".repeat(32),
+        source_operation_id,
+        artifact_path: "projects/vehicle/.service/automotive/state-corpus/uds/state/artifact"
+            .to_owned(),
+        created_at,
+    };
+
+    let inserted = store.record_automotive_state_corpus(&record).await.unwrap();
+    assert_eq!(inserted, record);
+    assert_eq!(
+        store
+            .automotive_state_corpus_entry(
+                &record.project_root,
+                &record.protocol,
+                &record.state_digest,
+                &record.artifact_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(record.clone())
+    );
+
+    let duplicate = AutomotiveStateCorpusRecord {
+        artifact_path: "must/not/replace/the/original".to_owned(),
+        created_at: Utc::now(),
+        ..record.clone()
+    };
+    assert_eq!(
+        store
+            .record_automotive_state_corpus(&duplicate)
+            .await
+            .unwrap(),
+        record
+    );
+
+    let listed = store
+        .automotive_state_corpus("/projects/vehicle-parser", 20)
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![record]);
+    assert!(store
+        .automotive_state_corpus("/projects/another-vehicle", 20)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn automotive_state_corpus_rejects_noncompleted_or_mismatched_sources() {
+    let (store, _dir) = temp_store().await;
+    let source_operation_id = Uuid::new_v4();
+    store
+        .insert_automotive_operation(&AutomotiveOperationRecord {
+            id: source_operation_id,
+            project_root: "/projects/vehicle-parser".to_owned(),
+            operation: "analyze_capture".to_owned(),
+            mode: "offline_pcap".to_owned(),
+            protocol: Some("uds".to_owned()),
+            status: AutomotiveOperationStatus::Running,
+            started_at: Utc::now(),
+            ended_at: None,
+            request_hash: "11".repeat(32),
+            transcript_hash: None,
+            artifact_dir: "projects/vehicle/.service/automotive/source".to_owned(),
+            approval_json: None,
+            result_json: None,
+            error: None,
+        })
+        .await
+        .unwrap();
+    let record = AutomotiveStateCorpusRecord {
+        project_root: "/projects/vehicle-parser".to_owned(),
+        protocol: "uds".to_owned(),
+        state_digest: "33".repeat(32),
+        artifact_sha256: "44".repeat(32),
+        source_operation_id,
+        artifact_path: "projects/vehicle/.service/automotive/state-corpus/uds/state/artifact"
+            .to_owned(),
+        created_at: Utc::now(),
+    };
+
+    assert!(matches!(
+        store.record_automotive_state_corpus(&record).await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    store
+        .complete_automotive_operation(
+            source_operation_id,
+            AutomotiveOperationStatus::Done,
+            Utc::now(),
+            None,
+            Some(r#"{"result":"capture_analysis"}"#),
+            None,
+        )
+        .await
+        .unwrap();
+    let wrong_project = AutomotiveStateCorpusRecord {
+        project_root: "/projects/another".to_owned(),
+        ..record.clone()
+    };
+    assert!(matches!(
+        store.record_automotive_state_corpus(&wrong_project).await,
+        Err(StorageError::InvalidData(_))
+    ));
+    let wrong_protocol = AutomotiveStateCorpusRecord {
+        protocol: "can".to_owned(),
+        ..record
+    };
+    assert!(matches!(
+        store.record_automotive_state_corpus(&wrong_protocol).await,
+        Err(StorageError::InvalidData(_))
+    ));
 }
 
 #[test]

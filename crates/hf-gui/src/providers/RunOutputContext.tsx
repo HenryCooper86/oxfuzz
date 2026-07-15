@@ -1,9 +1,17 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { useI18n } from "../i18n";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useI18n } from "../i18nContext";
 import { getTransport } from "../lib";
-import { useProject } from "./ProjectContext";
-import { useRunStatus } from "./RunStatusContext";
+import { useProject } from "./project";
+import { useRunStatus } from "./runStatus";
 import { pruneToKeys } from "../lib/projectState";
+import {
+  EMPTY_RUN_STATS,
+  RunOutputContext,
+  type AutoRevert,
+  type RunOutputValue,
+  type RunStats,
+  type RunSummary,
+} from "./runOutput";
 
 // Owns the output of a fuzz run -- the live log, rolling stats, final summary --
 // and the `run:progress` listener. Persistent output is kept per fuzzing target
@@ -12,35 +20,6 @@ import { pruneToKeys } from "../lib/projectState";
 // lives at the app root (always mounted), a run keeps streaming even when the
 // user navigates away from the Run view.
 
-interface Stats {
-  execs: number;
-  edges: number;
-  crashes: number;
-}
-/** The auto-revert policy outcome, present when a run's harness revision
- *  regressed coverage past the threshold and the previous revision was
- *  automatically restored. */
-export interface AutoRevert {
-  reverted_to_run: string;
-  from_rev: string;
-  to_rev: string;
-  previous_edges: number;
-  regressed_edges: number;
-  drop_pct: number;
-  /** True when the harness was restored; false in notify-only mode (detected
-   *  but not applied). */
-  reverted: boolean;
-}
-interface Summary {
-  edges: number;
-  crashes: number;
-  execs: number;
-  /** Coverage-stagnation proposal from the backend (e.g. "new_harness"), or
-   *  null when coverage kept progressing. Drives the Run view's iterate hint. */
-  stagnation?: string | null;
-  /** Set when the auto-revert policy fired this run; null otherwise. */
-  autoRevert?: AutoRevert | null;
-}
 type RunResult = {
   run_id: string | null;
   edges: number;
@@ -54,43 +33,19 @@ type RunResult = {
 
 interface RunData {
   log: string[];
-  stats: Stats;
-  summary: Summary | null;
+  stats: RunStats;
+  summary: RunSummary | null;
   lastTarget: string;
   lastEngine: string;
 }
 
-interface RunOutputValue {
-  log: string[];
-  stats: Stats;
-  summary: Summary | null;
-  running: boolean;
-  /** True between a cancel request and the run actually stopping. */
-  cancelling: boolean;
-  /** Target + engine of the most recent run, for the Run -> Triage handoff. */
-  lastTarget: string;
-  lastEngine: string;
-  /** Run a libFuzzer/AFL++/honggfuzz/CFL campaign; resolves to the crash count.
-   *  No `arch` here: standard runs use the already-built sandbox image, whose
-   *  architecture is fixed at image-build time (see `ensure_docker`). Only
-   *  syzkaller (a VM campaign) selects an arch per run. */
-  runFuzzer: (p: {
-    project: string;
-    target: string;
-    engine: string;
-    duration: number;
-  }) => Promise<number>;
-  /** Run a syzkaller campaign; resolves to the crash count. */
-  runSyzkaller: (opts: Record<string, unknown>) => Promise<number>;
-  /** Cancel the in-flight fuzz run (cooperative; the run stops shortly after). */
-  cancelRun: () => Promise<void>;
-  clear: () => void;
-}
-
-const RunOutputContext = createContext<RunOutputValue | null>(null);
-
-const ZERO: Stats = { execs: 0, edges: 0, crashes: 0 };
-const EMPTY: RunData = { log: [], stats: ZERO, summary: null, lastTarget: "", lastEngine: "" };
+const EMPTY: RunData = {
+  log: [],
+  stats: EMPTY_RUN_STATS,
+  summary: null,
+  lastTarget: "",
+  lastEngine: "",
+};
 const LOG_CAP = 600;
 
 // Per-target run summary/stats are persisted across restarts; the live log is
@@ -108,7 +63,7 @@ function loadSummaries(): Record<string, RunData> {
     for (const [k, v] of Object.entries(parsed as Record<string, PersistedRun>)) {
       out[k] = {
         log: [],
-        stats: v.stats ?? ZERO,
+        stats: v.stats ?? EMPTY_RUN_STATS,
         summary: v.summary ?? null,
         lastTarget: v.lastTarget ?? "",
         lastEngine: v.lastEngine ?? "",
@@ -346,25 +301,4 @@ export function RunOutputProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <RunOutputContext.Provider value={value}>{children}</RunOutputContext.Provider>;
-}
-
-/** Access shared run output. Safe outside a provider (returns inert defaults). */
-export function useRunOutput(): RunOutputValue {
-  const ctx = useContext(RunOutputContext);
-  if (!ctx) {
-    return {
-      log: [],
-      stats: ZERO,
-      summary: null,
-      running: false,
-      cancelling: false,
-      lastTarget: "",
-      lastEngine: "",
-      runFuzzer: async () => 0,
-      runSyzkaller: async () => 0,
-      cancelRun: async () => {},
-      clear: () => {},
-    };
-  }
-  return ctx;
 }

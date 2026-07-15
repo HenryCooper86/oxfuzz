@@ -1,32 +1,20 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { IconButton } from "./IconButton";
-import { useI18n } from "../../i18n";
-
-interface Toast {
-  id: number;
-  title: string;
-  description?: string;
-  variant?: "default" | "success" | "error";
-}
-
-interface ToastCtx {
-  toast: (t: Omit<Toast, "id">) => void;
-}
-
-const Ctx = createContext<ToastCtx | null>(null);
+import { useI18n } from "../../i18nContext";
+import { ToastContext, type ToastNotification } from "./toastContext";
 
 // Errors linger so they can actually be read; routine toasts auto-clear fast.
 const DISMISS_MS = { error: 8000, default: 3500, success: 3500 } as const;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const { t } = useI18n();
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((x) => x.id !== id));
   }, []);
   const toast = useCallback(
-    (t: Omit<Toast, "id">) => {
+    (t: Omit<ToastNotification, "id">) => {
       const id = Date.now() + Math.random();
       setToasts((prev) => [...prev, { ...t, id }]);
       const ms = DISMISS_MS[t.variant ?? "default"];
@@ -35,7 +23,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [dismiss],
   );
   return (
-    <Ctx.Provider value={{ toast }}>
+    <ToastContext.Provider value={{ toast }}>
       {children}
       {/* Announced to assistive tech; assertive so errors interrupt. */}
       <div
@@ -78,11 +66,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           </div>
         ))}
       </div>
-    </Ctx.Provider>
+    </ToastContext.Provider>
   );
-}
-
-export function useToast() {
-  const ctx = useContext(Ctx);
-  return ctx ?? { toast: () => {} };
 }

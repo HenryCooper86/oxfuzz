@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { usePipeline } from "../providers/PipelineContext";
-import { useRunOutput } from "../providers/RunOutputContext";
+import { useProject } from "../providers/project";
+import { usePipeline } from "../providers/pipeline";
+import { useRunOutput } from "../providers/runOutput";
 import type { Crash } from "../types";
 import { Button, ViewHeader, SeverityBadge } from "../components/ui";
 import { Bug, ChevronRight, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 // The report preview pulls in react-markdown + mermaid (heavy); load it only
 // when the user opens a report, keeping it out of the initial bundle.

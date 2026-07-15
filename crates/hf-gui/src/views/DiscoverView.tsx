@@ -1,11 +1,11 @@
 import { useState, useEffect } from "react";
 import { getTransport, pickFolder } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { usePipeline } from "../providers/PipelineContext";
-import { useTarget } from "../providers/TargetContext";
+import { useProject } from "../providers/project";
+import { usePipeline } from "../providers/pipeline";
+import { useTarget } from "../providers/target";
 import type { TargetInventory, TargetCandidate } from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {

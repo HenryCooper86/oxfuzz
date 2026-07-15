@@ -8,11 +8,11 @@
 import { useEffect, useState } from "react";
 import { FileCode, ListChecks, Repeat, Crosshair as TargetIcon } from "lucide-react";
 import { getTransport } from "../../lib";
-import { useI18n } from "../../i18n";
-import { usePipeline } from "../../providers/PipelineContext";
-import { useProject } from "../../providers/ProjectContext";
-import { useTarget } from "../../providers/TargetContext";
-import { useRunOutput } from "../../providers/RunOutputContext";
+import { useI18n } from "../../i18nContext";
+import { usePipeline } from "../../providers/pipeline";
+import { useProject } from "../../providers/project";
+import { useTarget } from "../../providers/target";
+import { useRunOutput } from "../../providers/runOutput";
 
 interface ArtifactSummary {
   harness_built: boolean;

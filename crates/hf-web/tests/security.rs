@@ -197,6 +197,53 @@ async fn cors_preflight_allows_only_an_exact_configured_origin() {
 }
 
 #[tokio::test]
+async fn cors_preflight_allows_typed_config_patch_from_an_approved_origin() {
+    let root = tempfile::tempdir().unwrap();
+    let security = WebSecurityConfig::new(
+        Some("cors-patch-token".to_owned()),
+        false,
+        vec!["http://localhost:5173".to_owned()],
+        vec![root.path().to_path_buf()],
+    )
+    .unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/config/defectdojo")
+                .header(header::ORIGIN, "http://localhost:5173")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,content-type",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .unwrap(),
+        "http://localhost:5173"
+    );
+    assert!(response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|methods| methods.contains("PATCH")));
+}
+
+#[tokio::test]
 async fn project_paths_outside_the_allowlist_fail_before_service_access() {
     let allowed = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -274,6 +321,179 @@ async fn public_system_paths_are_redacted() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     for key in ["config_dir", "data_dir", "workspace_dir"] {
         assert_eq!(json[key], "<redacted-path>");
+    }
+}
+
+#[tokio::test]
+async fn typed_integration_config_routes_never_return_protected_values() {
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("defectdojo.toml"),
+        r#"
+url = "https://dojo.example.test"
+api_token = "synthetic-dojo-token"
+api_token_env = "SYNTHETIC_DOJO_TOKEN_ENV"
+verify_tls = true
+
+[lifecycle]
+autostart = true
+compose_project = "/synthetic/private/dojo-project"
+compose_files = ["/synthetic/private/compose.yml"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        config.path().join("issue_tracker.toml"),
+        r#"
+provider = "github"
+host = "https://github.example.test"
+repo = "/synthetic/private/repo"
+api_token = "synthetic-issue-token"
+api_token_env = "SYNTHETIC_ISSUE_TOKEN_ENV"
+labels = ["fuzzing"]
+verify_tls = true
+"#,
+    )
+    .unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed())
+            .with_integration_config_dir(config.path()),
+        open_local_security(root.path()),
+    );
+
+    for uri in ["/config/defectdojo", "/config/issue-tracker"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        for protected in [
+            "synthetic-dojo-token",
+            "SYNTHETIC_DOJO_TOKEN_ENV",
+            "synthetic-issue-token",
+            "SYNTHETIC_ISSUE_TOKEN_ENV",
+            "/synthetic/private",
+            "compose.yml",
+        ] {
+            assert!(!text.contains(protected), "protected config value leaked");
+        }
+        assert!(!text.contains("<redacted-path>"));
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let path_state = if uri == "/config/defectdojo" {
+            &json["lifecycle"]["compose_project"]
+        } else {
+            &json["repo"]
+        };
+        assert_eq!(path_state["configured"], true);
+        assert!(path_state["value"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn typed_integration_patch_preserves_hidden_fields_and_validates_before_write() {
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let path = config.path().join("defectdojo.toml");
+    std::fs::write(
+        &path,
+        r#"
+url = "https://dojo.example.test"
+api_token = "synthetic-dojo-token"
+api_token_env = "SYNTHETIC_DOJO_TOKEN_ENV"
+product_name = "old-product"
+
+[lifecycle]
+compose_files = ["/synthetic/private/compose.yml"]
+"#,
+    )
+    .unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed())
+            .with_integration_config_dir(config.path()),
+        open_local_security(root.path()),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/config/defectdojo")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "product_name": {
+                            "operation": "replace",
+                            "value": "new-product"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("synthetic-dojo-token"));
+    assert!(!text.contains("SYNTHETIC_DOJO_TOKEN_ENV"));
+    assert!(!text.contains("/synthetic/private"));
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("new-product"));
+    assert!(raw.contains("synthetic-dojo-token"));
+    assert!(raw.contains("SYNTHETIC_DOJO_TOKEN_ENV"));
+    assert!(raw.contains("/synthetic/private/compose.yml"));
+
+    let before_invalid = raw;
+    let invalid = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/config/defectdojo")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"url":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), before_invalid);
+}
+
+#[tokio::test]
+async fn generic_browser_config_write_rejects_integration_sections() {
+    let root = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(root.path()),
+    );
+
+    for name in ["defectdojo", "issue_tracker"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/config/write")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": name, "content": "verify_tls = true"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
 

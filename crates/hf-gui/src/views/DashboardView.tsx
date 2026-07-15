@@ -25,12 +25,12 @@ import {
 } from "lucide-react";
 import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRevertBadge";
 import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader } from "../components/ui";
-import { useToast } from "../components/ui/Toast";
-import { useConfirm } from "../providers/ConfirmContext";
+import { useToast } from "../components/ui/toastContext";
+import { useConfirm } from "../providers/confirm";
 import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { useTarget } from "../providers/TargetContext";
-import { useI18n, type TParams } from "../i18n";
+import { useProject } from "../providers/project";
+import { useTarget } from "../providers/target";
+import { useI18n, type TParams } from "../i18nContext";
 import type {
   CrashReviewItem,
   CreatedIssue,

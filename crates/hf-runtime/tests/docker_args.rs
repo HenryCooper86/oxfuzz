@@ -163,10 +163,13 @@ fn build_exec_args_with_syzkaller_profile() {
             SandboxMount::writable("/host/scratch".into(), "/syzbench/scratch"),
             SandboxMount::writable("/host/workdir".into(), "/syzbench/workdir"),
         ],
+        image: None,
         platform: Some("linux/amd64".to_owned()),
-        network_enabled: false,
+        network_mode: hf_core::runtime::SandboxNetworkMode::None,
         workdir: Some("/syzbench".to_owned()),
         relax_hardening: false,
+        capabilities: Vec::new(),
+        stdin: None,
         devices: vec!["/dev/kvm".to_owned()],
         workspace_read_only: true,
         max_file_size_bytes: None,
@@ -291,4 +294,105 @@ fn build_exec_args_applies_hardening_baseline() {
         !joined.contains("seccomp=unconfined"),
         "seccomp weakened on a normal run"
     );
+}
+
+#[test]
+fn automotive_virtual_can_profile_keeps_network_isolated_and_adds_only_can_capabilities() {
+    use hf_core::runtime::{SandboxCapability, SandboxNetworkMode, SandboxOptions};
+
+    let cfg = RuntimeConfig::default();
+    let options = SandboxOptions {
+        network_mode: SandboxNetworkMode::None,
+        capabilities: vec![SandboxCapability::NetAdmin, SandboxCapability::NetRaw],
+        ..SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(512, 1),
+        &[
+            "python3".to_owned(),
+            "-m".to_owned(),
+            "hf_scapy_automotive".to_owned(),
+        ],
+        &options,
+    );
+    let joined = args.join(" ");
+
+    assert!(joined.contains("--network=none"), "{joined}");
+    assert!(joined.contains("--cap-drop=ALL"), "{joined}");
+    assert!(joined.contains("--cap-add=NET_ADMIN"), "{joined}");
+    assert!(joined.contains("--cap-add=NET_RAW"), "{joined}");
+    assert!(!joined.contains("--privileged"), "{joined}");
+}
+
+#[test]
+fn physical_can_profile_uses_an_explicit_host_network_without_relaxing_hardening() {
+    use hf_core::runtime::{SandboxCapability, SandboxNetworkMode, SandboxOptions};
+
+    let cfg = RuntimeConfig::default();
+    let options = SandboxOptions {
+        network_mode: SandboxNetworkMode::Host,
+        capabilities: vec![SandboxCapability::NetRaw],
+        ..SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(512, 1),
+        &[
+            "python3".to_owned(),
+            "-m".to_owned(),
+            "hf_scapy_automotive".to_owned(),
+        ],
+        &options,
+    );
+    let joined = args.join(" ");
+
+    assert!(joined.contains("--network=host"), "{joined}");
+    assert!(!joined.contains("--network=none"), "{joined}");
+    assert!(joined.contains("--cap-drop=ALL"), "{joined}");
+    assert!(joined.contains("no-new-privileges"), "{joined}");
+    assert!(joined.contains("--cap-add=NET_RAW"), "{joined}");
+    assert!(!joined.contains("--cap-add=NET_ADMIN"), "{joined}");
+}
+
+#[test]
+fn sandbox_stdin_enables_interactive_docker_without_leaking_payload_into_arguments() {
+    use hf_core::runtime::SandboxOptions;
+
+    let cfg = RuntimeConfig::default();
+    let secret_marker = "synthetic-request-not-for-command-line";
+    let options = SandboxOptions {
+        stdin: Some(format!(r#"{{"payload":"{secret_marker}"}}\n"#).into_bytes()),
+        ..SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(512, 1),
+        &["python3".to_owned(), "-m".to_owned(), "sidecar".to_owned()],
+        &options,
+    );
+
+    assert!(args.iter().any(|argument| argument == "-i"));
+    assert!(!args.join(" ").contains(secret_marker));
+}
+
+#[test]
+fn specialized_sandbox_profile_can_select_a_pinned_sidecar_image() {
+    use hf_core::runtime::SandboxOptions;
+
+    let cfg = RuntimeConfig::default();
+    let options = SandboxOptions {
+        image: Some("hobot/scapy-automotive:2.7.0".to_owned()),
+        ..SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(512, 1),
+        &["python3".to_owned(), "-m".to_owned(), "sidecar".to_owned()],
+        &options,
+    );
+    let joined = args.join(" ");
+
+    assert!(joined.contains("hobot/scapy-automotive:2.7.0"));
+    assert!(!joined.contains("hobot/fuzz-sandbox:latest"));
 }

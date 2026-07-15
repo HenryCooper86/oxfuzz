@@ -2,13 +2,13 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Loader2, Crosshair, FolderPlus, FolderOpen, ChevronDown, X, Bot, RotateCcw, History, GitBranch, Maximize2, Minimize2, Sparkles, ListChecks, Trash2 } from "lucide-react";
 import { getTransport, pickFolder } from "../lib";
 import { Button, IconButton } from "../components/ui";
-import { useToast } from "../components/ui/Toast";
-import { useConfirm } from "../providers/ConfirmContext";
+import { useToast } from "../components/ui/toastContext";
+import { useConfirm } from "../providers/confirm";
 import { useListboxNav } from "../hooks/useListboxNav";
-import { useProject } from "../providers/ProjectContext";
-import { usePrefs } from "../providers/PrefsContext";
-import { useI18n } from "../i18n";
-import { useRunOutput } from "../providers/RunOutputContext";
+import { useProject } from "../providers/project";
+import { usePrefs } from "../providers/prefs";
+import { useI18n } from "../i18nContext";
+import { useRunOutput } from "../providers/runOutput";
 import {
   applyMode,
   normalizeAssistantContent,

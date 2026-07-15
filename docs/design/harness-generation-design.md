@@ -29,8 +29,12 @@ pub struct Harness {
    context (includes, types, existing test patterns).
 2. **Compile** -- `hf-runtime` builds the harness in-sandbox with the
    selected sanitizer + engine link flags.
-3. **Smoke fuzz** -- run the engine for 60 seconds with a tiny seed corpus;
-   require no immediate crash on empty input and at least one exec/sec.
+3. **Smoke fuzz** -- request a 60-second run with a tiny seed corpus; before
+   staging evidence, `hf-service` validates that engine and duration against the
+   current fuzzing policy. The resolved duration, memory, and CPU values are one
+   immutable `FuzzRunConfig` used unchanged by the engine command, runtime limits,
+   persisted run evidence, and smoke summary. Require no immediate crash on
+   empty input and at least one exec/sec.
 4. **Iterate** -- on compile failure or smoke failure, feed diagnostics back
    to the LLM for up to N rounds (default 3).
 5. **Review** -- persist the smoke evidence on the exact active harness record;
@@ -50,6 +54,8 @@ fills the template; the template guarantees the engine entry point is present.
 - Harness source is written to `fuzz_workspace/` only, never into the target
   project unless the user opts in.
 - Build and smoke fuzz always run in `hf-runtime` sandbox.
+- Smoke qualification fails before staging or run reservation when its engine
+  is disabled or its 60-second request exceeds the configured duration ceiling.
 - The agent never executes a harness directly on the host.
 - `harness.source` and `harness.active` bind the active binary to its persisted
   source and qualification id. The smoke summary binds that record to the full

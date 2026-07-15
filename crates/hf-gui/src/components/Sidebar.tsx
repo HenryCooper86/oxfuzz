@@ -1,9 +1,9 @@
 import type { ViewType } from "../types";
-import { useProject } from "../providers/ProjectContext";
-import { useTarget } from "../providers/TargetContext";
-import { useI18n } from "../i18n";
+import { useProject } from "../providers/project";
+import { useTarget } from "../providers/target";
+import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
-import { Bot, BookOpen, Bug, Boxes, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -43,6 +43,7 @@ const LIBRARY_ITEMS: NavItem[] = [
   { view: "skills", icon: Puzzle },
   { view: "knowledge", icon: BookOpen },
   { view: "automation", icon: Zap },
+  { view: "automotive", icon: CarFront },
   { view: "help", icon: LifeBuoy },
 ];
 

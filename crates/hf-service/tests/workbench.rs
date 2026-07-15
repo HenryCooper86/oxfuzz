@@ -1,5 +1,7 @@
 //! Tests for internal-team workbench service summaries.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -330,13 +332,7 @@ async fn issue_export_returns_reviewable_payload() {
 }
 
 fn isolate_workspace() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_workbench_it_workspace"),
-        );
-    });
+    common::install_managed_workspace("hobot_fuzz_workbench_it");
 }
 
 #[tokio::test]

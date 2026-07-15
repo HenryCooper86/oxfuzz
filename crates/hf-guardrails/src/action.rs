@@ -22,6 +22,27 @@ pub enum Action {
         /// Requested wall-clock duration in seconds.
         duration_secs: u64,
     },
+    /// Parse or transform automotive artifacts without opening a bus interface.
+    AutomotiveOffline {
+        /// Sidecar operation such as `analyze_pcap` or `generate_mutations`.
+        operation: String,
+    },
+    /// Exchange automotive frames only through an isolated virtual CAN device.
+    AutomotiveVirtualCan {
+        /// Primary automotive protocol.
+        protocol: String,
+        /// Maximum session duration in seconds.
+        duration_secs: u64,
+    },
+    /// Exchange frames through an allowlisted physical bench CAN interface.
+    AutomotivePhysicalBench {
+        /// Host interface exposed to the sandbox.
+        interface: String,
+        /// Primary automotive protocol.
+        protocol: String,
+        /// Maximum session duration in seconds.
+        duration_secs: u64,
+    },
     /// Parse untrusted crash artifacts produced by a fuzzer.
     Triage,
     /// A corpus filesystem operation within the workspace.
@@ -60,6 +81,20 @@ impl Action {
                 engine,
                 duration_secs,
             } => format!("run {engine} for {duration_secs}s"),
+            Action::AutomotiveOffline { operation } => {
+                format!("automotive offline {operation}")
+            }
+            Action::AutomotiveVirtualCan {
+                protocol,
+                duration_secs,
+            } => format!("automotive virtual CAN {protocol} for {duration_secs}s"),
+            Action::AutomotivePhysicalBench {
+                interface,
+                protocol,
+                duration_secs,
+            } => format!(
+                "automotive physical CAN interface {interface} using {protocol} for {duration_secs}s"
+            ),
             Action::Triage => "triage crash artifacts".to_owned(),
             Action::CorpusOp => "corpus operation".to_owned(),
             Action::Chat => "chat turn".to_owned(),
@@ -76,10 +111,15 @@ impl Action {
             Action::Discover | Action::DraftHarness | Action::CorpusOp | Action::Chat => {
                 RiskTier::Low
             }
-            Action::CompileHarness | Action::Triage | Action::AgentTool { .. } => RiskTier::Medium,
-            Action::RunHarness | Action::RunFuzzer { .. } | Action::WriteHostFile { .. } => {
-                RiskTier::High
-            }
+            Action::CompileHarness
+            | Action::Triage
+            | Action::AutomotiveOffline { .. }
+            | Action::AgentTool { .. } => RiskTier::Medium,
+            Action::RunHarness
+            | Action::RunFuzzer { .. }
+            | Action::AutomotiveVirtualCan { .. }
+            | Action::AutomotivePhysicalBench { .. }
+            | Action::WriteHostFile { .. } => RiskTier::High,
             Action::ShellExec { .. } => RiskTier::Critical,
         }
     }

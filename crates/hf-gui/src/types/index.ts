@@ -19,6 +19,7 @@ export type ViewType =
   | "skills"
   | "knowledge"
   | "automation"
+  | "automotive"
   | "defectdojo"
   | "help";
 

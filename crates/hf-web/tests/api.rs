@@ -185,6 +185,150 @@ async fn config_conversion_endpoints_round_trip_json_and_toml() {
 }
 
 #[tokio::test]
+async fn fuzzing_config_endpoint_returns_the_service_validated_policy() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/config/fuzzing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let policy: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(policy["enabled_engines"].is_array());
+    assert!(policy["default_engine"].is_string());
+    assert!(policy["default_duration_secs"].is_number());
+    assert!(policy["sandbox"]["max_mem_mb"].is_number());
+    assert!(policy["sandbox"]["max_cpus"].is_number());
+    assert!(policy["sandbox"]["max_duration_secs"].is_number());
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_config_endpoint_round_trips_only_the_typed_policy() {
+    allow_open_dev_mode();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("hobot-fuzz.toml"),
+        "coverage_stagnation_secs = 77\n",
+    )
+    .unwrap();
+    let app = hf_web::router::build_with_state(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed())
+            .with_integration_config_dir(directory.path()),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/config/automotive")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let mut policy: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(policy["enabled"], false);
+    assert_eq!(policy["physical_bench"]["enabled"], false);
+    policy["enabled"] = serde_json::Value::Bool(true);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/config/automotive")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "settings": policy }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(saved["enabled"], true);
+    let raw = std::fs::read_to_string(directory.path().join("hobot-fuzz.toml")).unwrap();
+    assert!(raw.contains("coverage_stagnation_secs = 77"));
+    assert!(raw.contains("[automotive]"));
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_capture_route_rejects_files_outside_the_approved_project() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let outside = directory.path().join("outside.pcap");
+    std::fs::write(&outside, b"not accessible to the web route").unwrap();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/automotive/analyze-capture")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project_root": project,
+                        "protocol": "uds",
+                        "capture_path": outside,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_replay_route_is_typed_and_rejects_an_incomplete_request() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build_with_state(hf_web::router::AppState::new(
+        hf_service::ServiceContainer::stubbed(),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/automotive/replay")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn system_status_returns_json_flags() {
     allow_open_dev_mode();
     let app = hf_web::router::build();
@@ -319,6 +463,30 @@ async fn schedule_list_without_scheduler_returns_empty_array() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json.as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn schedule_limits_without_scheduler_are_explicitly_unavailable() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/schedule/concurrency/limits")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let limits: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(limits["active_fuzz_campaign_limit"], 0);
+    assert_eq!(limits["scheduler_workflow_dispatch_limit"], 0);
+    assert_eq!(limits["effective_max_concurrent_fuzz_runs"], 0);
 }
 
 #[tokio::test]

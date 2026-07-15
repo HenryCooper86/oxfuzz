@@ -1,0 +1,299 @@
+import { getTransport } from "./index";
+import type { Transport } from "./transport";
+
+export type AutomotiveProtocol =
+  | "can"
+  | "can_fd"
+  | "iso_tp"
+  | "uds"
+  | "gmlan"
+  | "some_ip"
+  | "some_ip_sd"
+  | "do_ip"
+  | "obd"
+  | "ccp"
+  | "xcp"
+  | "bmw_hsfz"
+  | "sec_oc";
+
+export type AutomotiveMode = "offline_pcap" | "virtual_can" | "physical_bench";
+
+export type AutomotiveCapability =
+  | "decode_capture"
+  | "generate_mutations"
+  | "build_replay_plan"
+  | "execute_virtual"
+  | "execute_physical"
+  | "state_feedback";
+
+export interface AutomotiveLimitSettings {
+  max_packets: number;
+  max_input_bytes: number;
+  max_payload_bytes: number;
+  max_duration_secs: number;
+  max_rate_per_second: number;
+  max_output_bytes: number;
+  max_mem_mb: number;
+  max_cpus: number;
+}
+
+export interface AutomotivePhysicalBenchSettings {
+  enabled: boolean;
+  require_approval: boolean;
+  interfaces: string[];
+  arbitration_ids: number[];
+  uds_services: number[];
+  allow_dangerous_services: boolean;
+}
+
+export interface AutomotiveSettings {
+  enabled: boolean;
+  sidecar_image: string;
+  allowed_protocols: AutomotiveProtocol[];
+  allowed_modes: AutomotiveMode[];
+  virtual_interfaces: string[];
+  limits: AutomotiveLimitSettings;
+  physical_bench: AutomotivePhysicalBenchSettings;
+}
+
+export interface AutomotiveStateSignature {
+  protocol: string;
+  digest: string;
+  observations: Record<string, string>;
+}
+
+export interface AutomotiveArtifactRef {
+  artifact_id: string;
+  sha256: string;
+  media_type: string;
+  size_bytes: number;
+}
+
+export interface AutomotiveCapabilityReport {
+  adapter_name: string;
+  adapter_version: string;
+  schema_versions: number[];
+  protocols: AutomotiveProtocol[];
+  modes: AutomotiveMode[];
+  capabilities: AutomotiveCapability[];
+  limits: {
+    max_events: number;
+    max_payload_bytes: number;
+    max_duration_ms: number;
+    max_rate_per_second: number;
+  };
+}
+
+export interface AutomotiveCaptureAnalysis {
+  protocol: AutomotiveProtocol;
+  event_count: number;
+  transcript: AutomotiveArtifactRef;
+  transcript_hash: string;
+  state_signatures: AutomotiveStateSignature[];
+}
+
+export interface AutomotiveProtocolMessage {
+  protocol: AutomotiveProtocol;
+  payload_hex: string;
+  fields: Record<string, string>;
+}
+
+export interface AutomotiveReplayStep {
+  sequence: number;
+  delay_micros: number;
+  action: "send" | "expect_response";
+  message: AutomotiveProtocolMessage;
+}
+
+export interface AutomotiveReplayPlan {
+  protocol: AutomotiveProtocol;
+  mode: "virtual_can" | "physical_bench";
+  deterministic_seed: number;
+  steps: AutomotiveReplayStep[];
+}
+
+export type AutomotiveModeConfig =
+  | { mode: "virtual_can"; interface: string }
+  | { mode: "physical_bench"; interface: string; approval_id: string };
+
+export interface AutomotiveReplay {
+  protocol: AutomotiveProtocol;
+  mode: "virtual_can" | "physical_bench";
+  planned_events: number;
+  executed_events: number;
+  transcript_hash: string;
+  state_signatures: AutomotiveStateSignature[];
+  completed: boolean;
+}
+
+export interface AutomotiveMutation {
+  protocol: AutomotiveProtocol;
+  generated: number;
+  transcript_hash: string | null;
+  artifacts: AutomotiveArtifactRef[];
+}
+
+export type AutomotiveCapabilitiesResult = {
+  result: "capabilities";
+  data: AutomotiveCapabilityReport;
+};
+
+export type AutomotiveCaptureAnalysisResult = {
+  result: "capture_analysis";
+  data: AutomotiveCaptureAnalysis;
+};
+
+export type AutomotiveReplayResult = {
+  result: "replay";
+  data: AutomotiveReplay;
+};
+
+export type AutomotiveMutationResult = {
+  result: "mutations";
+  data: AutomotiveMutation;
+};
+
+export type AutomotiveReplayPlanResult = {
+  result: "replay_plan";
+  data: AutomotiveReplayPlan;
+};
+
+export type AutomotiveFrontendResult =
+  | AutomotiveCapabilitiesResult
+  | AutomotiveCaptureAnalysisResult
+  | AutomotiveMutationResult
+  | AutomotiveReplayPlanResult
+  | AutomotiveReplayResult;
+
+export interface AutomotiveOperationOutcome<
+  TResult extends AutomotiveFrontendResult = AutomotiveFrontendResult,
+> {
+  operation_id: string;
+  result: TResult;
+  transcript_sha256: string | null;
+  artifact_dir: string;
+}
+
+export type AutomotiveOperationStatus =
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export interface AutomotiveOperationSummary {
+  id: string;
+  project_root: string;
+  operation: string;
+  mode: string;
+  protocol: string | null;
+  status: AutomotiveOperationStatus;
+  started_at: string;
+  ended_at: string | null;
+  transcript_sha256: string | null;
+  artifact_dir: string;
+  error: string | null;
+  state_signatures: AutomotiveStateSignature[];
+}
+
+export interface AnalyzeAutomotiveCaptureInput {
+  projectRoot: string;
+  protocol: AutomotiveProtocol;
+  capturePath: string;
+}
+
+export interface ExecuteAutomotiveReplayInput {
+  projectRoot: string;
+  mode: AutomotiveModeConfig;
+  plan: AutomotiveReplayPlan;
+}
+
+export interface GenerateAutomotiveMutationsInput {
+  projectRoot: string;
+  protocol: AutomotiveProtocol;
+  sourcePath: string;
+  deterministicSeed: number;
+  mutationCount: number;
+  mediaType: string;
+}
+
+export interface BuildAutomotiveReplayPlanInput {
+  projectRoot: string;
+  protocol: AutomotiveProtocol;
+  sourcePath: string;
+  targetMode: "virtual_can" | "physical_bench";
+  deterministicSeed: number;
+}
+
+export function getAutomotiveSettings(
+  transport: Transport = getTransport(),
+): Promise<AutomotiveSettings> {
+  return transport.invoke<AutomotiveSettings>("get_automotive_settings");
+}
+
+export function setAutomotiveSettings(
+  settings: AutomotiveSettings,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveSettings> {
+  return transport.invoke<AutomotiveSettings>("set_automotive_settings", { settings });
+}
+
+export function inspectAutomotiveCapabilities(
+  projectRoot: string,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveCapabilitiesResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveCapabilitiesResult>>(
+    "automotive_capabilities",
+    { projectRoot },
+  );
+}
+
+export function analyzeAutomotiveCapture(
+  input: AnalyzeAutomotiveCaptureInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveCaptureAnalysisResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveCaptureAnalysisResult>>(
+    "automotive_analyze_capture",
+    { ...input },
+  );
+}
+
+export function executeAutomotiveReplay(
+  input: ExecuteAutomotiveReplayInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveReplayResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveReplayResult>>(
+    "automotive_execute_replay",
+    { ...input },
+  );
+}
+
+export function generateAutomotiveMutations(
+  input: GenerateAutomotiveMutationsInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveMutationResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveMutationResult>>(
+    "automotive_generate_mutations",
+    { ...input },
+  );
+}
+
+export function buildAutomotiveReplayPlan(
+  input: BuildAutomotiveReplayPlanInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveReplayPlanResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveReplayPlanResult>>(
+    "automotive_build_replay_plan",
+    { ...input },
+  );
+}
+
+export function listAutomotiveOperations(
+  projectRoot: string,
+  limit: number,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationSummary[]> {
+  return transport.invoke<AutomotiveOperationSummary[]>("list_automotive_operations", {
+    projectRoot,
+    limit,
+  });
+}

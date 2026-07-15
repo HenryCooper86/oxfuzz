@@ -4,9 +4,9 @@ import remarkGfm from "remark-gfm";
 import { BookOpen, Github, LifeBuoy, Search } from "lucide-react";
 import { Button, ViewHeader } from "../components/ui";
 import { Mermaid } from "../components/Mermaid";
-import { codeInfo } from "../components/ReportPreview";
+import { codeInfo } from "../lib/reportPreviewCode";
 import { openExternal } from "../lib";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 import { HELP_GROUPS, HELP_SECTIONS, type HelpSection } from "./help/helpContent";
 import { HELP_GROUPS_ZH, HELP_SECTIONS_ZH } from "./help/helpContent.zh";
 

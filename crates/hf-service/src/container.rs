@@ -7,8 +7,9 @@
 //! (AGENTS.md 2.12).
 
 use std::fmt::Write;
+use std::fs::{File, TryLockError};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use chrono::Utc;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
@@ -25,6 +26,59 @@ use uuid::Uuid;
 
 const MAX_RUN_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RUN_OUTPUT_ENTRIES: usize = 100_000;
+const SMOKE_FUZZ_SECS: u64 = 60;
+const COVERAGE_PRUNE_OPERATION_SECS: u64 = 600;
+const COVERAGE_PRUNE_COMMAND_SECS: u64 = 10;
+const CORPUS_MINIMIZE_SECS: u64 = 300;
+const WORKSPACE_MANIFEST_FILE: &str = ".hobot-fuzz-workspace.json";
+const WORKSPACE_MANIFEST_VERSION: u32 = 1;
+
+type WorkspaceOperationGate = tokio::sync::RwLock<()>;
+
+/// Workspace gates are keyed by resolved root rather than container instance:
+/// independent service containers in one process can target the same root.
+/// A weak registry avoids retaining a gate after its last lease is released.
+static WORKSPACE_OPERATION_GATES: OnceLock<
+    Mutex<std::collections::HashMap<PathBuf, Weak<WorkspaceOperationGate>>>,
+> = OnceLock::new();
+
+pub(crate) struct WorkspaceOperationLease {
+    _process_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _system_guard: File,
+}
+
+struct WorkspaceCleanupLease {
+    _process_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _system_guard: File,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct WorkspaceOwnershipManifest {
+    application: String,
+    version: u32,
+    canonical_root: PathBuf,
+}
+
+fn fuzzing_policy_error(error: &str) -> ClassifiedError {
+    ClassifiedError::Validation(format!("invalid fuzzing settings: {error}"))
+}
+
+fn require_fuzzing_harness_engine(
+    engine: EngineKind,
+    language: TargetLanguage,
+) -> Result<(), ClassifiedError> {
+    crate::config::resolve_harness_engine(Some(engine), language)
+        .map(|_| ())
+        .map_err(|error| fuzzing_policy_error(&error))
+}
+
+fn resolve_fuzzing_run(
+    engine: EngineKind,
+    duration_secs: u64,
+) -> Result<crate::config::ResolvedFuzzingRun, ClassifiedError> {
+    crate::config::resolve_fuzzing_run(Some(engine), Some(duration_secs))
+        .map_err(|error| fuzzing_policy_error(&error))
+}
 
 /// Runs that reached a terminal state may own crash artifacts. Failed and
 /// cancelled campaigns can produce valid partial evidence before stopping.
@@ -53,7 +107,21 @@ fn run_has_crash_evidence(status: RunStatus) -> bool {
 /// workspaces on a specific volume (e.g. a large scratch disk).
 #[must_use]
 pub fn workspace_root() -> PathBuf {
-    workspace_root_from(std::env::var_os("HF_WORKSPACE_DIR"))
+    configured_workspace_root().0
+}
+
+/// Create or validate the configured managed workspace root and its ownership
+/// manifest before callers stage artifacts directly beneath it.
+///
+/// Normal service operations call this internally. It is also the canonical
+/// setup boundary for integrations that must seed fixture artifacts before
+/// invoking a workspace-backed operation.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the configured root is unsafe, unmanaged, or
+/// cannot be initialized.
+pub fn initialize_workspace_root() -> Result<PathBuf, ClassifiedError> {
+    prepare_configured_workspace_root()
 }
 
 /// Pure resolver for [`workspace_root`], taking the `HF_WORKSPACE_DIR` value
@@ -66,6 +134,356 @@ fn workspace_root_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
         }
     }
     crate::init::user_app_dir().join("workspaces")
+}
+
+fn workspace_root_selection(override_dir: Option<std::ffi::OsString>) -> (PathBuf, bool) {
+    let uses_trusted_default = override_dir.as_ref().is_none_or(|dir| dir.is_empty());
+    (workspace_root_from(override_dir), uses_trusted_default)
+}
+
+fn configured_workspace_root() -> (PathBuf, bool) {
+    workspace_root_selection(std::env::var_os("HF_WORKSPACE_DIR"))
+}
+
+fn workspace_operation_gate(
+    root: &Path,
+) -> Result<(PathBuf, Arc<WorkspaceOperationGate>), ClassifiedError> {
+    let key = comparable_path(root).ok_or_else(|| {
+        ClassifiedError::Internal(format!("resolve workspace lease root {}", root.display()))
+    })?;
+    let registry =
+        WORKSPACE_OPERATION_GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut gates = registry.lock().map_err(|_| {
+        ClassifiedError::Internal("workspace operation gate registry is poisoned".to_owned())
+    })?;
+    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+        return Ok((key, gate));
+    }
+    let gate = Arc::new(WorkspaceOperationGate::new(()));
+    gates.insert(key.clone(), Arc::downgrade(&gate));
+    Ok((key, gate))
+}
+
+fn workspace_lock_file(root: &Path) -> Result<File, ClassifiedError> {
+    use sha2::{Digest as _, Sha256};
+
+    // Keep the lock outside the deletable workspace. The digest gives every
+    // canonical/absolute root a stable cross-process rendezvous file without
+    // exposing the path itself in the filename.
+    let lock_dir = crate::init::user_app_dir().join("locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create workspace lease directory {}: {error}",
+            lock_dir.display()
+        ))
+    })?;
+    let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+    let lock_path = lock_dir.join(format!("workspace-{digest:x}.lock"));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "open workspace lease {}: {error}",
+                lock_path.display()
+            ))
+        })
+}
+
+fn workspace_lock_error(error: TryLockError, cleanup: bool) -> ClassifiedError {
+    match error {
+        TryLockError::WouldBlock if cleanup => ClassifiedError::Validation(
+            "workspace cannot be cleared while another workspace operation is active".to_owned(),
+        ),
+        TryLockError::WouldBlock => ClassifiedError::Validation(
+            "workspace operation cannot start while workspace cleanup is active".to_owned(),
+        ),
+        TryLockError::Error(error) => {
+            ClassifiedError::Internal(format!("acquire workspace lease: {error}"))
+        }
+    }
+}
+
+fn protected_workspace_paths() -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from(std::path::MAIN_SEPARATOR_STR)];
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home));
+    }
+    if let Some(repo) = repo_root() {
+        paths.push(repo);
+    }
+    if let Some(source_repo) = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+    {
+        paths.push(source_repo.to_path_buf());
+    }
+    paths.push(crate::init::config_dir());
+    paths.push(crate::config::data_dir());
+    paths.push(crate::init::user_app_dir());
+    paths
+}
+
+fn comparable_path(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok().or_else(|| {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
+        Some(absolute)
+    })
+}
+
+#[cfg(unix)]
+fn same_filesystem_entry(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(left) = std::fs::metadata(left) else {
+        return false;
+    };
+    let Ok(right) = std::fs::metadata(right) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_filesystem_entry(left: &Path, right: &Path) -> bool {
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn validate_workspace_cleanup_root(root: &Path) -> Result<(), ClassifiedError> {
+    for protected in protected_workspace_paths() {
+        let Some(protected) = comparable_path(&protected) else {
+            continue;
+        };
+        let same_or_ancestor = protected == root
+            || protected.starts_with(root)
+            || protected
+                .ancestors()
+                .any(|ancestor| same_filesystem_entry(ancestor, root));
+        if same_or_ancestor {
+            return Err(ClassifiedError::Validation(format!(
+                "workspace cleanup refused for protected path {}",
+                root.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn workspace_manifest(root: &Path) -> PathBuf {
+    root.join(WORKSPACE_MANIFEST_FILE)
+}
+
+fn validate_workspace_manifest(root: &Path) -> Result<(), ClassifiedError> {
+    let manifest_path = workspace_manifest(root);
+    let metadata = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "workspace ownership manifest is missing or unreadable at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > 16 * 1024 {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace ownership manifest is not a small regular file: {}",
+            manifest_path.display()
+        )));
+    }
+    let bytes = std::fs::read(&manifest_path).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "read workspace ownership manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest: WorkspaceOwnershipManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "parse workspace ownership manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if manifest.application != "hobot_fuzz"
+        || manifest.version != WORKSPACE_MANIFEST_VERSION
+        || manifest.canonical_root != root
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace ownership manifest does not identify {}",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn write_workspace_manifest(root: &Path) -> Result<(), ClassifiedError> {
+    use std::io::Write as _;
+
+    let destination = workspace_manifest(root);
+    let temporary = root.join(format!(".hobot-fuzz-workspace-{}.tmp", Uuid::new_v4()));
+    let manifest = WorkspaceOwnershipManifest {
+        application: "hobot_fuzz".to_owned(),
+        version: WORKSPACE_MANIFEST_VERSION,
+        canonical_root: root.to_path_buf(),
+    };
+    let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+        ClassifiedError::Internal(format!("serialize workspace ownership manifest: {error}"))
+    })?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "create workspace ownership manifest {}: {error}",
+                temporary.display()
+            ))
+        })?;
+    if let Err(error) = file.write_all(&encoded).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(ClassifiedError::Internal(format!(
+            "write workspace ownership manifest {}: {error}",
+            temporary.display()
+        )));
+    }
+    if let Err(error) = std::fs::rename(&temporary, &destination) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(ClassifiedError::Internal(format!(
+            "commit workspace ownership manifest {}: {error}",
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Create a new managed workspace root, or verify the ownership manifest of an
+/// existing one. Only the implicit per-user default may adopt legacy artifacts;
+/// a non-empty `HF_WORKSPACE_DIR` override without a manifest is never adopted.
+fn prepare_managed_workspace_root_with_adoption(
+    root: &Path,
+    adopt_legacy_default: bool,
+) -> Result<PathBuf, ClassifiedError> {
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ClassifiedError::Validation(format!(
+                "workspace root must not be a symbolic link: {}",
+                root.display()
+            )));
+        }
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(ClassifiedError::Validation(format!(
+                "workspace root is not a regular directory: {}",
+                root.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(root).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "create workspace root {}: {error}",
+                    root.display()
+                ))
+            })?;
+        }
+        Err(error) => {
+            return Err(ClassifiedError::Validation(format!(
+                "inspect workspace root {}: {error}",
+                root.display()
+            )));
+        }
+    }
+
+    let canonical = std::fs::canonicalize(root).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace root {}: {error}",
+            root.display()
+        ))
+    })?;
+    validate_workspace_cleanup_root(&canonical)?;
+
+    match std::fs::symlink_metadata(workspace_manifest(&canonical)) {
+        Ok(_) => validate_workspace_manifest(&canonical)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut entries = std::fs::read_dir(&canonical).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "read workspace root {}: {error}",
+                    canonical.display()
+                ))
+            })?;
+            if entries.next().is_some() && !adopt_legacy_default {
+                return Err(ClassifiedError::Validation(format!(
+                    "workspace root is non-empty and has no ownership manifest: {}",
+                    canonical.display()
+                )));
+            }
+            write_workspace_manifest(&canonical)?;
+        }
+        Err(error) => {
+            return Err(ClassifiedError::Validation(format!(
+                "inspect workspace ownership manifest {}: {error}",
+                workspace_manifest(&canonical).display()
+            )));
+        }
+    }
+    Ok(canonical)
+}
+
+/// Initialize an explicit workspace root for a service-owned subsystem after
+/// that subsystem has completed all policy preflight checks.
+#[cfg(feature = "automotive-scapy")]
+pub(crate) fn initialize_workspace_root_at(root: &Path) -> Result<PathBuf, ClassifiedError> {
+    prepare_managed_workspace_root_with_adoption(root, false)
+}
+
+#[cfg(test)]
+fn prepare_managed_workspace_root(root: &Path) -> Result<PathBuf, ClassifiedError> {
+    prepare_managed_workspace_root_with_adoption(root, false)
+}
+
+fn prepare_configured_workspace_root() -> Result<PathBuf, ClassifiedError> {
+    let (root, uses_trusted_default) = configured_workspace_root();
+    prepare_managed_workspace_root_with_adoption(&root, uses_trusted_default)
+}
+
+fn clear_managed_workspace_root(root: &Path) -> Result<(), ClassifiedError> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ClassifiedError::Validation(format!(
+                "inspect workspace root {}: {error}",
+                root.display()
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace root must not be a symbolic link: {}",
+            root.display()
+        )));
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace root is not a regular directory: {}",
+            root.display()
+        )));
+    }
+    let canonical = std::fs::canonicalize(root).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace root {}: {error}",
+            root.display()
+        ))
+    })?;
+    validate_workspace_cleanup_root(&canonical)?;
+    validate_workspace_manifest(&canonical)?;
+    std::fs::remove_dir_all(&canonical).map_err(|error| {
+        ClassifiedError::Internal(format!("clear workspace {}: {error}", canonical.display()))
+    })
 }
 
 /// Resolve a per-project/per-target workspace directory so multiple projects
@@ -111,7 +529,7 @@ fn run_output_relative(run_id: Uuid) -> PathBuf {
 
 /// Create or resolve a service-owned directory below `workspace` without
 /// following symlinks left by an earlier untrusted sandbox execution.
-fn ensure_workspace_directory(
+pub(crate) fn ensure_workspace_directory(
     workspace: &Path,
     relative: &Path,
 ) -> Result<PathBuf, ClassifiedError> {
@@ -1119,6 +1537,13 @@ fn project_slug(project: &Path) -> String {
     hasher.update(project.to_string_lossy().as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     format!("{name}-{}", &digest[..8])
+}
+
+/// Resolve a per-project directory beneath an explicit managed workspace root.
+#[must_use]
+#[cfg(feature = "automotive-scapy")]
+pub(crate) fn project_workspace_dir_at(root: &Path, project: &Path) -> PathBuf {
+    root.join(project_slug(project))
 }
 
 /// Whether the in-container qemu for a syzkaller run can use KVM hardware
@@ -2579,6 +3004,13 @@ impl ServiceContainer {
     /// no sandbox, no LLM.
     #[must_use]
     pub fn artifact_summary(&self, project: &Path, target: &str) -> ArtifactSummary {
+        let Ok(_workspace_operation) = Self::try_acquire_workspace_operation_now() else {
+            return ArtifactSummary {
+                harness_built: false,
+                corpus_count: 0,
+                crash_count: 0,
+            };
+        };
         let workspace = workspace_dir(project, target);
         let harness_built = workspace.join(harness_binary_name(target)).exists();
         let corpus_count =
@@ -2627,6 +3059,7 @@ impl ServiceContainer {
         sha256: &str,
         expected_path: &Path,
     ) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let Some(store) = self.store.as_ref() else {
             return Ok(());
         };
@@ -2687,6 +3120,7 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError` on a storage failure.
     pub async fn delete_run(&self, run_id: &str) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let store = self
             .store
             .as_ref()
@@ -2724,6 +3158,7 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError` on a storage failure.
     pub async fn clear_all_runs(&self) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let store = self
             .store
             .as_ref()
@@ -2789,6 +3224,7 @@ impl ServiceContainer {
         store: &Store,
         run: &RunRecord,
     ) -> Result<Option<PathBuf>, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let Some(recorded) = run.evidence_dir.as_deref() else {
             return Ok(None);
         };
@@ -2964,6 +3400,7 @@ impl ServiceContainer {
         &self,
         run_id: &str,
     ) -> Result<CompileOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let store = self
             .store
             .as_ref()
@@ -3414,6 +3851,7 @@ impl ServiceContainer {
         &self,
         project: Option<&Path>,
     ) -> Result<serde_json::Value, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let Some(store) = self.store.as_ref() else {
             return Ok(serde_json::json!({ "error": "no database configured" }));
         };
@@ -3603,6 +4041,7 @@ impl ServiceContainer {
         project: &Path,
         file: &Path,
     ) -> Result<crate::knowledge::KnowledgeStats, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         if !is_regular_file(file) {
             return Err(ClassifiedError::Validation(format!(
                 "document is not a regular file: {}",
@@ -3616,6 +4055,7 @@ impl ServiceContainer {
 
         // Stage below the Docker runtime's approved workspace root, not in the
         // durable knowledge directory (which lives elsewhere in app data).
+        prepare_configured_workspace_root()?;
         let docs = crate::knowledge::docs_dir(project);
         let staging = document_staging_dir(project, Uuid::new_v4());
         std::fs::create_dir_all(&staging)
@@ -3796,6 +4236,13 @@ impl ServiceContainer {
         self.store.as_ref()
     }
 
+    /// Runtime adapter used by service-owned optional subsystems.
+    #[must_use]
+    #[cfg(feature = "automotive-scapy")]
+    pub(crate) fn runtime_adapter(&self) -> &Arc<dyn RuntimeAdapter> {
+        &self.runtime
+    }
+
     /// Clear all learned knowledge across every project: discovered targets and
     /// their harnesses, corpus entries, and crashes, plus all runs.
     /// Configuration and on-disk workspaces are left untouched. A no-op when no
@@ -3824,6 +4271,7 @@ impl ServiceContainer {
     /// Returns `ClassifiedError` if either the DB delete or the workspace
     /// removal fails.
     pub async fn delete_project(&self, project: &Path) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         if let Some(store) = &self.store {
             let key = project.to_string_lossy();
             store
@@ -3886,6 +4334,73 @@ impl ServiceContainer {
         }
     }
 
+    /// Enter a workspace-backed service operation. Both guards are `Send`, so
+    /// callers may retain the lease across sandbox, storage, and provider awaits.
+    async fn acquire_workspace_operation(
+        &self,
+    ) -> Result<WorkspaceOperationLease, ClassifiedError> {
+        let root = workspace_root();
+        self.acquire_workspace_operation_at(&root).await
+    }
+
+    pub(crate) async fn acquire_workspace_operation_at(
+        &self,
+        root: &Path,
+    ) -> Result<WorkspaceOperationLease, ClassifiedError> {
+        let (root, gate) = workspace_operation_gate(root)?;
+        let process_guard = gate.read_owned().await;
+        let system_guard = workspace_lock_file(&root)?;
+        system_guard
+            .try_lock_shared()
+            .map_err(|error| workspace_lock_error(error, false))?;
+        Ok(WorkspaceOperationLease {
+            _process_guard: process_guard,
+            _system_guard: system_guard,
+        })
+    }
+
+    /// Enter a synchronous workspace read without racing whole-root cleanup.
+    fn try_acquire_workspace_operation_now() -> Result<WorkspaceOperationLease, ClassifiedError> {
+        let root = workspace_root();
+        let (root, gate) = workspace_operation_gate(&root)?;
+        let process_guard = gate.try_read_owned().map_err(|_| {
+            ClassifiedError::Validation(
+                "workspace operation cannot start while workspace cleanup is active".to_owned(),
+            )
+        })?;
+        let system_guard = workspace_lock_file(&root)?;
+        system_guard
+            .try_lock_shared()
+            .map_err(|error| workspace_lock_error(error, false))?;
+        Ok(WorkspaceOperationLease {
+            _process_guard: process_guard,
+            _system_guard: system_guard,
+        })
+    }
+
+    /// Take the whole-workspace cleanup lease without blocking a runtime thread.
+    /// Cleanup is an explicit user action, so an overlapping operation is
+    /// rejected and can be retried after that operation finishes.
+    fn try_acquire_workspace_cleanup(
+        root: &Path,
+    ) -> Result<WorkspaceCleanupLease, ClassifiedError> {
+        let (root, gate) = workspace_operation_gate(root)?;
+        let process_guard = gate.try_write_owned().map_err(|_| {
+            ClassifiedError::Validation(
+                "workspace cannot be cleared while another workspace operation is active"
+                    .to_owned(),
+            )
+        })?;
+        let system_guard = workspace_lock_file(&root)?;
+        system_guard
+            .try_lock()
+            .map_err(|error| workspace_lock_error(error, true))?;
+        Ok(WorkspaceCleanupLease {
+            _process_guard: process_guard,
+            _system_guard: system_guard,
+        })
+    }
+
     /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
     /// reproducers, coverage builds), reclaiming disk space. Since the
     /// workspace is now persistent, it grows over time; this is the affordance
@@ -3895,16 +4410,42 @@ impl ServiceContainer {
     /// # Errors
     /// Returns `ClassifiedError` if the workspace directory cannot be removed.
     pub fn clear_workspace(&self) -> Result<(), ClassifiedError> {
-        let root = workspace_root();
-        match std::fs::remove_dir_all(&root) {
-            Ok(()) => Ok(()),
-            // Already absent is success -- nothing to reclaim.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(ClassifiedError::Internal(format!(
-                "clear workspace {}: {e}",
-                root.display()
-            ))),
+        let (root, uses_trusted_default) = configured_workspace_root();
+        self.clear_workspace_at_with_adoption(&root, uses_trusted_default)
+    }
+
+    #[cfg(test)]
+    fn clear_workspace_at(&self, root: &Path) -> Result<(), ClassifiedError> {
+        self.clear_workspace_at_with_adoption(root, false)
+    }
+
+    fn clear_workspace_at_with_adoption(
+        &self,
+        root: &Path,
+        adopt_legacy_default: bool,
+    ) -> Result<(), ClassifiedError> {
+        let _workspace_cleanup = Self::try_acquire_workspace_cleanup(root)?;
+        let active_runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| ClassifiedError::Internal("active-run registry is poisoned".into()))?;
+        if !active_runs.is_empty() {
+            return Err(ClassifiedError::Validation(
+                "workspace cannot be cleared while an active fuzz run exists".to_owned(),
+            ));
         }
+        match std::fs::symlink_metadata(root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "inspect workspace root {}: {error}",
+                    root.display()
+                )));
+            }
+        }
+        prepare_managed_workspace_root_with_adoption(root, adopt_legacy_default)?;
+        clear_managed_workspace_root(root)
     }
 
     // -- Discovery --------------------------------------------------------
@@ -3967,6 +4508,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<HarnessDraft, ClassifiedError> {
+        require_fuzzing_harness_engine(engine, lang)?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
             .candidates
@@ -4042,6 +4584,8 @@ impl ServiceContainer {
         &self,
         project: &Path,
     ) -> Result<Vec<SchedulableTarget>, ClassifiedError> {
+        let fuzzing = crate::config::effective_fuzzing_settings()
+            .map_err(|error| fuzzing_policy_error(&error))?;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "scheduling campaigns requires the persistent service store".to_owned(),
@@ -4058,10 +4602,9 @@ impl ServiceContainer {
                 .list_harnesses(candidate.id)
                 .await
                 .map_err(ClassifiedError::from)?;
-            for harness in harnesses
-                .iter()
-                .filter(|h| h.status == HarnessStatus::Promoted)
-            {
+            for harness in harnesses.iter().filter(|h| {
+                h.status == HarnessStatus::Promoted && fuzzing.require_engine(h.engine).is_ok()
+            }) {
                 schedulable.push(SchedulableTarget {
                     target: candidate.symbol.clone(),
                     engine: harness.engine.as_str().to_owned(),
@@ -4130,6 +4673,7 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
                 "harness qualification requires the persistent service store".to_owned(),
@@ -4190,6 +4734,7 @@ impl ServiceContainer {
         target: &str,
         harness: &Harness,
     ) -> Result<(), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let (qualification_run_id, expected_source, expected_binary) =
             qualification_evidence(harness)?;
         let workspace = workspace_dir(project, target);
@@ -4278,12 +4823,10 @@ impl ServiceContainer {
         target: &str,
         lang: TargetLanguage,
     ) -> Result<CompileOutcome, ClassifiedError> {
-        if !engine.supports_language(lang) {
-            return Err(ClassifiedError::Validation(format!(
-                "{lang:?} harness compilation is not supported by {engine:?} in the current engine adapter"
-            )));
-        }
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        require_fuzzing_harness_engine(engine, lang)?;
         self.guardrails.authorize(Action::CompileHarness).await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
@@ -4369,6 +4912,8 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        require_fuzzing_harness_engine(engine, lang)?;
         self.guardrails.authorize(Action::CompileHarness).await?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
@@ -4378,6 +4923,7 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
@@ -4404,6 +4950,7 @@ impl ServiceContainer {
         initial_source: String,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let target = &candidate.symbol;
         let mut source = initial_source;
         let mut repairs_used = 0usize;
@@ -4512,6 +5059,8 @@ impl ServiceContainer {
         lang: TargetLanguage,
         max_repairs: usize,
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        require_fuzzing_harness_engine(engine, lang)?;
         self.guardrails.authorize(Action::CompileHarness).await?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
@@ -4590,6 +5139,9 @@ impl ServiceContainer {
         _max_repairs: usize,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        let engine = resolved.engine;
         // 1. Choose a target: the caller's, else the top-ranked candidate.
         let inv = self.discover(project, lang).await?;
         let target = match target.filter(|t| !t.is_empty()) {
@@ -4625,7 +5177,7 @@ impl ServiceContainer {
         while iterations < cap {
             iterations += 1;
             let summary = self
-                .run_fuzzer(project, &target, engine, duration_secs, &noop)
+                .run_fuzzer_with_started(project, &target, resolved, &noop, &|_| {})
                 .await?;
             termination = summary.termination;
             edges = edges.max(summary.edges);
@@ -4677,6 +5229,14 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<SmokeRunSummary, ClassifiedError> {
+        let resolved = resolve_fuzzing_run(engine, SMOKE_FUZZ_SECS)?;
+        if !engine.supports_language(lang) {
+            return Err(ClassifiedError::Validation(format!(
+                "fuzzing engine '{}' does not support {lang:?} harnesses",
+                engine.as_str()
+            )));
+        }
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         self.guardrails.authorize(Action::RunHarness).await?;
         let workspace = workspace_dir(project, target);
         let harness = self.active_harness(project, target, engine).await?;
@@ -4710,20 +5270,21 @@ impl ServiceContainer {
 
         // Allocate the run identity before execution so its immutable inputs and
         // every finding are owned by one durable evidence directory.
+        let smoke_config = FuzzRunConfig {
+            harness_id: harness.id,
+            engine: resolved.engine,
+            duration: Some(std::time::Duration::from_secs(resolved.duration_secs)),
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
+            seed_corpus: Some(workspace.join("corpus")),
+            sanitizer: harness.sanitizer,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+        };
         let mut smoke_record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
-            Some(FuzzRunConfig {
-                harness_id: harness.id,
-                engine,
-                duration: Some(std::time::Duration::from_mins(1)),
-                max_mem_mb: 2048,
-                max_cpus: 1,
-                seed_corpus: Some(workspace.join("corpus")),
-                sanitizer: harness.sanitizer,
-                env: Vec::new(),
-                extra_args: Vec::new(),
-            }),
+            Some(smoke_config.clone()),
             Utc::now(),
         );
         smoke_record.kind = RunKind::Smoke;
@@ -4758,12 +5319,13 @@ impl ServiceContainer {
         }
         let mut staged_harness = harness;
         staged_harness.build_cmd.output = artifacts.binary_host.clone();
-        let mut smoked = match hf_harness::smoke_fuzz_in_paths(
+        let mut smoked = match hf_harness::smoke_fuzz_in_paths_with_config(
             staged_harness,
             self.runtime.as_ref(),
             &workspace,
             &artifacts.corpus_relative,
             &artifacts.output_relative,
+            &smoke_config,
         )
         .await
         {
@@ -4844,6 +5406,7 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let mut harness = self.active_harness(project, target, engine).await?;
         let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(format!(
@@ -4879,6 +5442,7 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
     ) -> Result<Harness, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let mut harness = self.active_harness(project, target, engine).await?;
         let smoke = harness.smoke_run.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("run smoke qualification before approving findings".into())
@@ -4914,6 +5478,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<SeedEntry>, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let seeds = generate_target_seeds(target);
@@ -4962,6 +5527,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
         count: usize,
     ) -> Result<Vec<SeedEntry>, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         // Clamp the requested count to a sane range so no presentation layer can
         // ask the LLM for zero or an absurd number of seeds. Owning the bound
         // here keeps CLI, REST, and Tauri consistent (the clamp previously lived
@@ -5056,6 +5622,7 @@ impl ServiceContainer {
         on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
         on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
     ) -> Result<Uuid, ClassifiedError> {
+        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
         let active_id = Arc::new(std::sync::Mutex::new(None));
@@ -5097,8 +5664,7 @@ impl ServiceContainer {
                     .run_fuzzer_with_started(
                         &project,
                         &target,
-                        engine,
-                        duration_secs,
+                        resolved,
                         &progress_sink,
                         &started_sink,
                     )
@@ -5256,7 +5822,8 @@ impl ServiceContainer {
         duration_secs: u64,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
-        self.run_fuzzer_with_started(project, target, engine, duration_secs, on_progress, &|_| {})
+        let resolved = resolve_fuzzing_run(engine, duration_secs)?;
+        self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {})
             .await
     }
 
@@ -5264,12 +5831,15 @@ impl ServiceContainer {
         &self,
         project: &Path,
         target: &str,
-        engine: EngineKind,
-        duration_secs: u64,
+        resolved: crate::config::ResolvedFuzzingRun,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+
+        let engine = resolved.engine;
+        let duration_secs = resolved.duration_secs;
 
         let qualified = self.active_harness(project, target, engine).await?;
         if qualified.status != HarnessStatus::Promoted {
@@ -5315,8 +5885,8 @@ impl ServiceContainer {
             harness_id: qualified.id,
             engine,
             duration: Some(std::time::Duration::from_secs(duration_secs)),
-            max_mem_mb: 2048,
-            max_cpus: 1,
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
             seed_corpus: Some(corpus_dir.clone()),
             sanitizer: hf_core::target::Sanitizer::Address,
             env: Vec::new(),
@@ -5611,11 +6181,15 @@ impl ServiceContainer {
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<SyzkallerSummary, ClassifiedError> {
         use std::sync::atomic::{AtomicU64, Ordering};
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+
+        let resolved = resolve_fuzzing_run(EngineKind::Syzkaller, opts.duration_secs)?;
+        let duration_secs = resolved.duration_secs;
 
         self.guardrails
             .authorize(Action::RunFuzzer {
                 engine: "Syzkaller".to_owned(),
-                duration_secs: opts.duration_secs,
+                duration_secs,
             })
             .await?;
 
@@ -5669,8 +6243,9 @@ impl ServiceContainer {
         let use_kvm = syz_kvm_usable(&platform);
         let run_id = Uuid::new_v4();
         let provided_config = manager_cfg.is_some();
+        let workspace_root = prepare_configured_workspace_root()?;
         let stage_request = crate::syzkaller::SyzkallerStageRequest {
-            workspace_root: workspace_root(),
+            workspace_root,
             run_id,
             target_triple: target_triple.clone(),
             manager_cfg: manager_cfg.map(PathBuf::from),
@@ -5699,8 +6274,7 @@ impl ServiceContainer {
         }
 
         log(&format!(
-            "Launching syz-manager in the sandbox for {}s...",
-            opts.duration_secs
+            "Launching syz-manager in the sandbox for {duration_secs}s..."
         ));
         if use_kvm {
             log("Note: qemu uses KVM acceleration (/dev/kvm passed through) -- expect good exec rates.");
@@ -5709,11 +6283,11 @@ impl ServiceContainer {
         }
 
         let limits = hf_core::runtime::ResourceLimits {
-            max_mem_mb: 4096,
-            max_cpus: 4,
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
             // The inner `timeout` governs the campaign; give the sandbox deadline
             // a grace margin so it is only a backstop.
-            max_duration_secs: opts.duration_secs.saturating_add(30),
+            max_duration_secs: duration_secs.saturating_add(30),
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
@@ -5753,10 +6327,8 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
-        let cmd = syzkaller_manager_command(
-            crate::syzkaller::CONTAINER_MANAGER_CONFIG,
-            opts.duration_secs,
-        );
+        let cmd =
+            syzkaller_manager_command(crate::syzkaller::CONTAINER_MANAGER_CONFIG, duration_secs);
         let writable_monitor =
             crate::syzkaller::WritableBudgetMonitor::start(&stage, cancel.clone());
         let run_result = self
@@ -5895,6 +6467,7 @@ impl ServiceContainer {
         /// calls. Crashes beyond the cap are still ingested and persisted, just
         /// without a drafted report.
         const MAX_BUG_REPORT_DRAFTS: usize = 20;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
 
         self.guardrails.authorize(Action::Triage).await?;
         let workspace = workspace_dir(project, target);
@@ -6009,6 +6582,10 @@ impl ServiceContainer {
         logs: &mut std::collections::HashMap<PathBuf, String>,
     ) {
         use crate::crash_minimization::{prepare, PreparedMinimization, MAX_CRASH_MINIMIZATIONS};
+        let Ok(_workspace_operation) = self.acquire_workspace_operation().await else {
+            tracing::warn!("crash minimization skipped because the workspace is unavailable");
+            return;
+        };
 
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: 2048,
@@ -6099,6 +6676,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Vec<RegressionResult>, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         // Replaying crash inputs runs the (untrusted) harness in the sandbox --
         // gate it like triage.
         self.guardrails.authorize(Action::Triage).await?;
@@ -6188,6 +6766,9 @@ impl ServiceContainer {
     /// cached per target, keyed by a corpus+harness signature so they refresh
     /// automatically when a run grows the corpus or the harness is rebuilt.
     pub async fn coverage_functions(&self, project: &Path, target: &str) -> Vec<String> {
+        let Ok(_workspace_operation) = self.acquire_workspace_operation().await else {
+            return Vec::new();
+        };
         let workspace = workspace_dir(project, target);
         if !workspace.join("harness.c").exists() {
             return Vec::new();
@@ -6252,6 +6833,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Option<hf_coverage::CoverageSummary> {
+        let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
         let workspace = workspace_dir(project, target);
         if !workspace.join("harness.c").exists() {
             return None;
@@ -6574,6 +7156,7 @@ impl ServiceContainer {
         target_id: Uuid,
     ) -> Result<crate::report::CorpusStats, ClassifiedError> {
         use hf_core::corpus::CorpusSource;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
 
         let entries = match &self.store {
             Some(store) if target_id != Uuid::nil() => store.list_corpus_entries(target_id).await?,
@@ -6610,6 +7193,7 @@ impl ServiceContainer {
         binary_host: &Path,
         input_host_path: &Path,
     ) -> Option<String> {
+        let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
         if !binary_host.is_file() {
             return None;
         }
@@ -6690,6 +7274,7 @@ impl ServiceContainer {
         run_id: Uuid,
         target_id: Uuid,
     ) -> Result<Option<Vec<hf_core::crash::Crash>>, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
         if !binary_host.is_file() {
             return Ok(None);
         }
@@ -6900,6 +7485,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<hf_core::corpus::Corpus, ClassifiedError> {
+        let _workspace_operation = Self::try_acquire_workspace_operation_now()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         hf_corpus::list(&corpus_dir)
@@ -6914,6 +7500,8 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<usize, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let seeds = vec![
@@ -6935,6 +7523,8 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<usize, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let latest_run = self.latest_run_record(project, Some(target)).await?;
@@ -6958,6 +7548,8 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<usize, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let corpus = hf_corpus::list(&corpus_dir)?;
@@ -6985,6 +7577,9 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<MinimizeOutcome, ClassifiedError> {
+        let resolved = resolve_fuzzing_run(EngineKind::AflPlusPlus, COVERAGE_PRUNE_OPERATION_SECS)?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
         let mut corpus = hf_corpus::list(&corpus_dir)?;
@@ -7014,7 +7609,7 @@ impl ServiceContainer {
         self.guardrails
             .authorize(Action::RunFuzzer {
                 engine: "AFL++ showmap".to_owned(),
-                duration_secs: 600,
+                duration_secs: resolved.duration_secs,
             })
             .await?;
 
@@ -7028,9 +7623,9 @@ impl ServiceContainer {
         }
         let binary_container = format!("/work/{bin}");
         let limits = hf_core::runtime::ResourceLimits {
-            max_mem_mb: 2048,
-            max_cpus: 1,
-            max_duration_secs: 10,
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
+            max_duration_secs: COVERAGE_PRUNE_COMMAND_SECS.min(resolved.duration_secs),
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
@@ -7038,7 +7633,8 @@ impl ServiceContainer {
             workspace_read_only: true,
             ..hf_core::runtime::SandboxOptions::default()
         };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(10);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(resolved.duration_secs);
         for entry in &mut corpus.entries {
             let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
             else {
@@ -7139,6 +7735,8 @@ impl ServiceContainer {
         target: &str,
         run: Option<RunRecord>,
     ) -> Result<usize, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
 
@@ -7185,6 +7783,9 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<MinimizeOutcome, ClassifiedError> {
+        let resolved = resolve_fuzzing_run(EngineKind::LibFuzzer, CORPUS_MINIMIZE_SECS)?;
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
         let before = hf_corpus::list(&corpus_dir)?.entries.len();
@@ -7208,7 +7809,7 @@ impl ServiceContainer {
         self.guardrails
             .authorize(Action::RunFuzzer {
                 engine: "libFuzzer corpus minimization".to_owned(),
-                duration_secs: 300,
+                duration_secs: resolved.duration_secs,
             })
             .await?;
 
@@ -7235,9 +7836,9 @@ impl ServiceContainer {
             artifacts.corpus_container.clone(),
         ];
         let limits = hf_core::runtime::ResourceLimits {
-            max_mem_mb: 4096,
-            max_cpus: 2,
-            max_duration_secs: 300,
+            max_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
+            max_duration_secs: resolved.duration_secs,
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
@@ -8312,9 +8913,12 @@ mod coverage_tests {
 #[cfg(test)]
 mod workspace_tests {
     use super::{
-        document_staging_dir, project_workspace_dir, read_current_harness_source, run_binary_path,
-        run_context_digest, run_output_dir, run_output_relative, run_output_within_budget,
-        stage_run_artifacts, verify_run_artifacts, workspace_dir, write_current_harness_source,
+        document_staging_dir, prepare_managed_workspace_root,
+        prepare_managed_workspace_root_with_adoption, project_workspace_dir,
+        read_current_harness_source, run_binary_path, run_context_digest, run_output_dir,
+        run_output_relative, run_output_within_budget, stage_run_artifacts, verify_run_artifacts,
+        workspace_dir, workspace_lock_file, workspace_root_selection, write_current_harness_source,
+        ServiceContainer, WORKSPACE_MANIFEST_FILE,
     };
     use std::path::{Component, Path};
 
@@ -8342,6 +8946,315 @@ mod workspace_tests {
         // An empty override falls back to the persistent default.
         let empty = super::workspace_root_from(Some(String::new().into()));
         assert!(empty.ends_with("workspaces"));
+    }
+
+    #[test]
+    fn only_the_implicit_default_root_is_trusted_for_legacy_adoption() {
+        let (_, default_is_trusted) = workspace_root_selection(None);
+        let (_, empty_override_is_trusted) =
+            workspace_root_selection(Some(std::ffi::OsString::new()));
+        let (override_root, override_is_trusted) =
+            workspace_root_selection(Some("/mnt/scratch/hf".into()));
+
+        assert!(default_is_trusted);
+        assert!(empty_override_is_trusted);
+        assert!(!override_is_trusted);
+        assert_eq!(override_root, std::path::PathBuf::from("/mnt/scratch/hf"));
+    }
+
+    #[test]
+    fn managed_workspace_preparation_creates_an_ownership_manifest() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+
+        let canonical = prepare_managed_workspace_root(&root).unwrap();
+
+        assert_eq!(canonical, std::fs::canonicalize(&root).unwrap());
+        let manifest = root.join(WORKSPACE_MANIFEST_FILE);
+        assert!(std::fs::symlink_metadata(manifest)
+            .unwrap()
+            .file_type()
+            .is_file());
+    }
+
+    #[test]
+    fn managed_workspace_preparation_does_not_claim_unrelated_data() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("unowned-workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("operator-data"), b"keep").unwrap();
+
+        let error = prepare_managed_workspace_root(&root).unwrap_err();
+
+        assert!(error.to_string().contains("non-empty"));
+        assert!(!root.join(WORKSPACE_MANIFEST_FILE).exists());
+        assert_eq!(std::fs::read(root.join("operator-data")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn trusted_default_preparation_migrates_legacy_artifacts() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("legacy-default-workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("existing-artifact"), b"artifact").unwrap();
+
+        prepare_managed_workspace_root_with_adoption(&root, true).unwrap();
+
+        assert!(root.join(WORKSPACE_MANIFEST_FILE).is_file());
+        assert_eq!(
+            std::fs::read(root.join("existing-artifact")).unwrap(),
+            b"artifact"
+        );
+    }
+
+    #[test]
+    fn trusted_default_cleanup_migrates_then_removes_a_legacy_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("legacy-default-workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("existing-artifact"), b"artifact").unwrap();
+
+        ServiceContainer::stubbed()
+            .clear_workspace_at_with_adoption(&root, true)
+            .unwrap();
+
+        assert!(!root.exists());
+        assert!(parent.path().is_dir());
+    }
+
+    #[test]
+    fn workspace_cleanup_removes_only_a_managed_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+        prepare_managed_workspace_root(&root).unwrap();
+        std::fs::create_dir(root.join("project")).unwrap();
+        std::fs::write(root.join("project/artifact"), b"artifact").unwrap();
+
+        ServiceContainer::stubbed()
+            .clear_workspace_at(&root)
+            .unwrap();
+
+        assert!(!root.exists());
+        assert!(parent.path().is_dir());
+    }
+
+    #[test]
+    fn workspace_cleanup_treats_an_absent_root_as_success() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("missing-workspace");
+
+        ServiceContainer::stubbed()
+            .clear_workspace_at(&root)
+            .unwrap();
+
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn workspace_cleanup_rejects_an_unowned_nonempty_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("unowned-workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("keep-me"), b"unrelated").unwrap();
+
+        let error = ServiceContainer::stubbed()
+            .clear_workspace_at(&root)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ownership manifest"));
+        assert_eq!(std::fs::read(root.join("keep-me")).unwrap(), b"unrelated");
+    }
+
+    #[test]
+    fn workspace_cleanup_rejects_a_manifest_for_another_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let first = parent.path().join("first-workspace");
+        let second = parent.path().join("second-workspace");
+        prepare_managed_workspace_root(&first).unwrap();
+        prepare_managed_workspace_root(&second).unwrap();
+        std::fs::copy(
+            first.join(WORKSPACE_MANIFEST_FILE),
+            second.join(WORKSPACE_MANIFEST_FILE),
+        )
+        .unwrap();
+        std::fs::write(second.join("keep-me"), b"artifact").unwrap();
+
+        let error = ServiceContainer::stubbed()
+            .clear_workspace_at(&second)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("does not identify"));
+        assert!(second.join("keep-me").is_file());
+    }
+
+    #[test]
+    fn workspace_cleanup_rejects_protected_roots() {
+        let container = ServiceContainer::stubbed();
+        let mut protected = vec![std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR)];
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            #[cfg(target_os = "macos")]
+            {
+                let case_alias =
+                    std::path::PathBuf::from(home.to_string_lossy().to_ascii_uppercase());
+                if case_alias.exists() {
+                    protected.push(case_alias);
+                }
+            }
+            protected.push(home);
+        }
+        if let Some(repo) = super::repo_root() {
+            protected.push(repo);
+        }
+        protected.push(crate::init::config_dir());
+        protected.push(crate::config::data_dir());
+
+        for root in protected {
+            if !root.exists() {
+                continue;
+            }
+            let error = container.clear_workspace_at(&root).unwrap_err();
+            assert!(
+                error.to_string().contains("protected path"),
+                "unexpected error for {}: {error}",
+                root.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_cleanup_rejects_a_symlink_root() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("managed-workspace");
+        prepare_managed_workspace_root(&target).unwrap();
+        std::fs::write(target.join("keep-me"), b"artifact").unwrap();
+        let link = parent.path().join("workspace-link");
+        symlink(&target, &link).unwrap();
+
+        let error = ServiceContainer::stubbed()
+            .clear_workspace_at(&link)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(target.join("keep-me").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_cleanup_rejects_a_symlink_manifest() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+        prepare_managed_workspace_root(&root).unwrap();
+        let manifest = root.join(WORKSPACE_MANIFEST_FILE);
+        let contents = std::fs::read(&manifest).unwrap();
+        std::fs::remove_file(&manifest).unwrap();
+        let outside = parent.path().join("outside-manifest");
+        std::fs::write(&outside, contents).unwrap();
+        symlink(&outside, &manifest).unwrap();
+
+        let error = ServiceContainer::stubbed()
+            .clear_workspace_at(&root)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ownership manifest"));
+        assert!(root.is_dir());
+        assert!(outside.is_file());
+    }
+
+    #[test]
+    fn workspace_cleanup_refuses_while_a_run_is_active() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+        prepare_managed_workspace_root(&root).unwrap();
+        std::fs::write(root.join("keep-me"), b"artifact").unwrap();
+        let container = ServiceContainer::stubbed();
+        container.active_runs.lock().unwrap().insert(
+            uuid::Uuid::new_v4(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let error = container.clear_workspace_at(&root).unwrap_err();
+
+        assert!(error.to_string().contains("active fuzz run"));
+        assert!(root.join("keep-me").is_file());
+    }
+
+    #[tokio::test]
+    async fn workspace_cleanup_refuses_while_any_workspace_operation_is_active() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+        prepare_managed_workspace_root(&root).unwrap();
+        std::fs::write(root.join("keep-me"), b"artifact").unwrap();
+        let operation_container = ServiceContainer::stubbed();
+        let cleanup_container = ServiceContainer::stubbed();
+        let operation = operation_container
+            .acquire_workspace_operation_at(&root)
+            .await
+            .unwrap();
+        assert!(
+            operation_container.active_runs.lock().unwrap().is_empty(),
+            "the lease must protect pre-registration staging"
+        );
+
+        let error = cleanup_container.clear_workspace_at(&root).unwrap_err();
+
+        assert!(error.to_string().contains("workspace operation"));
+        assert!(root.join("keep-me").is_file());
+        drop(operation);
+        cleanup_container.clear_workspace_at(&root).unwrap();
+        assert!(!root.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_operations_wait_until_cleanup_releases_the_exclusive_lease() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+        prepare_managed_workspace_root(&root).unwrap();
+        let cleanup = ServiceContainer::try_acquire_workspace_cleanup(&root)
+            .expect("exclusive cleanup lease");
+        let waiting_container = ServiceContainer::stubbed();
+        let (attempting_tx, attempting_rx) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            let _ = attempting_tx.send(());
+            let _operation = waiting_container
+                .acquire_workspace_operation_at(&root)
+                .await
+                .expect("workspace operation lease");
+            tokio::task::yield_now().await;
+        });
+        attempting_rx.await.unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(!waiter.is_finished(), "operation entered during cleanup");
+        drop(cleanup);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("operation should enter after cleanup")
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_file_lease_blocks_cleanup_without_the_process_gate() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("managed-workspace");
+        let root = prepare_managed_workspace_root(&root).unwrap();
+        let operation_file = workspace_lock_file(&root).unwrap();
+        operation_file.try_lock_shared().unwrap();
+
+        let cleanup_file = workspace_lock_file(&root).unwrap();
+        assert!(matches!(
+            cleanup_file.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        drop(cleanup_file);
+        drop(operation_file);
+        workspace_lock_file(&root).unwrap().try_lock().unwrap();
     }
 
     #[test]

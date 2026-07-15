@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { getTransport, useDefectDojo } from "../lib";
-import { usePrefs } from "../providers/PrefsContext";
-import { useRunStatus } from "../providers/RunStatusContext";
+import { usePrefs } from "../providers/prefs";
+import { useRunStatus } from "../providers/runStatus";
 import type { SystemStatus } from "../types";
 import { Container, Box, ShieldCheck } from "lucide-react";
 

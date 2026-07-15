@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { useToast } from "../components/ui/Toast";
-import { useConfirm } from "../providers/ConfirmContext";
+import { useProject } from "../providers/project";
+import { useToast } from "../components/ui/toastContext";
+import { useConfirm } from "../providers/confirm";
 import type { Crash, CorpusEntry } from "../types";
 import { Button, IconButton, Input, ViewHeader, EmptyState, ErrorState, Badge } from "../components/ui";
 import { Bug, Database, RotateCw, FileWarning, Download, Search, Trash2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 export function ArtifactsView() {
   const { activeProject } = useProject();

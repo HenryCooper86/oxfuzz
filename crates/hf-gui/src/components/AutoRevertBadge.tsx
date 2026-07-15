@@ -1,5 +1,5 @@
 import { RotateCcw } from "lucide-react";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 export interface AutoRevertPolicyView {
   enabled: boolean;

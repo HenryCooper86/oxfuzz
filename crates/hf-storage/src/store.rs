@@ -117,6 +117,80 @@ pub struct AutoRevertEvent {
     pub reverted: bool,
 }
 
+/// Lifecycle status of one sandboxed automotive protocol operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomotiveOperationStatus {
+    /// The operation has durable evidence and is executing in the sandbox.
+    Running,
+    /// The operation completed successfully.
+    Done,
+    /// The operation terminated with an error.
+    Failed,
+    /// The operator cancelled the operation.
+    Cancelled,
+}
+
+impl AutomotiveOperationStatus {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Durable evidence record for one automotive protocol operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomotiveOperationRecord {
+    /// Service-owned operation identifier.
+    pub id: Uuid,
+    /// Canonical project root associated with the evidence.
+    pub project_root: String,
+    /// Operation kind such as `analyze_pcap` or `virtual_session`.
+    pub operation: String,
+    /// Execution mode such as `offline_pcap` or `virtual_can`.
+    pub mode: String,
+    /// Primary protocol, when the request selects one.
+    pub protocol: Option<String>,
+    /// Current lifecycle status.
+    pub status: AutomotiveOperationStatus,
+    /// Time execution was durably admitted.
+    pub started_at: DateTime<Utc>,
+    /// Terminal timestamp.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// SHA-256 of the canonical request envelope.
+    pub request_hash: String,
+    /// SHA-256 of the complete sidecar transcript, when available.
+    pub transcript_hash: Option<String>,
+    /// Workspace-relative evidence directory.
+    pub artifact_dir: String,
+    /// Serialized approval evidence for exceptional modes.
+    pub approval_json: Option<String>,
+    /// Serialized domain result including state findings.
+    pub result_json: Option<String>,
+    /// Sanitized terminal failure reason.
+    pub error: Option<String>,
+}
+
+/// One digest-addressed automotive protocol-state corpus promotion.
+///
+/// This evidence is intentionally separate from source-coverage corpus rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomotiveStateCorpusRecord {
+    /// Canonical project root associated with the protocol evidence.
+    pub project_root: String,
+    /// Stable automotive protocol identifier.
+    pub protocol: String,
+    /// Validated protocol-state signature digest.
+    pub state_digest: String,
+    /// SHA-256 of the retained artifact bytes.
+    pub artifact_sha256: String,
+    /// Completed operation that observed the state and retained the source.
+    pub source_operation_id: Uuid,
+    /// Workspace-relative path to the digest-addressed retained copy.
+    pub artifact_path: String,
+    /// Time the first matching promotion was persisted.
+    pub created_at: DateTime<Utc>,
+}
+
 /// A persisted fuzz-run record.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -304,6 +378,268 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // -- automotive operations --------------------------------------------
+
+    /// Insert a newly admitted automotive operation before sandbox launch.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or when the initial status is not
+    /// `Running`.
+    pub async fn insert_automotive_operation(
+        &self,
+        operation: &AutomotiveOperationRecord,
+    ) -> Result<(), StorageError> {
+        if operation.status != AutomotiveOperationStatus::Running || operation.ended_at.is_some() {
+            return Err(StorageError::InvalidData(
+                "a new automotive operation must be running with no end time".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO automotive_operations
+                (id, project_root, operation, mode, protocol, status, started_at, ended_at,
+                 request_hash, transcript_hash, artifact_dir, approval_json, result_json, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )
+        .bind(operation.id.to_string())
+        .bind(&operation.project_root)
+        .bind(&operation.operation)
+        .bind(&operation.mode)
+        .bind(operation.protocol.as_deref())
+        .bind(enum_str(&operation.status))
+        .bind(operation.started_at.to_rfc3339())
+        .bind(operation.ended_at.map(|value| value.to_rfc3339()))
+        .bind(&operation.request_hash)
+        .bind(operation.transcript_hash.as_deref())
+        .bind(&operation.artifact_dir)
+        .bind(operation.approval_json.as_deref())
+        .bind(operation.result_json.as_deref())
+        .bind(operation.error.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark an automotive operation terminal and retain its transcript/result.
+    ///
+    /// # Errors
+    /// Returns an error for a non-terminal status, missing id, or SQL failure.
+    pub async fn complete_automotive_operation(
+        &self,
+        id: Uuid,
+        status: AutomotiveOperationStatus,
+        ended_at: DateTime<Utc>,
+        transcript_hash: Option<&str>,
+        result_json: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if !status.is_terminal() {
+            return Err(StorageError::InvalidData(
+                "automotive operation completion requires a terminal status".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE automotive_operations
+             SET status = ?2, ended_at = ?3, transcript_hash = ?4, result_json = ?5, error = ?6
+             WHERE id = ?1 AND status = 'running'",
+        )
+        .bind(id.to_string())
+        .bind(enum_str(&status))
+        .bind(ended_at.to_rfc3339())
+        .bind(transcript_hash)
+        .bind(result_json)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::NotFound(format!(
+                "running automotive operation {id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Load one automotive operation by id.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn automotive_operation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<AutomotiveOperationRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, project_root, operation, mode, protocol, status, started_at, ended_at,
+                    request_hash, transcript_hash, artifact_dir, approval_json, result_json, error
+             FROM automotive_operations WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(automotive_operation_from_row).transpose()
+    }
+
+    /// List automotive evidence for a project, newest first.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn automotive_operations(
+        &self,
+        project_root: &str,
+        limit: u32,
+    ) -> Result<Vec<AutomotiveOperationRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, project_root, operation, mode, protocol, status, started_at, ended_at,
+                    request_hash, transcript_hash, artifact_dir, approval_json, result_json, error
+             FROM automotive_operations
+             WHERE project_root = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2",
+        )
+        .bind(project_root)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(automotive_operation_from_row).collect()
+    }
+
+    /// Persist a protocol-state corpus promotion or return the existing
+    /// promotion with the same project, protocol, state, and artifact digests.
+    ///
+    /// # Errors
+    /// Returns an error for empty fields, a missing source operation, malformed
+    /// stored data, or a SQL failure.
+    pub async fn record_automotive_state_corpus(
+        &self,
+        record: &AutomotiveStateCorpusRecord,
+    ) -> Result<AutomotiveStateCorpusRecord, StorageError> {
+        for (field, value) in [
+            ("project_root", record.project_root.as_str()),
+            ("protocol", record.protocol.as_str()),
+            ("state_digest", record.state_digest.as_str()),
+            ("artifact_sha256", record.artifact_sha256.as_str()),
+            ("artifact_path", record.artifact_path.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(StorageError::InvalidData(format!(
+                    "automotive state corpus {field} must not be empty"
+                )));
+            }
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let source = sqlx::query(
+            "SELECT project_root, protocol, status
+             FROM automotive_operations WHERE id = ?1",
+        )
+        .bind(record.source_operation_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| {
+            StorageError::NotFound(format!(
+                "automotive source operation {}",
+                record.source_operation_id
+            ))
+        })?;
+        let source_project: String = source.try_get("project_root")?;
+        let source_protocol: Option<String> = source.try_get("protocol")?;
+        let source_status: String = source.try_get("status")?;
+        if source_status != "done" {
+            return Err(StorageError::InvalidData(
+                "automotive state corpus source operation must be completed".to_owned(),
+            ));
+        }
+        if source_project != record.project_root
+            || source_protocol.as_deref() != Some(record.protocol.as_str())
+        {
+            return Err(StorageError::InvalidData(
+                "automotive state corpus source project or protocol does not match".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO automotive_state_corpus
+                (project_root, protocol, state_digest, artifact_sha256,
+                 source_operation_id, artifact_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(project_root, protocol, state_digest, artifact_sha256) DO NOTHING",
+        )
+        .bind(&record.project_root)
+        .bind(&record.protocol)
+        .bind(&record.state_digest)
+        .bind(&record.artifact_sha256)
+        .bind(record.source_operation_id.to_string())
+        .bind(&record.artifact_path)
+        .bind(record.created_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "SELECT project_root, protocol, state_digest, artifact_sha256,
+                    source_operation_id, artifact_path, created_at
+             FROM automotive_state_corpus
+             WHERE project_root = ?1 AND protocol = ?2
+               AND state_digest = ?3 AND artifact_sha256 = ?4",
+        )
+        .bind(&record.project_root)
+        .bind(&record.protocol)
+        .bind(&record.state_digest)
+        .bind(&record.artifact_sha256)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let persisted = automotive_state_corpus_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(persisted)
+    }
+
+    /// Load one exact automotive protocol-state corpus promotion.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn automotive_state_corpus_entry(
+        &self,
+        project_root: &str,
+        protocol: &str,
+        state_digest: &str,
+        artifact_sha256: &str,
+    ) -> Result<Option<AutomotiveStateCorpusRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT project_root, protocol, state_digest, artifact_sha256,
+                    source_operation_id, artifact_path, created_at
+             FROM automotive_state_corpus
+             WHERE project_root = ?1 AND protocol = ?2
+               AND state_digest = ?3 AND artifact_sha256 = ?4",
+        )
+        .bind(project_root)
+        .bind(protocol)
+        .bind(state_digest)
+        .bind(artifact_sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref()
+            .map(automotive_state_corpus_from_row)
+            .transpose()
+    }
+
+    /// List retained automotive state-corpus evidence for one project, newest
+    /// first.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn automotive_state_corpus(
+        &self,
+        project_root: &str,
+        limit: u32,
+    ) -> Result<Vec<AutomotiveStateCorpusRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT project_root, protocol, state_digest, artifact_sha256,
+                    source_operation_id, artifact_path, created_at
+             FROM automotive_state_corpus
+             WHERE project_root = ?1
+             ORDER BY created_at DESC, protocol ASC, state_digest ASC, artifact_sha256 ASC
+             LIMIT ?2",
+        )
+        .bind(project_root)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(automotive_state_corpus_from_row).collect()
     }
 
     /// Record a finished run's peak coverage (edges), throughput (execs/sec),
@@ -1435,6 +1771,53 @@ fn enum_str<T: Serialize>(v: &T) -> String {
         .ok()
         .and_then(|val| val.as_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+fn automotive_operation_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<AutomotiveOperationRecord, StorageError> {
+    let id = Uuid::parse_str(&row.try_get::<String, _>("id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let status = serde_json::from_value(serde_json::Value::String(row.try_get("status")?))?;
+    let started_at = ts(&row.try_get::<String, _>("started_at")?)?;
+    let ended_at = row
+        .try_get::<Option<String>, _>("ended_at")?
+        .as_deref()
+        .map(ts)
+        .transpose()?;
+    Ok(AutomotiveOperationRecord {
+        id,
+        project_root: row.try_get("project_root")?,
+        operation: row.try_get("operation")?,
+        mode: row.try_get("mode")?,
+        protocol: row.try_get("protocol")?,
+        status,
+        started_at,
+        ended_at,
+        request_hash: row.try_get("request_hash")?,
+        transcript_hash: row.try_get("transcript_hash")?,
+        artifact_dir: row.try_get("artifact_dir")?,
+        approval_json: row.try_get("approval_json")?,
+        result_json: row.try_get("result_json")?,
+        error: row.try_get("error")?,
+    })
+}
+
+fn automotive_state_corpus_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<AutomotiveStateCorpusRecord, StorageError> {
+    let source_operation_id = Uuid::parse_str(&row.try_get::<String, _>("source_operation_id")?)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let created_at = ts(&row.try_get::<String, _>("created_at")?)?;
+    Ok(AutomotiveStateCorpusRecord {
+        project_root: row.try_get("project_root")?,
+        protocol: row.try_get("protocol")?,
+        state_digest: row.try_get("state_digest")?,
+        artifact_sha256: row.try_get("artifact_sha256")?,
+        source_operation_id,
+        artifact_path: row.try_get("artifact_path")?,
+        created_at,
+    })
 }
 
 /// Decode a JSON-text column into a model.

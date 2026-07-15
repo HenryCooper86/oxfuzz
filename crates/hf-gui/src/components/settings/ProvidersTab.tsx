@@ -16,7 +16,8 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { getTransport } from "../../lib";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
+import { isSecretHeaderName } from "../../lib/secretFields";
 import { normalizeProvider, type Provider } from "./providerTypes";
 
 export type { Provider } from "./providerTypes";
@@ -213,8 +214,18 @@ function HeadersEditor({
     <div className="flex flex-col gap-1.5">
       {entries.map(([k, v], i) => (
         <div key={i} className="flex items-center gap-1.5">
-          <Input className="w-[150px]" value={k} onChange={(e) => setKey(k, e.target.value)} placeholder={t("settings.providers.headerName")} mono />
-          <Input className="w-[180px]" value={v} onChange={(e) => setVal(k, e.target.value)} placeholder={t("settings.providers.headerValue")} mono />
+          <Input aria-label={t("settings.providers.headerName")} className="w-[150px]" value={k} onChange={(e) => setKey(k, e.target.value)} placeholder={t("settings.providers.headerName")} mono />
+          <Input
+            aria-label={t("settings.providers.headerValue")}
+            autoComplete={isSecretHeaderName(k) ? "new-password" : undefined}
+            className="w-[180px]"
+            type={isSecretHeaderName(k) ? "password" : "text"}
+            value={v}
+            onChange={(e) => setVal(k, e.target.value)}
+            placeholder={t("settings.providers.headerValue")}
+            spellCheck={isSecretHeaderName(k) ? false : undefined}
+            mono
+          />
           <Button variant="icon" size="sm" onClick={() => removeKey(k)} title={t("settings.providers.removeHeader")} aria-label={t("settings.providers.removeHeader")}>
             <Trash2 size={13} />
           </Button>
@@ -312,9 +323,12 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
         <SettingsItem title={t("settings.providers.baseUrl")}>
           <Input className="w-[260px]" value={provider.base_url ?? ""} onChange={(e) => onChange({ base_url: e.target.value || null })} placeholder={BASE_URL_PLACEHOLDERS[provider.provider_type] ?? "Default"} mono />
         </SettingsItem>
-        <SettingsItem title={t("settings.providers.apiKey")}>
+        <SettingsItem
+          title={t("settings.providers.apiKey")}
+          description={provider.api_key_configured && !provider.api_key ? t("settings.providers.hiddenValuePreserved") : undefined}
+        >
           <div className="relative w-[260px]">
-            <Input className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder={t("settings.providers.directKeyOptional")} />
+            <Input autoComplete="new-password" className="pr-8" type={showKey ? "text" : "password"} value={provider.api_key ?? ""} onChange={(e) => onChange({ api_key: e.target.value || null })} placeholder={provider.api_key_configured && !provider.api_key ? t("settings.providers.configuredUnchanged") : t("settings.providers.directKeyOptional")} spellCheck={false} />
             <button
               type="button"
               onClick={() => setShowKey((s) => !s)}
@@ -327,8 +341,11 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
             </button>
           </div>
         </SettingsItem>
-        <SettingsItem title={t("settings.providers.apiKeyEnv")}>
-          <Input className="w-[260px]" value={provider.api_key_env ?? ""} onChange={(e) => onChange({ api_key_env: e.target.value || null })} placeholder="e.g. OPENAI_API_KEY" mono />
+        <SettingsItem
+          title={t("settings.providers.apiKeyEnv")}
+          description={provider.api_key_env_configured && !provider.api_key_env ? t("settings.providers.hiddenValuePreserved") : undefined}
+        >
+          <Input className="w-[260px]" value={provider.api_key_env ?? ""} onChange={(e) => onChange({ api_key_env: e.target.value || null })} placeholder={provider.api_key_env_configured && !provider.api_key_env ? t("settings.providers.configuredUnchanged") : "e.g. OPENAI_API_KEY"} mono />
         </SettingsItem>
         <SettingsItem title={t("settings.providers.httpProtocol")}>
           <Select
@@ -378,7 +395,12 @@ function ProviderForm({ provider, onChange }: { provider: Provider; onChange: (p
       )}
 
       <SettingsGroup title={t("settings.providers.httpHeaders")}>
-        <SettingsItem title={t("settings.providers.customHeaders")} description={t("settings.providers.customHeadersDesc")}>
+        <SettingsItem
+          title={t("settings.providers.customHeaders")}
+          description={provider.headers_configured && Object.keys(provider.headers).length === 0
+            ? t("settings.providers.hiddenHeadersPreserved")
+            : t("settings.providers.customHeadersDesc")}
+        >
           <HeadersEditor headers={provider.headers} onChange={(h) => onChange({ headers: h })} />
         </SettingsItem>
       </SettingsGroup>

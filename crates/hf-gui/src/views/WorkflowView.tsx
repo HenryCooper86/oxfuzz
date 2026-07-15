@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Check, Minus, Crosshair, FileCode, Play, Bug, Database, FolderOpen } from "lucide-react";
 import { pickFolder } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { usePipeline } from "../providers/PipelineContext";
+import { useProject } from "../providers/project";
+import { usePipeline } from "../providers/pipeline";
 import type { ViewType } from "../types";
 import { DiscoverView } from "./DiscoverView";
 import { HarnessView } from "./HarnessView";
@@ -10,7 +10,7 @@ import { RunView } from "./RunView";
 import { TriageView } from "./TriageView";
 import { CorpusView } from "./CorpusView";
 import { ViewHeader, Button } from "../components/ui";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 // A unified, connected fuzzing flow: choose a project, then Discover -> Harness
 // -> Run -> Triage as one stacked accordion (no jumping between sidebar pages).

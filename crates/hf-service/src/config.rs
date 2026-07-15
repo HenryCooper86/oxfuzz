@@ -7,10 +7,13 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 
 use crate::init::config_dir;
+
+use hf_core::engine::EngineKind;
 
 /// The editable config sections consumed by the production service.
 ///
@@ -96,6 +99,562 @@ impl KnowledgeRuntimeConfig {
     }
 }
 
+/// Resource limits applied to harness-based fuzzing campaigns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FuzzingSandboxSettings {
+    /// Memory available to the fuzzer container, in MiB.
+    pub max_mem_mb: u64,
+    /// CPU cores available to the fuzzer container.
+    pub max_cpus: u32,
+    /// Largest campaign duration an operator may request.
+    pub max_duration_secs: u64,
+}
+
+impl Default for FuzzingSandboxSettings {
+    fn default() -> Self {
+        Self {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 7200,
+        }
+    }
+}
+
+/// Global operator policy for fuzzing engines and campaign defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FuzzingSettings {
+    /// Canonical engine ids permitted for new harness work and campaigns.
+    pub enabled_engines: Vec<String>,
+    /// Canonical engine id selected when a client does not provide one.
+    pub default_engine: String,
+    /// Campaign duration selected when a client does not provide one.
+    pub default_duration_secs: u64,
+    /// Sandboxed resource limits for harness-based campaigns.
+    pub sandbox: FuzzingSandboxSettings,
+}
+
+impl Default for FuzzingSettings {
+    fn default() -> Self {
+        Self {
+            enabled_engines: all_engine_ids(),
+            default_engine: EngineKind::LibFuzzer.as_str().to_owned(),
+            default_duration_secs: 60,
+            sandbox: FuzzingSandboxSettings::default(),
+        }
+    }
+}
+
+/// One immutable policy snapshot resolved before a fuzz run starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedFuzzingRun {
+    /// Engine approved by the current operator policy.
+    pub engine: EngineKind,
+    /// Validated requested or default duration.
+    pub duration_secs: u64,
+    /// Memory copied into the persisted run configuration.
+    pub max_mem_mb: u64,
+    /// CPU limit copied into the persisted run configuration.
+    pub max_cpus: u32,
+}
+
+/// Resource and evidence ceilings for one automotive sidecar operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutomotiveLimitSettings {
+    /// Maximum decoded, generated, or replayed packet events.
+    pub max_packets: u32,
+    /// Maximum immutable capture or seed artifact bytes accepted for staging.
+    pub max_input_bytes: u64,
+    /// Maximum aggregate payload bytes accepted from the sidecar.
+    pub max_payload_bytes: u64,
+    /// Maximum wall-clock duration.
+    pub max_duration_secs: u64,
+    /// Maximum transmitted events per second for virtual or physical modes.
+    pub max_rate_per_second: u32,
+    /// Maximum aggregate evidence bytes written by the operation.
+    pub max_output_bytes: u64,
+    /// Container memory ceiling in MiB.
+    pub max_mem_mb: u64,
+    /// Container CPU ceiling.
+    pub max_cpus: u32,
+}
+
+impl Default for AutomotiveLimitSettings {
+    fn default() -> Self {
+        Self {
+            max_packets: 10_000,
+            max_input_bytes: 64 * 1024 * 1024,
+            max_payload_bytes: 1024 * 1024,
+            max_duration_secs: 300,
+            max_rate_per_second: 100,
+            max_output_bytes: 64 * 1024 * 1024,
+            max_mem_mb: 1024,
+            max_cpus: 1,
+        }
+    }
+}
+
+/// Exceptional physical-bench policy. It is disabled and empty by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutomotivePhysicalBenchSettings {
+    /// Whether any physical interface may be exposed to the sandbox.
+    pub enabled: bool,
+    /// Mandatory human approval for every operation; must remain true.
+    pub require_approval: bool,
+    /// Exact host interface names eligible for approval.
+    pub interfaces: Vec<String>,
+    /// Exact standard or extended CAN arbitration ids eligible for use.
+    pub arbitration_ids: Vec<u32>,
+    /// UDS service ids eligible for use after the fixed dangerous denylist.
+    pub uds_services: Vec<u8>,
+    /// Permit a separately approved request to use a dangerous UDS service.
+    pub allow_dangerous_services: bool,
+}
+
+impl Default for AutomotivePhysicalBenchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_approval: true,
+            interfaces: Vec::new(),
+            arbitration_ids: Vec::new(),
+            uds_services: Vec::new(),
+            allow_dangerous_services: false,
+        }
+    }
+}
+
+/// Global operator policy for the optional Scapy automotive subsystem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutomotiveSettings {
+    /// Runtime switch independent of the compile-time feature.
+    pub enabled: bool,
+    /// Pinned sandbox image containing the sidecar and Scapy.
+    pub sidecar_image: String,
+    /// Canonical protocol ids the service may admit.
+    pub allowed_protocols: Vec<String>,
+    /// Canonical execution mode ids the service may admit.
+    pub allowed_modes: Vec<String>,
+    /// Exact isolated vcan interfaces eligible for virtual sessions.
+    pub virtual_interfaces: Vec<String>,
+    /// Resource and evidence ceilings.
+    pub limits: AutomotiveLimitSettings,
+    /// Additional policy for physical interfaces.
+    pub physical_bench: AutomotivePhysicalBenchSettings,
+}
+
+impl Default for AutomotiveSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sidecar_image: "hobot/scapy-automotive:2.7.0".to_owned(),
+            allowed_protocols: AUTOMOTIVE_PROTOCOL_IDS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            allowed_modes: vec!["offline_pcap".to_owned(), "virtual_can".to_owned()],
+            virtual_interfaces: vec!["vcan0".to_owned()],
+            limits: AutomotiveLimitSettings::default(),
+            physical_bench: AutomotivePhysicalBenchSettings::default(),
+        }
+    }
+}
+
+const AUTOMOTIVE_PROTOCOL_IDS: &[&str] = &[
+    "can",
+    "can_fd",
+    "iso_tp",
+    "uds",
+    "gmlan",
+    "some_ip",
+    "some_ip_sd",
+    "do_ip",
+    "obd",
+    "ccp",
+    "xcp",
+    "bmw_hsfz",
+    "sec_oc",
+];
+const AUTOMOTIVE_MODE_IDS: &[&str] = &["offline_pcap", "virtual_can", "physical_bench"];
+
+impl AutomotiveSettings {
+    fn validate_unique_ids(values: &[String], allowed: &[&str], field: &str) -> Result<(), String> {
+        if values.is_empty() {
+            return Err(format!("automotive.{field} must not be empty"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for value in values {
+            if !allowed.contains(&value.as_str()) {
+                return Err(format!("automotive.{field} contains unknown id '{value}'"));
+            }
+            if !seen.insert(value) {
+                return Err(format!(
+                    "automotive.{field} contains duplicate id '{value}'"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_interface(interface: &str) -> bool {
+        !interface.is_empty()
+            && interface.len() <= 15
+            && interface
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    }
+
+    fn validate_virtual_interface(interface: &str) -> bool {
+        interface.strip_prefix("vcan").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix.len() <= 3
+                && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }
+
+    fn validate_pinned_image(image: &str) -> bool {
+        if image.is_empty()
+            || image.len() > 256
+            || image.chars().any(char::is_whitespace)
+            || image
+                .chars()
+                .any(|character| matches!(character, '\0' | '\n' | '\r'))
+        {
+            return false;
+        }
+        if let Some((_, digest)) = image.rsplit_once("@sha256:") {
+            return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+        }
+        image
+            .rsplit_once(':')
+            .is_some_and(|(_, tag)| !tag.is_empty() && tag != "latest" && !tag.contains('/'))
+    }
+
+    /// Validate the persisted operator policy without widening unsafe values.
+    ///
+    /// # Errors
+    /// Returns a field-specific error for an invalid image, protocol, mode,
+    /// interface, physical policy, or resource ceiling.
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::validate_pinned_image(&self.sidecar_image) {
+            return Err(
+                "automotive.sidecar_image must be a pinned tag or sha256 digest".to_owned(),
+            );
+        }
+        Self::validate_unique_ids(
+            &self.allowed_protocols,
+            AUTOMOTIVE_PROTOCOL_IDS,
+            "allowed_protocols",
+        )?;
+        Self::validate_unique_ids(&self.allowed_modes, AUTOMOTIVE_MODE_IDS, "allowed_modes")?;
+        if self.virtual_interfaces.is_empty()
+            || self
+                .virtual_interfaces
+                .iter()
+                .any(|interface| !Self::validate_virtual_interface(interface))
+        {
+            return Err(
+                "automotive.virtual_interfaces must contain only vcanN interfaces".to_owned(),
+            );
+        }
+        let unique_virtual_interfaces = self
+            .virtual_interfaces
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        if unique_virtual_interfaces.len() != self.virtual_interfaces.len() {
+            return Err("automotive.virtual_interfaces contains a duplicate interface".to_owned());
+        }
+        let limits = &self.limits;
+        if limits.max_packets == 0 || limits.max_packets > 1_000_000 {
+            return Err("automotive.limits.max_packets must be within 1..=1000000".to_owned());
+        }
+        if limits.max_input_bytes == 0 || limits.max_input_bytes > 1024 * 1024 * 1024 {
+            return Err(
+                "automotive.limits.max_input_bytes must be within 1..=1073741824".to_owned(),
+            );
+        }
+        if limits.max_payload_bytes == 0 || limits.max_payload_bytes > 1024 * 1024 {
+            return Err(
+                "automotive.limits.max_payload_bytes must be within 1..=1048576".to_owned(),
+            );
+        }
+        if limits.max_duration_secs == 0 || limits.max_duration_secs > 3600 {
+            return Err("automotive.limits.max_duration_secs must be within 1..=3600".to_owned());
+        }
+        if limits.max_rate_per_second == 0 || limits.max_rate_per_second > 10_000 {
+            return Err(
+                "automotive.limits.max_rate_per_second must be within 1..=10000".to_owned(),
+            );
+        }
+        if limits.max_output_bytes == 0 || limits.max_output_bytes > 512 * 1024 * 1024 {
+            return Err(
+                "automotive.limits.max_output_bytes must be within 1..=536870912".to_owned(),
+            );
+        }
+        if limits.max_mem_mb == 0 || limits.max_mem_mb > 8192 {
+            return Err("automotive.limits.max_mem_mb must be within 1..=8192".to_owned());
+        }
+        if limits.max_cpus == 0 || limits.max_cpus > 8 {
+            return Err("automotive.limits.max_cpus must be within 1..=8".to_owned());
+        }
+        let mode_caps = [
+            ("offline_pcap", 100_000_u32, 3_600_u64, 100_000_u32),
+            ("virtual_can", 10_000, 3_600, 1_000),
+            ("physical_bench", 1_000, 300, 100),
+        ];
+        for (mode, max_packets, max_duration_secs, max_rate_per_second) in mode_caps {
+            if !self.allowed_modes.iter().any(|allowed| allowed == mode) {
+                continue;
+            }
+            if limits.max_packets > max_packets
+                || limits.max_duration_secs > max_duration_secs
+                || limits.max_rate_per_second > max_rate_per_second
+            {
+                return Err(format!(
+                    "automotive limits exceed the pinned {mode} adapter profile"
+                ));
+            }
+        }
+        let physical = &self.physical_bench;
+        let physical_mode_allowed = self
+            .allowed_modes
+            .iter()
+            .any(|mode_| mode_ == "physical_bench");
+        if physical.enabled {
+            if !physical_mode_allowed {
+                return Err(
+                    "automotive physical bench requires physical_bench in allowed_modes".to_owned(),
+                );
+            }
+            if !physical.require_approval {
+                return Err("automotive physical bench approval is mandatory".to_owned());
+            }
+            if physical.interfaces.is_empty()
+                || physical
+                    .interfaces
+                    .iter()
+                    .any(|interface| !Self::validate_interface(interface))
+            {
+                return Err(
+                    "automotive.physical_bench.interfaces must contain valid interfaces".to_owned(),
+                );
+            }
+            let unique_interfaces = physical
+                .interfaces
+                .iter()
+                .collect::<std::collections::HashSet<_>>();
+            if unique_interfaces.len() != physical.interfaces.len() {
+                return Err("automotive.physical_bench.interfaces contains a duplicate".to_owned());
+            }
+        } else if physical_mode_allowed {
+            return Err(
+                "automotive.allowed_modes cannot enable physical_bench while its policy is disabled"
+                    .to_owned(),
+            );
+        }
+        if physical.arbitration_ids.iter().any(|id| *id > 0x1fff_ffff) {
+            return Err(
+                "automotive.physical_bench.arbitration_ids contains an out-of-range id".to_owned(),
+            );
+        }
+        if physical
+            .arbitration_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != physical.arbitration_ids.len()
+            || physical
+                .uds_services
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != physical.uds_services.len()
+        {
+            return Err("automotive physical allowlists contain a duplicate".to_owned());
+        }
+        Ok(())
+    }
+}
+
+const HARD_MAX_FUZZ_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
+const HARD_MAX_FUZZ_MEMORY_MB: u64 = 64 * 1024;
+const HARD_MAX_FUZZ_CPUS: u32 = 64;
+
+fn all_engines() -> [EngineKind; 5] {
+    [
+        EngineKind::LibFuzzer,
+        EngineKind::AflPlusPlus,
+        EngineKind::Honggfuzz,
+        EngineKind::ClusterFuzzLite,
+        EngineKind::Syzkaller,
+    ]
+}
+
+fn all_engine_ids() -> Vec<String> {
+    all_engines()
+        .into_iter()
+        .map(|engine| engine.as_str().to_owned())
+        .collect()
+}
+
+fn canonical_engine(value: &str) -> Result<EngineKind, String> {
+    let trimmed = value.trim();
+    let engine = trimmed.parse::<EngineKind>()?;
+    if trimmed != engine.as_str() {
+        return Err(format!(
+            "fuzzing engine id '{value}' is not canonical; use '{}'",
+            engine.as_str()
+        ));
+    }
+    Ok(engine)
+}
+
+impl FuzzingSettings {
+    fn enabled_engine_set(&self) -> Result<std::collections::HashSet<EngineKind>, String> {
+        let mut enabled = std::collections::HashSet::new();
+        for value in &self.enabled_engines {
+            let engine = canonical_engine(value)?;
+            if !enabled.insert(engine) {
+                return Err(format!(
+                    "fuzzing.enabled_engines contains duplicate engine '{}'",
+                    engine.as_str()
+                ));
+            }
+        }
+        if enabled.is_empty() {
+            return Err("fuzzing.enabled_engines must contain at least one engine".to_owned());
+        }
+        Ok(enabled)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let enabled = self.enabled_engine_set()?;
+        let default_engine = canonical_engine(&self.default_engine)?;
+        if !enabled.contains(&default_engine) {
+            return Err("fuzzing.default_engine must be enabled".to_owned());
+        }
+        if self.default_duration_secs == 0 {
+            return Err("fuzzing.default_duration_secs must be greater than zero".to_owned());
+        }
+        if self.sandbox.max_duration_secs == 0
+            || self.sandbox.max_duration_secs > HARD_MAX_FUZZ_DURATION_SECS
+        {
+            return Err(format!(
+                "fuzzing.sandbox.max_duration_secs must be within 1..={HARD_MAX_FUZZ_DURATION_SECS}"
+            ));
+        }
+        if self.default_duration_secs > self.sandbox.max_duration_secs {
+            return Err(
+                "fuzzing.default_duration_secs cannot exceed sandbox.max_duration_secs".to_owned(),
+            );
+        }
+        if self.sandbox.max_mem_mb == 0 || self.sandbox.max_mem_mb > HARD_MAX_FUZZ_MEMORY_MB {
+            return Err(format!(
+                "fuzzing.sandbox.max_mem_mb must be within 1..={HARD_MAX_FUZZ_MEMORY_MB}"
+            ));
+        }
+        if self.sandbox.max_cpus == 0 || self.sandbox.max_cpus > HARD_MAX_FUZZ_CPUS {
+            return Err(format!(
+                "fuzzing.sandbox.max_cpus must be within 1..={HARD_MAX_FUZZ_CPUS}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve a requested engine and duration against this policy.
+    ///
+    /// # Errors
+    /// Returns an error when the policy is invalid, the engine is disabled, or
+    /// the duration is zero or above the configured ceiling.
+    pub fn resolve(
+        &self,
+        engine: Option<EngineKind>,
+        duration_secs: Option<u64>,
+    ) -> Result<ResolvedFuzzingRun, String> {
+        self.validate()?;
+        let enabled = self.enabled_engine_set()?;
+        let engine = match engine {
+            Some(engine) => engine,
+            None => canonical_engine(&self.default_engine)?,
+        };
+        if !enabled.contains(&engine) {
+            return Err(format!(
+                "fuzzing engine '{}' is disabled in Settings",
+                engine.as_str()
+            ));
+        }
+        let duration_secs = duration_secs.unwrap_or(self.default_duration_secs);
+        if duration_secs == 0 {
+            return Err("fuzzing duration must be greater than zero".to_owned());
+        }
+        if duration_secs > self.sandbox.max_duration_secs {
+            return Err(format!(
+                "fuzzing duration {duration_secs}s exceeds the configured maximum of {}s",
+                self.sandbox.max_duration_secs
+            ));
+        }
+        Ok(ResolvedFuzzingRun {
+            engine,
+            duration_secs,
+            max_mem_mb: self.sandbox.max_mem_mb,
+            max_cpus: self.sandbox.max_cpus,
+        })
+    }
+
+    /// Check that an engine is enabled without resolving run-specific values.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid policy or a disabled engine.
+    pub fn require_engine(&self, engine: EngineKind) -> Result<(), String> {
+        self.resolve(Some(engine), None).map(|_| ())
+    }
+
+    /// Resolve an enabled engine that can build a harness for `language`.
+    ///
+    /// An explicit request is never substituted. When the global default is a
+    /// kernel-only engine, an omitted request falls through to the first
+    /// enabled engine that supports the target language.
+    ///
+    /// # Errors
+    /// Returns an error for invalid policy, a disabled or incompatible explicit
+    /// engine, or when no enabled engine supports the requested language.
+    pub fn resolve_harness_engine(
+        &self,
+        engine: Option<EngineKind>,
+        language: hf_core::target::TargetLanguage,
+    ) -> Result<EngineKind, String> {
+        self.validate()?;
+        if let Some(engine) = engine {
+            self.require_engine(engine)?;
+            if engine.supports_language(language) {
+                return Ok(engine);
+            }
+            return Err(format!(
+                "{language:?} harnesses are not supported by fuzzing engine '{}'",
+                engine.as_str()
+            ));
+        }
+
+        let default_engine = canonical_engine(&self.default_engine)?;
+        if default_engine.supports_language(language) {
+            return Ok(default_engine);
+        }
+        for value in &self.enabled_engines {
+            let candidate = canonical_engine(value)?;
+            if candidate.supports_language(language) {
+                return Ok(candidate);
+            }
+        }
+        Err(format!(
+            "no enabled fuzzing engine supports {language:?} harnesses"
+        ))
+    }
+}
+
 /// Typed global settings whose values are consumed during service bootstrap.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -104,6 +663,8 @@ struct HobotFuzzRuntimeConfig {
     auto_revert_enabled: bool,
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
+    fuzzing: FuzzingSettings,
+    automotive: AutomotiveSettings,
     knowledge: KnowledgeRuntimeConfig,
     session: hf_session::SessionConfig,
     scheduler: hf_scheduler::SchedulerConfig,
@@ -116,6 +677,8 @@ impl Default for HobotFuzzRuntimeConfig {
             auto_revert_enabled: false,
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
+            fuzzing: FuzzingSettings::default(),
+            automotive: AutomotiveSettings::default(),
             knowledge: KnowledgeRuntimeConfig::default(),
             session: hf_session::SessionConfig::default(),
             scheduler: hf_scheduler::SchedulerConfig::default(),
@@ -128,6 +691,8 @@ impl HobotFuzzRuntimeConfig {
         if !valid_auto_revert_threshold(self.auto_revert_threshold_pct) {
             return Err("auto_revert_threshold_pct must be within (0, 100]".to_owned());
         }
+        self.fuzzing.validate()?;
+        self.automotive.validate()?;
         self.knowledge.validate()?;
         if self.session.max_depth == 0 {
             return Err("session.max_depth must be greater than zero".to_owned());
@@ -175,6 +740,52 @@ pub fn effective_scheduler_config() -> hf_scheduler::SchedulerConfig {
     effective_runtime_config().scheduler
 }
 
+/// Read and validate the operator fuzzing policy for the next operation.
+///
+/// This intentionally reads the atomic config file for every preflight, so a
+/// Settings save affects the next harness or run without restarting the app.
+/// An invalid manually-edited policy fails closed instead of widening back to
+/// permissive defaults.
+///
+/// # Errors
+/// Returns an error when the global config cannot be read or validated.
+pub fn effective_fuzzing_settings() -> Result<FuzzingSettings, String> {
+    let raw = read_config("hobot-fuzz")?;
+    Ok(parse_hobot_fuzz_runtime_config(&raw)?.fuzzing)
+}
+
+/// Read and validate the automotive sidecar policy for the next operation.
+///
+/// # Errors
+/// Returns an error when the global config cannot be read or validated.
+pub fn effective_automotive_settings() -> Result<AutomotiveSettings, String> {
+    let raw = read_config("hobot-fuzz")?;
+    Ok(parse_hobot_fuzz_runtime_config(&raw)?.automotive)
+}
+
+/// Resolve the next fuzz run from the current persisted operator policy.
+///
+/// # Errors
+/// Returns an error for an invalid policy, disabled engine, or invalid duration.
+pub fn resolve_fuzzing_run(
+    engine: Option<EngineKind>,
+    duration_secs: Option<u64>,
+) -> Result<ResolvedFuzzingRun, String> {
+    effective_fuzzing_settings()?.resolve(engine, duration_secs)
+}
+
+/// Resolve an enabled user-space harness engine for the target language.
+///
+/// # Errors
+/// Returns an error for invalid policy or when the requested language has no
+/// compatible enabled engine.
+pub fn resolve_harness_engine(
+    engine: Option<EngineKind>,
+    language: hf_core::target::TargetLanguage,
+) -> Result<EngineKind, String> {
+    effective_fuzzing_settings()?.resolve_harness_engine(engine, language)
+}
+
 /// One editable config section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigSection {
@@ -209,6 +820,838 @@ pub struct ModelInfo {
 /// The provider form struct surfaced to / received from the GUI is the full
 /// pool [`hf_provider::ProviderConfig`] (every field round-trips 1:1).
 pub use hf_provider::ProviderConfig;
+
+/// An explicit update for a value omitted from public browser config DTOs.
+///
+/// Omitting the containing patch field preserves the stored value. `Clear` and
+/// `Replace` make destructive or secret-bearing changes explicit instead of
+/// overloading an empty/redacted browser value.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigValuePatch<T> {
+    /// Replace the stored value with the supplied value.
+    Replace {
+        /// The new value.
+        value: T,
+    },
+    /// Remove the stored value.
+    Clear,
+}
+
+/// Public state for a string that may contain a protected host path.
+///
+/// Safe values remain visible for operator context. Absolute paths and
+/// redaction markers are represented by `configured = true` with no value, so
+/// presentations can preserve, explicitly replace, or explicitly clear them
+/// without round-tripping a placeholder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublicConfigString {
+    /// Whether the underlying value is non-empty, including when it is hidden.
+    pub configured: bool,
+    /// The value when it is safe to expose.
+    pub value: Option<String>,
+}
+
+/// Browser-safe view of `DefectDojo` lifecycle settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DefectDojoPublicLifecycle {
+    /// Start a managed local `DefectDojo` installation on app launch.
+    pub autostart: bool,
+    /// Docker Compose project override, with host paths kept opaque.
+    pub compose_project: PublicConfigString,
+    /// Whether one or more hidden compose file paths are configured.
+    pub compose_files_configured: bool,
+    /// Readiness wait timeout, when overridden.
+    pub startup_timeout_secs: Option<u64>,
+}
+
+/// Configured-state flags for protected `DefectDojo` credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DefectDojoPublicCredentialState {
+    /// Whether a direct token is stored.
+    pub api_token_configured: bool,
+    /// Whether a secret environment-variable name is stored.
+    pub api_token_env_configured: bool,
+}
+
+/// Browser-safe `DefectDojo` transport and import policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DefectDojoPublicPolicy {
+    /// Whether the server certificate is verified.
+    pub verify_tls: bool,
+    /// Whether missing `DefectDojo` objects may be created.
+    pub auto_create: bool,
+    /// Whether repeat uploads use reimport semantics.
+    pub reimport: bool,
+}
+
+/// Browser-safe `DefectDojo` settings.
+///
+/// Secret values, secret environment-variable names, and compose paths are
+/// represented only by configured-state booleans.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DefectDojoPublicConfig {
+    /// Base URL of the `DefectDojo` instance.
+    pub url: String,
+    /// Protected credential state, flattened to preserve the public JSON schema.
+    #[serde(flatten)]
+    pub credentials: DefectDojoPublicCredentialState,
+    /// Product override.
+    pub product_name: Option<String>,
+    /// Product-type override.
+    pub product_type_name: Option<String>,
+    /// Engagement override.
+    pub engagement_name: Option<String>,
+    /// Transport and import behavior, flattened to preserve the public JSON schema.
+    #[serde(flatten)]
+    pub policy: DefectDojoPublicPolicy,
+    /// Browser-safe lifecycle settings.
+    pub lifecycle: DefectDojoPublicLifecycle,
+}
+
+impl From<&crate::defectdojo::DefectDojoConfig> for DefectDojoPublicConfig {
+    fn from(config: &crate::defectdojo::DefectDojoConfig) -> Self {
+        Self {
+            url: browser_safe_url(&config.url),
+            credentials: DefectDojoPublicCredentialState {
+                api_token_configured: config
+                    .api_token
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                api_token_env_configured: !config.api_token_env.trim().is_empty(),
+            },
+            product_name: config.product_name.clone(),
+            product_type_name: config.product_type_name.clone(),
+            engagement_name: config.engagement_name.clone(),
+            policy: DefectDojoPublicPolicy {
+                verify_tls: config.verify_tls,
+                auto_create: config.auto_create,
+                reimport: config.reimport,
+            },
+            lifecycle: DefectDojoPublicLifecycle {
+                autostart: config.lifecycle.autostart,
+                compose_project: public_config_string(config.lifecycle.compose_project.as_deref()),
+                compose_files_configured: !config.lifecycle.compose_files.is_empty(),
+                startup_timeout_secs: config.lifecycle.startup_timeout_secs,
+            },
+        }
+    }
+}
+
+/// Typed `DefectDojo` lifecycle patch accepted at the browser boundary.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DefectDojoLifecyclePatch {
+    /// Change autostart; omission preserves it.
+    pub autostart: Option<bool>,
+    /// Replace or clear the optional Compose project name.
+    pub compose_project: Option<ConfigValuePatch<String>>,
+    /// Explicitly replace or clear the protected compose file paths.
+    pub compose_files: Option<ConfigValuePatch<Vec<String>>>,
+    /// Replace or clear the optional readiness timeout.
+    pub startup_timeout_secs: Option<ConfigValuePatch<u64>>,
+}
+
+/// Typed `DefectDojo` patch accepted at the browser boundary.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DefectDojoConfigPatch {
+    /// Replace the `DefectDojo` base URL.
+    pub url: Option<String>,
+    /// Explicitly replace or clear the direct token.
+    pub api_token: Option<ConfigValuePatch<String>>,
+    /// Explicitly replace or clear the protected secret environment name.
+    pub api_token_env: Option<ConfigValuePatch<String>>,
+    /// Change TLS verification.
+    pub verify_tls: Option<bool>,
+    /// Replace or clear the optional product name.
+    pub product_name: Option<ConfigValuePatch<String>>,
+    /// Replace or clear the optional product-type name.
+    pub product_type_name: Option<ConfigValuePatch<String>>,
+    /// Replace or clear the optional engagement name.
+    pub engagement_name: Option<ConfigValuePatch<String>>,
+    /// Change automatic object creation.
+    pub auto_create: Option<bool>,
+    /// Change import versus reimport behavior.
+    pub reimport: Option<bool>,
+    /// Patch lifecycle settings.
+    pub lifecycle: Option<DefectDojoLifecyclePatch>,
+}
+
+/// Browser-safe issue-tracker settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IssueTrackerPublicConfig {
+    /// `github`, `gitlab`, or `none`.
+    pub provider: String,
+    /// Public forge base URL override.
+    pub host: Option<String>,
+    /// Target repository identifier, with legacy host paths kept opaque.
+    pub repo: PublicConfigString,
+    /// Whether a direct Personal Access Token is stored.
+    pub api_token_configured: bool,
+    /// Whether a protected secret environment-variable name is stored.
+    pub api_token_env_configured: bool,
+    /// Optional attribution username.
+    pub username: Option<String>,
+    /// Labels added to filed issues.
+    pub labels: Vec<String>,
+    /// Whether the forge certificate is verified.
+    pub verify_tls: bool,
+}
+
+impl From<&crate::issue_tracker::IssueTrackerConfig> for IssueTrackerPublicConfig {
+    fn from(config: &crate::issue_tracker::IssueTrackerConfig) -> Self {
+        Self {
+            provider: config.provider.clone(),
+            host: config.host.as_deref().map(browser_safe_url),
+            repo: public_config_string(Some(&config.repo)),
+            api_token_configured: config
+                .api_token
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            api_token_env_configured: !config.api_token_env.trim().is_empty(),
+            username: config.username.clone(),
+            labels: config.labels.clone(),
+            verify_tls: config.verify_tls,
+        }
+    }
+}
+
+fn browser_safe_url(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return String::new();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn public_config_string(value: Option<&str>) -> PublicConfigString {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    let configured = value.is_some();
+    let value = value
+        .filter(|value| !looks_like_absolute_host_path(value))
+        .filter(|value| !contains_redaction_marker(value))
+        .map(str::to_owned);
+    PublicConfigString { configured, value }
+}
+
+fn looks_like_absolute_host_path(value: &str) -> bool {
+    Path::new(value).is_absolute()
+        || value.starts_with("\\\\")
+        || value
+            .as_bytes()
+            .get(1)
+            .is_some_and(|separator| *separator == b':')
+}
+
+/// Typed issue-tracker patch accepted at the browser boundary.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IssueTrackerConfigPatch {
+    /// Replace the provider id.
+    pub provider: Option<String>,
+    /// Replace or clear the optional forge host override.
+    pub host: Option<ConfigValuePatch<String>>,
+    /// Explicitly replace or clear the target repository identifier.
+    pub repo: Option<ConfigValuePatch<String>>,
+    /// Explicitly replace or clear the direct Personal Access Token.
+    pub api_token: Option<ConfigValuePatch<String>>,
+    /// Explicitly replace or clear the protected secret environment name.
+    pub api_token_env: Option<ConfigValuePatch<String>>,
+    /// Replace or clear the optional attribution username.
+    pub username: Option<ConfigValuePatch<String>>,
+    /// Replace the issue labels.
+    pub labels: Option<Vec<String>>,
+    /// Change TLS verification.
+    pub verify_tls: Option<bool>,
+}
+
+/// File-backed integration settings store.
+///
+/// Production uses [`Default`], while tests and embedders can provide an
+/// isolated directory without mutating process-global environment variables.
+/// Patch transactions targeting the same resolved directory are serialized
+/// across store instances within this process. Atomic replacement prevents
+/// partial files across processes, but there is no cross-process advisory lock;
+/// concurrent writers in separate processes remain last-writer-wins.
+#[derive(Debug, Clone)]
+pub struct IntegrationConfigStore {
+    directory: PathBuf,
+    transaction_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    patch_gate: Option<Arc<IntegrationConfigPatchGate>>,
+}
+
+/// Typed automotive settings store over the shared global config file.
+///
+/// The read-modify-write transaction preserves every unrelated global setting,
+/// validates the complete resulting document, and uses the same per-directory
+/// lock and atomic private-file replacement as protected integration settings.
+#[derive(Debug, Clone)]
+pub struct AutomotiveConfigStore {
+    directory: PathBuf,
+    transaction_lock: Arc<Mutex<()>>,
+}
+
+impl Default for AutomotiveConfigStore {
+    fn default() -> Self {
+        Self::new(config_dir())
+    }
+}
+
+impl AutomotiveConfigStore {
+    /// Create a store rooted at `directory`.
+    #[must_use]
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
+        let directory = directory.into();
+        Self {
+            transaction_lock: integration_config_lock(&directory),
+            directory,
+        }
+    }
+
+    /// Load the validated automotive policy, applying documented defaults when
+    /// the table is absent.
+    ///
+    /// # Errors
+    /// Returns an error when the global config cannot be read or validated.
+    pub fn get(&self) -> Result<AutomotiveSettings, String> {
+        let raw = read_config_from(&self.directory, "hobot-fuzz")?;
+        Ok(parse_hobot_fuzz_runtime_config(&raw)?.automotive)
+    }
+
+    /// Replace only the automotive table after validating the full global file.
+    ///
+    /// # Errors
+    /// Returns without writing when the current config or replacement policy is
+    /// invalid, or when the atomic private-file replacement fails.
+    pub fn set(&self, settings: AutomotiveSettings) -> Result<AutomotiveSettings, String> {
+        settings.validate()?;
+        let _transaction = lock_recover(&self.transaction_lock);
+        let raw = read_config_from(&self.directory, "hobot-fuzz")?;
+        parse_hobot_fuzz_runtime_config(&raw)?;
+        let mut document: toml::Table =
+            toml::from_str(&raw).map_err(|error| format!("invalid hobot-fuzz config: {error}"))?;
+        let automotive = toml::Value::try_from(&settings)
+            .map_err(|error| format!("automotive settings could not be serialized: {error}"))?;
+        document.insert("automotive".to_owned(), automotive);
+        let content = toml::to_string_pretty(&document)
+            .map_err(|error| format!("hobot-fuzz settings could not be serialized: {error}"))?;
+        parse_hobot_fuzz_runtime_config(&content)?;
+        std::fs::create_dir_all(&self.directory).map_err(|error| error.to_string())?;
+        write_private_config_file(&self.directory.join("hobot-fuzz.toml"), &content)?;
+        Ok(settings)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct IntegrationConfigPatchGate {
+    state: Mutex<IntegrationConfigPatchGateState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct IntegrationConfigPatchGateState {
+    paused: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+impl IntegrationConfigPatchGate {
+    fn pause(&self) {
+        let mut state = lock_recover(&self.state);
+        state.paused = true;
+        self.changed.notify_all();
+        while !state.released {
+            state = match self.changed.wait(state) {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
+    }
+
+    fn wait_until_paused(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = lock_recover(&self.state);
+        while !state.paused {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            let (next, result) = match self.changed.wait_timeout(state, remaining) {
+                Ok(waited) => waited,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state = next;
+            if result.timed_out() && !state.paused {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn release(&self) {
+        let mut state = lock_recover(&self.state);
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
+impl Default for IntegrationConfigStore {
+    fn default() -> Self {
+        Self::new(config_dir())
+    }
+}
+
+impl IntegrationConfigStore {
+    /// Create a store rooted at `directory`.
+    #[must_use]
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
+        let directory = directory.into();
+        Self {
+            transaction_lock: integration_config_lock(&directory),
+            directory,
+            #[cfg(test)]
+            patch_gate: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_patch_gate(mut self, gate: Arc<IntegrationConfigPatchGate>) -> Self {
+        self.patch_gate = Some(gate);
+        self
+    }
+
+    /// Load a browser-safe `DefectDojo` DTO.
+    ///
+    /// # Errors
+    /// Returns an error when the stored config cannot be read or validated.
+    pub fn defectdojo(&self) -> Result<DefectDojoPublicConfig, String> {
+        let config = self.load_defectdojo()?;
+        Ok(DefectDojoPublicConfig::from(&config))
+    }
+
+    /// Merge, validate, and atomically persist a `DefectDojo` patch.
+    ///
+    /// Omitted protected fields are preserved. Secret/path values change only
+    /// through an explicit [`ConfigValuePatch`].
+    ///
+    /// # Errors
+    /// Returns an error without writing when the stored config or patch is invalid.
+    pub fn patch_defectdojo(
+        &self,
+        patch: DefectDojoConfigPatch,
+    ) -> Result<DefectDojoPublicConfig, String> {
+        let _transaction = lock_recover(&self.transaction_lock);
+        let mut config = self.load_defectdojo()?;
+        #[cfg(test)]
+        if let Some(gate) = &self.patch_gate {
+            gate.pause();
+        }
+        apply_defectdojo_patch(&mut config, patch)?;
+        validate_defectdojo_for_write(&config)?;
+        let content = toml::to_string_pretty(&config)
+            .map_err(|_| "DefectDojo settings could not be serialized".to_owned())?;
+        crate::defectdojo::resolve_config(&content).map_err(|error| error.to_string())?;
+        self.write_section("defectdojo", &content)?;
+        Ok(DefectDojoPublicConfig::from(&config))
+    }
+
+    /// Load a browser-safe issue-tracker DTO.
+    ///
+    /// # Errors
+    /// Returns an error when the stored config cannot be read or decoded.
+    pub fn issue_tracker(&self) -> Result<IssueTrackerPublicConfig, String> {
+        let config = self.load_issue_tracker()?;
+        Ok(IssueTrackerPublicConfig::from(&config))
+    }
+
+    /// Merge, validate, and atomically persist an issue-tracker patch.
+    ///
+    /// Omitted protected fields are preserved. Secret values change only
+    /// through an explicit [`ConfigValuePatch`].
+    ///
+    /// # Errors
+    /// Returns an error without writing when the stored config or patch is invalid.
+    pub fn patch_issue_tracker(
+        &self,
+        patch: IssueTrackerConfigPatch,
+    ) -> Result<IssueTrackerPublicConfig, String> {
+        let _transaction = lock_recover(&self.transaction_lock);
+        let mut config = self.load_issue_tracker()?;
+        #[cfg(test)]
+        if let Some(gate) = &self.patch_gate {
+            gate.pause();
+        }
+        apply_issue_tracker_patch(&mut config, patch)?;
+        validate_issue_tracker_for_write(&config)?;
+        let content = toml::to_string_pretty(&config)
+            .map_err(|_| "issue-tracker settings could not be serialized".to_owned())?;
+        crate::issue_tracker::resolve_config(&content)
+            .map_err(|_| "issue-tracker settings failed validation".to_owned())?;
+        self.write_section("issue_tracker", &content)?;
+        Ok(IssueTrackerPublicConfig::from(&config))
+    }
+
+    fn load_defectdojo(&self) -> Result<crate::defectdojo::DefectDojoConfig, String> {
+        let raw = read_config_from(&self.directory, "defectdojo")?;
+        crate::defectdojo::resolve_config(&raw)
+            .map_err(|_| "stored DefectDojo settings are invalid".to_owned())
+    }
+
+    fn load_issue_tracker(&self) -> Result<crate::issue_tracker::IssueTrackerConfig, String> {
+        let raw = read_config_from(&self.directory, "issue_tracker")?;
+        crate::issue_tracker::resolve_config(&raw)
+            .map_err(|_| "stored issue-tracker settings are invalid".to_owned())
+    }
+
+    fn write_section(&self, section: &str, content: &str) -> Result<(), String> {
+        let section = validated_section(section)?;
+        std::fs::create_dir_all(&self.directory).map_err(|error| error.to_string())?;
+        write_private_config_file(&self.directory.join(format!("{section}.toml")), content)
+    }
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn integration_config_lock(directory: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
+        OnceLock::new();
+
+    let key = std::fs::canonicalize(directory)
+        .or_else(|_| std::path::absolute(directory))
+        .unwrap_or_else(|_| directory.to_path_buf());
+    let mut locks =
+        lock_recover(LOCKS.get_or_init(|| Mutex::new(std::collections::HashMap::new())));
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+fn apply_optional_string_patch(
+    target: &mut Option<String>,
+    patch: ConfigValuePatch<String>,
+    field: &str,
+) -> Result<(), String> {
+    match patch {
+        ConfigValuePatch::Replace { value } => {
+            if value.trim().is_empty() {
+                return Err(format!("{field} replacement cannot be empty; use clear"));
+            }
+            reject_redaction_marker(&value, field)?;
+            *target = Some(value);
+        }
+        ConfigValuePatch::Clear => *target = None,
+    }
+    Ok(())
+}
+
+fn apply_environment_patch(
+    target: &mut String,
+    patch: ConfigValuePatch<String>,
+    field: &str,
+) -> Result<(), String> {
+    match patch {
+        ConfigValuePatch::Replace { value } => {
+            validate_environment_name(&value, field)?;
+            *target = value;
+        }
+        ConfigValuePatch::Clear => target.clear(),
+    }
+    Ok(())
+}
+
+fn reject_redaction_marker(value: &str, field: &str) -> Result<(), String> {
+    if contains_redaction_marker(value) {
+        return Err(format!("{field} cannot contain a redaction marker"));
+    }
+    Ok(())
+}
+
+fn contains_redaction_marker(value: &str) -> bool {
+    value.contains("<redacted>") || value.contains("<redacted-path>")
+}
+
+fn apply_optional_non_path_string_patch(
+    target: &mut Option<String>,
+    patch: ConfigValuePatch<String>,
+    field: &str,
+) -> Result<(), String> {
+    match patch {
+        ConfigValuePatch::Replace { value } => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(format!("{field} replacement cannot be empty; use clear"));
+            }
+            reject_redaction_marker(value, field)?;
+            if looks_like_absolute_host_path(value) {
+                return Err(format!("{field} must not be an absolute path"));
+            }
+            *target = Some(value.to_owned());
+        }
+        ConfigValuePatch::Clear => *target = None,
+    }
+    Ok(())
+}
+
+fn apply_repository_patch(
+    target: &mut String,
+    patch: ConfigValuePatch<String>,
+) -> Result<(), String> {
+    match patch {
+        ConfigValuePatch::Replace { value } => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("repo replacement cannot be empty; use clear".to_owned());
+            }
+            reject_redaction_marker(value, "repo")?;
+            if looks_like_absolute_host_path(value) || value.contains("://") {
+                return Err("repo must be a repository identifier, not a URL or path".to_owned());
+            }
+            value.clone_into(target);
+        }
+        ConfigValuePatch::Clear => target.clear(),
+    }
+    Ok(())
+}
+
+fn validate_environment_name(value: &str, field: &str) -> Result<(), String> {
+    reject_redaction_marker(value, field)?;
+    let mut chars = value.chars();
+    let valid_first = chars
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic());
+    if !valid_first || !chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return Err(format!("{field} must be an environment-variable name"));
+    }
+    Ok(())
+}
+
+fn validate_http_url(value: &str, field: &str) -> Result<(), String> {
+    reject_redaction_marker(value, field)?;
+    let url = reqwest::Url::parse(value).map_err(|_| format!("{field} must be a valid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("{field} must use http or https"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{field} must not contain credentials"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(format!("{field} must not contain a query or fragment"));
+    }
+    if url.host_str().is_none() {
+        return Err(format!("{field} must include a host"));
+    }
+    Ok(())
+}
+
+fn apply_defectdojo_patch(
+    config: &mut crate::defectdojo::DefectDojoConfig,
+    patch: DefectDojoConfigPatch,
+) -> Result<(), String> {
+    if let Some(url) = patch.url {
+        config.url = url;
+    }
+    if let Some(api_token) = patch.api_token {
+        apply_optional_string_patch(&mut config.api_token, api_token, "api_token")?;
+    }
+    if let Some(api_token_env) = patch.api_token_env {
+        apply_environment_patch(&mut config.api_token_env, api_token_env, "api_token_env")?;
+    }
+    if let Some(verify_tls) = patch.verify_tls {
+        config.verify_tls = verify_tls;
+    }
+    if let Some(product_name) = patch.product_name {
+        apply_optional_string_patch(&mut config.product_name, product_name, "product_name")?;
+    }
+    if let Some(product_type_name) = patch.product_type_name {
+        apply_optional_string_patch(
+            &mut config.product_type_name,
+            product_type_name,
+            "product_type_name",
+        )?;
+    }
+    if let Some(engagement_name) = patch.engagement_name {
+        apply_optional_string_patch(
+            &mut config.engagement_name,
+            engagement_name,
+            "engagement_name",
+        )?;
+    }
+    if let Some(auto_create) = patch.auto_create {
+        config.auto_create = auto_create;
+    }
+    if let Some(reimport) = patch.reimport {
+        config.reimport = reimport;
+    }
+    if let Some(lifecycle) = patch.lifecycle {
+        if let Some(autostart) = lifecycle.autostart {
+            config.lifecycle.autostart = autostart;
+        }
+        if let Some(compose_project) = lifecycle.compose_project {
+            apply_optional_non_path_string_patch(
+                &mut config.lifecycle.compose_project,
+                compose_project,
+                "lifecycle.compose_project",
+            )?;
+        }
+        if let Some(compose_files) = lifecycle.compose_files {
+            match compose_files {
+                ConfigValuePatch::Replace { value } => {
+                    for path in &value {
+                        if path.trim().is_empty() {
+                            return Err(
+                                "lifecycle.compose_files cannot contain an empty path".to_owned()
+                            );
+                        }
+                        reject_redaction_marker(path, "lifecycle.compose_files")?;
+                    }
+                    config.lifecycle.compose_files = value;
+                }
+                ConfigValuePatch::Clear => config.lifecycle.compose_files.clear(),
+            }
+        }
+        if let Some(timeout) = lifecycle.startup_timeout_secs {
+            match timeout {
+                ConfigValuePatch::Replace { value } if value > 0 => {
+                    config.lifecycle.startup_timeout_secs = Some(value);
+                }
+                ConfigValuePatch::Replace { .. } => {
+                    return Err(
+                        "lifecycle.startup_timeout_secs must be greater than zero".to_owned()
+                    );
+                }
+                ConfigValuePatch::Clear => config.lifecycle.startup_timeout_secs = None,
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_defectdojo_for_write(
+    config: &crate::defectdojo::DefectDojoConfig,
+) -> Result<(), String> {
+    validate_http_url(config.url.trim(), "url")?;
+    if let Some(token) = config.api_token.as_deref() {
+        if token.trim().is_empty() {
+            return Err("api_token cannot be empty; use clear".to_owned());
+        }
+        reject_redaction_marker(token, "api_token")?;
+    }
+    if !config.api_token_env.is_empty() {
+        validate_environment_name(&config.api_token_env, "api_token_env")?;
+    }
+    if config
+        .api_token
+        .as_deref()
+        .is_none_or(|token| token.trim().is_empty())
+        && config.api_token_env.trim().is_empty()
+    {
+        return Err("DefectDojo requires a direct token or token environment name".to_owned());
+    }
+    if config.lifecycle.startup_timeout_secs == Some(0) {
+        return Err("lifecycle.startup_timeout_secs must be greater than zero".to_owned());
+    }
+    if let Some(compose_project) = config.lifecycle.compose_project.as_deref() {
+        reject_redaction_marker(compose_project, "lifecycle.compose_project")?;
+    }
+    for path in &config.lifecycle.compose_files {
+        if path.trim().is_empty() {
+            return Err("lifecycle.compose_files cannot contain an empty path".to_owned());
+        }
+        reject_redaction_marker(path, "lifecycle.compose_files")?;
+    }
+    Ok(())
+}
+
+fn apply_issue_tracker_patch(
+    config: &mut crate::issue_tracker::IssueTrackerConfig,
+    patch: IssueTrackerConfigPatch,
+) -> Result<(), String> {
+    if let Some(provider) = patch.provider {
+        config.provider = provider.trim().to_ascii_lowercase();
+    }
+    if let Some(host) = patch.host {
+        apply_optional_string_patch(&mut config.host, host, "host")?;
+    }
+    if let Some(repo) = patch.repo {
+        apply_repository_patch(&mut config.repo, repo)?;
+    }
+    if let Some(api_token) = patch.api_token {
+        apply_optional_string_patch(&mut config.api_token, api_token, "api_token")?;
+    }
+    if let Some(api_token_env) = patch.api_token_env {
+        apply_environment_patch(&mut config.api_token_env, api_token_env, "api_token_env")?;
+    }
+    if let Some(username) = patch.username {
+        apply_optional_string_patch(&mut config.username, username, "username")?;
+    }
+    if let Some(labels) = patch.labels {
+        if labels.iter().any(|label| label.trim().is_empty()) {
+            return Err("labels cannot contain an empty value".to_owned());
+        }
+        config.labels = labels;
+    }
+    if let Some(verify_tls) = patch.verify_tls {
+        config.verify_tls = verify_tls;
+    }
+    Ok(())
+}
+
+fn validate_issue_tracker_for_write(
+    config: &crate::issue_tracker::IssueTrackerConfig,
+) -> Result<(), String> {
+    let provider = config.provider.trim().to_ascii_lowercase();
+    reject_redaction_marker(&config.repo, "repo")?;
+    match provider.as_str() {
+        "" | "none" => {}
+        "github" | "gitlab" => {
+            let repo = config.repo.trim();
+            if repo.is_empty() {
+                return Err("repo is required when the issue tracker is enabled".to_owned());
+            }
+            if !looks_like_absolute_host_path(repo) && repo.contains("://") {
+                return Err("repo must be a repository identifier, not a URL or path".to_owned());
+            }
+        }
+        _ => return Err("provider must be github, gitlab, or none".to_owned()),
+    }
+    if let Some(host) = config
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+    {
+        validate_http_url(host, "host")?;
+    }
+    if let Some(token) = config.api_token.as_deref() {
+        if token.trim().is_empty() {
+            return Err("api_token cannot be empty; use clear".to_owned());
+        }
+        reject_redaction_marker(token, "api_token")?;
+    }
+    if !config.api_token_env.is_empty() {
+        validate_environment_name(&config.api_token_env, "api_token_env")?;
+    }
+    if config.labels.iter().any(|label| label.trim().is_empty()) {
+        return Err("labels cannot contain an empty value".to_owned());
+    }
+    Ok(())
+}
 
 /// Validate that `name` is a known section before touching the filesystem.
 ///
@@ -403,10 +1846,13 @@ pub fn list_configs() -> Vec<ConfigSection> {
 /// # Errors
 /// Returns an error string if `name` is unknown or the file cannot be read.
 pub fn read_config(name: &str) -> Result<String, String> {
+    read_config_from(&config_dir(), name)
+}
+
+fn read_config_from(directory: &Path, name: &str) -> Result<String, String> {
     let section = validated_section(name)?;
-    let dir = config_dir();
-    let live = dir.join(format!("{section}.toml"));
-    let example = dir.join(format!("{section}.example.toml"));
+    let live = directory.join(format!("{section}.toml"));
+    let example = directory.join(format!("{section}.example.toml"));
     if live.is_file() {
         std::fs::read_to_string(&live).map_err(|e| e.to_string())
     } else if example.is_file() {
@@ -986,6 +2432,403 @@ cpus = 2\n";
     }
 
     #[test]
+    fn browser_integration_updates_preserve_protected_values_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("defectdojo.toml"),
+            r#"
+url = "https://dojo.example.test"
+api_token = "synthetic-dojo-token"
+api_token_env = "SYNTHETIC_DOJO_TOKEN_ENV"
+verify_tls = true
+product_name = "old-product"
+auto_create = true
+reimport = true
+
+[lifecycle]
+autostart = true
+compose_files = ["/synthetic/private/compose.yml"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("issue_tracker.toml"),
+            r#"
+provider = "github"
+host = "https://github.example.test"
+repo = "example/project"
+api_token = "synthetic-issue-token"
+api_token_env = "SYNTHETIC_ISSUE_TOKEN_ENV"
+labels = ["fuzzing"]
+verify_tls = true
+"#,
+        )
+        .unwrap();
+        let store = IntegrationConfigStore::new(dir.path());
+
+        let dojo = store
+            .patch_defectdojo(DefectDojoConfigPatch {
+                product_name: Some(ConfigValuePatch::Replace {
+                    value: "new-product".to_owned(),
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+            .expect("safe DefectDojo patch");
+        let tracker = store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                labels: Some(vec!["security".to_owned(), "fuzzing".to_owned()]),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .expect("safe issue-tracker patch");
+
+        assert_eq!(dojo.product_name.as_deref(), Some("new-product"));
+        assert!(dojo.credentials.api_token_configured);
+        assert!(dojo.credentials.api_token_env_configured);
+        assert!(dojo.lifecycle.compose_files_configured);
+        assert_eq!(tracker.labels, ["security", "fuzzing"]);
+        assert!(tracker.api_token_configured);
+        assert!(tracker.api_token_env_configured);
+
+        let dojo_raw = std::fs::read_to_string(dir.path().join("defectdojo.toml")).unwrap();
+        let tracker_raw = std::fs::read_to_string(dir.path().join("issue_tracker.toml")).unwrap();
+        assert!(dojo_raw.contains("synthetic-dojo-token"));
+        assert!(dojo_raw.contains("SYNTHETIC_DOJO_TOKEN_ENV"));
+        assert!(dojo_raw.contains("/synthetic/private/compose.yml"));
+        assert!(tracker_raw.contains("synthetic-issue-token"));
+        assert!(tracker_raw.contains("SYNTHETIC_ISSUE_TOKEN_ENV"));
+    }
+
+    #[test]
+    fn browser_integration_updates_require_explicit_replace_or_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("defectdojo.toml"),
+            r#"
+url = "https://dojo.example.test"
+api_token = "synthetic-old-token"
+api_token_env = "SYNTHETIC_DOJO_TOKEN_ENV"
+
+[lifecycle]
+compose_files = ["/synthetic/old/compose.yml"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("issue_tracker.toml"),
+            r#"
+provider = "gitlab"
+host = "https://gitlab.example.test"
+repo = "example/project"
+api_token = "synthetic-old-issue-token"
+api_token_env = "SYNTHETIC_ISSUE_TOKEN_ENV"
+"#,
+        )
+        .unwrap();
+        let store = IntegrationConfigStore::new(dir.path());
+
+        let dojo = store
+            .patch_defectdojo(DefectDojoConfigPatch {
+                api_token: Some(ConfigValuePatch::Clear),
+                api_token_env: Some(ConfigValuePatch::Replace {
+                    value: "SYNTHETIC_NEW_DOJO_ENV".to_owned(),
+                }),
+                lifecycle: Some(DefectDojoLifecyclePatch {
+                    compose_files: Some(ConfigValuePatch::Replace {
+                        value: vec!["/synthetic/new/compose.yml".to_owned()],
+                    }),
+                    ..DefectDojoLifecyclePatch::default()
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+            .expect("explicit DefectDojo protected-value patch");
+        let tracker = store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                api_token: Some(ConfigValuePatch::Replace {
+                    value: "synthetic-new-issue-token".to_owned(),
+                }),
+                api_token_env: Some(ConfigValuePatch::Clear),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .expect("explicit issue-tracker protected-value patch");
+
+        assert!(!dojo.credentials.api_token_configured);
+        assert!(dojo.credentials.api_token_env_configured);
+        assert!(dojo.lifecycle.compose_files_configured);
+        assert!(tracker.api_token_configured);
+        assert!(!tracker.api_token_env_configured);
+
+        let dojo_raw = std::fs::read_to_string(dir.path().join("defectdojo.toml")).unwrap();
+        let tracker_raw = std::fs::read_to_string(dir.path().join("issue_tracker.toml")).unwrap();
+        assert!(!dojo_raw.contains("synthetic-old-token"));
+        assert!(!dojo_raw.contains("SYNTHETIC_DOJO_TOKEN_ENV"));
+        assert!(!dojo_raw.contains("/synthetic/old/compose.yml"));
+        assert!(dojo_raw.contains("SYNTHETIC_NEW_DOJO_ENV"));
+        assert!(dojo_raw.contains("/synthetic/new/compose.yml"));
+        assert!(!tracker_raw.contains("synthetic-old-issue-token"));
+        assert!(!tracker_raw.contains("SYNTHETIC_ISSUE_TOKEN_ENV"));
+        assert!(tracker_raw.contains("synthetic-new-issue-token"));
+    }
+
+    #[test]
+    fn invalid_browser_integration_patch_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issue_tracker.toml");
+        let original = r#"
+provider = "github"
+repo = "example/project"
+api_token_env = "SYNTHETIC_ISSUE_TOKEN_ENV"
+"#;
+        std::fs::write(&path, original).unwrap();
+        let store = IntegrationConfigStore::new(dir.path());
+
+        let error = store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                provider: Some("github".to_owned()),
+                repo: Some(ConfigValuePatch::Replace {
+                    value: String::new(),
+                }),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .expect_err("an enabled tracker requires a repository");
+
+        assert!(error.contains("repo"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn public_integration_dtos_serialize_without_protected_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("defectdojo.toml"),
+            r#"
+url = "https://synthetic-user:synthetic-password@dojo.example.test/base?token=synthetic-query-secret"
+api_token = "synthetic-dojo-token"
+api_token_env = "SYNTHETIC_DOJO_TOKEN_ENV"
+
+[lifecycle]
+compose_project = "/synthetic/private/compose-project"
+compose_files = ["/synthetic/private/compose.yml"]
+"#,
+        )
+        .unwrap();
+        let store = IntegrationConfigStore::new(dir.path());
+
+        let json = serde_json::to_string(&store.defectdojo().unwrap()).unwrap();
+
+        assert!(!json.contains("synthetic-dojo-token"));
+        assert!(!json.contains("SYNTHETIC_DOJO_TOKEN_ENV"));
+        assert!(!json.contains("synthetic-user"));
+        assert!(!json.contains("synthetic-password"));
+        assert!(!json.contains("synthetic-query-secret"));
+        assert!(!json.contains("/synthetic/private"));
+        assert!(!json.contains("compose-project"));
+        assert!(!json.contains("compose.yml"));
+        assert!(json.contains("api_token_configured"));
+        assert!(json.contains("compose_files_configured"));
+    }
+
+    #[test]
+    fn path_shaped_integration_values_are_opaque_until_explicitly_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dojo_path = dir.path().join("defectdojo.toml");
+        let tracker_path = dir.path().join("issue_tracker.toml");
+        std::fs::write(
+            &dojo_path,
+            r#"
+url = "https://dojo.example.test"
+api_token_env = "SYNTHETIC_DOJO_TOKEN_ENV"
+product_name = "old-product"
+
+[lifecycle]
+compose_project = "/synthetic/private/dojo-project"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &tracker_path,
+            r#"
+provider = "github"
+repo = "/synthetic/private/repository"
+api_token_env = "SYNTHETIC_ISSUE_TOKEN_ENV"
+labels = ["fuzzing"]
+"#,
+        )
+        .unwrap();
+        let store = IntegrationConfigStore::new(dir.path());
+
+        let dojo = store.defectdojo().unwrap();
+        let tracker = store.issue_tracker().unwrap();
+        assert!(dojo.lifecycle.compose_project.configured);
+        assert_eq!(dojo.lifecycle.compose_project.value, None);
+        assert!(tracker.repo.configured);
+        assert_eq!(tracker.repo.value, None);
+        let public_json = serde_json::json!({ "dojo": dojo, "tracker": tracker }).to_string();
+        assert!(!public_json.contains("/synthetic/private"));
+        assert!(!public_json.contains("<redacted-path>"));
+
+        store
+            .patch_defectdojo(DefectDojoConfigPatch {
+                product_name: Some(ConfigValuePatch::Replace {
+                    value: "new-product".to_owned(),
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+            .unwrap();
+        store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                labels: Some(vec!["security".to_owned()]),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .unwrap();
+        assert!(std::fs::read_to_string(&dojo_path)
+            .unwrap()
+            .contains("/synthetic/private/dojo-project"));
+        assert!(std::fs::read_to_string(&tracker_path)
+            .unwrap()
+            .contains("/synthetic/private/repository"));
+
+        let dojo = store
+            .patch_defectdojo(DefectDojoConfigPatch {
+                lifecycle: Some(DefectDojoLifecyclePatch {
+                    compose_project: Some(ConfigValuePatch::Replace {
+                        value: "dojo-main".to_owned(),
+                    }),
+                    ..DefectDojoLifecyclePatch::default()
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+            .unwrap();
+        let tracker = store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                repo: Some(ConfigValuePatch::Replace {
+                    value: "security/project".to_owned(),
+                }),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .unwrap();
+        assert_eq!(
+            dojo.lifecycle.compose_project.value.as_deref(),
+            Some("dojo-main")
+        );
+        assert_eq!(tracker.repo.value.as_deref(), Some("security/project"));
+
+        let dojo_before_marker = std::fs::read_to_string(&dojo_path).unwrap();
+        let tracker_before_marker = std::fs::read_to_string(&tracker_path).unwrap();
+        assert!(store
+            .patch_defectdojo(DefectDojoConfigPatch {
+                lifecycle: Some(DefectDojoLifecyclePatch {
+                    compose_project: Some(ConfigValuePatch::Replace {
+                        value: "<redacted-path>".to_owned(),
+                    }),
+                    ..DefectDojoLifecyclePatch::default()
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+            .is_err());
+        assert!(store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                repo: Some(ConfigValuePatch::Replace {
+                    value: "<redacted-path>".to_owned(),
+                }),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&dojo_path).unwrap(),
+            dojo_before_marker
+        );
+        assert_eq!(
+            std::fs::read_to_string(&tracker_path).unwrap(),
+            tracker_before_marker
+        );
+        assert!(!dojo_before_marker.contains("<redacted-path>"));
+        assert!(!tracker_before_marker.contains("<redacted-path>"));
+
+        store
+            .patch_defectdojo(DefectDojoConfigPatch {
+                lifecycle: Some(DefectDojoLifecyclePatch {
+                    compose_project: Some(ConfigValuePatch::Clear),
+                    ..DefectDojoLifecyclePatch::default()
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+            .unwrap();
+        store
+            .patch_issue_tracker(IssueTrackerConfigPatch {
+                provider: Some("none".to_owned()),
+                repo: Some(ConfigValuePatch::Clear),
+                ..IssueTrackerConfigPatch::default()
+            })
+            .unwrap();
+        assert!(
+            !store
+                .defectdojo()
+                .unwrap()
+                .lifecycle
+                .compose_project
+                .configured
+        );
+        assert!(!store.issue_tracker().unwrap().repo.configured);
+    }
+
+    #[test]
+    fn integration_patch_transactions_are_serialized_across_store_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("defectdojo.toml");
+        std::fs::write(
+            &path,
+            r#"
+url = "https://dojo.example.test"
+api_token = "synthetic-old-token"
+product_name = "old-product"
+"#,
+        )
+        .unwrap();
+        let gate = std::sync::Arc::new(IntegrationConfigPatchGate::default());
+        let first_store = IntegrationConfigStore::new(dir.path()).with_patch_gate(gate.clone());
+        let second_store = IntegrationConfigStore::new(dir.path());
+
+        let first = std::thread::spawn(move || {
+            first_store.patch_defectdojo(DefectDojoConfigPatch {
+                product_name: Some(ConfigValuePatch::Replace {
+                    value: "new-product".to_owned(),
+                }),
+                ..DefectDojoConfigPatch::default()
+            })
+        });
+        assert!(gate.wait_until_paused(std::time::Duration::from_secs(5)));
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let result = second_store.patch_defectdojo(DefectDojoConfigPatch {
+                api_token: Some(ConfigValuePatch::Replace {
+                    value: "synthetic-new-token".to_owned(),
+                }),
+                ..DefectDojoConfigPatch::default()
+            });
+            done_tx.send(()).unwrap();
+            result
+        });
+        assert_eq!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(150)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "the second store entered the read-modify-write transaction concurrently"
+        );
+
+        gate.release();
+        first.join().unwrap().unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        second.join().unwrap().unwrap();
+
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("new-product"));
+        assert!(raw.contains("synthetic-new-token"));
+        assert!(!raw.contains("synthetic-old-token"));
+    }
+
+    #[test]
     fn malformed_provider_config_is_not_treated_as_an_empty_secret_set() {
         let error = parse_provider_config("[[providers]]\nid = [not valid toml")
             .expect_err("malformed provider state must fail closed");
@@ -1007,6 +2850,41 @@ cpus = 2\n";
             r#"
             coverage_stagnation_secs = 90
 
+            [fuzzing]
+            enabled_engines = ["libfuzzer", "afl++"]
+            default_engine = "afl++"
+            default_duration_secs = 45
+
+            [fuzzing.sandbox]
+            max_mem_mb = 3072
+            max_cpus = 2
+            max_duration_secs = 600
+
+            [automotive]
+            enabled = true
+            sidecar_image = "hobot/scapy-automotive:2.7.0"
+            allowed_protocols = ["can", "iso_tp", "uds", "do_ip"]
+            allowed_modes = ["offline_pcap", "virtual_can"]
+            virtual_interfaces = ["vcan0"]
+
+            [automotive.limits]
+            max_packets = 500
+            max_input_bytes = 16777216
+            max_payload_bytes = 1048576
+            max_duration_secs = 30
+            max_rate_per_second = 50
+            max_output_bytes = 16777216
+            max_mem_mb = 768
+            max_cpus = 1
+
+            [automotive.physical_bench]
+            enabled = false
+            require_approval = true
+            interfaces = []
+            arbitration_ids = []
+            uds_services = []
+            allow_dangerous_services = false
+
             [knowledge]
             l2_max_tokens = 123
             retrieval_strategy = "keyword"
@@ -1026,6 +2904,14 @@ cpus = 2\n";
         .expect("runtime config should parse");
 
         assert_eq!(config.knowledge.l2_max_tokens, 123);
+        let run = config
+            .fuzzing
+            .resolve(Some(hf_core::engine::EngineKind::AflPlusPlus), Some(90))
+            .expect("enabled engine and bounded duration should resolve");
+        assert_eq!(run.engine, hf_core::engine::EngineKind::AflPlusPlus);
+        assert_eq!(run.duration_secs, 90);
+        assert_eq!(run.max_mem_mb, 3072);
+        assert_eq!(run.max_cpus, 2);
         assert_eq!(config.knowledge.retrieval_strategy, "keyword");
         assert!((config.knowledge.bm25_weight - 2.5).abs() < f64::EPSILON);
         assert_eq!(config.session.max_depth, 4);
@@ -1039,6 +2925,129 @@ cpus = 2\n";
             hf_scheduler::ConcurrencyPolicy::Allow
         );
         assert_eq!(config.scheduler.history_retention_limit, 17);
+        assert!(config.automotive.enabled);
+        assert_eq!(config.automotive.limits.max_packets, 500);
+        assert_eq!(config.automotive.limits.max_input_bytes, 16_777_216);
+        assert_eq!(config.automotive.allowed_protocols[2], "uds");
+    }
+
+    #[test]
+    fn automotive_defaults_are_disabled_and_exclude_physical_access() {
+        let settings = AutomotiveSettings::default();
+
+        assert!(!settings.enabled);
+        assert_eq!(settings.sidecar_image, "hobot/scapy-automotive:2.7.0");
+        assert!(settings
+            .allowed_modes
+            .iter()
+            .any(|mode_| mode_ == "offline_pcap"));
+        assert!(settings
+            .allowed_modes
+            .iter()
+            .any(|mode_| mode_ == "virtual_can"));
+        assert!(!settings
+            .allowed_modes
+            .iter()
+            .any(|mode_| mode_ == "physical_bench"));
+        assert!(!settings.physical_bench.enabled);
+        assert!(settings.physical_bench.require_approval);
+        assert!(settings.physical_bench.interfaces.is_empty());
+        assert!(!settings.physical_bench.allow_dangerous_services);
+        settings.validate().expect("safe defaults");
+    }
+
+    #[test]
+    fn automotive_policy_rejects_unpinned_images_unsafe_interfaces_and_excessive_limits() {
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        settings.sidecar_image = "hobot/scapy-automotive:latest".to_owned();
+        assert!(settings.validate().unwrap_err().contains("pinned"));
+
+        settings.sidecar_image = "hobot/scapy-automotive:2.7.0".to_owned();
+        settings.virtual_interfaces = vec!["../can0".to_owned()];
+        assert!(settings.validate().unwrap_err().contains("interface"));
+
+        settings.virtual_interfaces = vec!["can0".to_owned()];
+        assert!(settings.validate().unwrap_err().contains("vcan"));
+
+        settings.virtual_interfaces = vec!["vcan0".to_owned(), "vcan0".to_owned()];
+        assert!(settings.validate().unwrap_err().contains("duplicate"));
+
+        settings.virtual_interfaces = vec!["vcan0".to_owned()];
+        settings.limits.max_packets = 10_001;
+        assert!(settings.validate().unwrap_err().contains("virtual_can"));
+
+        settings.limits.max_packets = 10_000;
+        settings.limits.max_rate_per_second = 0;
+        assert!(settings
+            .validate()
+            .unwrap_err()
+            .contains("max_rate_per_second"));
+
+        settings.limits.max_rate_per_second = 100;
+        settings.limits.max_packets = 1_000;
+        settings.physical_bench.enabled = true;
+        settings.physical_bench.require_approval = false;
+        settings.physical_bench.interfaces = vec!["can0".to_owned()];
+        settings.allowed_modes.push("physical_bench".to_owned());
+        assert!(settings.validate().unwrap_err().contains("approval"));
+
+        settings.physical_bench.require_approval = true;
+        settings.limits.max_packets = 1_001;
+        assert!(settings.validate().unwrap_err().contains("physical_bench"));
+
+        settings.limits.max_packets = 1_000;
+        settings.physical_bench.arbitration_ids = vec![0x7e0, 0x7e0];
+        assert!(settings.validate().unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn automotive_config_store_updates_only_the_typed_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hobot-fuzz.toml");
+        std::fs::write(
+            &path,
+            r#"
+coverage_stagnation_secs = 77
+
+[fuzzing]
+enabled_engines = ["libfuzzer"]
+default_engine = "libfuzzer"
+default_duration_secs = 22
+"#,
+        )
+        .unwrap();
+        let store = AutomotiveConfigStore::new(dir.path());
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        settings.allowed_protocols = vec!["can".to_owned(), "uds".to_owned()];
+
+        assert_eq!(store.set(settings.clone()).unwrap(), settings);
+        assert_eq!(store.get().unwrap(), settings);
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("coverage_stagnation_secs = 77"));
+        assert!(raw.contains("default_duration_secs = 22"));
+        assert!(raw.contains("[automotive]"));
+    }
+
+    #[test]
+    fn automotive_config_store_fails_closed_without_replacing_valid_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AutomotiveConfigStore::new(dir.path());
+        let valid = AutomotiveSettings::default();
+        store.set(valid.clone()).unwrap();
+        let path = dir.path().join("hobot-fuzz.toml");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let mut invalid = valid;
+        invalid.sidecar_image = "hobot/scapy-automotive:latest".to_owned();
+        assert!(store.set(invalid).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before);
     }
 
     #[test]
@@ -1054,6 +3063,15 @@ cpus = 2\n";
     #[test]
     fn hobot_config_rejects_invalid_runtime_values() {
         for raw in [
+            "[fuzzing]\nenabled_engines = []\n",
+            "[fuzzing]\nenabled_engines = [\"libfuzzer\", \"libfuzzer\"]\n",
+            "[fuzzing]\nenabled_engines = [\"unknown\"]\ndefault_engine = \"unknown\"\n",
+            "[fuzzing]\nenabled_engines = [\"afl++\"]\ndefault_engine = \"libfuzzer\"\n",
+            "[fuzzing]\ndefault_duration_secs = 0\n",
+            "[fuzzing]\ndefault_duration_secs = 120\n[fuzzing.sandbox]\nmax_duration_secs = 60\n",
+            "[fuzzing.sandbox]\nmax_mem_mb = 0\n",
+            "[fuzzing.sandbox]\nmax_cpus = 0\n",
+            "[fuzzing.sandbox]\nmax_duration_secs = 0\n",
             "[knowledge]\nretrieval_strategy = \"unknown\"\n",
             "[knowledge]\nretrieval_strategy = \"semantic\"\n",
             "[knowledge]\nbm25_weight = -1.0\n",
@@ -1066,6 +3084,70 @@ cpus = 2\n";
                 "invalid runtime config was accepted: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn fuzzing_policy_uses_defaults_and_rejects_disabled_or_excessive_runs() {
+        let settings = FuzzingSettings {
+            enabled_engines: vec!["honggfuzz".to_owned()],
+            default_engine: "honggfuzz".to_owned(),
+            default_duration_secs: 30,
+            sandbox: FuzzingSandboxSettings {
+                max_mem_mb: 1024,
+                max_cpus: 1,
+                max_duration_secs: 60,
+            },
+        };
+
+        let resolved = settings
+            .resolve(None, None)
+            .expect("defaults should resolve");
+        assert_eq!(resolved.engine, hf_core::engine::EngineKind::Honggfuzz);
+        assert_eq!(resolved.duration_secs, 30);
+        assert_eq!(resolved.max_mem_mb, 1024);
+        assert_eq!(resolved.max_cpus, 1);
+
+        assert!(settings
+            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(30))
+            .unwrap_err()
+            .contains("disabled"));
+        assert!(settings
+            .resolve(Some(hf_core::engine::EngineKind::Honggfuzz), Some(61))
+            .unwrap_err()
+            .contains("maximum"));
+    }
+
+    #[test]
+    fn harness_default_skips_enabled_engines_that_do_not_support_the_language() {
+        let settings = FuzzingSettings {
+            enabled_engines: vec![
+                "syzkaller".to_owned(),
+                "afl++".to_owned(),
+                "libfuzzer".to_owned(),
+            ],
+            default_engine: "syzkaller".to_owned(),
+            ..FuzzingSettings::default()
+        };
+
+        assert_eq!(
+            settings
+                .resolve_harness_engine(None, hf_core::target::TargetLanguage::C)
+                .expect("C should use the first enabled user-space engine"),
+            hf_core::engine::EngineKind::AflPlusPlus
+        );
+        assert_eq!(
+            settings
+                .resolve_harness_engine(None, hf_core::target::TargetLanguage::Rust)
+                .expect("Rust should skip engines without Rust harness support"),
+            hf_core::engine::EngineKind::LibFuzzer
+        );
+        assert!(settings
+            .resolve_harness_engine(
+                Some(hf_core::engine::EngineKind::Syzkaller),
+                hf_core::target::TargetLanguage::C,
+            )
+            .unwrap_err()
+            .contains("not supported"));
     }
 
     #[test]
@@ -1112,7 +3194,9 @@ cpus = 2\n";
             "auto_revert_enabled",
             "auto_revert_notify_only",
             "auto_revert_threshold_pct",
+            "automotive",
             "coverage_stagnation_secs",
+            "fuzzing",
             "knowledge",
             "scheduler",
             "session",

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, lazy, Suspense } from "react";
 import { getTransport, isTauriEnvironment, onDataChanged } from "../lib";
-import { useI18n } from "../i18n";
-import { useConfirm } from "../providers/ConfirmContext";
+import { useI18n } from "../i18nContext";
+import { useConfirm } from "../providers/confirm";
 import type { ReportDraft } from "../types";
 import { ViewHeader, EmptyState, ErrorState, Input, Button, IconButton } from "../components/ui";
 import { FileText, Trash2, Eye, Search, Share2, RotateCw } from "lucide-react";

@@ -208,10 +208,13 @@ pub(crate) fn sandbox_options(
 ) -> SandboxOptions {
     SandboxOptions {
         extra_mounts: stage.mounts.clone(),
+        image: None,
         platform: Some(platform.to_owned()),
-        network_enabled: false,
+        network_mode: hf_core::runtime::SandboxNetworkMode::None,
         workdir: Some("/syzbench".to_owned()),
         relax_hardening: false,
+        capabilities: Vec::new(),
+        stdin: None,
         devices: if use_kvm {
             vec!["/dev/kvm".to_owned()]
         } else {
@@ -1069,7 +1072,10 @@ mod tests {
 
         let sandbox = sandbox_options(&stage, "linux/amd64", true);
 
-        assert!(!sandbox.network_enabled);
+        assert_eq!(
+            sandbox.network_mode,
+            hf_core::runtime::SandboxNetworkMode::None
+        );
         assert!(!sandbox.relax_hardening);
         assert!(sandbox.workspace_read_only);
         assert_eq!(

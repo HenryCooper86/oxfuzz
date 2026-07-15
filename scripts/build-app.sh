@@ -17,7 +17,7 @@ npm run build
 
 echo ""
 echo "=== Building Tauri app ($OS $ARCH) ==="
-node_modules/.bin/tauri build
+node_modules/.bin/tauri build --features automotive-scapy
 
 cd ../..
 

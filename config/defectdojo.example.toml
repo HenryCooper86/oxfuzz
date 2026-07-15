@@ -7,9 +7,10 @@
 # /reimport-scan/ on repeat pushes, so re-found crashes update in place instead
 # of piling up as duplicates).
 #
-# The API token is NEVER stored in this file. Set `api_token_env` to the NAME of
-# an environment variable that holds the token, and export that variable in your
-# shell / .env. This mirrors how provider API keys are handled (api_key_env).
+# CLI and CI should keep the token out of this file: set `api_token_env` to the
+# NAME of an environment variable that holds the token, and export that variable
+# in your shell / .env. The desktop app can instead store a direct `api_token` in
+# this owner-only settings file when no shell environment is available.
 
 # Base URL of your DefectDojo instance (no trailing /api/v2 and no trailing /).
 url = "https://defectdojo.example.com"

@@ -1,27 +1,35 @@
 // Issue-tracker settings -- file crash issues into the FUZZED project's repo.
 //
-// Config-backed (config/issue_tracker.toml), so the orchestrator handles
-// load/save via the generic ObjectForm. This tab adds context plus a "Test
-// connection" button that validates the *saved* host + token against the live
-// GitHub/GitLab API, and a link to open the target repo.
+// SettingsView loads a public typed DTO and saves an explicit typed patch,
+// preserving protected values unless the operator chooses replace or clear.
+// This tab also tests the saved host/token and links to a safe visible repo.
 
 import { useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { getTransport, openExternal } from "../../lib";
-import { useI18n } from "../../i18n";
+import type { IssueTrackerDraft } from "../../lib/integrationSettings";
+import { useI18n } from "../../i18nContext";
 import { Button } from "../ui/Button";
-import { ObjectForm } from "./ObjectForm";
+import { Input } from "../ui/Input";
+import { Select } from "../ui/Select";
+import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
+import { Switch } from "../ui/Switch";
+import { ProtectedValueEditor } from "./ProtectedValueEditor";
 
-type Cfg = Record<string, unknown>;
-
-export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (next: Cfg) => void }) {
+export function IssueTrackerTab({ value, onChange }: { value: IssueTrackerDraft; onChange: (next: IssueTrackerDraft) => void }) {
   const { t } = useI18n();
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  const provider = typeof value.provider === "string" ? value.provider.trim().toLowerCase() : "";
-  const repo = typeof value.repo === "string" ? value.repo.trim() : "";
-  const host = typeof value.host === "string" ? value.host.trim() : "";
+  const provider = value.provider.trim().toLowerCase();
+  const repo = (
+    value.repo.change === "clear"
+      ? ""
+      : value.repo.change === "replace"
+        ? value.repo.replacement
+        : value.repo.current ?? ""
+  ).trim();
+  const host = value.host.trim();
   const configured = (provider === "github" || provider === "gitlab") && repo.length > 0;
 
   const providerLabel = provider === "github" ? "GitHub" : provider === "gitlab" ? "GitLab" : t("settings.issuetracker.theTracker");
@@ -58,7 +66,65 @@ export function IssueTrackerTab({ value, onChange }: { value: Cfg; onChange: (ne
         </p>
       </div>
 
-      <ObjectForm value={value} onChange={onChange} />
+      <SettingsGroup title={t("settings.issuetracker.repository") }>
+        <SettingsItem title={t("settings.issuetracker.provider")}>
+          <Select
+            className="w-[220px]"
+            value={value.provider}
+            onChange={(nextProvider) => onChange({ ...value, provider: nextProvider })}
+            options={[
+              { value: "none", label: t("settings.issuetracker.disabled") },
+              { value: "github", label: "GitHub" },
+              { value: "gitlab", label: "GitLab" },
+            ]}
+          />
+        </SettingsItem>
+        <SettingsItem title={t("settings.issuetracker.host")} description={t("settings.issuetracker.hostDesc")}>
+          <Input className="w-[320px]" mono value={value.host} onChange={(event) => onChange({ ...value, host: event.target.value })} placeholder={defaultHost} />
+        </SettingsItem>
+        <SettingsItem title={t("settings.issuetracker.repo")} description={t("settings.issuetracker.repoDesc")}>
+          <ProtectedValueEditor
+            value={value.repo}
+            onChange={(repoDraft) => onChange({ ...value, repo: repoDraft })}
+            placeholder="owner/repository"
+          />
+        </SettingsItem>
+        <SettingsItem title={t("settings.issuetracker.username")} description={t("settings.issuetracker.usernameDesc")}>
+          <Input className="w-[260px]" value={value.username} onChange={(event) => onChange({ ...value, username: event.target.value })} />
+        </SettingsItem>
+        <SettingsItem title={t("settings.issuetracker.labels")} description={t("settings.issuetracker.labelsDesc")}>
+          <Input
+            className="w-[320px]"
+            mono
+            value={value.labels.join(", ")}
+            onChange={(event) => onChange({
+              ...value,
+              labels: event.target.value.split(",").map((label) => label.trim()).filter(Boolean),
+            })}
+          />
+        </SettingsItem>
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.issuetracker.authentication") }>
+        <SettingsItem title={t("settings.issuetracker.apiToken")} description={t("settings.issuetracker.apiTokenDesc")}>
+          <ProtectedValueEditor
+            secret
+            value={value.api_token}
+            onChange={(apiToken) => onChange({ ...value, api_token: apiToken })}
+            placeholder={t("settings.issuetracker.apiToken")}
+          />
+        </SettingsItem>
+        <SettingsItem title={t("settings.issuetracker.apiTokenEnv")} description={t("settings.issuetracker.apiTokenEnvDesc")}>
+          <ProtectedValueEditor
+            value={value.api_token_env}
+            onChange={(apiTokenEnv) => onChange({ ...value, api_token_env: apiTokenEnv })}
+            placeholder={provider === "github" ? "GITHUB_TOKEN" : "GITLAB_TOKEN"}
+          />
+        </SettingsItem>
+        <SettingsItem title={t("settings.issuetracker.verifyTls")}>
+          <Switch ariaLabel={t("settings.issuetracker.verifyTls")} checked={value.verify_tls} onChange={(verifyTls) => onChange({ ...value, verify_tls: verifyTls })} />
+        </SettingsItem>
+      </SettingsGroup>
 
       <div className="flex items-center gap-3 flex-wrap">
         <Button

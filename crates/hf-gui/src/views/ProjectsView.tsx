@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ViewType } from "../types";
-import { useProject } from "../providers/ProjectContext";
+import { useProject } from "../providers/project";
 import { getTransport, onDataChanged, pickFolder } from "../lib";
-import { useConfirm } from "../providers/ConfirmContext";
-import { useToast } from "../components/ui/Toast";
+import { useConfirm } from "../providers/confirm";
+import { useToast } from "../components/ui/toastContext";
 import { Button, IconButton, EmptyState, ViewHeader } from "../components/ui";
 import { FolderOpen, FolderPlus, Crosshair, Play, X, Folder, Trash2 } from "lucide-react";
 import { AutoRevertBadge, type AutoRevertPolicyView } from "../components/AutoRevertBadge";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 
 type ProjectAutoRevert = AutoRevertPolicyView;
 

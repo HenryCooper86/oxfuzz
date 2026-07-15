@@ -5,29 +5,14 @@ import { useState, type ReactNode } from "react";
 import { Crosshair, Server, Shield, Database, CheckCircle2, ArrowRight, ArrowLeft } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
-import { Switch } from "../ui/Switch";
 import { Badge } from "../ui/Badge";
 import { Separator } from "../ui/Separator";
-import { useToast } from "../ui/Toast";
+import { useToast } from "../ui/toastContext";
 import { getTransport } from "../../lib";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
 import { normalizeProvider, type Provider } from "../settings/providerTypes";
 
 type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
-
-/** Read a TOML config section, apply `patch`, and write it back (form-mode round
- * trip, matching how Settings persists a section). */
-async function patchConfig(
-  name: string,
-  patch: (value: Record<string, unknown>) => Record<string, unknown>,
-): Promise<void> {
-  const T = getTransport();
-  const text = await T.invoke<string>("read_config", { name });
-  const value = await T.invoke<Record<string, unknown>>("config_toml_to_value", { content: text });
-  const next = patch(value ?? {});
-  const nextText = await T.invoke<string>("config_value_to_toml", { value: next });
-  await T.invoke("write_config", { name, content: nextText });
-}
 
 const STEPS: { id: Step; label: string; icon: ReactNode }[] = [
   { id: "welcome", label: "Welcome", icon: <Crosshair size={16} /> },
@@ -49,9 +34,6 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("gpt-4o");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
-  const [useDocker, setUseDocker] = useState(true);
-  const [requireHarnessApproval, setRequireHarnessApproval] = useState(true);
-  const [requireRunApproval, setRequireRunApproval] = useState(true);
 
   function next() {
     const nextIdx = stepIdx + 1;
@@ -80,28 +62,6 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
           tags: ["general", "reasoning", "code"],
         });
         await getTransport().invoke("set_providers", { providers: [provider] });
-      }
-      // Persist the sandbox + guardrails choices the wizard collected. Without
-      // this they were UI-only and silently ignored -- toggling off the Docker
-      // sandbox or an approval gate here did nothing. Best-effort: the defaults
-      // are already the safe values, so a config write failure should not trap
-      // the user in the wizard.
-      try {
-        await patchConfig("runtime", (v) => ({ ...v, backend: useDocker ? "docker" : "native" }));
-        await patchConfig("guardrails", (v) => ({
-          ...v,
-          hitl_gates: {
-            ...(typeof v.hitl_gates === "object" && v.hitl_gates ? v.hitl_gates : {}),
-            harness: requireHarnessApproval,
-            run: requireRunApproval,
-          },
-        }));
-      } catch (e) {
-        toast({
-          title: t("wizard.partialSaveTitle"),
-          description: t("wizard.partialSaveDesc", { error: String(e) }),
-          variant: "error",
-        });
       }
       // ChatView reads the preferred model from localStorage; the API key now
       // lives only in the backend config, not in the browser store.
@@ -215,16 +175,14 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
               <p className="text-xs text-text-secondary">{t("wizard.sandboxDesc")}</p>
               <div className="flex items-center justify-between p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
                 <div>
-                  <span className="text-xs text-text-primary">{t("wizard.useDocker")}</span>
-                  <p className="text-xs text-text-muted mt-0.5">{t("wizard.useDockerDesc")}</p>
+                  <span className="text-xs text-text-primary">{t("settings.fuzzing.sandboxRequired")}</span>
+                  <p className="text-xs text-text-muted mt-0.5">{t("settings.fuzzing.protectionsDesc")}</p>
                 </div>
-                <Switch checked={useDocker} onChange={setUseDocker} />
+                <Badge variant="success">{t("settings.fuzzing.alwaysOn")}</Badge>
               </div>
-              {useDocker && (
-                <div className="text-xs text-text-muted p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
-                  {t("wizard.buildImage")} <code style={{ color: "var(--accent)" }}>./scripts/build-sandbox.sh</code>
-                </div>
-              )}
+              <div className="text-xs text-text-muted p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
+                {t("wizard.buildImage")} <code style={{ color: "var(--accent)" }}>./scripts/build-sandbox.sh</code>
+              </div>
             </div>
           )}
 
@@ -237,14 +195,14 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                   <span className="text-xs text-text-primary">{t("wizard.approveHarness")}</span>
                   <p className="text-xs text-text-muted mt-0.5">{t("wizard.approveHarnessDesc")}</p>
                 </div>
-                <Switch checked={requireHarnessApproval} onChange={setRequireHarnessApproval} />
+                <Badge variant="success">{t("settings.fuzzing.required")}</Badge>
               </div>
               <div className="flex items-center justify-between p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
                 <div>
                   <span className="text-xs text-text-primary">{t("wizard.approveRun")}</span>
                   <p className="text-xs text-text-muted mt-0.5">{t("wizard.approveRunDesc")}</p>
                 </div>
-                <Switch checked={requireRunApproval} onChange={setRequireRunApproval} />
+                <Badge variant="success">{t("settings.fuzzing.required")}</Badge>
               </div>
             </div>
           )}

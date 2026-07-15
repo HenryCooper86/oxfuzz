@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
-import { useI18n } from "../i18n";
-import { useProject } from "../providers/ProjectContext";
+import { useI18n } from "../i18nContext";
+import { useProject } from "../providers/project";
 import { ViewHeader, EmptyState, Button } from "../components/ui";
 import { RotateCcw, AlertTriangle, ScrollText } from "lucide-react";
 

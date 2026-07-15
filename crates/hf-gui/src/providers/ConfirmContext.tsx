@@ -1,23 +1,16 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
-import { useI18n } from "../i18n";
-
-interface ConfirmOptions {
-  title: string;
-  message?: string;
-  confirmLabel?: string;
-  cancelLabel?: string;
-  /** Style the confirm button as destructive (red). */
-  danger?: boolean;
-}
-
-type ConfirmFn = (opts: ConfirmOptions) => Promise<boolean>;
-
-const ConfirmCtx = createContext<ConfirmFn | null>(null);
+import { useI18n } from "../i18nContext";
+import {
+  confirmationFocusTarget,
+  confirmationKeyboardAction,
+} from "../lib/confirmationBehavior";
+import { ConfirmContext, type ConfirmFn, type ConfirmOptions } from "./confirm";
 
 // A themed replacement for window.confirm: matches the app's look and dark
-// mode, is keyboard-accessible (Enter confirms, Escape cancels), and returns a
-// promise resolving to the user's choice.
+// mode, keeps destructive actions off the default focus path, and returns a
+// promise resolving to the user's choice. Escape cancels; Enter activates the
+// focused button through native button semantics.
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const { t } = useI18n();
   const [opts, setOpts] = useState<ConfirmOptions | null>(null);
@@ -37,7 +30,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <ConfirmCtx.Provider value={confirm}>
+    <ConfirmContext.Provider value={confirm}>
       {children}
       {opts && (
         <div
@@ -45,8 +38,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }}
           onClick={() => settle(false)}
           onKeyDown={(e) => {
-            if (e.key === "Escape") settle(false);
-            if (e.key === "Enter") settle(true);
+            if (confirmationKeyboardAction(e.key) === "cancel") settle(false);
           }}
         >
           <div
@@ -64,11 +56,16 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
               </p>
             )}
             <div className="flex items-center justify-end gap-2 mt-1">
-              <Button variant="outline" size="sm" onClick={() => settle(false)}>
+              <Button
+                autoFocus={confirmationFocusTarget(Boolean(opts.danger)) === "cancel"}
+                variant="outline"
+                size="sm"
+                onClick={() => settle(false)}
+              >
                 {opts.cancelLabel ?? t("common.cancel")}
               </Button>
               <Button
-                autoFocus
+                autoFocus={confirmationFocusTarget(Boolean(opts.danger)) === "confirm"}
                 variant={opts.danger ? "danger" : "primary"}
                 size="sm"
                 onClick={() => settle(true)}
@@ -79,15 +76,6 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           </div>
         </div>
       )}
-    </ConfirmCtx.Provider>
-  );
-}
-
-/** Access the themed confirm. Falls back to window.confirm outside a provider. */
-export function useConfirm(): ConfirmFn {
-  const ctx = useContext(ConfirmCtx);
-  return useMemo(
-    () => ctx ?? ((opts: ConfirmOptions) => Promise.resolve(window.confirm(opts.message ?? opts.title))),
-    [ctx],
+    </ConfirmContext.Provider>
   );
 }

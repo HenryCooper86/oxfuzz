@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged } from "../lib";
-import { useConfirm } from "../providers/ConfirmContext";
+import { useConfirm } from "../providers/confirm";
 import { PathActions } from "../components/PathActions";
-import { useProject } from "../providers/ProjectContext";
-import { useTarget } from "../providers/TargetContext";
+import { useProject } from "../providers/project";
+import { useTarget } from "../providers/target";
 import type { CorpusEntry } from "../types";
 import { Button, ViewHeader } from "../components/ui";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 import { Database, Plus, Scissors, Sprout, Sparkles } from "lucide-react";
 
 export function CorpusView({ embedded = false }: { embedded?: boolean }) {

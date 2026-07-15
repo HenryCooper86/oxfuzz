@@ -21,10 +21,13 @@ use hf_service::ServiceContainer;
 fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_it_workspace"),
-        );
+        let root = std::env::temp_dir().join(format!(
+            "hobot_fuzz_cancel_live_workspace_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::env::set_var("HF_WORKSPACE_DIR", &root);
+        hf_service::initialize_workspace_root().expect("initialize managed live-test workspace");
     });
 }
 

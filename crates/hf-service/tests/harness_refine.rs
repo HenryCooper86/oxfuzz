@@ -1,6 +1,8 @@
 //! Integration test for coverage-guided harness refinement
 //! (`ServiceContainer::harness_refine`).
 
+mod common;
+
 use std::sync::Arc;
 
 use hf_core::engine::EngineKind;
@@ -8,13 +10,7 @@ use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_refine_it_workspace"),
-        );
-    });
+    common::install_managed_workspace("hobot_fuzz_refine_it");
 }
 
 /// A runtime whose commands all succeed (exit 0). Coverage collection returns

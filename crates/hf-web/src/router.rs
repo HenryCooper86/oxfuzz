@@ -4,6 +4,8 @@
 //! via a `tokio::sync::broadcast` channel, and the router matches the
 //! `httpTransport.ts` `COMMAND_MAP` used by the web-mode frontend.
 
+#[cfg(feature = "automotive-scapy")]
+use axum::extract::Query;
 use axum::extract::{Json, Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -35,6 +37,9 @@ pub struct AppState {
     pub container: ServiceContainer,
     event_tx: broadcast::Sender<SseEvent>,
     security: WebSecurityConfig,
+    integration_configs: hf_service::config::IntegrationConfigStore,
+    #[cfg(feature = "automotive-scapy")]
+    automotive_configs: hf_service::config::AutomotiveConfigStore,
     /// Campaign scheduler, when started (present in `build_bootstrapped`, absent
     /// in bare test states). Schedule endpoints degrade to empty results when
     /// `None`.
@@ -50,8 +55,27 @@ impl AppState {
             container,
             event_tx,
             security: WebSecurityConfig::deny_all(),
+            integration_configs: hf_service::config::IntegrationConfigStore::default(),
+            #[cfg(feature = "automotive-scapy")]
+            automotive_configs: hf_service::config::AutomotiveConfigStore::default(),
             scheduler: None,
         }
+    }
+
+    /// Use an isolated directory for typed integration configuration.
+    ///
+    /// Production uses the service-resolved config directory. Tests and
+    /// embedders can override it without mutating process-global environment.
+    #[must_use]
+    pub fn with_integration_config_dir(mut self, directory: impl Into<PathBuf>) -> Self {
+        let directory = directory.into();
+        self.integration_configs =
+            hf_service::config::IntegrationConfigStore::new(directory.clone());
+        #[cfg(feature = "automotive-scapy")]
+        {
+            self.automotive_configs = hf_service::config::AutomotiveConfigStore::new(directory);
+        }
+        self
     }
 
     /// Attach a started campaign scheduler.
@@ -398,6 +422,10 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
             "/schedule/concurrency",
             get(schedule_concurrency_get).post(schedule_concurrency_set),
         )
+        .route(
+            "/schedule/concurrency/limits",
+            get(schedule_concurrency_limits),
+        )
         .route("/schedule/{id}", axum::routing::delete(schedule_delete))
         .route("/schedule/{id}/enabled", post(schedule_set_enabled))
         .route("/config/models", get(list_models))
@@ -407,9 +435,19 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/config/toml_to_value", post(config_toml_to_value))
         .route("/config/value_to_toml", post(config_value_to_toml))
         .route("/config/providers", get(get_providers).post(set_providers))
+        .route("/config/fuzzing", get(get_fuzzing_settings))
+        .route(
+            "/config/defectdojo",
+            get(get_defectdojo_config).patch(patch_defectdojo_config),
+        )
+        .route(
+            "/config/issue-tracker",
+            get(get_issue_tracker_config).patch(patch_issue_tracker_config),
+        )
         .route("/system/paths", get(app_paths))
         .route("/system/arch", get(host_arch))
         .route("/events", get(event_stream))
+        .merge(automotive_routes())
         // Auth + audit wraps every route above (layers apply to routes added
         // before them). The policy is resolved once at build time and captured
         // by the middleware so per-request handling needs no env lookups.
@@ -419,6 +457,38 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         }))
         .layer(cors)
         .with_state(state)
+}
+
+#[cfg(feature = "automotive-scapy")]
+fn automotive_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/config/automotive",
+            get(get_automotive_settings)
+                .post(set_automotive_settings)
+                .put(set_automotive_settings),
+        )
+        .route("/automotive/capabilities", post(automotive_capabilities))
+        .route(
+            "/automotive/analyze-capture",
+            post(automotive_analyze_capture),
+        )
+        .route("/automotive/analyze", post(automotive_analyze_capture))
+        .route("/automotive/mutations", post(automotive_generate_mutations))
+        .route(
+            "/automotive/replay-plan",
+            post(automotive_build_replay_plan),
+        )
+        .route("/automotive/replay", post(automotive_execute_replay))
+        .route(
+            "/automotive/operations",
+            get(list_automotive_operations_query).post(list_automotive_operations),
+        )
+}
+
+#[cfg(not(feature = "automotive-scapy"))]
+fn automotive_routes() -> Router<AppState> {
+    Router::new()
 }
 
 /// Bearer-token auth + request audit middleware.
@@ -1845,6 +1915,19 @@ async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> 
     Json(state.scheduler.as_ref().map_or(0, |s| s.max_concurrent()))
 }
 
+async fn schedule_concurrency_limits(
+    State(state): State<AppState>,
+) -> Json<hf_service::scheduler::CampaignConcurrencyLimits> {
+    Json(state.scheduler.as_ref().map_or(
+        hf_service::scheduler::CampaignConcurrencyLimits {
+            active_fuzz_campaign_limit: 0,
+            scheduler_workflow_dispatch_limit: 0,
+            effective_max_concurrent_fuzz_runs: 0,
+        },
+        |scheduler| scheduler.concurrency_limits(),
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 struct ConcurrencyRequest {
     max_concurrent: usize,
@@ -1945,6 +2028,14 @@ async fn write_config(
     State(_): State<AppState>,
     Json(req): Json<WriteConfigRequest>,
 ) -> ApiResult<()> {
+    if matches!(req.name.as_str(), "defectdojo" | "issue_tracker") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "integration settings require the typed config endpoint".to_owned(),
+            }),
+        ));
+    }
     if req.content.contains("<redacted>") || req.content.contains("<redacted-path>") {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1989,31 +2080,37 @@ async fn config_value_to_toml(
 async fn get_providers(State(_): State<AppState>) -> Json<serde_json::Value> {
     let providers = hf_service::config::get_providers()
         .into_iter()
-        .map(|provider| {
-            let api_key_configured = provider
-                .api_key
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-                || provider
-                    .api_key_env
-                    .as_ref()
-                    .is_some_and(|value| !value.is_empty());
-            let headers_configured = !provider.headers.is_empty();
-            let mut value = public_value(provider);
-            if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "api_key_configured".to_owned(),
-                    serde_json::Value::Bool(api_key_configured),
-                );
-                object.insert(
-                    "headers_configured".to_owned(),
-                    serde_json::Value::Bool(headers_configured),
-                );
-            }
-            value
-        })
+        .map(public_provider_value)
         .collect();
     Json(serde_json::Value::Array(providers))
+}
+
+fn public_provider_value(provider: hf_service::config::ProviderConfig) -> serde_json::Value {
+    let api_key_configured = provider
+        .api_key
+        .as_ref()
+        .is_some_and(|value| !value.is_empty());
+    let api_key_env_configured = provider
+        .api_key_env
+        .as_ref()
+        .is_some_and(|value| !value.is_empty());
+    let headers_configured = !provider.headers.is_empty();
+    let mut value = public_value(provider);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "api_key_configured".to_owned(),
+            serde_json::Value::Bool(api_key_configured),
+        );
+        object.insert(
+            "api_key_env_configured".to_owned(),
+            serde_json::Value::Bool(api_key_env_configured),
+        );
+        object.insert(
+            "headers_configured".to_owned(),
+            serde_json::Value::Bool(headers_configured),
+        );
+    }
+    value
 }
 
 #[derive(Debug, Deserialize)]
@@ -2044,6 +2141,282 @@ async fn set_providers(
     // restarting the server.
     state.container.reload_providers();
     Ok(Json(()))
+}
+
+async fn get_fuzzing_settings(
+    State(_): State<AppState>,
+) -> ApiResult<hf_service::config::FuzzingSettings> {
+    let settings = hf_service::config::effective_fuzzing_settings()
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(settings))
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn get_automotive_settings(
+    State(state): State<AppState>,
+) -> ApiResult<hf_service::config::AutomotiveSettings> {
+    state
+        .automotive_configs
+        .get()
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct SetAutomotiveSettingsRequest {
+    settings: hf_service::config::AutomotiveSettings,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn set_automotive_settings(
+    State(state): State<AppState>,
+    Json(request): Json<SetAutomotiveSettingsRequest>,
+) -> ApiResult<hf_service::config::AutomotiveSettings> {
+    state
+        .automotive_configs
+        .set(request.settings)
+        .map(Json)
+        .map_err(map_err(StatusCode::BAD_REQUEST))
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveProjectRequest {
+    project_root: PathBuf,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_capabilities(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveProjectRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveOperationOutcome> {
+    let project_root = approved_project(&state, &request.project_root)?;
+    state
+        .container
+        .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+            project_root,
+            command: hf_service::automotive::AutomotiveCommand::Capabilities,
+            approval: None,
+        })
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveAnalyzeCaptureRequest {
+    project_root: PathBuf,
+    protocol: hf_service::automotive::AutomotiveProtocol,
+    capture_path: PathBuf,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_analyze_capture(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveAnalyzeCaptureRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveOperationOutcome> {
+    let (project_root, capture_path) = state
+        .security
+        .approve_document(&request.project_root, &request.capture_path)
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    state
+        .container
+        .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+            project_root,
+            command: hf_service::automotive::AutomotiveCommand::AnalyzeCapture {
+                protocol: request.protocol,
+                capture_path,
+            },
+            approval: None,
+        })
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveMutationRequest {
+    project_root: PathBuf,
+    protocol: hf_service::automotive::AutomotiveProtocol,
+    source_path: PathBuf,
+    deterministic_seed: u64,
+    mutation_count: u32,
+    media_type: String,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_generate_mutations(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveMutationRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveOperationOutcome> {
+    let (project_root, source_path) = state
+        .security
+        .approve_document(&request.project_root, &request.source_path)
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    state
+        .container
+        .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+            project_root,
+            command: hf_service::automotive::AutomotiveCommand::GenerateMutations {
+                protocol: request.protocol,
+                source_path,
+                deterministic_seed: request.deterministic_seed,
+                mutation_count: request.mutation_count,
+                media_type: request.media_type,
+            },
+            approval: None,
+        })
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveReplayPlanRequest {
+    project_root: PathBuf,
+    protocol: hf_service::automotive::AutomotiveProtocol,
+    source_path: PathBuf,
+    target_mode: hf_service::automotive::AutomotiveMode,
+    deterministic_seed: u64,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_build_replay_plan(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveReplayPlanRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveOperationOutcome> {
+    let (project_root, source_path) = state
+        .security
+        .approve_document(&request.project_root, &request.source_path)
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    state
+        .container
+        .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+            project_root,
+            command: hf_service::automotive::AutomotiveCommand::BuildReplayPlan {
+                protocol: request.protocol,
+                source_path,
+                target_mode: request.target_mode,
+                deterministic_seed: request.deterministic_seed,
+            },
+            approval: None,
+        })
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveExecuteReplayRequest {
+    project_root: PathBuf,
+    mode: hf_service::automotive::ModeConfig,
+    plan: hf_service::automotive::ReplayPlan,
+    approval: Option<hf_service::automotive::AutomotiveApprovalEvidence>,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_execute_replay(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveExecuteReplayRequest>,
+) -> ApiResult<hf_service::automotive::AutomotiveOperationOutcome> {
+    let project_root = approved_project(&state, &request.project_root)?;
+    state
+        .container
+        .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+            project_root,
+            command: hf_service::automotive::AutomotiveCommand::ExecuteReplay {
+                mode: request.mode,
+                plan: request.plan,
+            },
+            approval: request.approval,
+        })
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveOperationListRequest {
+    project_root: PathBuf,
+    limit: Option<u32>,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn list_automotive_operations(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveOperationListRequest>,
+) -> ApiResult<Vec<hf_service::automotive::AutomotiveOperationSummary>> {
+    automotive_operation_list(&state, request).await
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn list_automotive_operations_query(
+    State(state): State<AppState>,
+    Query(request): Query<AutomotiveOperationListRequest>,
+) -> ApiResult<Vec<hf_service::automotive::AutomotiveOperationSummary>> {
+    automotive_operation_list(&state, request).await
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_operation_list(
+    state: &AppState,
+    request: AutomotiveOperationListRequest,
+) -> ApiResult<Vec<hf_service::automotive::AutomotiveOperationSummary>> {
+    let project_root = approved_project(state, &request.project_root)?;
+    state
+        .container
+        .list_automotive_operations(&project_root, request.limit.unwrap_or(50))
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+async fn get_defectdojo_config(
+    State(state): State<AppState>,
+) -> ApiResult<hf_service::config::DefectDojoPublicConfig> {
+    let config = state
+        .integration_configs
+        .defectdojo()
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(config))
+}
+
+async fn patch_defectdojo_config(
+    State(state): State<AppState>,
+    Json(patch): Json<hf_service::config::DefectDojoConfigPatch>,
+) -> ApiResult<hf_service::config::DefectDojoPublicConfig> {
+    let config = state
+        .integration_configs
+        .patch_defectdojo(patch)
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(config))
+}
+
+async fn get_issue_tracker_config(
+    State(state): State<AppState>,
+) -> ApiResult<hf_service::config::IssueTrackerPublicConfig> {
+    let config = state
+        .integration_configs
+        .issue_tracker()
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(config))
+}
+
+async fn patch_issue_tracker_config(
+    State(state): State<AppState>,
+    Json(patch): Json<hf_service::config::IssueTrackerConfigPatch>,
+) -> ApiResult<hf_service::config::IssueTrackerPublicConfig> {
+    let config = state
+        .integration_configs
+        .patch_issue_tracker(patch)
+        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+    Ok(Json(config))
 }
 
 // -- System endpoints ------------------------------------------------------
@@ -2107,13 +2480,43 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
 mod request_tests {
     use axum::http::StatusCode;
 
-    use super::{classified_api_error, SetProvidersRequest};
+    use super::{classified_api_error, public_provider_value, SetProvidersRequest};
 
     #[test]
     fn provider_write_accepts_the_browser_transport_wrapper() {
         let request: SetProvidersRequest =
             serde_json::from_str(r#"{"providers":[]}"#).expect("wrapped provider request");
         assert!(request.into_providers().is_empty());
+    }
+
+    #[test]
+    fn public_provider_state_distinguishes_direct_key_env_name_and_headers() {
+        let provider: hf_service::config::ProviderConfig = toml::from_str(
+            r#"
+id = "primary"
+provider_type = "openai"
+model = "gpt-test"
+api_key = "synthetic-direct-key"
+api_key_env = "SYNTHETIC_PROVIDER_KEY_ENV"
+
+[headers]
+Authorization = "Bearer synthetic-header"
+"#,
+        )
+        .expect("synthetic provider config");
+
+        let public = public_provider_value(provider);
+
+        assert_eq!(public["api_key_configured"], true);
+        assert_eq!(public["api_key_env_configured"], true);
+        assert_eq!(public["headers_configured"], true);
+        assert!(public["api_key"].is_null());
+        assert!(public["api_key_env"].is_null());
+        assert_eq!(public["headers"], serde_json::json!({}));
+        let serialized = public.to_string();
+        assert!(!serialized.contains("synthetic-direct-key"));
+        assert!(!serialized.contains("SYNTHETIC_PROVIDER_KEY_ENV"));
+        assert!(!serialized.contains("synthetic-header"));
     }
 
     #[test]

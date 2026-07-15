@@ -102,8 +102,14 @@ impl ServiceContainer {
             }
             "harness" => {
                 let target = arg_str(args, "target")?;
-                let engine = parse_engine(arg_str(args, "engine").unwrap_or("libfuzzer"))?;
                 let language = parse_language(arg_str(args, "lang").unwrap_or("c"))?;
+                let requested_engine = args
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .map(parse_engine)
+                    .transpose()?;
+                let engine = crate::config::resolve_harness_engine(requested_engine, language)
+                    .map_err(ClassifiedError::Validation)?;
                 let draft = self
                     .harness_draft(project, target, engine, language)
                     .await?;
@@ -124,13 +130,23 @@ impl ServiceContainer {
             }
             "run" => {
                 let target = arg_str(args, "target")?;
-                let engine = parse_engine(arg_str(args, "engine").unwrap_or("libfuzzer"))?;
-                let duration_secs = args
-                    .get("duration_secs")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(60);
+                let requested_engine = args
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .map(parse_engine)
+                    .transpose()?;
+                let requested_duration = args.get("duration_secs").and_then(Value::as_u64);
+                let resolved =
+                    crate::config::resolve_fuzzing_run(requested_engine, requested_duration)
+                        .map_err(ClassifiedError::Validation)?;
                 let summary = self
-                    .run_fuzzer(project, target, engine, duration_secs, &|_| {})
+                    .run_fuzzer(
+                        project,
+                        target,
+                        resolved.engine,
+                        resolved.duration_secs,
+                        &|_| {},
+                    )
                     .await?;
                 Ok(serde_json::json!({
                     "edges": summary.edges,

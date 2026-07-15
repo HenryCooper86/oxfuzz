@@ -7,6 +7,7 @@ interface SelectProps {
   onChange: (v: string) => void;
   className?: string;
   mono?: boolean;
+  disabled?: boolean;
   /**
    * Trigger text when nothing is selected. Radix reserves the empty string for
    * "no selection" -- an `Item` may not use it -- so an empty `options` list
@@ -16,11 +17,19 @@ interface SelectProps {
   placeholder?: string;
 }
 
-export function Select({ value, options, onChange, className, mono, placeholder }: SelectProps) {
+export function Select({
+  value,
+  options,
+  onChange,
+  className,
+  mono,
+  disabled,
+  placeholder,
+}: SelectProps) {
   return (
-    <RadixSelect.Root value={value} onValueChange={onChange}>
+    <RadixSelect.Root value={value} onValueChange={onChange} disabled={disabled}>
       <RadixSelect.Trigger
-        className={`inline-flex items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
+        className={`inline-flex items-center justify-between gap-2 px-2 py-1.5 text-12px border border-solid border-[var(--border)] rounded-[var(--radius-md)] bg-[var(--surface-primary)] text-text-primary transition-colors duration-150 outline-none focus:border-[var(--border-focus)] cursor-pointer data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50 ${mono ? "font-[var(--font-mono)]" : "font-sans"} ${className ?? ""}`}
       >
         <RadixSelect.Value placeholder={placeholder} />
         <RadixSelect.Icon style={{ opacity: 0.7 }}>

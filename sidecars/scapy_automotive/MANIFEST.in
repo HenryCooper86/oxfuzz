@@ -1,0 +1,4 @@
+include Dockerfile
+include LICENSE-DISTRIBUTION.md
+include requirements.txt
+include requirements-can.txt

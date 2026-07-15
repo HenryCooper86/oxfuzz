@@ -9,7 +9,7 @@ import { Activity, Loader2, RotateCw } from "lucide-react";
 import { getTransport } from "../../lib";
 import { Badge } from "../ui/Badge";
 import { IconButton } from "../ui/IconButton";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
 
 interface ModelCost {
   model: string;

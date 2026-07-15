@@ -1,15 +1,18 @@
 import { useState, useEffect, useRef } from "react";
-import { useI18n } from "../i18n";
+import { useI18n } from "../i18nContext";
 import { pickFolder, pickFile, getTransport } from "../lib";
-import { useProject } from "../providers/ProjectContext";
-import { usePipeline } from "../providers/PipelineContext";
-import { usePrefs } from "../providers/PrefsContext";
-import { useRunOutput } from "../providers/RunOutputContext";
-import { useTarget } from "../providers/TargetContext";
+import { useProject } from "../providers/project";
+import { usePipeline } from "../providers/pipeline";
+import { usePrefs } from "../providers/prefs";
+import { useRunOutput } from "../providers/runOutput";
+import { useTarget } from "../providers/target";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { SandboxBanner } from "../components/SandboxBanner";
 import { Play, Activity, AlertTriangle, FolderOpen, Square, RotateCw, RotateCcw } from "lucide-react";
 import type { HarnessReviewItem, ViewType } from "../types";
+import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
+import { enabledEngineOptions } from "../lib/fuzzingSettings";
+import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 
 export function RunView({
   embedded = false,
@@ -26,13 +29,22 @@ export function RunView({
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
   const { log, stats: liveStats, summary, running, cancelling, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
+  const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   // Embedded in the workflow, the project comes from the workflow's gate.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
   const [target, setTarget] = useState(sharedTarget || "");
-  const [engine, setEngine] = useState(sharedEngine || "libfuzzer");
-  const [duration, setDuration] = useState("60");
+  const [selectedEngine, setSelectedEngine] = useState(sharedEngine || "libfuzzer");
+  const [durationOverride, setDurationOverride] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const engineOptions = fuzzingSettings
+    ? enabledEngineOptions(fuzzingSettings, { includeSyzkaller: true })
+    : [];
+  const engine = engineOptions.some((option) => option.value === selectedEngine)
+    ? selectedEngine
+    : (engineOptions.find((option) => option.value === fuzzingSettings?.default_engine)
+      ?? engineOptions[0])?.value ?? selectedEngine;
+  const duration = durationOverride ?? (fuzzingSettings ? String(fuzzingSettings.default_duration_secs) : "");
 
   // Suggest the project's harnessed targets so the standalone Run view isn't a
   // blank free-text field (you can only fuzz a target that has a harness).
@@ -121,6 +133,8 @@ export function RunView({
   }
 
   async function run() {
+    const policy = fuzzingSettings;
+    if (!policy) return;
     if (!project) return;
     // Non-kernel engines require a target symbol.
     if (!isSyz && !target) return;
@@ -130,14 +144,25 @@ export function RunView({
         ? await runSyzkaller({
             project,
             arch: sandboxArch,
-            duration: Math.max(1, Math.floor(Number(duration) || 60)),
+            duration: Math.max(
+              1,
+              Math.floor(Number(duration) || policy.default_duration_secs),
+            ),
             kernel_image: kernelImage || null,
             disk_image: diskImage || null,
             ssh_key: sshKey || null,
             manager_cfg: managerCfg || null,
             vm_count: Number(vmCount) || 2,
           })
-        : await runFuzzer({ project, target, engine, duration: Math.max(1, Math.floor(Number(duration) || 60)) });
+        : await runFuzzer({
+            project,
+            target,
+            engine,
+            duration: Math.max(
+              1,
+              Math.floor(Number(duration) || policy.default_duration_secs),
+            ),
+          });
       markDone("run");
       // If the run found no crashes, there is nothing to triage.
       if (crashes === 0) markSkipped("triage");
@@ -157,6 +182,10 @@ export function RunView({
       )}
 
       {!isSyz && <SandboxBanner />}
+
+      {!fuzzingSettings && (
+        <FuzzingPolicyNotice loaded={fuzzingPolicyLoaded} error={fuzzingPolicyError} />
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         {!embedded && (
@@ -213,14 +242,8 @@ export function RunView({
           <Label>{t("run.engine")}</Label>
           <Select
             value={engine}
-            onChange={(v) => setEngine(v)}
-            options={[
-              { value: "libfuzzer", label: "libFuzzer" },
-              { value: "afl++", label: "AFL++" },
-              { value: "honggfuzz", label: "honggfuzz" },
-              { value: "clusterfuzzlite", label: "ClusterFuzzLite" },
-              { value: "syzkaller", label: "syzkaller (kernel)" },
-            ]}
+            onChange={setSelectedEngine}
+            options={engineOptions}
           />
         </div>
         <div className="flex flex-col gap-1">
@@ -228,8 +251,9 @@ export function RunView({
           <Input
             type="number"
             min={1}
+            max={fuzzingSettings?.sandbox.max_duration_secs}
             value={duration}
-            onChange={(e) => setDuration(e.target.value)}
+            onChange={(e) => setDurationOverride(e.target.value)}
           />
         </div>
       </div>
@@ -270,7 +294,7 @@ export function RunView({
           variant="primary"
           className="self-start"
           onClick={run}
-          disabled={running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
+          disabled={!fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
           loading={running}
         >
           {!running && <Play size={14} />}

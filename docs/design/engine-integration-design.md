@@ -46,6 +46,20 @@ pub struct FuzzRunConfig {
 }
 ```
 
+Before constructing this value, `hf-service` resolves the effective fuzzing
+policy. It rejects engines outside the configured allowed set and durations
+outside `(0, max_duration_secs]`, then copies the configured memory and CPU
+limits into the run configuration. Presentation defaults are advisory only;
+the service preflight is the authoritative enforcement boundary for direct,
+scheduled, agent, CLI, REST, and desktop runs.
+
+Engine-backed corpus operations use the same preflight. AFL++ coverage pruning
+validates its 600-second operation budget and libFuzzer corpus minimization
+validates its 300-second budget before reading or staging workspace artifacts.
+Both reject disabled engines and copy the resolved memory and CPU ceilings into
+their sandbox requests. A stricter per-input timeout may remain below the
+operation-wide duration for coverage measurement.
+
 ## 5. Run Lifecycle
 
 1. `build` -- compile harness in sandbox -> `BuildArtifact` (binary path).
@@ -88,12 +102,31 @@ key fail that snapshot rather than being reported as zero.
 Streaming stdout remains useful for live logs, but it is not authoritative for
 persisted AFL++ run statistics.
 
-## 6. Open Questions
+## 6. Automotive Protocol Sidecar Is Not an Engine
+
+The optional Scapy sidecar does not implement `EngineAdapter` and is not added
+to `EngineKind`. Engine adapters translate `FuzzRunConfig` into source-fuzzer
+arguments and report source coverage/crashes. Automotive capture decoding,
+field-aware mutation planning, replay, and protocol-state feedback use the
+versioned `hf-automotive` contract and a service-owned `hf-runtime`
+operation instead.
+
+This separation prevents protocol state signatures from being mislabeled as
+edges or functions, prevents sidecar capability discovery from becoming engine
+registration, and keeps physical-interface policy out of `hf-engine`. A future
+workflow may use both systems, but `hf-service` correlates their separately
+typed evidence rather than adapting one contract into the other.
+
+## 7. Open Questions
 
 - Unified corpus format across engines, or per-engine directories?
 - Should we support parallel multi-engine runs on the same target?
 
-## 7. Tests
+## 8. Tests
 
 - Unit: each adapter constructs the correct CLI args from a `FuzzRunConfig`.
 - Integration: a mocked engine `run` streams progress and emits a fake crash.
+- Service contract: disabled engines and excessive durations fail before run
+  reservation, while accepted runs persist the resolved resource limits.
+- Boundary contract: the Scapy sidecar remains absent from `EngineKind` and the
+  engine registry; its pure domain tests run in `hf-automotive`.

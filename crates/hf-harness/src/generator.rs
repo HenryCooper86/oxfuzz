@@ -498,12 +498,40 @@ fn ensure_regular_directory(
 /// Returns `ClassifiedError` if either path escapes the workspace, a directory
 /// is not regular, the sandbox command fails, or no fuzzer activity is detected.
 pub async fn smoke_fuzz_in_paths(
-    mut harness: Harness,
+    harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
     corpus_relative: &Path,
     output_relative: &Path,
 ) -> Result<Harness, ClassifiedError> {
+    let config = smoke_cfg(&harness);
+    smoke_fuzz_in_paths_with_config(
+        harness,
+        rt,
+        workspace,
+        corpus_relative,
+        output_relative,
+        &config,
+    )
+    .await
+}
+
+/// Run a bounded smoke fuzz using one caller-resolved run configuration for
+/// the engine command, sandbox limits, and returned evidence summary.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the configuration does not identify the
+/// harness, has zero duration/resources, either path escapes the workspace, the
+/// sandbox command fails, or no fuzzer activity is detected.
+pub async fn smoke_fuzz_in_paths_with_config(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    corpus_relative: &Path,
+    output_relative: &Path,
+    config: &hf_core::engine::FuzzRunConfig,
+) -> Result<Harness, ClassifiedError> {
+    let duration_secs = validate_smoke_config(&harness, config)?;
     let safe_relative = |path: &Path| {
         !path.as_os_str().is_empty()
             && !path.is_absolute()
@@ -581,7 +609,14 @@ pub async fn smoke_fuzz_in_paths(
         }
     }
 
-    let mut cmd = smoke_command(harness.engine, &binary, &corpus_container, &out_container)?;
+    let mut cmd = smoke_command(
+        harness.engine,
+        &binary,
+        &corpus_container,
+        &out_container,
+        config,
+        duration_secs,
+    )?;
     if matches!(
         harness.engine,
         EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
@@ -592,10 +627,10 @@ pub async fn smoke_fuzz_in_paths(
         ));
     }
     let limits = hf_core::runtime::ResourceLimits {
-        max_mem_mb: 2048,
-        max_cpus: 1,
-        max_duration_secs: 90,
-        env: std::collections::HashMap::new(),
+        max_mem_mb: config.max_mem_mb,
+        max_cpus: config.max_cpus,
+        max_duration_secs: duration_secs,
+        env: config.env.iter().cloned().collect(),
         ptrace: false,
     };
     let sandbox = hf_core::runtime::SandboxOptions {
@@ -660,7 +695,7 @@ pub async fn smoke_fuzz_in_paths(
     }
     let passed = crashes == 0;
     let summary = SmokeRunSummary {
-        duration_secs: 60,
+        duration_secs,
         execs_per_sec: execs,
         crashes,
         passed,
@@ -689,6 +724,31 @@ fn count_smoke_artifacts(engine: EngineKind, out_dir: &Path) -> u32 {
 
 /// Bounded smoke-fuzz duration, in seconds.
 const SMOKE_SECS: u64 = 60;
+const DEFAULT_SMOKE_MAX_MEM_MB: u64 = 2048;
+const DEFAULT_SMOKE_MAX_CPUS: u32 = 1;
+
+fn validate_smoke_config(
+    harness: &Harness,
+    config: &hf_core::engine::FuzzRunConfig,
+) -> Result<u64, ClassifiedError> {
+    if config.harness_id != harness.id || config.engine != harness.engine {
+        return Err(ClassifiedError::Harness(
+            "smoke fuzz: run configuration does not identify the active harness".to_owned(),
+        ));
+    }
+    if config.sanitizer != harness.sanitizer {
+        return Err(ClassifiedError::Harness(
+            "smoke fuzz: run configuration sanitizer does not match the harness".to_owned(),
+        ));
+    }
+    let duration_secs = config.duration.map_or(0, |duration| duration.as_secs());
+    if duration_secs == 0 || config.max_mem_mb == 0 || config.max_cpus == 0 {
+        return Err(ClassifiedError::Harness(
+            "smoke fuzz: duration, memory, and CPU limits must be greater than zero".to_owned(),
+        ));
+    }
+    Ok(duration_secs)
+}
 
 /// Build the engine-appropriate smoke-fuzz command.
 ///
@@ -705,23 +765,17 @@ fn smoke_command(
     binary: &str,
     corpus: &str,
     out: &str,
+    config: &hf_core::engine::FuzzRunConfig,
+    duration_secs: u64,
 ) -> Result<Vec<String>, ClassifiedError> {
     match engine {
         EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => Ok(vec![
             binary.to_owned(),
-            format!("-max_total_time={SMOKE_SECS}"),
+            format!("-max_total_time={duration_secs}"),
         ]),
-        EngineKind::AflPlusPlus => Ok(hf_engine::afl::build_run_args(
-            &smoke_cfg(engine),
-            binary,
-            corpus,
-            out,
-        )),
+        EngineKind::AflPlusPlus => Ok(hf_engine::afl::build_run_args(config, binary, corpus, out)),
         EngineKind::Honggfuzz => Ok(hf_engine::honggfuzz::build_run_args(
-            &smoke_cfg(engine),
-            binary,
-            corpus,
-            out,
+            config, binary, corpus, out,
         )),
         EngineKind::Syzkaller => Err(ClassifiedError::Harness(
             "smoke fuzz does not apply to syzkaller: it fuzzes an instrumented \
@@ -731,18 +785,17 @@ fn smoke_command(
     }
 }
 
-/// A minimal [`FuzzRunConfig`](hf_core::engine::FuzzRunConfig) for a bounded
-/// smoke run. Only `duration`/`env`/`extra_args` are read by the adapter
-/// argument builders; the rest are placeholders.
-fn smoke_cfg(engine: EngineKind) -> hf_core::engine::FuzzRunConfig {
+/// Default configuration retained for direct `hf-harness` callers. Production
+/// service paths pass their resolved policy snapshot explicitly.
+fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
     hf_core::engine::FuzzRunConfig {
-        harness_id: uuid::Uuid::nil(),
-        engine,
+        harness_id: harness.id,
+        engine: harness.engine,
         duration: Some(std::time::Duration::from_secs(SMOKE_SECS)),
-        max_mem_mb: 2048,
-        max_cpus: 1,
+        max_mem_mb: DEFAULT_SMOKE_MAX_MEM_MB,
+        max_cpus: DEFAULT_SMOKE_MAX_CPUS,
         seed_corpus: None,
-        sanitizer: hf_core::target::Sanitizer::Address,
+        sanitizer: harness.sanitizer,
         env: Vec::new(),
         extra_args: Vec::new(),
     }
@@ -1264,13 +1317,33 @@ Iterations : 12345
         );
     }
 
+    fn smoke_command_config(
+        engine: EngineKind,
+        duration_secs: u64,
+    ) -> hf_core::engine::FuzzRunConfig {
+        hf_core::engine::FuzzRunConfig {
+            harness_id: uuid::Uuid::nil(),
+            engine,
+            duration: Some(std::time::Duration::from_secs(duration_secs)),
+            max_mem_mb: 3072,
+            max_cpus: 3,
+            seed_corpus: None,
+            sanitizer: hf_core::target::Sanitizer::Address,
+            env: Vec::new(),
+            extra_args: Vec::new(),
+        }
+    }
+
     #[test]
     fn smoke_command_libfuzzer_runs_binary_directly() {
+        let config = smoke_command_config(EngineKind::LibFuzzer, SMOKE_SECS);
         let cmd = smoke_command(
             EngineKind::LibFuzzer,
             "/work/fuzz",
             "/work/corpus",
             "/work/out",
+            &config,
+            SMOKE_SECS,
         )
         .unwrap();
         assert_eq!(cmd, vec!["/work/fuzz", "-max_total_time=60"]);
@@ -1279,11 +1352,14 @@ Iterations : 12345
     #[test]
     fn smoke_command_clusterfuzzlite_uses_libfuzzer_binary_smoke() {
         // CFL compiles a libFuzzer-style binary, so its smoke is a direct run.
+        let config = smoke_command_config(EngineKind::ClusterFuzzLite, SMOKE_SECS);
         let cmd = smoke_command(
             EngineKind::ClusterFuzzLite,
             "/work/fuzz",
             "/work/corpus",
             "/work/out",
+            &config,
+            SMOKE_SECS,
         )
         .unwrap();
         assert_eq!(cmd, vec!["/work/fuzz", "-max_total_time=60"]);
@@ -1291,11 +1367,14 @@ Iterations : 12345
 
     #[test]
     fn smoke_command_afl_uses_afl_fuzz_driver() {
+        let config = smoke_command_config(EngineKind::AflPlusPlus, SMOKE_SECS);
         let cmd = smoke_command(
             EngineKind::AflPlusPlus,
             "/work/fuzz",
             "/work/corpus",
             "/work/out",
+            &config,
+            SMOKE_SECS,
         )
         .unwrap();
         assert_eq!(cmd.first().map(String::as_str), Some("afl-fuzz"));
@@ -1314,11 +1393,14 @@ Iterations : 12345
 
     #[test]
     fn smoke_command_honggfuzz_uses_honggfuzz_driver() {
+        let config = smoke_command_config(EngineKind::Honggfuzz, SMOKE_SECS);
         let cmd = smoke_command(
             EngineKind::Honggfuzz,
             "/work/fuzz",
             "/work/corpus",
             "/work/out",
+            &config,
+            SMOKE_SECS,
         )
         .unwrap();
         assert_eq!(cmd.first().map(String::as_str), Some("honggfuzz"));
@@ -1332,11 +1414,14 @@ Iterations : 12345
     #[test]
     fn smoke_command_syzkaller_is_rejected() {
         // Syzkaller fuzzes a kernel image, not a userspace harness binary.
+        let config = smoke_command_config(EngineKind::Syzkaller, SMOKE_SECS);
         let err = smoke_command(
             EngineKind::Syzkaller,
             "/work/fuzz",
             "/work/corpus",
             "/work/out",
+            &config,
+            SMOKE_SECS,
         );
         assert!(err.is_err());
     }
