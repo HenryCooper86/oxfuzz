@@ -91,7 +91,9 @@ export function StatusBar() {
     const refreshCost = () => {
       t.invoke<{ cost_usd: number; calls: number; input_tokens: number; output_tokens: number }>("diagnostics_cost_summary")
         .then(setCost)
-        .catch(() => {});
+        // Do not keep labeling a stale value as this session's spend when the
+        // diagnostics store is unavailable. The full panel surfaces the error.
+        .catch(() => setCost(null));
     };
     refreshCost();
 

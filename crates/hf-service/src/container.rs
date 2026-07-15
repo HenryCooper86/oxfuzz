@@ -1694,7 +1694,9 @@ impl ServiceContainer {
     }
 
     /// Aggregated LLM cost/usage recorded this session.
-    pub async fn cost_summary(&self) -> crate::diagnostics::CostSummary {
+    pub async fn cost_summary(
+        &self,
+    ) -> Result<crate::diagnostics::CostSummary, crate::diagnostics::DiagnosticsError> {
         self.diagnostics.summary().await
     }
 
@@ -2094,13 +2096,15 @@ impl ServiceContainer {
     /// A live system snapshot for the Observability panel: per-provider health
     /// and usage, the agent pool, and runtime memory counters. Merges live
     /// provider stats (concurrency/requests/errors) with the provider config
-    /// (model/tags/limits) and cumulative diagnostics (tokens/cost by model).
+    /// (model/tags/limits) and session diagnostics (tokens/cost by model).
     /// `agents.available_slots` is left for the caller to fill from the agent
     /// registry.
-    pub async fn system_snapshot(&self) -> SystemSnapshot {
+    pub async fn system_snapshot(
+        &self,
+    ) -> Result<SystemSnapshot, crate::diagnostics::DiagnosticsError> {
         let statuses = self.provider_statuses().await;
         let configs = crate::config::get_providers();
-        let cost = self.diagnostics.summary().await;
+        let cost = self.diagnostics.summary().await?;
 
         let providers = statuses
             .into_iter()
@@ -2147,11 +2151,11 @@ impl ServiceContainer {
             crashes,
         };
 
-        SystemSnapshot {
+        Ok(SystemSnapshot {
             providers,
             agents: self.active_agent_pool(),
             memory,
-        }
+        })
     }
 
     /// A cheap snapshot of a target's on-disk artifacts (compiled harness,

@@ -713,7 +713,11 @@ pub async fn provider_statuses(
 pub async fn system_snapshot(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<hf_service::SystemSnapshot, String> {
-    let mut snapshot = state.container.system_snapshot().await;
+    let mut snapshot = state
+        .container
+        .system_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
     let agent_count = hf_service::AgentRegistry::with_user_dir(agents_dir())
         .list()
         .len();
@@ -1039,7 +1043,11 @@ pub fn clear_workspace(state: tauri::State<'_, crate::state::AppState>) -> Resul
 pub async fn diagnostics_cost_summary(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<hf_service::diagnostics::CostSummary, String> {
-    Ok(state.container.cost_summary().await)
+    state
+        .container
+        .cost_summary()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Runs interrupted by a prior crash/quit, awaiting recovery.

@@ -313,6 +313,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/clear", post(clear_all_runs))
         .route("/projects/export", post(export_project_data))
         .route("/providers/status", get(provider_statuses))
+        .route("/diagnostics/cost", get(diagnostics_cost_summary))
         .route("/system/snapshot", get(system_snapshot))
         .route("/system/status", get(system_status))
         .route("/workbench/dashboard", post(workbench_dashboard))
@@ -840,6 +841,7 @@ async fn generate_seeds(
     let entries = state
         .container
         .generate_seeds(&project, &req.target)
+        .await
         .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(serde_json::json!({"seeds": entries})))
 }
@@ -943,8 +945,21 @@ async fn triage(
 }
 
 async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
-    let snapshot = state.container.system_snapshot().await;
+    let snapshot = state
+        .container
+        .system_snapshot()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(public_value(snapshot)))
+}
+
+async fn diagnostics_cost_summary(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+    let summary = state
+        .container
+        .cost_summary()
+        .await
+        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(public_value(summary)))
 }
 
 async fn system_status(State(_): State<AppState>) -> Json<hf_service::SystemStatus> {
