@@ -30,7 +30,7 @@ Register a new engine by adding its `EngineKind` variant and a match arm in
 
 | Engine | Compiler wrapper | Link flags |
 | --- | --- | --- |
-| AFL++ | `afl-clang-fast` | (wrapper handles it) |
+| AFL++ | `afl-clang-fast` | `-fsanitize=fuzzer,address` for the generated `LLVMFuzzerTestOneInput` harness and AFLDriver |
 | honggfuzz | `hfuzz-cc` | `-lhfuzz` |
 | libFuzzer | `clang` | `-fsanitize=fuzzer` |
 | ClusterFuzzLite | project build script | oss-fuzz `compile` |

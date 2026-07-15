@@ -437,20 +437,85 @@ pub async fn smoke_fuzz(
 /// Returns `ClassifiedError` if the output path is unsafe, the sandbox command
 /// fails or is force-stopped, or no fuzzer activity is detected.
 pub async fn smoke_fuzz_in(
-    mut harness: Harness,
+    harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
     output_relative: &Path,
 ) -> Result<Harness, ClassifiedError> {
-    if output_relative.as_os_str().is_empty()
-        || output_relative.is_absolute()
-        || !output_relative
-            .components()
-            .all(|part| matches!(part, std::path::Component::Normal(_)))
-    {
+    smoke_fuzz_in_paths(harness, rt, workspace, Path::new("corpus"), output_relative).await
+}
+
+fn ensure_regular_directory(
+    workspace: &Path,
+    relative: &Path,
+    label: &str,
+) -> Result<PathBuf, ClassifiedError> {
+    let workspace_metadata = std::fs::symlink_metadata(workspace).map_err(|error| {
+        ClassifiedError::Harness(format!("smoke fuzz: cannot inspect workspace: {error}"))
+    })?;
+    if !workspace_metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Harness(
+            "smoke fuzz: workspace is not a regular directory".to_owned(),
+        ));
+    }
+
+    let mut current = workspace.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(ClassifiedError::Harness(format!(
+                "smoke fuzz: {label} path must stay inside the workspace"
+            )));
+        };
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(ClassifiedError::Harness(format!(
+                    "smoke fuzz: {label} path is not a regular directory"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|create_error| {
+                    ClassifiedError::Harness(format!(
+                        "smoke fuzz: cannot create {label} directory: {create_error}"
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(ClassifiedError::Harness(format!(
+                    "smoke fuzz: cannot inspect {label} path: {error}"
+                )));
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Run a bounded smoke fuzz against a caller-owned corpus snapshot and output
+/// directory, both workspace-relative.
+///
+/// # Errors
+/// Returns `ClassifiedError` if either path escapes the workspace, a directory
+/// is not regular, the sandbox command fails, or no fuzzer activity is detected.
+pub async fn smoke_fuzz_in_paths(
+    mut harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    corpus_relative: &Path,
+    output_relative: &Path,
+) -> Result<Harness, ClassifiedError> {
+    let safe_relative = |path: &Path| {
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+    };
+    if !safe_relative(output_relative) || !safe_relative(corpus_relative) {
         return Err(ClassifiedError::Harness(format!(
-            "smoke fuzz: output path must stay inside the workspace: {}",
-            output_relative.display()
+            "smoke fuzz: corpus/output paths must stay inside the workspace: {}, {}",
+            corpus_relative.display(),
+            output_relative.display(),
         )));
     }
     // Reference the binary by its container-internal path: the runtime mounts
@@ -474,33 +539,49 @@ pub async fn smoke_fuzz_in(
     // so the subsequent Triage action can ingest the exact smoke findings.
     // LibFuzzer otherwise defaults to the process working directory, which
     // made Smoke Test report a crash while Triage appeared empty.
-    let out_dir = workspace.join(output_relative);
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| ClassifiedError::Harness(format!("smoke fuzz: cannot create out dir: {e}")))?;
+    let out_dir = ensure_regular_directory(workspace, output_relative, "output")?;
 
     // AFL++/honggfuzz drive the binary through their own fuzzer process, which
     // also needs an input directory on the mounted workspace. Create it (and
     // an AFL++ seed, which the driver requires) before launching.
-    let corpus_container = "/work/corpus";
+    let corpus_container = format!("/work/{}", corpus_relative.display());
     let out_container = format!("/work/{}", output_relative.display());
-    let corpus_dir = workspace.join("corpus");
-    std::fs::create_dir_all(&corpus_dir).map_err(|e| {
-        ClassifiedError::Harness(format!("smoke fuzz: cannot create corpus dir: {e}"))
-    })?;
+    let corpus_dir = ensure_regular_directory(workspace, corpus_relative, "corpus")?;
     if matches!(
         harness.engine,
         EngineKind::AflPlusPlus | EngineKind::Honggfuzz
     ) {
         // AFL++ refuses to start with an empty input dir; ensure one seed.
         let seed = corpus_dir.join("seed");
-        if !seed.exists() {
-            std::fs::write(&seed, b"hobot_fuzz_smoke").map_err(|e| {
-                ClassifiedError::Harness(format!("smoke fuzz: cannot write seed: {e}"))
-            })?;
+        match std::fs::symlink_metadata(&seed) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(ClassifiedError::Harness(
+                    "smoke fuzz: seed path is not a regular file".to_owned(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                use std::io::Write as _;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&seed)
+                    .map_err(|e| {
+                        ClassifiedError::Harness(format!("smoke fuzz: cannot create seed: {e}"))
+                    })?;
+                file.write_all(b"hobot_fuzz_smoke").map_err(|e| {
+                    ClassifiedError::Harness(format!("smoke fuzz: cannot write seed: {e}"))
+                })?;
+            }
+            Err(e) => {
+                return Err(ClassifiedError::Harness(format!(
+                    "smoke fuzz: cannot inspect seed: {e}"
+                )));
+            }
         }
     }
 
-    let mut cmd = smoke_command(harness.engine, &binary, corpus_container, &out_container)?;
+    let mut cmd = smoke_command(harness.engine, &binary, &corpus_container, &out_container)?;
     if matches!(
         harness.engine,
         EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
@@ -523,6 +604,7 @@ pub async fn smoke_fuzz_in(
             hf_core::runtime::SandboxMount::writable(out_dir.clone(), out_container.clone()),
         ],
         workspace_read_only: true,
+        max_file_size_bytes: Some(64 * 1024 * 1024),
         ..hf_core::runtime::SandboxOptions::default()
     };
     let result = rt
@@ -697,7 +779,11 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
         },
         EngineKind::AflPlusPlus => BuildCommand {
             compiler: "afl-clang-fast".to_owned(),
-            args: vec!["-fsanitize=address".to_owned(), "-g".to_owned()],
+            args: vec![
+                "-fsanitize=fuzzer".to_owned(),
+                "-fsanitize=address".to_owned(),
+                "-g".to_owned(),
+            ],
             output: PathBuf::from(output_name),
         },
         EngineKind::Honggfuzz => BuildCommand {

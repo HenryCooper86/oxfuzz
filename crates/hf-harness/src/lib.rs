@@ -8,5 +8,5 @@ pub mod generator;
 
 pub use generator::{
     build_command, compile, draft, generate_seeds, refine, repair, smoke_fuzz, smoke_fuzz_in,
-    try_compile, CompileFailure, CompileResult, MAX_REPAIR_DIAGNOSTICS_CHARS,
+    smoke_fuzz_in_paths, try_compile, CompileFailure, CompileResult, MAX_REPAIR_DIAGNOSTICS_CHARS,
 };

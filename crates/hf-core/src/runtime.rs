@@ -134,6 +134,9 @@ pub struct SandboxOptions {
     /// overlays only its service-owned corpus/output directories as writable
     /// extra mounts; build flows leave it disabled.
     pub workspace_read_only: bool,
+    /// Optional per-file write ceiling enforced by the container runtime.
+    /// Service-level aggregate monitoring complements this limit.
+    pub max_file_size_bytes: Option<u64>,
 }
 
 /// A sandboxed runtime for building harnesses and running fuzzers.
