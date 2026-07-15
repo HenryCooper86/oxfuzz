@@ -39,6 +39,16 @@ surfaces aligned on the same operational status.
 5. Background: `corpus_ops` + `coverage_report` loop; on stagnation, propose
    new harness.
 
+Every persisted execution, including smoke qualification, carries the harness
+identifier in its run configuration. Target-specific consumers resolve the run
+through `run.config.harness_id -> harness.target_id`; they never infer target
+ownership from whichever project run happened most recently.
+
+Persistent chat context is session-owned. Presentation-supplied session ids are
+validated before transcript file I/O, and the session metadata row must exist
+before the service loads model context or retains a per-session turn lock. Raw
+session strings never become filesystem paths outside the transcript store.
+
 ### 4.1 Coverage Regression Rollback
 
 Automatic harness rollback is evidence-gated. A completed run may be compared
@@ -79,5 +89,9 @@ manifest tests enforce this boundary and prevent a service/agent cycle.
   corpus, environment, and argument mismatches.
 - Regression: target rediscovery preserves the original target id and all
   harness/corpus/crash attribution.
+- Regression: reports, exports, regression replay, and corpus absorption ignore
+  a newer run that belongs to another target in the same project.
+- Security regression: malformed session ids cannot escape transcript storage,
+  and unknown sessions are rejected before model invocation.
 - Contract: presentation manifests contain no direct domain, runtime, or agent
   dependencies.

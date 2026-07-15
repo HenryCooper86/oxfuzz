@@ -231,7 +231,7 @@ pub fn run() {
 /// the `HF_DB_PATH` persistence store -- the same construction the CLI and web
 /// API use.
 fn build_app_state() -> AppState {
-    pin_user_data_dirs();
+    pin_user_data_dirs().expect("prepare private desktop config and data directories");
     tauri::async_runtime::block_on(async {
         let container = hf_service::ServiceContainer::bootstrap().await;
         // The scheduler runs campaigns headlessly; persist schedules under the
@@ -259,30 +259,73 @@ fn build_app_state() -> AppState {
 ///
 /// On first run the per-user config is seeded from `<repo>/config` when present,
 /// so a developer's existing providers carry over into the GUI.
-fn pin_user_data_dirs() {
+fn pin_user_data_dirs() -> Result<(), String> {
     let base = hf_service::init::user_app_dir();
 
     let cfg_dir = base.join("config");
     if std::env::var_os("HF_CONFIG_DIR").is_none() {
-        let _ = std::fs::create_dir_all(&cfg_dir);
+        std::fs::create_dir_all(&cfg_dir).map_err(|error| error.to_string())?;
         // Seed from the source checkout's config on first run (only when the
         // per-user file does not exist yet -- never clobber the user's edits).
         let user_providers = cfg_dir.join("providers.toml");
-        if !user_providers.exists() {
-            if let Some(repo_providers) =
-                hf_service::repo_root().map(|r| r.join("config").join("providers.toml"))
-            {
-                if repo_providers.exists() {
-                    let _ = std::fs::copy(&repo_providers, &user_providers);
-                }
-            }
-        }
+        let repo_providers =
+            hf_service::repo_root().map(|root| root.join("config").join("providers.toml"));
+        seed_user_provider_config(repo_providers.as_deref(), &user_providers)?;
         std::env::set_var("HF_CONFIG_DIR", &cfg_dir);
     }
 
     let data = base.join("data");
-    let _ = std::fs::create_dir_all(&data);
+    std::fs::create_dir_all(&data).map_err(|error| error.to_string())?;
     if std::env::var_os("HF_DB_PATH").is_none() {
         std::env::set_var("HF_DB_PATH", data.join("hobot_fuzz.db"));
+    }
+    Ok(())
+}
+
+fn seed_user_provider_config(
+    repo_providers: Option<&std::path::Path>,
+    user_providers: &std::path::Path,
+) -> Result<bool, String> {
+    let Some(repo_providers) = repo_providers else {
+        return Ok(false);
+    };
+    match std::fs::symlink_metadata(repo_providers) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            hf_service::config::copy_private_config_if_missing(repo_providers, user_providers)
+        }
+        Ok(_) => Err(format!(
+            "provider seed is not a regular file: {}",
+            repo_providers.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seed_user_provider_config;
+
+    #[test]
+    fn first_run_provider_seed_is_private_and_never_clobbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("repo-providers.toml");
+        let destination = dir.path().join("user/config/providers.toml");
+        std::fs::write(&source, "api_key = \"first\"\n").unwrap();
+
+        assert!(seed_user_provider_config(Some(&source), &destination).unwrap());
+        std::fs::write(&source, "api_key = \"replacement\"\n").unwrap();
+        assert!(!seed_user_provider_config(Some(&source), &destination).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "api_key = \"first\"\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(destination).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }
