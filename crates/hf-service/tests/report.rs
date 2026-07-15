@@ -77,6 +77,7 @@ fn populated() -> ReportData {
             project_root: "/proj".to_owned(),
             engine: EngineKind::LibFuzzer,
             status: RunStatus::Done,
+            kind: hf_storage::RunKind::Campaign,
             started_at: "2026-06-28T00:00:00Z".parse().unwrap(),
             ended_at: Some("2026-06-28T00:10:00Z".parse().unwrap()),
             config: None,
@@ -84,6 +85,9 @@ fn populated() -> ReportData {
             execs: None,
             crash_count: None,
             harness_rev: None,
+            binary_rev: None,
+            evidence_dir: None,
+            context_rev: None,
         }),
         crashes: vec![sample_crash()],
         coverage: Some(CoverageSummary {

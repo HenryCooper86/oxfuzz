@@ -22,10 +22,15 @@ preserving full-fidelity round-trips as the models evolve.
 | id | TEXT (uuid) | PK |
 | project_root | TEXT | |
 | engine | TEXT | |
-| status | TEXT | pending/running/done/failed |
+| status | TEXT | pending/running/done/failed/cancelled |
 | started_at | TEXT | ISO8601 |
 | ended_at | TEXT | nullable |
 | config_json | TEXT | FuzzRunConfig |
+| run_kind | TEXT | campaign/smoke; defaults to campaign for legacy rows |
+| harness_rev | TEXT | nullable full SHA-256 of approved source |
+| binary_rev | TEXT | nullable full SHA-256 of staged executable |
+| evidence_dir | TEXT | nullable workspace-relative run output directory |
+| context_rev | TEXT | nullable SHA-256 of target sources, starting corpus, and runtime image |
 
 ### targets
 | column | type | notes |

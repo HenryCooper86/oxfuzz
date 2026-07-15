@@ -34,6 +34,7 @@ impl hf_core::runtime::RuntimeAdapter for WritingRuntime {
             stdout: "DONE exec/s: 64".to_owned(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
         })
     }
     async fn write_file(

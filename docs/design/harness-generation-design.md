@@ -34,9 +34,11 @@ pub struct Harness {
 4. **Iterate** -- on compile failure or smoke failure, feed diagnostics back
    to the LLM for up to N rounds (default 3).
 5. **Review** -- persist the smoke evidence on the exact active harness record;
-   a crash-free run leaves it at `SmokePassed`.
+   the evidence binds the full source and executable SHA-256 digests to the
+   smoke-run id, and a crash-free run leaves it at `SmokePassed`.
 6. **Promote** -- only an explicit human action changes that exact revision to
-   `Promoted`. A full or scheduled fuzz run fails closed for every other state.
+   `Promoted`. Promotion and every full or scheduled fuzz run recompute both
+   digests and fail closed for a mismatch or every other state.
 
 ## 4. Templates
 
@@ -50,8 +52,9 @@ fills the template; the template guarantees the engine entry point is present.
 - Build and smoke fuzz always run in `hf-runtime` sandbox.
 - The agent never executes a harness directly on the host.
 - `harness.source` and `harness.active` bind the active binary to its persisted
-  source and qualification id. Every successful recompile creates a new active
-  revision and invalidates prior approval.
+  source and qualification id. The smoke summary binds that record to the full
+  source and executable digests that actually ran. Every successful recompile
+  creates a new active revision and invalidates prior approval.
 - Agents may prepare and smoke-test a harness, but they cannot promote it.
 
 ## 6. Open Questions
@@ -66,4 +69,5 @@ fills the template; the template guarantees the engine entry point is present.
 - Integration: generate a harness for a fixture `parse_value` and assert
   smoke fuzz completes.
 - Integration: promotion before smoke fails; a full campaign before promotion
-  fails; smoke and promotion update the same persisted harness id.
+  fails; smoke and promotion update the same persisted harness id; tampering
+  with either qualified artifact blocks promotion and campaign execution.

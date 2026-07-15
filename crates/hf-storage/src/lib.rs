@@ -20,6 +20,8 @@ pub use checkpoint_store::SqliteChatCheckpointStore;
 pub use config::StorageConfig;
 pub use pool::create_pool;
 pub use session_store::SqliteSessionStore;
-pub use store::{AutoRevertEvent, ProjectAutoRevert, RunRecord, RunStatus, StorageError, Store};
+pub use store::{
+    AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError, Store,
+};
 pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;

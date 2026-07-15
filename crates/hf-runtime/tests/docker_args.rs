@@ -155,18 +155,19 @@ fn build_exec_args_adds_ptrace_caps_when_requested() {
 
 #[test]
 fn build_exec_args_with_syzkaller_profile() {
-    use hf_core::runtime::SandboxOptions;
+    use hf_core::runtime::{SandboxMount, SandboxOptions};
     let cfg = cfg_with(limits(4096, 4));
     let opts = SandboxOptions {
         extra_mounts: vec![
-            "/host/kernel:/syzbench/kernel:ro".to_owned(),
-            "/host/rootfs.img:/syzbench/rootfs.img".to_owned(),
+            SandboxMount::read_only("/host/kernel".into(), "/syzbench/kernel"),
+            SandboxMount::writable("/host/rootfs.img".into(), "/syzbench/rootfs.img"),
         ],
         platform: Some("linux/amd64".to_owned()),
         network_enabled: true,
         workdir: Some("/syzbench".to_owned()),
         relax_hardening: true,
         devices: vec!["/dev/kvm".to_owned()],
+        workspace_read_only: false,
     };
     let args = hf_runtime::docker::build_exec_args_with(
         &cfg,
@@ -179,11 +180,11 @@ fn build_exec_args_with_syzkaller_profile() {
     assert!(joined.contains("--platform linux/amd64"), "{joined}");
     assert!(joined.contains("--device=/dev/kvm"), "{joined}");
     assert!(
-        joined.contains("-v /host/kernel:/syzbench/kernel:ro"),
+        joined.contains("--mount type=bind,source=/host/kernel,target=/syzbench/kernel,readonly"),
         "{joined}"
     );
     assert!(
-        joined.contains("-v /host/rootfs.img:/syzbench/rootfs.img"),
+        joined.contains("--mount type=bind,source=/host/rootfs.img,target=/syzbench/rootfs.img"),
         "{joined}"
     );
     assert!(joined.contains("-w /syzbench"), "{joined}");
@@ -202,6 +203,41 @@ fn build_exec_args_with_syzkaller_profile() {
     );
     // pids-limit is still applied even when hardening is relaxed.
     assert!(joined.contains("--pids-limit=512"), "{joined}");
+}
+
+#[test]
+fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
+    use hf_core::runtime::{SandboxMount, SandboxOptions};
+
+    let cfg = cfg_with(limits(2048, 1));
+    let opts = SandboxOptions {
+        extra_mounts: vec![
+            SandboxMount::writable("/host/corpus".into(), "/work/corpus"),
+            SandboxMount::writable("/host/run-out".into(), "/work/runs/run-id/out"),
+        ],
+        workspace_read_only: true,
+        ..SandboxOptions::default()
+    };
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &limits(2048, 1),
+        &["fuzz_bin".to_owned()],
+        &opts,
+    );
+    let joined = args.join(" ");
+
+    assert!(
+        joined.contains("/tmp/hobot_fuzz_workspace:/work:ro"),
+        "primary workspace must be immutable: {joined}"
+    );
+    assert!(
+        joined.contains("type=bind,source=/host/corpus,target=/work/corpus"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("type=bind,source=/host/run-out,target=/work/runs/run-id/out"),
+        "{joined}"
+    );
 }
 
 #[test]

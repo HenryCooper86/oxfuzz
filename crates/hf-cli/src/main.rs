@@ -989,14 +989,20 @@ async fn cmd_regress(project: PathBuf, target: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let still = results.iter().filter(|r| r.still_crashes).count();
+    let fixed = results
+        .iter()
+        .filter(|r| r.verified && !r.still_crashes)
+        .count();
+    let inconclusive = results.iter().filter(|r| !r.verified).count();
     println!(
-        "Replayed {} crash(es): {still} still crashing, {} fixed.",
+        "Replayed {} crash(es): {still} still crashing, {fixed} fixed, {inconclusive} inconclusive.",
         results.len(),
-        results.len() - still
     );
     for r in &results {
         let tag = if r.still_crashes {
             "STILL CRASHES"
+        } else if !r.verified {
+            "INCONCLUSIVE"
         } else {
             "fixed"
         };
@@ -1026,13 +1032,14 @@ async fn cmd_campaign(
         .run_campaign(&project, target, engine, lang, duration_secs, 2, iterations)
         .await?;
     println!(
-        "target={} harness={:?} repairs={} iterations={} edges={} crashes={}",
+        "target={} harness={:?} repairs={} iterations={} edges={} crashes={} termination={:?}",
         outcome.target,
         outcome.harness_status,
         outcome.repairs_used,
         outcome.iterations,
         outcome.edges,
-        outcome.crashes
+        outcome.crashes,
+        outcome.termination
     );
     Ok(())
 }

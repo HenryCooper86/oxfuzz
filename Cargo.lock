@@ -2544,6 +2544,7 @@ dependencies = [
  "chrono",
  "futures",
  "hf-core",
+ "hf-crash",
  "hf-engine",
  "hf-prompt",
  "hf-test-utils",

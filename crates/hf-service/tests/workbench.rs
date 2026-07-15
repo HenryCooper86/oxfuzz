@@ -69,7 +69,7 @@ fn sample_harness(target_id: Uuid) -> Harness {
 }
 
 fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
-    RunRecord::new(
+    let mut run = RunRecord::new(
         project,
         EngineKind::LibFuzzer,
         Some(FuzzRunConfig {
@@ -84,7 +84,9 @@ fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
             extra_args: Vec::new(),
         }),
         Utc::now(),
-    )
+    );
+    run.context_rev = Some("test-comparison-context".to_owned());
+    run
 }
 
 #[tokio::test]
@@ -257,6 +259,9 @@ async fn dashboard_readiness_tracks_operational_state() {
         execs_per_sec: 1_250.0,
         crashes: 0,
         passed: true,
+        source_sha256: None,
+        binary_sha256: None,
+        run_id: None,
     });
     let mut run = sample_run("/proj", harness.id);
     run.status = RunStatus::Done;

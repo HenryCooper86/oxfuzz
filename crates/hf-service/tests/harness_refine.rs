@@ -35,6 +35,7 @@ impl hf_core::runtime::RuntimeAdapter for OkRuntime {
             stdout: String::new(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
         })
     }
     async fn write_file(

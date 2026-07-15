@@ -38,9 +38,12 @@ Templates live in `config/prompts/harness_<lang>_<engine>.md`. They contain:
 ## 5. Promotion Gate
 
 A harness moves to `SmokePassed` only after its smoke evidence is persisted on
-the exact active revision. A crash during smoke is useful evidence but is not a
-clean pass and cannot be promoted. Only an explicit human action moves a clean
-`SmokePassed` revision to `Promoted`.
+the exact active revision. That evidence records the full SHA-256 digest of the
+staged source and executable plus the owning smoke-run id. Promotion and every
+later campaign recompute the active source/executable digests and fail closed
+if either differs from the qualified pair. A crash during smoke is useful
+evidence but is not a clean pass and cannot be promoted. Only an explicit human
+action moves a clean `SmokePassed` revision to `Promoted`.
 
 Every full, scheduled, CI, or agent-started `FuzzRun` must resolve the active
 binary/source record and reject it unless its status is `Promoted`. Recompiling

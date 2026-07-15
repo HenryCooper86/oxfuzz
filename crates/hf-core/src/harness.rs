@@ -34,6 +34,15 @@ pub struct SmokeRunSummary {
     pub execs_per_sec: f64,
     pub crashes: u32,
     pub passed: bool,
+    /// Full SHA-256 of the exact harness source exercised by this smoke run.
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+    /// Full SHA-256 of the exact executable exercised by this smoke run.
+    #[serde(default)]
+    pub binary_sha256: Option<String>,
+    /// Persisted run that owns the qualification evidence.
+    #[serde(default)]
+    pub run_id: Option<Uuid>,
 }
 
 /// A generated fuzzing harness.
