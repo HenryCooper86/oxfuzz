@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 
-use hf_service::{EngineKind, Message, Role, ServiceContainer, SessionId, TargetLanguage};
+use hf_service::{
+    ClassifiedError, EngineKind, FuzzProgress, Message, Role, RunCancelOutcome, RunLifecycleStatus,
+    ServiceContainer, SessionId, TargetLanguage,
+};
 
 use crate::security::{redact_config_text, redact_public_json};
 use crate::WebSecurityConfig;
@@ -189,6 +192,27 @@ fn map_err<E: std::fmt::Display>(
     }
 }
 
+fn classified_api_error(error: ClassifiedError) -> ApiError {
+    let status = match &error {
+        ClassifiedError::Validation(_) => StatusCode::BAD_REQUEST,
+        ClassifiedError::Harness(_) | ClassifiedError::Engine(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ClassifiedError::Provider(_) => StatusCode::BAD_GATEWAY,
+        ClassifiedError::Sandbox(_) => StatusCode::SERVICE_UNAVAILABLE,
+        ClassifiedError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        ClassifiedError::Storage(_) | ClassifiedError::Internal(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Build the router
 // ---------------------------------------------------------------------------
@@ -279,7 +303,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/coverage", post(run_coverage_series))
         .route("/runs/harness-source", post(run_harness_source))
         .route("/runs/revert-harness", post(revert_harness_from_run))
-        .route("/runs/start", post(run_start_unavailable))
+        .route("/runs/start", post(run_start))
         .route("/runs/{id}/status", get(run_status))
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .route(
@@ -478,7 +502,7 @@ async fn discover(
         .container
         .discover(&project, lang)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(inv)))
 }
 
@@ -504,7 +528,7 @@ async fn harness_draft(
         .container
         .harness_draft(&project, &req.target, engine, lang)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
         "source": draft.source,
         "target": req.target,
@@ -536,20 +560,15 @@ async fn harness_compile(
         Some(l) => parse_lang(l).map_err(map_err(StatusCode::BAD_REQUEST))?,
         None => TargetLanguage::C,
     };
-    match state
+    let out = state
         .container
         .harness_compile(req.source, &project, engine, &req.target, lang)
         .await
-    {
-        Ok(out) => Ok(Json(serde_json::json!({
-            "status": format!("{:?}", out.status),
-            "message": "Harness compiled successfully in sandbox.",
-        }))),
-        Err(e) => Ok(Json(serde_json::json!({
-            "status": "Failed",
-            "message": format!("Compile failed: {e}"),
-        }))),
-    }
+        .map_err(classified_api_error)?;
+    Ok(Json(serde_json::json!({
+        "status": format!("{:?}", out.status),
+        "message": "Harness compiled successfully in sandbox.",
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -574,7 +593,7 @@ async fn harness_smoke(
         .container
         .harness_smoke(&project, &req.target, engine, lang)
         .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
         // Mirror the Tauri command: crashes during smoke mean it did not pass.
         "status": if smoke.passed { "SmokePassed" } else { "SmokeFailed" },
@@ -595,7 +614,7 @@ async fn harness_promote(
         .container
         .harness_promote(&project, &req.target, engine)
         .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
         "status": format!("{:?}", harness.status),
         "harness_id": harness.id,
@@ -653,20 +672,73 @@ async fn revert_harness_from_run(
         .container
         .revert_harness_from_run(&req.run_id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
         "status": format!("{:?}", out.status),
         "message": "Reverted and recompiled the harness in the sandbox.",
     })))
 }
 
-async fn run_start_unavailable() -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse {
-            error: "run start requires a service-owned durable run handle; use the CLI or desktop until that service contract is available".to_owned(),
-        }),
-    )
+#[derive(Debug, Deserialize)]
+struct RunStartRequest {
+    project: PathBuf,
+    target: String,
+    engine: String,
+    #[serde(alias = "duration")]
+    duration_secs: u64,
+}
+
+async fn run_start(
+    State(state): State<AppState>,
+    Json(req): Json<RunStartRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let project = approved_project(&state, &req.project)?;
+    let engine = parse_engine(&req.engine).map_err(map_err(StatusCode::BAD_REQUEST))?;
+    let progress_state = state.clone();
+    let on_progress = std::sync::Arc::new(move |run_id: uuid::Uuid, progress: FuzzProgress| {
+        let (kind, data) = match progress {
+            FuzzProgress::EdgesCovered(value) => ("EdgesCovered", serde_json::json!(value)),
+            FuzzProgress::ExecsPerSec(value) => ("ExecsPerSec", serde_json::json!(value)),
+            FuzzProgress::CrashesFound(value) => ("CrashesFound", serde_json::json!(value)),
+            FuzzProgress::LogLine(value) => ("LogLine", serde_json::json!(value)),
+            FuzzProgress::Done => ("Done", serde_json::Value::Null),
+        };
+        if let Err(error) = progress_state.publish_event(SseEvent::RunProgress {
+            run_id: Some(run_id.to_string()),
+            kind: kind.to_owned(),
+            data,
+        }) {
+            tracing::warn!(%run_id, %error, "dropping invalid run progress event");
+        }
+    });
+    let status_state = state.clone();
+    let on_status = std::sync::Arc::new(move |run_id: uuid::Uuid, status: RunLifecycleStatus| {
+        if let Err(error) = status_state.publish_event(SseEvent::RunStatus {
+            run_id: run_id.to_string(),
+            status: status.as_str().to_owned(),
+        }) {
+            tracing::warn!(%run_id, %error, "dropping invalid run status event");
+        }
+    });
+    let run_id = state
+        .container
+        .start_fuzzer(
+            project,
+            req.target,
+            engine,
+            req.duration_secs,
+            on_progress,
+            on_status,
+        )
+        .await
+        .map_err(classified_api_error)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "run_id": run_id,
+            "status": RunLifecycleStatus::Running.as_str(),
+        })),
+    ))
 }
 
 async fn run_status(
@@ -674,12 +746,11 @@ async fn run_status(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let run_id = uuid::Uuid::parse_str(&id).map_err(map_err(StatusCode::BAD_REQUEST))?;
-    let item = state
+    let status = state
         .container
-        .run_history(None)
+        .run_control_status(run_id)
         .await
-        .into_iter()
-        .find(|run| run.id == run_id.to_string())
+        .map_err(classified_api_error)?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -688,14 +759,7 @@ async fn run_status(
                 }),
             )
         })?;
-    let mut value = public_value(item);
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "active".to_owned(),
-            serde_json::Value::Bool(state.container.active_run_ids().contains(&run_id)),
-        );
-    }
-    Ok(Json(value))
+    Ok(Json(public_value(status)))
 }
 
 async fn cancel_run_by_id(
@@ -703,13 +767,29 @@ async fn cancel_run_by_id(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let run_id = uuid::Uuid::parse_str(&id).map_err(map_err(StatusCode::BAD_REQUEST))?;
-    if !state.container.cancel_run(run_id) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "run is not active".to_owned(),
-            }),
-        ));
+    match state
+        .container
+        .request_run_cancel(run_id)
+        .await
+        .map_err(classified_api_error)?
+    {
+        RunCancelOutcome::Accepted => {}
+        RunCancelOutcome::NotFound => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "run not found".to_owned(),
+                }),
+            ));
+        }
+        RunCancelOutcome::Inactive => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "run is not active".to_owned(),
+                }),
+            ));
+        }
     }
     let _ = state.publish_event(SseEvent::RunStatus {
         run_id: run_id.to_string(),
@@ -788,7 +868,7 @@ async fn set_project_auto_revert_override(
         .container
         .set_project_auto_revert_override(&project, req.enabled, req.threshold_pct, req.notify_only)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -801,7 +881,7 @@ async fn clear_project_auto_revert_override(
         .container
         .clear_project_auto_revert_override(&project)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -842,7 +922,7 @@ async fn generate_seeds(
         .container
         .generate_seeds(&project, &req.target)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({"seeds": entries})))
 }
 
@@ -869,7 +949,7 @@ async fn generate_seeds_llm(
         .container
         .generate_seeds_llm(&project, &req.target, lang, count)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({"seeds": entries})))
 }
 
@@ -890,7 +970,7 @@ async fn corpus(
             let corpus = state
                 .container
                 .corpus_list(&project, &req.target)
-                .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(classified_api_error)?;
             Ok(Json(public_value(corpus.entries)))
         }
         "seed" => {
@@ -898,7 +978,7 @@ async fn corpus(
                 .container
                 .corpus_seed(&project, &req.target)
                 .await
-                .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(classified_api_error)?;
             Ok(Json(serde_json::json!({"seeded": n})))
         }
         "grow" => {
@@ -906,7 +986,7 @@ async fn corpus(
                 .container
                 .corpus_grow(&project, &req.target)
                 .await
-                .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(classified_api_error)?;
             Ok(Json(serde_json::json!({"entries": n})))
         }
         "prune" => {
@@ -914,7 +994,7 @@ async fn corpus(
                 .container
                 .corpus_prune(&project, &req.target)
                 .await
-                .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(classified_api_error)?;
             Ok(Json(serde_json::json!({"entries": n})))
         }
         other => Err((
@@ -941,7 +1021,7 @@ async fn triage(
         .container
         .triage(&project, &req.target)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(deduped)))
 }
 
@@ -1036,7 +1116,7 @@ async fn issue_export(
         .container
         .issue_export(&project, &req.crash_id)
         .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(export))
 }
 
@@ -1053,7 +1133,7 @@ async fn file_issue(
         .container
         .file_issue(&req.crash_id)
         .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(created))
 }
 
@@ -1067,7 +1147,7 @@ async fn issue_tracker_test(State(state): State<AppState>) -> ApiResult<bool> {
         .issue_tracker_test_connection()
         .await
         .map(|()| Json(true))
-        .map_err(map_err(StatusCode::BAD_REQUEST))
+        .map_err(classified_api_error)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1086,7 +1166,7 @@ async fn defectdojo_push(
         .container
         .push_to_defectdojo(&project, req.target.as_deref())
         .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(outcome))
 }
 
@@ -1095,7 +1175,7 @@ async fn defectdojo_test(State(state): State<AppState>) -> ApiResult<bool> {
         .container
         .defectdojo_test_connection()
         .await
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(true))
 }
 
@@ -1125,7 +1205,7 @@ async fn list_report_drafts(State(state): State<AppState>) -> ApiResult<serde_js
     let reports = state
         .container
         .list_report_drafts()
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(reports)))
 }
 
@@ -1155,7 +1235,7 @@ async fn save_report_draft(
             &req.status,
             &req.content,
         )
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(public_value(report)))
 }
 
@@ -1171,7 +1251,7 @@ async fn delete_report_draft(
     state
         .container
         .delete_report_draft(&req.id)
-        .map_err(map_err(StatusCode::BAD_REQUEST))?;
+        .map_err(classified_api_error)?;
     Ok(Json(()))
 }
 
@@ -1198,7 +1278,7 @@ async fn clear_knowledge(State(state): State<AppState>) -> ApiResult<serde_json:
         .container
         .clear_knowledge()
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({ "cleared": true })))
 }
 
@@ -1211,7 +1291,7 @@ async fn delete_project(
         .container
         .delete_project(&project)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -1228,7 +1308,7 @@ async fn delete_crash(
         .container
         .delete_crash(&req.crash_id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(true))
 }
 
@@ -1246,7 +1326,7 @@ async fn delete_corpus_entry(
         .container
         .delete_corpus_entry(&req.sha256, std::path::Path::new(&req.path))
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(true))
 }
 
@@ -1255,7 +1335,7 @@ async fn clear_all_artifacts(State(state): State<AppState>) -> ApiResult<bool> {
         .container
         .clear_all_artifacts()
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(true))
 }
 
@@ -1267,7 +1347,7 @@ async fn delete_run(
         .container
         .delete_run(&req.run_id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(true))
 }
 
@@ -1276,7 +1356,7 @@ async fn clear_all_runs(State(state): State<AppState>) -> ApiResult<bool> {
         .container
         .clear_all_runs()
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(true))
 }
 
@@ -1286,7 +1366,7 @@ async fn sarif(State(state): State<AppState>, Json(req): Json<TriageRequest>) ->
         .container
         .export_sarif(&project, &req.target)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(doc))
 }
 
@@ -1299,7 +1379,7 @@ async fn report(
         .container
         .generate_report(&project, &req.target)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(markdown))
 }
 
@@ -1316,7 +1396,7 @@ async fn chat_send(
         .container
         .chat_send(&req.message)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(resp))
 }
 
@@ -1370,7 +1450,7 @@ async fn chat_agent(
             &hf_service::NullSink,
         )
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(answer))
 }
 
@@ -1403,7 +1483,7 @@ async fn create_session(
         .container
         .create_chat_session(req.title)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(id))
 }
 
@@ -1421,7 +1501,7 @@ async fn chat_history(
         .container
         .chat_history(&id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(history))
 }
 
@@ -1434,7 +1514,7 @@ async fn delete_session(
         .container
         .delete_chat_session(&id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(deleted))
 }
 
@@ -1447,7 +1527,7 @@ async fn chat_rollback(
         .container
         .chat_rollback_last(&id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(removed))
 }
 
@@ -1466,7 +1546,7 @@ async fn chat_rollback_to(
         .container
         .chat_rollback_to(&id, &req.checkpoint_id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(removed))
 }
 
@@ -1479,7 +1559,7 @@ async fn chat_checkpoints(
         .container
         .chat_checkpoints(&id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(checkpoints))
 }
 
@@ -1504,7 +1584,7 @@ async fn chat_branch(
             req.title.filter(|t| !t.is_empty()),
         )
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(branch))
 }
 
@@ -1517,7 +1597,7 @@ async fn chat_branches(
         .container
         .chat_branches(&id)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(branches))
 }
 
@@ -1533,8 +1613,8 @@ async fn knowledge_index(
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<hf_service::knowledge::KnowledgeStats> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let knowledge_stats = hf_service::knowledge::index_project(&project)
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let knowledge_stats =
+        hf_service::knowledge::index_project(&project).map_err(classified_api_error)?;
     Ok(Json(knowledge_stats))
 }
 
@@ -1559,7 +1639,7 @@ async fn knowledge_ingest(
         .container
         .ingest_document(&project, &document)
         .await
-        .map_err(map_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(classified_api_error)?;
     Ok(Json(ingested))
 }
 
@@ -1639,7 +1719,7 @@ async fn schedule_targets(
         .schedulable_targets(&project)
         .await
         .map(Json)
-        .map_err(map_err(StatusCode::BAD_REQUEST))
+        .map_err(classified_api_error)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1946,12 +2026,54 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
 
 #[cfg(test)]
 mod request_tests {
-    use super::SetProvidersRequest;
+    use axum::http::StatusCode;
+
+    use super::{classified_api_error, SetProvidersRequest};
 
     #[test]
     fn provider_write_accepts_the_browser_transport_wrapper() {
         let request: SetProvidersRequest =
             serde_json::from_str(r#"{"providers":[]}"#).expect("wrapped provider request");
         assert!(request.into_providers().is_empty());
+    }
+
+    #[test]
+    fn classified_errors_have_one_stable_http_mapping() {
+        use hf_service::ClassifiedError;
+
+        let cases = [
+            (
+                ClassifiedError::Validation("bad input".into()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ClassifiedError::Harness("not qualified".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                ClassifiedError::Engine("launch rejected".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                ClassifiedError::Provider("offline".into()),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                ClassifiedError::Sandbox("docker offline".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (ClassifiedError::Timeout, StatusCode::GATEWAY_TIMEOUT),
+            (
+                ClassifiedError::Storage("database".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ClassifiedError::Internal("bug".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(classified_api_error(error).0, expected);
+        }
     }
 }

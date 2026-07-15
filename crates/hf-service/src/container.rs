@@ -2112,6 +2112,21 @@ impl ServiceContainer {
         self
     }
 
+    /// Connect persistence at an explicit path and attach it to this container.
+    ///
+    /// This keeps embedding and presentation tests on the service boundary
+    /// without exposing the infrastructure store type in their manifests.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError::Storage`] when the database cannot be
+    /// opened or migrated.
+    pub async fn with_store_path(self, path: PathBuf) -> Result<Self, ClassifiedError> {
+        let store = Store::connect(path)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        Ok(self.with_store(Arc::new(store)))
+    }
+
     /// The chat checkpoint manager (turn-level rollback), if a database is
     /// configured.
     #[must_use]
@@ -4964,6 +4979,168 @@ impl ServiceContainer {
 
     // -- Run --------------------------------------------------------------
 
+    /// Reserve and launch a fuzz campaign in a service-owned background task.
+    ///
+    /// The returned UUID is already persisted, recovery-journaled, and
+    /// registered for cooperative cancellation. Progress and lifecycle sinks
+    /// always receive that same service-owned id. A request future may be
+    /// dropped after this method returns without aborting the campaign.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when preflight or durable reservation
+    /// fails. Errors after reservation are reflected in the persisted run and
+    /// delivered as a [`RunLifecycleStatus::Failed`] lifecycle callback.
+    pub async fn start_fuzzer(
+        &self,
+        project: PathBuf,
+        target: String,
+        engine: EngineKind,
+        duration_secs: u64,
+        on_progress: Arc<dyn Fn(Uuid, FuzzProgress) + Send + Sync + 'static>,
+        on_status: Arc<dyn Fn(Uuid, RunLifecycleStatus) + Send + Sync + 'static>,
+    ) -> Result<Uuid, ClassifiedError> {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let active_id = Arc::new(std::sync::Mutex::new(None));
+        let container = self.clone();
+
+        tokio::spawn({
+            let started_tx = Arc::clone(&started_tx);
+            let active_id = Arc::clone(&active_id);
+            async move {
+                let progress_sink = {
+                    let active_id = Arc::clone(&active_id);
+                    let on_progress = Arc::clone(&on_progress);
+                    move |progress| {
+                        if let Ok(id) = active_id.lock() {
+                            if let Some(id) = *id {
+                                on_progress(id, progress);
+                            }
+                        }
+                    }
+                };
+                let started_sink = {
+                    let active_id = Arc::clone(&active_id);
+                    let started_tx = Arc::clone(&started_tx);
+                    let on_status = Arc::clone(&on_status);
+                    move |run_id| {
+                        if let Ok(mut id) = active_id.lock() {
+                            *id = Some(run_id);
+                        }
+                        on_status(run_id, RunLifecycleStatus::Running);
+                        if let Ok(mut sender) = started_tx.lock() {
+                            if let Some(sender) = sender.take() {
+                                let _ = sender.send(Ok(run_id));
+                            }
+                        }
+                    }
+                };
+
+                let result = container
+                    .run_fuzzer_with_started(
+                        &project,
+                        &target,
+                        engine,
+                        duration_secs,
+                        &progress_sink,
+                        &started_sink,
+                    )
+                    .await;
+                match result {
+                    Ok(summary) => {
+                        let status = if summary.termination
+                            == hf_core::runtime::CommandTermination::Cancelled
+                        {
+                            RunLifecycleStatus::Cancelled
+                        } else {
+                            RunLifecycleStatus::Done
+                        };
+                        on_status(summary.run_id, status);
+                    }
+                    Err(error) => {
+                        let run_id = active_id.lock().ok().and_then(|id| *id);
+                        if let Some(run_id) = run_id {
+                            tracing::error!(%run_id, %error, "background fuzz run failed");
+                            on_status(run_id, RunLifecycleStatus::Failed);
+                        } else if let Ok(mut sender) = started_tx.lock() {
+                            if let Some(sender) = sender.take() {
+                                let _ = sender.send(Err(error));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        started_rx.await.map_err(|_| {
+            ClassifiedError::Internal(
+                "background fuzz task ended before durable reservation".to_owned(),
+            )
+        })?
+    }
+
+    /// Read the durable lifecycle state for one run.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when persistence is unavailable or the
+    /// stored row cannot be decoded.
+    pub async fn run_control_status(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Option<RunControlStatus>, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("run control requires the persistent service store".into())
+        })?;
+        let Some(run) = store
+            .get_run(run_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let active = self
+            .active_runs
+            .lock()
+            .map_err(|_| ClassifiedError::Internal("active-run registry is poisoned".into()))?
+            .contains_key(&run_id);
+        Ok(Some(RunControlStatus {
+            run_id,
+            status: run.status.into(),
+            active,
+            started_at: run.started_at.to_rfc3339(),
+            ended_at: run.ended_at.map(|ended_at| ended_at.to_rfc3339()),
+        }))
+    }
+
+    /// Request cooperative cancellation for one durable run.
+    ///
+    /// # Errors
+    /// Returns a [`ClassifiedError`] when run state cannot be read or the
+    /// active-run registry is unavailable.
+    pub async fn request_run_cancel(
+        &self,
+        run_id: Uuid,
+    ) -> Result<RunCancelOutcome, ClassifiedError> {
+        let Some(status) = self.run_control_status(run_id).await? else {
+            return Ok(RunCancelOutcome::NotFound);
+        };
+        if status.status != RunLifecycleStatus::Running || !status.active {
+            return Ok(RunCancelOutcome::Inactive);
+        }
+        let runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| ClassifiedError::Internal("active-run registry is poisoned".into()))?;
+        let Some(token) = runs.get(&run_id) else {
+            return Ok(RunCancelOutcome::Inactive);
+        };
+        if token.is_cancelled() {
+            return Ok(RunCancelOutcome::Inactive);
+        }
+        token.cancel();
+        Ok(RunCancelOutcome::Accepted)
+    }
+
     /// Cancel an in-flight fuzz run by id.
     ///
     /// Fires the run's cancellation token, which cooperatively tears down the
@@ -5021,6 +5198,19 @@ impl ServiceContainer {
         engine: EngineKind,
         duration_secs: u64,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        self.run_fuzzer_with_started(project, target, engine, duration_secs, on_progress, &|_| {})
+            .await
+    }
+
+    async fn run_fuzzer_with_started(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        duration_secs: u64,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
 
@@ -5150,6 +5340,10 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
+        // The run is durable and cancellable at this point. Non-blocking
+        // presentation transports may now return the exact UUID; no engine
+        // process has been launched yet.
+        on_started(run_id);
 
         let runner = hf_engine::runner::EngineRunner::new();
         // Watch edge readings for stagnation while forwarding every event.
@@ -7360,6 +7554,74 @@ pub struct RunHistoryItem {
     pub binary_rev: Option<String>,
     /// Workspace-relative run output directory.
     pub evidence_dir: Option<String>,
+}
+
+/// Public lifecycle states used by non-blocking run-control transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLifecycleStatus {
+    /// The durable row exists but execution has not started.
+    Pending,
+    /// The sandboxed engine is active and may be cancelled cooperatively.
+    Running,
+    /// Execution completed and terminal evidence is durable.
+    Done,
+    /// Execution failed and the durable row has been repaired.
+    Failed,
+    /// The user requested cooperative cancellation.
+    Cancelled,
+}
+
+impl RunLifecycleStatus {
+    /// Stable lowercase transport representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl From<RunStatus> for RunLifecycleStatus {
+    fn from(status: RunStatus) -> Self {
+        match status {
+            RunStatus::Pending => Self::Pending,
+            RunStatus::Running => Self::Running,
+            RunStatus::Done => Self::Done,
+            RunStatus::Failed => Self::Failed,
+            RunStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Durable status snapshot for one service-owned run UUID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RunControlStatus {
+    /// Service-owned run UUID.
+    pub run_id: Uuid,
+    /// Durable lifecycle state.
+    pub status: RunLifecycleStatus,
+    /// Whether a cooperative cancellation token is currently registered.
+    pub active: bool,
+    /// RFC3339 reservation time.
+    pub started_at: String,
+    /// RFC3339 terminal time, when complete.
+    pub ended_at: Option<String>,
+}
+
+/// Domain outcome of a cooperative cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCancelOutcome {
+    /// The active run's token was signalled.
+    Accepted,
+    /// No durable run exists for the requested UUID.
+    NotFound,
+    /// The run exists but is terminal or no longer active.
+    Inactive,
 }
 
 /// A fuzz run summary.
