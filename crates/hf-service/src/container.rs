@@ -5859,7 +5859,7 @@ impl ServiceContainer {
         // harness binary, native runtime without casr, or the tool errored). The
         // captured sanitizer traces (`logs`) feed bug-report drafting; CASR-path
         // crashes carry their summary instead.
-        let (mut deduped, logs): (
+        let (mut deduped, mut logs): (
             Vec<hf_core::crash::Crash>,
             std::collections::HashMap<PathBuf, String>,
         ) = match self
@@ -5878,6 +5878,21 @@ impl ServiceContainer {
         // duplicates (the report lists every persisted crash for the run).
         for crash in &mut deduped {
             crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
+        }
+
+        // Native minimizers execute against the immutable run-owned harness and
+        // original crash input. Legacy records without binary digest evidence
+        // remain triageable but cannot claim a verified minimized artifact.
+        if run.binary_rev.is_some() {
+            self.minimize_triaged_crashes(
+                &workspace,
+                run_id,
+                engine,
+                &run_binary,
+                &mut deduped,
+                &mut logs,
+            )
+            .await;
         }
 
         // Draft an LLM bug report for each unique crash when a provider is
@@ -5925,6 +5940,90 @@ impl ServiceContainer {
             }
         }
         Ok(deduped)
+    }
+
+    async fn minimize_triaged_crashes(
+        &self,
+        workspace: &Path,
+        run_id: Uuid,
+        engine: EngineKind,
+        binary: &Path,
+        crashes: &mut [hf_core::crash::Crash],
+        logs: &mut std::collections::HashMap<PathBuf, String>,
+    ) {
+        use crate::crash_minimization::{prepare, PreparedMinimization, MAX_CRASH_MINIMIZATIONS};
+
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 2048,
+            max_cpus: 1,
+            max_duration_secs: 120,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        for crash in crashes.iter_mut().take(MAX_CRASH_MINIMIZATIONS) {
+            let original = crash.input_path.clone();
+            let prepared = match prepare(workspace, run_id, engine, binary, &original, crash.id) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    tracing::warn!(
+                        crash_id = %crash.id,
+                        "crash minimization staging failed: {error}"
+                    );
+                    continue;
+                }
+            };
+            let minimized = match prepared {
+                PreparedMinimization::Unsupported => break,
+                PreparedMinimization::Complete(path) => Some(path),
+                PreparedMinimization::Run(run) => {
+                    let result = self
+                        .runtime
+                        .run_command_opts(&run.command, workspace, &limits, &run.sandbox)
+                        .await;
+                    match result {
+                        Ok(result)
+                            if result.termination
+                                == hf_core::runtime::CommandTermination::Completed
+                                && result.exit_code == 0 =>
+                        {
+                            match run.publish() {
+                                Ok(path) => Some(path),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        crash_id = %crash.id,
+                                        "crash minimizer output was rejected: {error}"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        Ok(result) => {
+                            tracing::warn!(
+                                crash_id = %crash.id,
+                                termination = ?result.termination,
+                                exit_code = result.exit_code,
+                                "crash minimizer did not complete successfully"
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                crash_id = %crash.id,
+                                "crash minimizer failed: {error}"
+                            );
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some(path) = minimized {
+                if let Some(log) = logs.get(&original).cloned() {
+                    logs.insert(path.clone(), log);
+                }
+                crash.input_path = path;
+                crash.minimized = true;
+            }
+        }
     }
 
     /// Regression check: replay stored crash inputs against the current harness
