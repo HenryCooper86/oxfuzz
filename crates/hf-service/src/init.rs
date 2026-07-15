@@ -116,7 +116,8 @@ fn db_path() -> PathBuf {
 /// Initialize a workspace: materialize any missing config files from their
 /// `*.example.toml` templates and create + migrate the database.
 ///
-/// Idempotent: existing config files are left untouched.
+/// Idempotent: existing config contents are left untouched. On Unix, private
+/// config permissions are tightened to owner-only on every initialization.
 ///
 /// # Errors
 /// Returns `ClassifiedError` if the config directory cannot be read or the
@@ -143,12 +144,14 @@ pub async fn init_at(config_dir: &Path, db_path: &Path) -> Result<InitReport, Cl
             continue;
         };
         let target = config_dir.join(format!("{stem}.toml"));
-        if !target.exists() {
-            std::fs::copy(entry.path(), &target)
-                .map_err(|e| ClassifiedError::Internal(format!("copy {name}: {e}")))?;
+        if crate::config::copy_private_config_if_missing(&entry.path(), &target)
+            .map_err(|e| ClassifiedError::Internal(format!("create {name}: {e}")))?
+        {
             created.push(format!("{stem}.toml"));
         }
     }
+    crate::config::secure_config_directory(config_dir)
+        .map_err(|error| ClassifiedError::Internal(format!("secure configs: {error}")))?;
 
     // Connect (creating + migrating) the database.
     let _store = Store::connect(db_path).await?;

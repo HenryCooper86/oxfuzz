@@ -36,6 +36,48 @@ async fn seed_writes_inputs_and_computes_sha256() {
 }
 
 #[tokio::test]
+async fn seed_replaces_an_existing_entry() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+
+    seed(
+        target_id(),
+        &corpus_root,
+        vec![(b"first".to_vec(), "stable-name".to_owned())],
+    )
+    .await
+    .unwrap();
+    seed(
+        target_id(),
+        &corpus_root,
+        vec![(b"replacement".to_vec(), "stable-name".to_owned())],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fs::read(corpus_root.join("stable-name")).unwrap(),
+        b"replacement"
+    );
+}
+
+#[tokio::test]
+async fn seed_rejects_names_that_escape_the_corpus_root() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+
+    let result = seed(
+        target_id(),
+        &corpus_root,
+        vec![(b"escaped".to_vec(), "../escaped-seed".to_owned())],
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(!dir.path().join("escaped-seed").exists());
+}
+
+#[tokio::test]
 async fn grow_copies_new_inputs_from_engine_output() {
     let dir = TempDir::new().unwrap();
     let corpus_root = dir.path().join("corpus");
@@ -255,4 +297,74 @@ async fn list_returns_correct_metadata() {
     assert_eq!(entry.size, 5);
     assert!(!entry.sha256.is_empty());
     assert!(matches!(entry.source, CorpusSource::Manual));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn corpus_operations_ignore_symlinked_inputs() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let host_file = outside.join("host-data");
+    fs::write(&host_file, b"must-not-be-ingested").unwrap();
+
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    symlink(&host_file, corpus_root.join("linked-entry")).unwrap();
+    assert!(
+        list(&corpus_root).unwrap().entries.is_empty(),
+        "corpus listing followed a symlink"
+    );
+
+    let engine_out = dir.path().join("out");
+    fs::create_dir_all(&engine_out).unwrap();
+    symlink(&host_file, engine_out.join("queue-entry")).unwrap();
+    assert!(
+        grow(&corpus_root, &engine_out).unwrap().entries.is_empty(),
+        "corpus growth followed a symlink"
+    );
+
+    let (corpus, added) = absorb(&corpus_root, &[engine_out.join("queue-entry")]).unwrap();
+    assert_eq!(added, 0, "crash absorption followed a symlink");
+    assert!(corpus.entries.is_empty());
+
+    let external_corpus = outside.join("external-corpus");
+    fs::create_dir_all(&external_corpus).unwrap();
+    fs::write(external_corpus.join("host-seed"), b"outside corpus").unwrap();
+    let linked_corpus = dir.path().join("linked-corpus");
+    symlink(&external_corpus, &linked_corpus).unwrap();
+    assert!(
+        list(&linked_corpus).is_err(),
+        "a symlink must not become a writable corpus root"
+    );
+    assert!(seed(
+        target_id(),
+        &linked_corpus,
+        vec![(b"write".to_vec(), "new-seed".to_owned())],
+    )
+    .await
+    .is_err());
+    assert!(!external_corpus.join("new-seed").exists());
+
+    let linked_engine_out = dir.path().join("linked-engine-out");
+    symlink(&external_corpus, &linked_engine_out).unwrap();
+    let grown = grow(&corpus_root, &linked_engine_out).unwrap();
+    assert!(grown.entries.is_empty());
+
+    let minimized = dir.path().join("minimized");
+    fs::create_dir_all(&minimized).unwrap();
+    fs::write(minimized.join("keep"), b"safe survivor").unwrap();
+    symlink(&host_file, corpus_root.join("keep")).unwrap();
+    let result = minimize(&corpus_root, &minimized).unwrap();
+    assert_eq!(
+        fs::read(corpus_root.join("keep")).unwrap(),
+        b"safe survivor"
+    );
+    assert!(result
+        .entries
+        .iter()
+        .any(|entry| entry.path == corpus_root.join("keep")));
+    assert_eq!(fs::read(&host_file).unwrap(), b"must-not-be-ingested");
 }

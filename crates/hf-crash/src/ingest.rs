@@ -22,6 +22,12 @@ pub fn ingest(
     run_id: Uuid,
     target_id: Uuid,
 ) -> Result<Vec<Crash>, ClassifiedError> {
+    if !is_regular_directory(run_dir) {
+        return Err(ClassifiedError::Validation(format!(
+            "crash output is not a regular directory: {}",
+            run_dir.display()
+        )));
+    }
     let mut crashes = Vec::new();
 
     // libFuzzer-style: files matching crash-*, leak-*, timeout-*.
@@ -31,7 +37,7 @@ pub fn ingest(
         let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        if !path.is_file() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
         if is_crash_artifact(&name) {
@@ -60,8 +66,11 @@ pub fn ingest(
     let mut afl_dirs = vec![run_dir.join("crashes")];
     if let Ok(entries) = std::fs::read_dir(run_dir) {
         for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
             let nested = entry.path().join("crashes");
-            if nested.is_dir() {
+            if is_regular_directory(&nested) {
                 afl_dirs.push(nested);
             }
         }
@@ -80,7 +89,7 @@ fn ingest_afl_crash_dir(
     target_id: Uuid,
     crashes: &mut Vec<Crash>,
 ) -> Result<(), ClassifiedError> {
-    if !dir.is_dir() {
+    if !is_regular_directory(dir) {
         return Ok(());
     }
     let entries = std::fs::read_dir(dir)
@@ -89,7 +98,7 @@ fn ingest_afl_crash_dir(
         let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        if !path.is_file() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
         // AFL++ drops a `README.txt` in the crashes dir; it is not a crash.
@@ -118,6 +127,16 @@ fn ingest_afl_crash_dir(
         });
     }
     Ok(())
+}
+
+/// Whether `path` is a real directory rather than a symlink to one.
+fn is_regular_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+/// Whether `path` is a real file rather than a symlink to one.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 fn is_crash_artifact(name: &str) -> bool {
@@ -153,7 +172,7 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
     // 1. libFuzzer convention: log-<stem>.txt alongside the crash.
     let stem = crash_name.split('-').nth(1).unwrap_or(crash_name);
     let conventional = run_dir.join(format!("log-{stem}.txt"));
-    if conventional.is_file() {
+    if is_regular_file(&conventional) {
         match std::fs::read_to_string(&conventional) {
             Ok(s) => return Some(s),
             Err(e) => {
@@ -185,7 +204,7 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
         let mut crash_artifacts = 0usize;
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
                 continue;
             }
             let name = entry.file_name();
@@ -274,6 +293,7 @@ mod tests {
             "hf-ingest-test-{}",
             N.fetch_add(1, Ordering::Relaxed)
         ));
+        std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();
         base
     }
@@ -319,6 +339,43 @@ mod tests {
         // one, so it stays unclassified from a sibling log.
         let other = find_sanitizer_log(&dir.join("crash-bbb"), &dir, "crash-bbb");
         assert!(other.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_crash_artifact_is_ignored() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp();
+        let outside = dir.join("outside-input");
+        std::fs::write(&outside, b"host data").unwrap();
+        symlink(&outside, dir.join("crash-linked")).unwrap();
+
+        let crashes = ingest(&dir, Uuid::new_v4(), Uuid::new_v4()).unwrap();
+        assert!(
+            crashes.is_empty(),
+            "crash ingestion followed a symlinked artifact"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_run_directory_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp();
+        let outside = dir.join("outside-run");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("crash-external"), b"host data").unwrap();
+        let linked = dir.join("linked-run");
+        symlink(&outside, &linked).unwrap();
+
+        assert!(
+            ingest(&linked, Uuid::new_v4(), Uuid::new_v4()).is_err(),
+            "crash ingestion followed its root symlink"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

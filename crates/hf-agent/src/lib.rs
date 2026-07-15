@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hf_core::error::ClassifiedError;
-use hf_core::provider::{ChatRequest, RouteRequest};
+use hf_core::provider::{ChatRequest, RouteRequest, ToolCallingMode};
 use hf_core::types::{Message, Role, TokenUsage};
 use hf_guardrails::{LoopGuard, StepRecord};
 use hf_tools::registry::ToolRegistryImpl;
@@ -248,8 +248,23 @@ you receive its result and continue until you can give a final answer.",
         for _ in 0..self.max_iterations {
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
-            let trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
+            let mut trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
+            // Context assembly relies on the internal `Tool` role to recognize
+            // and remove results whose originating turn was trimmed. Convert
+            // only the provider-facing copy after assembly because this agent's
+            // JSON step protocol does not use native tool-call identifiers.
+            for message in &mut trimmed {
+                if message.role == Role::Tool {
+                    message.role = Role::User;
+                    message.tool_call_id = None;
+                }
+            }
             let mut req = ChatRequest::from_messages(trimmed);
+            // This agent uses its JSON step protocol in the system prompt rather
+            // than provider-native function calls. Keep the request and result
+            // messages in that mode so strict providers do not receive a
+            // `role: tool` message without a native `tool_call_id`.
+            req.tool_calling_mode = ToolCallingMode::PromptBased;
             // Apply the agent's configured sampling temperature (previously set
             // in the definition but never plumbed into the request).
             req.temperature = self.definition.temperature;
