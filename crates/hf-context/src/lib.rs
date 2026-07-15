@@ -7,7 +7,6 @@
 //! - [`CompactionEngine`] — summarizes older messages to reclaim context space
 //! - [`repair`] — session history repair (empty, orphan, duplicate, merge)
 //! - [`RecallStore`] — memory recall via hybrid text/vector search
-//! - [`ContextMiddlewareAdapter`] — bridges `ContextProvider` to y-hooks Middleware
 //! - [`InjectContextStatus`] — pipeline stage for context budget reporting
 //!
 //! The pipeline stages (`BuildSystemPrompt`, `InjectBootstrap`, `InjectMemory`,
@@ -27,7 +26,6 @@ pub mod inject_tools;
 pub mod knowledge_provider;
 pub mod load_history;
 pub mod memory;
-pub mod middleware_adapter;
 pub mod pipeline;
 pub mod pruning;
 pub mod recall;
@@ -49,7 +47,6 @@ pub use inject_memory::InjectMemory;
 pub use inject_tools::InjectTools;
 pub use knowledge_provider::KnowledgeContextProvider;
 pub use load_history::LoadHistory;
-pub use middleware_adapter::{stage_priorities, ContextMiddlewareAdapter};
 pub use pipeline::{
     AssembledContext, ContextCategory, ContextItem, ContextPipeline, ContextPipelineError,
     ContextProvider, ContextRequest,

@@ -15,7 +15,6 @@
 //! | [`session`] | `SessionStore`, `TranscriptStore` | - |
 //! | [`memory`] | `MemoryClient`, `ExperienceStore` | - |
 //! | [`checkpoint`] | `CheckpointStorage` | - |
-//! | [`hook`] | `Middleware`, `HookHandler`, `EventSubscriber` | - |
 //! | [`skill`] | `SkillRegistry` | - |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
@@ -34,7 +33,6 @@ pub mod engine;
 pub mod error;
 pub mod exec;
 pub mod harness;
-pub mod hook;
 pub mod memory;
 pub mod permission_types;
 pub mod provider;
