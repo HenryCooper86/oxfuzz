@@ -266,7 +266,11 @@ Indexes: `idx_diag_scores_trace(trace_id)`,
 
 Indexes: `idx_sched_exec_time(triggered_at DESC)`,
 `idx_sched_exec_schedule(schedule_id)`. Retention pruning is schedule-scoped
-and orders rows by `triggered_at DESC, id DESC` for deterministic ties.
+and orders rows by `triggered_at DESC, id DESC` for deterministic ties. It
+never removes pending/running records or records whose serialized `started_at`
+is still inside the rolling one-hour admission window. Hourly counts likewise
+read the serialized `started_at`; trigger time is not a substitute for a real
+execution start.
 
 ### `project_settings`
 
