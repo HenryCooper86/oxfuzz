@@ -1,115 +1,129 @@
-//! Crash ingestion: scan a run output directory for crash artifacts.
+//! Crash ingestion: scan a run output directory for engine-owned crash artifacts.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use hf_core::crash::{Crash, CrashKind};
+use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use uuid::Uuid;
 
 use crate::classify::classify;
 
-/// Scan a run output directory for crash artifacts.
+/// Maximum number of crash artifacts returned by one ingestion pass.
+pub const MAX_CRASH_ARTIFACTS: usize = 1_024;
+
+/// Maximum sanitizer report bytes read from one file.
+pub const MAX_SANITIZER_REPORT_BYTES: usize = 256 * 1_024;
+
+/// Maximum sanitizer report bytes read across one ingestion pass.
+pub const MAX_AGGREGATE_REPORT_BYTES: usize = 2 * 1_024 * 1_024;
+
+const MAX_REPORT_FILES: usize = MAX_CRASH_ARTIFACTS;
+
+/// Crash artifacts and the resource-limit state observed while ingesting them.
+#[derive(Debug, Clone)]
+pub struct CrashIngestResult {
+    /// Engine-owned crash artifacts, ordered deterministically by path.
+    pub crashes: Vec<Crash>,
+    /// Whether additional matching artifacts were excluded by the entry limit.
+    pub artifact_limit_reached: bool,
+    /// Whether report discovery, per-file reads, or aggregate reads hit a limit.
+    pub report_limit_reached: bool,
+    /// Total sanitizer report bytes retained for classification.
+    pub report_bytes_read: usize,
+}
+
+impl CrashIngestResult {
+    /// Whether any ingestion limit prevented a complete scan.
+    #[must_use]
+    pub const fn is_truncated(&self) -> bool {
+        self.artifact_limit_reached || self.report_limit_reached
+    }
+}
+
+/// Scan a run output directory using the producing engine's artifact contract.
 ///
-/// libFuzzer writes `crash-*`, `leak-*`, `timeout-*` files.
-/// AFL++ writes to a `crashes/` subdirectory.
-/// honggfuzz writes `SIG<signal>.PC.*` crash files plus a `HONGGFUZZ.REPORT.TXT`
-/// alongside them in the run directory.
+/// Artifact traversal is deterministic and bounded. Only regular files are
+/// accepted; symlinked roots, artifact directories, artifacts, and reports are
+/// never followed.
 ///
 /// # Errors
-/// Returns `ClassifiedError` if the directory cannot be read.
+/// Returns `ClassifiedError` when the run directory is invalid or cannot be
+/// enumerated.
+pub fn ingest_for_engine(
+    run_dir: &Path,
+    engine: EngineKind,
+    run_id: Uuid,
+    target_id: Uuid,
+) -> Result<CrashIngestResult, ClassifiedError> {
+    ingest_with_mode(run_dir, IngestMode::Engine(engine), run_id, target_id)
+}
+
+/// Scan a run output directory for crash artifacts using legacy mixed-engine
+/// filename detection.
+///
+/// New callers should use [`ingest_for_engine`] so coverage files from one
+/// engine cannot be mistaken for another engine's crash artifacts. This
+/// compatibility API is still bounded and does not follow symlinks.
+///
+/// # Errors
+/// Returns `ClassifiedError` when the run directory is invalid or cannot be
+/// enumerated.
 pub fn ingest(
     run_dir: &Path,
     run_id: Uuid,
     target_id: Uuid,
 ) -> Result<Vec<Crash>, ClassifiedError> {
+    let result = ingest_with_mode(run_dir, IngestMode::Legacy, run_id, target_id)?;
+    if result.is_truncated() {
+        tracing::warn!(
+            artifact_limit_reached = result.artifact_limit_reached,
+            report_limit_reached = result.report_limit_reached,
+            "legacy crash ingestion reached a safety limit"
+        );
+    }
+    Ok(result.crashes)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IngestMode {
+    Engine(EngineKind),
+    Legacy,
+}
+
+fn ingest_with_mode(
+    run_dir: &Path,
+    mode: IngestMode,
+    run_id: Uuid,
+    target_id: Uuid,
+) -> Result<CrashIngestResult, ClassifiedError> {
     if !is_regular_directory(run_dir) {
         return Err(ClassifiedError::Validation(format!(
             "crash output is not a regular directory: {}",
             run_dir.display()
         )));
     }
-    let mut crashes = Vec::new();
 
-    // libFuzzer-style: files matching crash-*, leak-*, timeout-*.
-    let entries = std::fs::read_dir(run_dir)
-        .map_err(|e| ClassifiedError::Internal(format!("read dir: {e}")))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let path = entry.path();
-        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+    let artifacts = collect_artifacts(run_dir, mode)?;
+    let artifact_limit_reached = artifacts.limit_reached;
+    let artifact_paths: Vec<_> = artifacts.paths.into_iter().collect();
+    let mut reports = ReportReader::default();
+    let mut crashes = Vec::with_capacity(artifact_paths.len());
+
+    for path in &artifact_paths {
+        // Re-check after discovery to avoid following an artifact that was
+        // replaced with a symlink between directory enumeration and use.
+        if !is_regular_file(path) {
             continue;
         }
-        if is_crash_artifact(&name) {
-            let log = find_sanitizer_log(&path, run_dir, &name);
-            let (kind, sig, summary) = log
-                .as_deref()
-                .map_or((CrashKind::Other, String::new(), String::new()), classify);
-            crashes.push(Crash {
-                id: Uuid::new_v4(),
-                run_id,
-                target_id,
-                input_path: path,
-                stack_signature: sig,
-                kind,
-                summary,
-                minimized: false,
-                bug_report: None,
-                casr: None,
-            });
-        }
-    }
-
-    // AFL++-style: a crashes/ subdirectory. A single-instance run (no -M/-S)
-    // nests it under an instance directory, e.g. out/default/crashes, so scan
-    // both the direct crashes/ dir and one level of instance subdirectories.
-    let mut afl_dirs = vec![run_dir.join("crashes")];
-    if let Ok(entries) = std::fs::read_dir(run_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let nested = entry.path().join("crashes");
-            if is_regular_directory(&nested) {
-                afl_dirs.push(nested);
-            }
-        }
-    }
-    for afl_crashes in afl_dirs {
-        ingest_afl_crash_dir(&afl_crashes, run_id, target_id, &mut crashes)?;
-    }
-
-    Ok(crashes)
-}
-
-/// Ingest every crash file in one AFL++ `crashes/` directory into `crashes`.
-fn ingest_afl_crash_dir(
-    dir: &Path,
-    run_id: Uuid,
-    target_id: Uuid,
-    crashes: &mut Vec<Crash>,
-) -> Result<(), ClassifiedError> {
-    if !is_regular_directory(dir) {
-        return Ok(());
-    }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| ClassifiedError::Internal(format!("read crashes dir: {e}")))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let path = entry.path();
-        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            continue;
-        }
-        // AFL++ drops a `README.txt` in the crashes dir; it is not a crash.
-        if name == "README.txt" {
-            continue;
-        }
-        // AFL++ does not embed a sanitizer trace in the crash file itself, but a
-        // sibling report may exist (e.g. when the harness was built with ASan).
-        // Classify from it when present; otherwise leave the crash unclassified
-        // for the service-layer replay pass.
-        let log = find_sanitizer_log(&path, dir, &name);
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let log = find_sanitizer_log_bounded(path, run_dir, &name, &artifact_paths, &mut reports);
         let (kind, sig, summary) = log
             .as_deref()
             .map_or((CrashKind::Other, String::new(), String::new()), classify);
@@ -117,7 +131,7 @@ fn ingest_afl_crash_dir(
             id: Uuid::new_v4(),
             run_id,
             target_id,
-            input_path: path,
+            input_path: path.clone(),
             stack_signature: sig,
             kind,
             summary,
@@ -126,7 +140,105 @@ fn ingest_afl_crash_dir(
             casr: None,
         });
     }
+
+    Ok(CrashIngestResult {
+        crashes,
+        artifact_limit_reached,
+        report_limit_reached: reports.limit_reached,
+        report_bytes_read: reports.bytes_read,
+    })
+}
+
+#[derive(Debug, Default)]
+struct BoundedPaths {
+    paths: BTreeSet<PathBuf>,
+    limit_reached: bool,
+}
+
+impl BoundedPaths {
+    fn insert(&mut self, path: PathBuf) {
+        self.paths.insert(path);
+        if self.paths.len() > MAX_CRASH_ARTIFACTS {
+            self.limit_reached = true;
+            self.paths.pop_last();
+        }
+    }
+}
+
+fn collect_artifacts(run_dir: &Path, mode: IngestMode) -> Result<BoundedPaths, ClassifiedError> {
+    let mut artifacts = BoundedPaths::default();
+
+    if matches!(mode, IngestMode::Legacy)
+        || matches!(mode, IngestMode::Engine(engine) if matches!(engine, EngineKind::Honggfuzz | EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite))
+    {
+        collect_files(run_dir, &mut artifacts, |name| match mode {
+            IngestMode::Legacy => is_libfuzzer_crash(name) || is_honggfuzz_crash(name),
+            IngestMode::Engine(EngineKind::Honggfuzz) => is_honggfuzz_crash(name),
+            IngestMode::Engine(EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite) => {
+                is_libfuzzer_crash(name)
+            }
+            IngestMode::Engine(EngineKind::AflPlusPlus | EngineKind::Syzkaller) => false,
+        })?;
+    }
+
+    if matches!(
+        mode,
+        IngestMode::Legacy | IngestMode::Engine(EngineKind::AflPlusPlus)
+    ) {
+        collect_afl_artifacts(run_dir, &mut artifacts)?;
+    }
+
+    Ok(artifacts)
+}
+
+fn collect_afl_artifacts(
+    run_dir: &Path,
+    artifacts: &mut BoundedPaths,
+) -> Result<(), ClassifiedError> {
+    collect_files(&run_dir.join("crashes"), artifacts, is_afl_crash)?;
+
+    let entries = read_directory(run_dir)?;
+    for entry in entries {
+        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        collect_files(&entry.path().join("crashes"), artifacts, is_afl_crash)?;
+    }
     Ok(())
+}
+
+fn collect_files(
+    dir: &Path,
+    artifacts: &mut BoundedPaths,
+    accepts: impl Fn(&str) -> bool,
+) -> Result<(), ClassifiedError> {
+    if !is_regular_directory(dir) {
+        return Ok(());
+    }
+    for entry in read_directory(dir)? {
+        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        if accepts(&name.to_string_lossy()) {
+            artifacts.insert(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn read_directory(path: &Path) -> Result<std::fs::ReadDir, ClassifiedError> {
+    std::fs::read_dir(path).map_err(|error| {
+        ClassifiedError::Internal(format!("read crash directory {}: {error}", path.display()))
+    })
 }
 
 /// Whether `path` is a real directory rather than a symlink to one.
@@ -139,108 +251,174 @@ fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-fn is_crash_artifact(name: &str) -> bool {
+fn is_libfuzzer_crash(name: &str) -> bool {
     name.starts_with("crash-")
         || name.starts_with("leak-")
         || name.starts_with("timeout-")
         || name.starts_with("oom-")
-        // honggfuzz names crash files after the fatal signal, e.g.
-        // `SIGSEGV.PC.<...>.fuzz` / `SIGABRT.PC.<...>.fuzz`.
-        || is_honggfuzz_crash(name)
 }
 
-/// Whether `name` looks like a honggfuzz crash artifact (`SIG<signal>.*`).
 fn is_honggfuzz_crash(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("SIG") else {
         return false;
     };
-    // A signal name (uppercase letters/digits) followed by honggfuzz's
-    // `.PC.`/`.STACK.` detail fields -- not, say, a `SIGNALS.md` doc.
-    rest.starts_with(|c: char| c.is_ascii_uppercase()) && name.contains(".PC.")
+    let Some((signal, detail)) = rest.split_once(".PC.") else {
+        return false;
+    };
+    !signal.is_empty()
+        && signal
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        && !detail.is_empty()
 }
 
-/// Find a sanitizer report to classify a crash artifact from.
-///
-/// Tries, in order:
-/// 1. The libFuzzer `log-<stem>.txt` convention next to the artifact.
-/// 2. Any sibling `.txt`/`.log` file (in the artifact's directory or the run
-///    directory) whose contents look like a sanitizer/UBSan trace.
-///
-/// Read failures are logged rather than silently swallowed, so a real I/O
-/// error (e.g. permissions) is visible instead of masquerading as "no log".
-fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Option<String> {
-    // 1. libFuzzer convention: log-<stem>.txt alongside the crash.
-    let stem = crash_name.split('-').nth(1).unwrap_or(crash_name);
-    let conventional = run_dir.join(format!("log-{stem}.txt"));
-    if is_regular_file(&conventional) {
-        match std::fs::read_to_string(&conventional) {
-            Ok(s) => return Some(s),
-            Err(e) => {
-                tracing::warn!(path = %conventional.display(), error = %e, "failed to read crash log");
-            }
+fn is_afl_crash(name: &str) -> bool {
+    !name.eq_ignore_ascii_case("README.txt")
+}
+
+#[derive(Debug, Default)]
+struct ReportReader {
+    bytes_read: usize,
+    files_seen: usize,
+    limit_reached: bool,
+    contents: BTreeMap<PathBuf, Option<String>>,
+    directory_entries: BTreeMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl ReportReader {
+    fn read_sanitizer_report(&mut self, path: &Path) -> Option<String> {
+        if let Some(cached) = self.contents.get(path) {
+            return cached.clone();
         }
+        if !is_regular_file(path) {
+            self.contents.insert(path.to_path_buf(), None);
+            return None;
+        }
+
+        let remaining = MAX_AGGREGATE_REPORT_BYTES.saturating_sub(self.bytes_read);
+        if remaining == 0 {
+            self.limit_reached = true;
+            self.contents.insert(path.to_path_buf(), None);
+            return None;
+        }
+        let keep = remaining.min(MAX_SANITIZER_REPORT_BYTES);
+        let mut bytes = Vec::with_capacity(keep.min(8 * 1_024));
+        let result =
+            File::open(path).and_then(|file| file.take((keep + 1) as u64).read_to_end(&mut bytes));
+        if let Err(error) = result {
+            tracing::warn!(path = %path.display(), %error, "failed to read crash report");
+            self.contents.insert(path.to_path_buf(), None);
+            return None;
+        }
+        if bytes.len() > keep {
+            self.limit_reached = true;
+            bytes.truncate(keep);
+        }
+        self.bytes_read += bytes.len();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let report = looks_like_sanitizer_report(&text).then_some(text);
+        self.contents.insert(path.to_path_buf(), report.clone());
+        report
     }
 
-    // 2. A sibling .txt/.log carrying a sanitizer trace. Look both next to the
-    // artifact and in the run directory (AFL++ keeps crashes in a subdir).
-    //
-    // A shared report must not be attached to the wrong crash: if several crash
-    // artifacts sit beside a single generic report, mapping all of them to that
-    // report gives them identical stack signatures and `dedup` collapses
-    // genuinely distinct crashes into one. So we only accept a report that is
-    // unambiguously this crash's: either its filename references the crash stem,
-    // or it is the sole crash artifact in the directory.
-    let mut dirs = vec![run_dir.to_path_buf()];
+    fn candidates(&mut self, dir: &Path) -> Vec<PathBuf> {
+        if let Some(cached) = self.directory_entries.get(dir) {
+            return cached.clone();
+        }
+        if !is_regular_directory(dir) {
+            self.directory_entries.insert(dir.to_path_buf(), Vec::new());
+            return Vec::new();
+        }
+
+        let remaining = MAX_REPORT_FILES.saturating_sub(self.files_seen);
+        let mut paths = BTreeSet::new();
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let Ok(entry) = entry else {
+                        continue;
+                    };
+                    if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    if !is_report_filename(&name.to_string_lossy()) {
+                        continue;
+                    }
+                    if remaining == 0 {
+                        self.limit_reached = true;
+                        continue;
+                    }
+                    paths.insert(entry.path());
+                    if paths.len() > remaining {
+                        self.limit_reached = true;
+                        paths.pop_last();
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), %error, "failed to enumerate crash reports");
+            }
+        }
+
+        let paths: Vec<_> = paths.into_iter().collect();
+        self.files_seen += paths.len();
+        self.directory_entries
+            .insert(dir.to_path_buf(), paths.clone());
+        paths
+    }
+}
+
+fn find_sanitizer_log_bounded(
+    crash_path: &Path,
+    run_dir: &Path,
+    crash_name: &str,
+    artifacts: &[PathBuf],
+    reports: &mut ReportReader,
+) -> Option<String> {
+    let stem = crash_name
+        .split_once('-')
+        .map_or(crash_name, |(_, stem)| stem);
+    let mut dirs = Vec::with_capacity(2);
     if let Some(parent) = crash_path.parent() {
-        if parent != run_dir {
-            dirs.push(parent.to_path_buf());
+        dirs.push(parent.to_path_buf());
+    }
+    if !dirs.iter().any(|dir| dir == run_dir) {
+        dirs.push(run_dir.to_path_buf());
+    }
+
+    for dir in &dirs {
+        let conventional = dir.join(format!("log-{stem}.txt"));
+        if let Some(report) = reports.read_sanitizer_report(&conventional) {
+            return Some(report);
         }
     }
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut reports: Vec<PathBuf> = Vec::new();
-        let mut crash_artifacts = 0usize;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if is_crash_artifact(&name) {
-                crash_artifacts += 1;
-            }
-            if path == *crash_path {
-                continue;
-            }
-            // honggfuzz writes an uppercase `HONGGFUZZ.REPORT.TXT`, so match the
-            // extension case-insensitively.
-            let is_text = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log"));
-            if is_text {
-                reports.push(path);
-            }
-        }
 
-        // First, a report whose name references this crash's stem -- a strong,
-        // per-crash association that holds even when many crashes share a dir.
-        for path in &reports {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-            if name.is_some_and(|n| n.contains(stem)) {
-                if let Some(s) = read_if_sanitizer_report(path) {
-                    return Some(s);
+    for dir in dirs {
+        let candidates = reports.candidates(&dir);
+        for path in &candidates {
+            let name = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_ascii_lowercase());
+            if name.is_some_and(|name| name.contains(&stem.to_ascii_lowercase())) {
+                if let Some(report) = reports.read_sanitizer_report(path) {
+                    return Some(report);
                 }
             }
         }
-        // Otherwise, a generic report only if it cannot belong to another crash.
-        if crash_artifacts <= 1 {
-            for path in &reports {
-                if let Some(s) = read_if_sanitizer_report(path) {
-                    return Some(s);
+
+        let artifacts_in_scope = if dir == run_dir {
+            artifacts.len()
+        } else {
+            artifacts
+                .iter()
+                .filter(|path| path.parent() == Some(dir.as_path()))
+                .count()
+        };
+        if artifacts_in_scope == 1 {
+            for path in &candidates {
+                if let Some(report) = reports.read_sanitizer_report(path) {
+                    return Some(report);
                 }
             }
         }
@@ -248,17 +426,28 @@ fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Op
     None
 }
 
-/// Read `path` and return its contents only if they resemble a sanitizer
-/// report. Read failures are logged rather than silently swallowed.
-fn read_if_sanitizer_report(path: &Path) -> Option<String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) if looks_like_sanitizer_report(&s) => Some(s),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "failed to read crash log");
-            None
-        }
+fn is_report_filename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("coverage") || lower.contains("profraw") || lower == "fuzzer_stats" {
+        return false;
     }
+    lower == "report.txt"
+        || lower == "sanitizer.txt"
+        || lower == "sanitizer.log"
+        || lower == "stderr.txt"
+        || lower == "stderr.log"
+        || lower == "honggfuzz.report.txt"
+        || [
+            "log-",
+            "report-",
+            "sanitizer-",
+            "asan-",
+            "ubsan-",
+            "lsan-",
+            "msan-",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 /// Whether a file's contents resemble a sanitizer/engine crash report worth
@@ -276,6 +465,20 @@ fn looks_like_sanitizer_report(s: &str) -> bool {
         // honggfuzz HONGGFUZZ.REPORT.TXT field markers.
         || lower.contains("stack hash")
         || lower.contains("fault address")
+}
+
+#[cfg(test)]
+fn find_sanitizer_log(crash_path: &Path, run_dir: &Path, crash_name: &str) -> Option<String> {
+    let artifacts = collect_artifacts(run_dir, IngestMode::Legacy).ok()?;
+    let artifact_paths: Vec<_> = artifacts.paths.into_iter().collect();
+    let mut reports = ReportReader::default();
+    find_sanitizer_log_bounded(
+        crash_path,
+        run_dir,
+        crash_name,
+        &artifact_paths,
+        &mut reports,
+    )
 }
 
 #[cfg(test)]
