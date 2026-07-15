@@ -92,14 +92,25 @@ export class SseAdapter {
         eventName === "run:progress" &&
         payload &&
         typeof payload === "object" &&
-        "kind" in payload
+        "kind" in payload &&
+        "run_id" in payload
       ) {
-        const progress = payload as { run_id?: string; kind: string; data: unknown };
+        const progress = payload as { run_id: unknown; kind: unknown; data: unknown };
+        if (typeof progress.run_id !== "string" || typeof progress.kind !== "string") {
+          return;
+        }
         payload = {
           run_id: progress.run_id,
           type: progress.kind,
           data: progress.data,
         };
+      } else if (eventName === "run:status") {
+        if (!payload || typeof payload !== "object") return;
+        const status = payload as { run_id?: unknown; status?: unknown };
+        if (typeof status.run_id !== "string" || typeof status.status !== "string") {
+          return;
+        }
+        payload = { run_id: status.run_id, status: status.status };
       }
       this.dispatch(eventName, payload);
     } catch {
