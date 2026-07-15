@@ -13,6 +13,7 @@ pub mod campaign_state;
 pub mod checkpoints;
 pub mod config;
 pub mod container;
+mod crash_minimization;
 pub mod defectdojo;
 pub mod defectdojo_lifecycle;
 pub mod diagnostics;
