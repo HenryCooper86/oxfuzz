@@ -10,7 +10,6 @@
 use async_trait::async_trait;
 use std::fmt::Write;
 
-use crate::middleware_adapter::stage_priorities;
 use crate::pipeline::{
     AssembledContext, ContextCategory, ContextItem, ContextPipelineError, ContextProvider,
 };
@@ -65,7 +64,7 @@ impl ContextProvider for KnowledgeContextProvider {
     }
 
     fn priority(&self) -> u32 {
-        stage_priorities::INJECT_KNOWLEDGE
+        350
     }
 
     async fn provide(&self, ctx: &mut AssembledContext) -> Result<(), ContextPipelineError> {

@@ -330,16 +330,14 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-provider` | LLM provider pool with tag routing, failover, freeze/thaw. |
 | `hf-session` | Session tree, parent/child delegation, compaction. |
 | `hf-context` | Token-budget-aware prompt assembly pipeline. |
-| `hf-hooks` | Middleware chain, event bus. |
 | `hf-tools` | Tool registry and validation with project-scoped `FileRead`, `Glob`, and `Grep`; the agent adds service-backed `KnowledgeSearch`. |
-| `hf-mcp` | Model Context Protocol client/server. |
 | `hf-skills` | Skill registry, versioning, experience capture. |
 | `hf-prompt` | Prompt templates for discovery, harness, triage. |
 | `hf-storage` | SQLite storage (sqlx), transcript persistence. |
 | `hf-runtime` | Sandbox (Docker/native), resource limits, build isolation. |
 | `hf-scheduler` | Cron-style and one-shot campaign scheduling. |
 | `hf-knowledge` | Full-text (BM25) retrieval over project source and ingested documents; optional vector search behind the `vector_qdrant` feature. |
-| `hf-diagnostics` | Span-based tracing, cost intelligence, run metrics. |
+| `hf-diagnostics` | Persistent LLM trace, token-usage, and cost evidence. |
 | `hf-guardrails` | Permission model, loop detection, risk scoring. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, reachability. |
 | `hf-harness` | Harness generation, compile validation, smoke fuzz. |
