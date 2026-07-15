@@ -198,8 +198,9 @@ pub fn build_exec_args(
 ///
 /// With its default this is identical to the hardened
 /// harness/fuzz profile. Options relax or extend it for specialized runs
-/// (syzkaller): extra bind mounts, a target platform, container networking, a
-/// custom working directory, and a relaxed capability profile for qemu.
+/// (syzkaller): extra bind mounts, a target platform, an optional device, and a
+/// custom working directory. The syzkaller service profile keeps network and
+/// capability hardening enabled.
 #[must_use]
 pub fn build_exec_args_with(
     cfg: &RuntimeConfig,
@@ -283,8 +284,8 @@ pub fn build_exec_args_with(
             .unwrap_or_else(|| cfg.container_workspace.clone()),
     );
 
-    // Network: disabled for fuzz runs by default; enabled only when a run needs
-    // it (syzkaller's managed VM).
+    // Network: disabled by default. qemu user networking for syzkaller operates
+    // inside this outer boundary and does not require a Docker network.
     if !opts.network_enabled {
         args.push("--network=none".to_owned());
     }
@@ -292,8 +293,8 @@ pub fn build_exec_args_with(
     // Hardening: drop all Linux capabilities by default (re-added per-run only
     // when needed), forbid privilege escalation, and cap process count to blunt
     // fork bombs from a malicious harness. The container is also network-
-    // isolated, resource-limited, and ephemeral. qemu-based runs cannot operate
-    // under this profile, so it can be relaxed per-run.
+    // isolated, resource-limited, and ephemeral. Any relaxation remains an
+    // explicit exceptional option; the qemu-based syzkaller profile keeps it.
     if !opts.relax_hardening {
         args.push("--cap-drop=ALL".to_owned());
         args.push("--security-opt".to_owned());

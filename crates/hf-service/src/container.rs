@@ -4837,16 +4837,14 @@ impl ServiceContainer {
     /// Run a syzkaller kernel-fuzzing campaign through the sandbox.
     ///
     /// syzkaller fuzzes an OS kernel by mutating syscall sequences inside a
-    /// managed VM whose kernel is built with KCOV coverage. This mounts the
-    /// user-supplied kernel image + rootfs (or an existing `manager.cfg`) into
-    /// the sandbox, synthesizes a qemu `manager.cfg` when needed, and streams
-    /// `syz-manager` progress to `on_progress`.
+    /// managed VM whose kernel is built with KCOV coverage. User-selected
+    /// artifacts are copied into a unique service-owned directory, manager
+    /// paths are rewritten to those staged copies, and `syz-manager` progress
+    /// is streamed to `on_progress`.
     ///
-    /// Unlike a harness/fuzz run, qemu needs container networking and a relaxed
-    /// capability profile, so this uses
-    /// [`SandboxOptions`](hf_core::runtime::SandboxOptions) rather than the
-    /// hardened default -- but it still goes through the `hf-runtime` sandbox
-    /// abstraction (no presentation layer shells out to `docker`).
+    /// qemu runs with the standard capability and privilege hardening, no
+    /// container network, and at most the `/dev/kvm` device. The selected
+    /// rootfs is never mounted writable; qemu receives a disposable copy.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if Docker is unavailable, an artifact path is
@@ -4909,111 +4907,38 @@ impl ServiceContainer {
             ));
         }
 
-        let file_ok = |p: &str| Path::new(p).is_file();
-
-        // Assemble bind mounts and resolve the in-container config path.
-        let mut mounts: Vec<hf_core::runtime::SandboxMount> = Vec::new();
-        let workspace = workspace_root().join("syzkaller");
-        std::fs::create_dir_all(&workspace)
-            .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workspace: {e}")))?;
-        let cfg_in_container: String;
-
         // Use KVM when the host can (native-arch Linux with /dev/kvm); this is
         // orders of magnitude faster than TCG emulation. It drives both the
-        // synthesized qemu args and the `--device /dev/kvm` passthrough below.
+        // synthesized qemu args and the sole device passthrough below.
         let use_kvm = syz_kvm_usable(&platform);
-
-        if let Some(cfg) = manager_cfg.as_deref() {
-            if !file_ok(cfg) {
-                return Err(ClassifiedError::Validation(format!(
-                    "manager.cfg not found: {cfg}"
-                )));
-            }
-            let dir = Path::new(cfg).parent().ok_or_else(|| {
-                ClassifiedError::Validation("manager.cfg has no parent directory".to_owned())
-            })?;
-            mounts.push(hf_core::runtime::SandboxMount::read_only(
-                dir.to_path_buf(),
-                dir.to_string_lossy(),
-            ));
-            cfg_in_container = cfg.to_owned();
-            log(&format!("Using provided manager.cfg: {cfg}"));
+        let run_id = Uuid::new_v4();
+        let provided_config = manager_cfg.is_some();
+        let stage_request = crate::syzkaller::SyzkallerStageRequest {
+            workspace_root: workspace_root(),
+            run_id,
+            target_triple: target_triple.clone(),
+            manager_cfg: manager_cfg.map(PathBuf::from),
+            kernel_image: kernel_image.map(PathBuf::from),
+            disk_image: disk_image.map(PathBuf::from),
+            ssh_key: ssh_key.map(PathBuf::from),
+            vm_count: opts.vm_count,
+            use_kvm,
+        };
+        // Rootfs images can be several GiB. Keep the copy off the async runtime
+        // while retaining a guard that removes staging on completion or abort.
+        let stage =
+            tokio::task::spawn_blocking(move || crate::syzkaller::prepare_stage(&stage_request))
+                .await
+                .map_err(|error| {
+                    ClassifiedError::Internal(format!("join syzkaller staging task: {error}"))
+                })??;
+        let workspace = stage.root.clone();
+        let sandbox_opts = crate::syzkaller::sandbox_options(&stage, &platform, use_kvm);
+        if provided_config {
+            log("Validated and rewrote the provided manager.cfg into isolated staging.");
         } else {
-            let kernel = kernel_image.ok_or_else(|| {
-                ClassifiedError::Validation(
-                    "kernel_image is required when no manager.cfg is provided".to_owned(),
-                )
-            })?;
-            let disk = disk_image.ok_or_else(|| {
-                ClassifiedError::Validation(
-                    "disk_image is required when no manager.cfg is provided".to_owned(),
-                )
-            })?;
-            if !file_ok(&kernel) {
-                return Err(ClassifiedError::Validation(format!(
-                    "kernel image not found: {kernel}"
-                )));
-            }
-            if !file_ok(&disk) {
-                return Err(ClassifiedError::Validation(format!(
-                    "disk image not found: {disk}"
-                )));
-            }
-            mounts.push(hf_core::runtime::SandboxMount::read_only(
-                PathBuf::from(&kernel),
-                "/syzbench/kernel",
-            ));
-            mounts.push(hf_core::runtime::SandboxMount::writable(
-                PathBuf::from(&disk),
-                "/syzbench/rootfs.img",
-            ));
-
-            let sshkey_field = if let Some(key) = ssh_key.as_deref() {
-                if !file_ok(key) {
-                    return Err(ClassifiedError::Validation(format!(
-                        "ssh key not found: {key}"
-                    )));
-                }
-                mounts.push(hf_core::runtime::SandboxMount::read_only(
-                    PathBuf::from(key),
-                    "/syzbench/id_rsa",
-                ));
-                "\n  \"sshkey\": \"/syzbench/id_rsa\",".to_owned()
-            } else {
-                String::new()
-            };
-
-            let count = opts.vm_count.unwrap_or(2).max(1);
-            let procs = count.min(4);
-            let machine = if hf_runtime::platform_short(&platform) == "arm64" {
-                "virt"
-            } else {
-                "pc"
-            };
-            let accel = if use_kvm { "kvm" } else { "tcg" };
-            // KVM pairs with `-cpu host`; TCG emulation uses `-cpu max`.
-            let cpu = if use_kvm { "host" } else { "max" };
-            let qemu_args = format!("-machine {machine},accel={accel} -cpu {cpu}");
-            let cfg_json = format!(
-                "{{\n  \"target\": \"{target_triple}\",\n  \"http\": \"0.0.0.0:56741\",\n  \"workdir\": \"/syzbench/workdir\",\n  \"image\": \"/syzbench/rootfs.img\",{sshkey_field}\n  \"syzkaller\": \"/opt/syzkaller\",\n  \"procs\": {procs},\n  \"type\": \"qemu\",\n  \"vm\": {{\n    \"count\": {count},\n    \"kernel\": \"/syzbench/kernel\",\n    \"cpu\": 2,\n    \"mem\": 2048,\n    \"qemu_args\": \"{qemu_args}\"\n  }}\n}}\n"
-            );
-            let cfg_host = workspace.join("manager.cfg");
-            std::fs::write(&cfg_host, &cfg_json)
-                .map_err(|e| ClassifiedError::Internal(format!("write manager.cfg: {e}")))?;
-            let workdir_host = workspace.join("workdir");
-            std::fs::create_dir_all(&workdir_host)
-                .map_err(|e| ClassifiedError::Internal(format!("mkdir syzkaller workdir: {e}")))?;
-            mounts.push(hf_core::runtime::SandboxMount::read_only(
-                cfg_host,
-                "/syzbench/manager.cfg",
-            ));
-            mounts.push(hf_core::runtime::SandboxMount::writable(
-                workdir_host,
-                "/syzbench/workdir",
-            ));
-            cfg_in_container = "/syzbench/manager.cfg".to_owned();
             log(&format!(
-                "Synthesized qemu manager.cfg ({target_triple}, {count} VM(s))."
+                "Synthesized an isolated qemu manager.cfg ({target_triple})."
             ));
         }
 
@@ -5036,20 +4961,6 @@ impl ServiceContainer {
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
-        let sandbox_opts = hf_core::runtime::SandboxOptions {
-            extra_mounts: mounts,
-            platform: Some(platform),
-            network_enabled: true,
-            workdir: Some("/syzbench".to_owned()),
-            relax_hardening: true,
-            devices: if use_kvm {
-                vec!["/dev/kvm".to_owned()]
-            } else {
-                Vec::new()
-            },
-            workspace_read_only: false,
-        };
-
         // Cross-line state for the streaming callback.
         let peak_edges = AtomicU64::new(0);
         let last_execs = AtomicU64::new(0);
@@ -5079,7 +4990,6 @@ impl ServiceContainer {
         // `cancel_all_runs`) and `cancel_run` can tear down a long KVM campaign.
         // `ActiveRunGuard` removes it again even if this future is aborted.
         let cancel = CancellationToken::new();
-        let run_id = Uuid::new_v4();
         if let Ok(mut runs) = self.active_runs.lock() {
             runs.insert(run_id, cancel.clone());
         }
@@ -5087,11 +4997,23 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
-        let cmd = syzkaller_manager_command(&cfg_in_container, opts.duration_secs);
-        let result = self
+        let cmd = syzkaller_manager_command(
+            crate::syzkaller::CONTAINER_MANAGER_CONFIG,
+            opts.duration_secs,
+        );
+        let writable_monitor =
+            crate::syzkaller::WritableBudgetMonitor::start(&stage, cancel.clone());
+        let run_result = self
             .runtime
             .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox_opts, &cancel, &on_line)
-            .await?;
+            .await;
+        if !writable_monitor.finish().await {
+            return Err(ClassifiedError::Sandbox(
+                "syzkaller scratch/workdir exceeded its 4 GiB growth or 100000-entry budget"
+                    .to_owned(),
+            ));
+        }
+        let result = run_result?;
 
         // GNU `timeout` uses 124 when the requested campaign budget expires;
         // that is the normal bounded completion path. Any other non-zero exit
@@ -6878,15 +6800,20 @@ pub struct SyzkallerRunOpts {
     pub arch: Option<String>,
     /// Campaign duration in seconds.
     pub duration_secs: u64,
-    /// Path to a KCOV kernel image (bzImage). Required without `manager_cfg`.
+    /// Path to a KCOV kernel image (bzImage). Required without `manager_cfg`;
+    /// otherwise overrides the config's `vm.kernel` path.
     pub kernel_image: Option<String>,
-    /// Path to a rootfs disk image. Required without `manager_cfg`.
+    /// Path to a rootfs disk image. Required without `manager_cfg`; otherwise
+    /// overrides the config's `image` path. The selected file is copied before
+    /// qemu receives a writable view.
     pub disk_image: Option<String>,
-    /// Optional SSH private key for the VM.
+    /// Optional SSH private key for the VM; overrides the config's `sshkey`.
     pub ssh_key: Option<String>,
-    /// Path to an existing `syz-manager` config; bypasses synthesis.
+    /// Path to an existing `syz-manager` config. The service parses and
+    /// rewrites managed paths rather than mounting this file or its parent.
     pub manager_cfg: Option<String>,
-    /// Number of fuzzing VMs (default 2).
+    /// Number of fuzzing VMs (default 2); overrides a supplied config when set
+    /// and is clamped to the service maximum of four.
     pub vm_count: Option<u32>,
 }
 
@@ -6903,10 +6830,9 @@ pub struct SyzkallerSummary {
 
 /// Build the syzkaller manager argv without a shell interpolation boundary.
 ///
-/// `manager_cfg` is user-selected and may contain whitespace or shell
-/// metacharacters. Keeping it as one argv element makes those bytes data rather
-/// than executable syntax. The inner timeout ends the campaign at its requested
-/// budget; the runtime deadline remains a teardown backstop.
+/// Keeping the staged config path as one argv element makes its bytes data
+/// rather than executable syntax. The inner timeout ends the campaign at its
+/// requested budget; the runtime deadline remains a teardown backstop.
 fn syzkaller_manager_command(manager_cfg: &str, duration_secs: u64) -> Vec<String> {
     vec![
         "timeout".to_owned(),

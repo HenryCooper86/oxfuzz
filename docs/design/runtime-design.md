@@ -23,8 +23,13 @@ must never cause Docker to bind-mount another host directory.
 
 Specialized extra mounts, currently limited to the service-owned Syzkaller
 flow, are explicit `SandboxOptions` inputs rather than substitutes for the
-primary workspace. They should be read-only unless the external tool requires a
-documented writable artifact.
+primary workspace. The service first copies user-selected inputs into a unique
+run staging directory below the approved workspace root. The runtime never
+bind-mounts the original kernel image, rootfs, SSH key, or manager config.
+Immutable staged inputs are read-only. Only the run's disposable rootfs/scratch
+directory and Syzkaller work directory are writable. Staging is bounded before
+copy (1 MiB manager config and SSH key, 2 GiB kernel, 32 GiB rootfs), and the
+copy verifies a stable source metadata snapshot and exact byte count.
 
 ## 3. Execution Profiles
 
@@ -34,8 +39,13 @@ documented writable artifact.
   unique container name for reliable teardown.
 - Crash triage: the hardened profile plus the minimum ptrace capability needed
   by CASR.
-- Syzkaller: an explicit exceptional profile for qemu/KVM, with platform,
-  devices, mounts, and network declared per call.
+- Syzkaller: the hardened profile with a target platform, staged mounts, and at
+  most `/dev/kvm` declared per call. Container networking remains disabled;
+  qemu user networking is constrained by that outer boundary. The profile does
+  not disable capability dropping or `no-new-privileges`. Its per-file limit
+  accommodates the staged rootfs plus 4 GiB, while a live service monitor
+  cancels the campaign if combined scratch/workdir growth exceeds 4 GiB, the
+  tree exceeds 100,000 entries, or a symlink/special file appears.
 
 ## 4. Artifact Integrity
 
@@ -80,3 +90,6 @@ line is bounded as well, so malformed output cannot bypass the cap.
 - Service contract tests prove every build and run uses `hf-runtime`, the
   promoted-revision gate, digest verification, run-scoped evidence, and the
   read-only execution mount profile.
+- Syzkaller staging tests prove configs contain only managed container paths,
+  implicit config references cannot escape the config directory, symlinks are
+  rejected, and mutating the staged rootfs cannot modify the selected original.
