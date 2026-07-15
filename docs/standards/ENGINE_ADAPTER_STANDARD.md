@@ -41,11 +41,32 @@ Each adapter translates `FuzzRunConfig` into the engine's CLI. Resource limits
 (memory, CPU, duration) are enforced by `hf-runtime`, not duplicated by the
 engine where possible.
 
+### 3.1 AFL++ File-Input Contract
+
+The supported AFL++ harness is the generated `LLVMFuzzerTestOneInput` target
+linked with AFL++'s libFuzzer-compatible driver. Input is always represented as
+a file argument:
+
+| Phase | Target argv after `--` |
+| --- | --- |
+| Fuzz run | `<binary> @@` |
+| `afl-showmap` | `<binary> <input>` |
+| `afl-tmin` | `<binary> @@` |
+| Reproduction | `<binary> <input>` |
+
+All four forms must be built through `hf-engine::afl`'s typed input-delivery
+helpers. Omitting `@@` selects AFL++'s stdin mode and is a contract violation.
+
 ## 4. Progress Streaming
 
 `FuzzRunHandle` exposes a stream of `FuzzProgress` events: `ExecsPerSec`,
 `EdgesCovered`, `CrashesFound`, `LogLine`. Adapters parse engine stdout/stderr
 into these events.
+
+For AFL++, stdout/stderr parsing is live-log telemetry only. Persisted terminal
+statistics must be read from that run's exact `default/fuzzer_stats` file with
+the bounded `hf-engine::afl::read_fuzzer_stats` API. Consumers must not scan a
+target-wide output directory or infer final AFL++ counters from UI text.
 
 ## 5. Crash Output
 
