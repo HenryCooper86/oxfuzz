@@ -804,7 +804,7 @@ async fn chat_rollback_undoes_last_turn() {
         .expect("create session");
 
     // Turn 1: checkpoint before (0 messages), then append the exchange.
-    container.chat_create_checkpoint(&node.id, 0).await;
+    container.chat_create_checkpoint(&node.id, 0).await.unwrap();
     manager
         .append_message(&node.id, &Message::user("q1"))
         .await
@@ -815,7 +815,7 @@ async fn chat_rollback_undoes_last_turn() {
         .unwrap();
 
     // Turn 2: checkpoint before (2 messages), then append.
-    container.chat_create_checkpoint(&node.id, 2).await;
+    container.chat_create_checkpoint(&node.id, 2).await.unwrap();
     manager
         .append_message(&node.id, &Message::user("q2"))
         .await
@@ -828,7 +828,7 @@ async fn chat_rollback_undoes_last_turn() {
     assert_eq!(manager.read_transcript(&node.id).await.unwrap().len(), 4);
 
     // Roll back the last turn -> back to the turn-1 state.
-    let removed = container.chat_rollback_last(&node.id).await;
+    let removed = container.chat_rollback_last(&node.id).await.unwrap();
     assert_eq!(removed, 2, "should remove the two turn-2 messages");
     let transcript = manager.read_transcript(&node.id).await.unwrap();
     assert_eq!(transcript.len(), 2);
@@ -867,7 +867,8 @@ async fn chat_checkpoint_picker_rolls_back_to_turn() {
     {
         container
             .chat_create_checkpoint(&node.id, u32::try_from(i * 2).unwrap())
-            .await;
+            .await
+            .unwrap();
         manager
             .append_message(&node.id, &Message::user(*q))
             .await
@@ -879,7 +880,7 @@ async fn chat_checkpoint_picker_rolls_back_to_turn() {
     }
 
     // The picker lists three turns, each previewing its user message.
-    let checkpoints = container.chat_checkpoints(&node.id).await;
+    let checkpoints = container.chat_checkpoints(&node.id).await.unwrap();
     assert_eq!(checkpoints.len(), 3);
     assert_eq!(checkpoints[0].turn_number, 1);
     assert_eq!(checkpoints[0].preview, "q1");
@@ -889,14 +890,15 @@ async fn chat_checkpoint_picker_rolls_back_to_turn() {
     let turn2 = &checkpoints[1];
     let removed = container
         .chat_rollback_to(&node.id, &turn2.checkpoint_id)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(removed, 4, "turns 2 and 3 (4 messages) removed");
     let transcript = manager.read_transcript(&node.id).await.unwrap();
     assert_eq!(transcript.len(), 2);
     assert_eq!(transcript[1].content, "a1");
 
     // Only turn 1's checkpoint remains valid.
-    assert_eq!(container.chat_checkpoints(&node.id).await.len(), 1);
+    assert_eq!(container.chat_checkpoints(&node.id).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -952,18 +954,97 @@ async fn chat_branch_forks_an_independent_conversation() {
         .unwrap();
 
     // The branch has the fork point + its own divergence; main is untouched.
-    let branch_hist = container.chat_history(&branch).await;
+    let branch_hist = container.chat_history(&branch).await.unwrap();
     assert_eq!(branch_hist.len(), 4);
     assert_eq!(branch_hist[0].content, "q1");
     assert_eq!(branch_hist[3].content, "a-alt");
 
-    let main_hist = container.chat_history(&main.id).await;
+    let main_hist = container.chat_history(&main.id).await.unwrap();
     assert_eq!(main_hist.len(), 4);
     assert_eq!(main_hist[3].content, "a2");
 
     // The tree lists both sessions, main flagged.
-    let tree = container.chat_branches(&main.id).await;
+    let tree = container.chat_branches(&main.id).await.unwrap();
     assert_eq!(tree.len(), 2);
     assert!(tree.iter().any(|b| b.is_main && b.title == "Main"));
     assert!(tree.iter().any(|b| !b.is_main && b.title == "Experiment"));
+}
+
+#[tokio::test]
+async fn persistent_chat_operations_reject_unknown_sessions() {
+    use hf_core::types::SessionId;
+
+    let rt = Arc::new(hf_runtime::StubRuntime);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("chat-errors.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = ServiceContainer::new(rt, None).with_store(store);
+    let unknown = SessionId::from_string("missing-session");
+
+    assert!(container.chat_history(&unknown).await.is_err());
+    assert!(container.chat_checkpoints(&unknown).await.is_err());
+    assert!(container.chat_branches(&unknown).await.is_err());
+    assert!(container.chat_rollback_last(&unknown).await.is_err());
+    assert!(container
+        .chat_rollback_to(&unknown, "missing-checkpoint")
+        .await
+        .is_err());
+    assert!(container
+        .chat_branch(&unknown, 2, Some("Branch".to_owned()))
+        .await
+        .is_err());
+    assert!(container.delete_chat_session(&unknown).await.is_err());
+}
+
+#[tokio::test]
+async fn chat_rollback_waits_for_the_shared_session_mutation_lock() {
+    use hf_core::session::{CreateSessionOptions, SessionType};
+    use hf_core::types::Message;
+
+    let rt = Arc::new(hf_runtime::StubRuntime);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        hf_storage::Store::connect(dir.path().join("chat-lock.db"))
+            .await
+            .expect("connect store"),
+    );
+    let container = ServiceContainer::new(rt, None).with_store(store);
+    let manager = container.session_manager().unwrap();
+    let session = manager
+        .create_session(CreateSessionOptions {
+            parent_id: None,
+            session_type: SessionType::Main,
+            agent_id: None,
+            title: None,
+        })
+        .await
+        .unwrap();
+    container
+        .chat_create_checkpoint(&session.id, 0)
+        .await
+        .unwrap();
+    manager
+        .append_messages(
+            &session.id,
+            &[Message::user("question"), Message::assistant("answer")],
+        )
+        .await
+        .unwrap();
+
+    let guard = container.session_turn_lock(&session.id).lock_owned().await;
+    let worker = container.clone();
+    let session_id = session.id.clone();
+    let mut rollback = tokio::spawn(async move { worker.chat_rollback_last(&session_id).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut rollback)
+            .await
+            .is_err(),
+        "rollback must wait while another mutation owns the session lock"
+    );
+
+    drop(guard);
+    assert_eq!(rollback.await.unwrap().unwrap(), 2);
 }

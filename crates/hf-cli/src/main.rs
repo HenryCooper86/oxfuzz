@@ -398,6 +398,7 @@ async fn cmd_agent(
                 session: None,
                 history_fallback: Vec::new(),
                 message: message.to_owned(),
+                display_message: None,
             },
             &sink,
         )
@@ -547,7 +548,7 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
 async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
     let container = ServiceContainer::bootstrap().await;
     match op {
-        SessionOp::New { title } => match container.create_chat_session(title).await {
+        SessionOp::New { title } => match container.create_chat_session(title).await? {
             Some(id) => println!("{id}"),
             None => {
                 println!("No database configured (set HF_DB_PATH); cannot persist sessions.");
@@ -555,25 +556,25 @@ async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
         },
         SessionOp::History { id } => {
             let sid = SessionId(id);
-            for m in container.chat_history(&sid).await {
+            for m in container.chat_history(&sid).await? {
                 println!("[{:?}] {}", m.role, m.content);
             }
         }
         SessionOp::Checkpoints { id } => {
             let sid = SessionId(id);
-            for c in container.chat_checkpoints(&sid).await {
+            for c in container.chat_checkpoints(&sid).await? {
                 println!("{c:?}");
             }
         }
         SessionOp::Branches { id } => {
             let sid = SessionId(id);
-            for b in container.chat_branches(&sid).await {
+            for b in container.chat_branches(&sid).await? {
                 println!("{b:?}");
             }
         }
         SessionOp::Rollback { id } => {
             let sid = SessionId(id);
-            let n = container.chat_rollback_last(&sid).await;
+            let n = container.chat_rollback_last(&sid).await?;
             println!("Rolled back {n} message(s).");
         }
     }

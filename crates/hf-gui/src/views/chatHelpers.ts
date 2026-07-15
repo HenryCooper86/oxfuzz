@@ -13,6 +13,17 @@ export function applyMode(text: string, mode: ChatMode): string {
 
 export type ChatRole = "user" | "assistant" | "system";
 
+export interface CanonicalChatTurn {
+  role: string;
+  content: string;
+}
+
+export interface CanonicalChatMessage {
+  role: ChatRole;
+  content: string;
+  timestamp: string;
+}
+
 export function normalizeChatRole(role: string): ChatRole {
   switch (role.toLowerCase()) {
     case "assistant":
@@ -27,6 +38,21 @@ export function normalizeChatRole(role: string): ChatRole {
 
 export function normalizeAssistantContent(content: string): string {
   return extractProtocolFinal(content) ?? content;
+}
+
+/** Rebuild visible state from the backend-owned display transcript. */
+export function toCanonicalChatMessages(
+  turns: CanonicalChatTurn[],
+  timestamp: () => string = () => new Date().toLocaleTimeString(),
+): CanonicalChatMessage[] {
+  return turns.map((turn) => {
+    const role = normalizeChatRole(turn.role);
+    return {
+      role,
+      content: role === "assistant" ? normalizeAssistantContent(turn.content) : turn.content,
+      timestamp: timestamp(),
+    };
+  });
 }
 
 function extractProtocolFinal(content: string, depth = 0): string | null {

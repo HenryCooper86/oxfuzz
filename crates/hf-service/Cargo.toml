@@ -45,6 +45,7 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 hf-test-utils = { workspace = true }
+sqlx = { workspace = true }
 
 [lints]
 workspace = true
