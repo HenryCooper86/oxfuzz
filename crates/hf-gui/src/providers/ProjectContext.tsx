@@ -1,30 +1,10 @@
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { getTransport, emitDataChanged } from "../lib";
+import { ProjectContext } from "./project";
 
 const STORAGE_KEY = "hf_recent_projects";
 const ACTIVE_KEY = "hf_active_project";
 const MAX_RECENTS = 8;
-
-interface ProjectContextValue {
-  /** The project folder currently in focus across views. */
-  activeProject: string;
-  /** Most-recently-used project folders (most recent first). */
-  recentProjects: string[];
-  /** Set the active project (also records it in recents). */
-  setActiveProject: (path: string) => void;
-  /** Record a project in the recents list without changing focus. */
-  addRecent: (path: string) => void;
-  /** Remove a project from recents (local only; leaves persisted data intact). */
-  removeRecent: (path: string) => void;
-  /**
-   * Permanently delete a project's persisted data (targets, harnesses, corpus,
-   * crashes, runs) and its on-disk workspace, then drop it from recents. Unlike
-   * {@link removeRecent}, this is destructive and touches the backend.
-   */
-  deleteProjectData: (path: string) => Promise<void>;
-}
-
-const ProjectContext = createContext<ProjectContextValue | null>(null);
 
 function loadRecents(): string[] {
   try {
@@ -138,20 +118,4 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>;
-}
-
-/** Access the shared project state. Safe to call outside a provider (returns inert defaults). */
-export function useProject(): ProjectContextValue {
-  const ctx = useContext(ProjectContext);
-  if (!ctx) {
-    return {
-      activeProject: "",
-      recentProjects: [],
-      setActiveProject: () => {},
-      addRecent: () => {},
-      removeRecent: () => {},
-      deleteProjectData: async () => {},
-    };
-  }
-  return ctx;
 }

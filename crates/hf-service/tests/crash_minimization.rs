@@ -1,5 +1,7 @@
 //! Crash minimization stays inside the run-owned sandbox evidence boundary.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +15,6 @@ use hf_core::target::{
 };
 use hf_service::ServiceContainer;
 use sha2::{Digest, Sha256};
-
-static WORKSPACE: std::sync::Once = std::sync::Once::new();
 
 #[derive(Clone, Copy)]
 enum MinimizeOutcome {
@@ -126,12 +126,7 @@ struct Fixture {
 
 async fn fixture(name: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    WORKSPACE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_crash_minimization_tests"),
-        );
-    });
+    common::install_managed_workspace("hobot_fuzz_crash_minimization_tests");
     let project = root.path().join(format!("{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&project).unwrap();
     let target = TargetCandidate {
@@ -266,7 +261,10 @@ async fn triage_persists_verified_run_owned_minimized_artifact() {
     let options = runtime.minimize_options.lock().unwrap();
     assert_eq!(options.len(), 1);
     assert!(options[0].workspace_read_only);
-    assert!(!options[0].network_enabled);
+    assert_eq!(
+        options[0].network_mode,
+        hf_core::runtime::SandboxNetworkMode::None
+    );
     assert_eq!(options[0].extra_mounts.len(), 1);
     assert!(!options[0].extra_mounts[0].read_only);
 }

@@ -8,7 +8,7 @@
 import { useEffect, useState } from "react";
 import { Server, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { getTransport } from "../../lib";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
 import "./ObservabilityPanel.css";
 
 interface ProviderSnapshot {

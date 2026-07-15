@@ -45,6 +45,48 @@ listed in their individual sections below.
 
 Indexes: `idx_runs_project(project_root)`, `idx_runs_status(status)`.
 
+### `automotive_operations`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | service-owned UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `operation` | `TEXT NOT NULL` | capability/analyze/plan/session/replay/minimize/promotion operation |
+| `mode` | `TEXT NOT NULL` | offline_pcap/virtual_can/physical_bench |
+| `protocol` | `TEXT` | nullable primary protocol |
+| `status` | `TEXT NOT NULL` | running/done/failed/cancelled |
+| `started_at` | `TEXT NOT NULL` | RFC 3339 |
+| `ended_at` | `TEXT` | nullable terminal timestamp |
+| `request_hash` | `TEXT NOT NULL` | canonical request SHA-256 |
+| `transcript_hash` | `TEXT` | nullable JSONL transcript SHA-256 |
+| `artifact_dir` | `TEXT NOT NULL` | workspace-relative evidence directory |
+| `approval_json` | `TEXT` | nullable serialized approval evidence |
+| `result_json` | `TEXT` | nullable serialized domain result/state findings |
+| `error` | `TEXT` | nullable sanitized failure reason |
+
+Indexes: `idx_automotive_operations_project(project_root, started_at DESC)`,
+`idx_automotive_operations_status(status)`.
+
+### `automotive_state_corpus`
+
+This table retains protocol-state novelty evidence separately from source
+coverage corpus entries.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `protocol` | `TEXT NOT NULL` | stable automotive protocol id |
+| `state_digest` | `TEXT NOT NULL` | validated protocol-state SHA-256 |
+| `artifact_sha256` | `TEXT NOT NULL` | digest of retained artifact bytes |
+| `source_operation_id` | `TEXT NOT NULL` | completed automotive operation UUID |
+| `artifact_path` | `TEXT NOT NULL` | workspace-relative digest-addressed copy |
+| `created_at` | `TEXT NOT NULL` | RFC 3339 first-promotion timestamp |
+
+Primary key: `(project_root, protocol, state_digest, artifact_sha256)`.
+Foreign key: `source_operation_id -> automotive_operations(id)`.
+Indexes: `idx_automotive_state_corpus_project(project_root, created_at DESC)`,
+`idx_automotive_state_corpus_state(protocol, state_digest)`.
+
 ### `targets`
 
 | column | SQLite declaration |
@@ -317,6 +359,8 @@ Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 | `0011_project_settings.sql` | creates per-project auto-revert settings |
 | `0012_auto_revert_events.sql` | creates the auto-revert audit trail |
 | `0013_run_evidence.sql` | adds binary, evidence, run-kind, and context fields |
+| `0014_automotive_operations.sql` | creates durable automotive operation evidence |
+| `0015_automotive_state_corpus.sql` | creates protocol-state corpus promotion evidence |
 
 ## 7. Read failure contract
 

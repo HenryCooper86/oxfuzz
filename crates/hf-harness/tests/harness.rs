@@ -1,6 +1,6 @@
 //! Tests for harness generation.
 
-use hf_core::engine::EngineKind;
+use hf_core::engine::{EngineKind, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
 use hf_core::provider::{
@@ -12,7 +12,9 @@ use hf_core::target::{
     InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
 };
 use hf_core::types::TokenUsage;
-use hf_harness::{compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths};
+use hf_harness::{
+    compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths, smoke_fuzz_in_paths_with_config,
+};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -73,6 +75,40 @@ struct MockRuntime {
 }
 
 struct ArtifactRuntime;
+
+#[derive(Default)]
+struct SmokePolicyRuntime {
+    command: std::sync::Mutex<Vec<String>>,
+    limits: std::sync::Mutex<Option<ResourceLimits>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeAdapter for SmokePolicyRuntime {
+    async fn run_command(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+    ) -> Result<CommandResult, ClassifiedError> {
+        *self.command.lock().unwrap() = cmd.to_vec();
+        *self.limits.lock().unwrap() = Some(limits.clone());
+        Ok(CommandResult {
+            exit_code: 0,
+            stdout: "stats: 5000 execs/sec".to_owned(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+        Ok(String::new())
+    }
+}
 
 #[async_trait::async_trait]
 impl RuntimeAdapter for ArtifactRuntime {
@@ -289,6 +325,61 @@ async fn smoke_fuzz_passes_with_positive_execs() {
         "smoke fuzz must create the run-owned output directory"
     );
     assert!(!workspace.path().join("out").exists());
+}
+
+#[tokio::test]
+async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
+    let rt = SmokePolicyRuntime::default();
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let cfg = FuzzRunConfig {
+        harness_id: harness.id,
+        engine: harness.engine,
+        duration: Some(std::time::Duration::from_secs(17)),
+        max_mem_mb: 3072,
+        max_cpus: 3,
+        seed_corpus: None,
+        sanitizer: harness.sanitizer,
+        env: Vec::new(),
+        extra_args: Vec::new(),
+    };
+    let workspace = tempfile::tempdir().expect("temp workspace");
+
+    let smoked = smoke_fuzz_in_paths_with_config(
+        harness,
+        &rt,
+        workspace.path(),
+        Path::new("runs/smoke/corpus"),
+        Path::new("runs/smoke/out"),
+        &cfg,
+    )
+    .await
+    .expect("configured smoke should succeed");
+
+    assert!(rt
+        .command
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|arg| arg == "-max_total_time=17"));
+    let limits = rt.limits.lock().unwrap().clone().unwrap();
+    assert_eq!(limits.max_mem_mb, 3072);
+    assert_eq!(limits.max_cpus, 3);
+    assert_eq!(limits.max_duration_secs, 17);
+    assert_eq!(smoked.smoke_run.unwrap().duration_secs, 17);
 }
 
 #[tokio::test]

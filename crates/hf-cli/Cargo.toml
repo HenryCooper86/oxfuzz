@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "CLI + TUI for hobot_fuzz"
 
+[features]
+default = []
+automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
+
 [[bin]]
 name = "hobot-fuzz"
 path = "src/main.rs"

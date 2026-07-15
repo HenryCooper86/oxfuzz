@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
 
 // The shared "this failed to load" placeholder -- the error-colored sibling of
 // EmptyState/LoadingState, so failures look the same everywhere (an error

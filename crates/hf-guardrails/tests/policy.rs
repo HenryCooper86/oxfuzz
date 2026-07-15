@@ -20,12 +20,60 @@ fn risk_tiers_are_ordered() {
     assert_eq!(Action::CompileHarness.risk(), RiskTier::Medium);
     assert_eq!(run_fuzzer().risk(), RiskTier::High);
     assert_eq!(
+        Action::AutomotiveOffline {
+            operation: "analyze_pcap".to_owned(),
+        }
+        .risk(),
+        RiskTier::Medium
+    );
+    assert_eq!(
+        Action::AutomotiveVirtualCan {
+            protocol: "uds".to_owned(),
+            duration_secs: 5,
+        }
+        .risk(),
+        RiskTier::High
+    );
+    assert_eq!(
+        Action::AutomotivePhysicalBench {
+            interface: "can0".to_owned(),
+            protocol: "uds".to_owned(),
+            duration_secs: 5,
+        }
+        .risk(),
+        RiskTier::High
+    );
+    assert_eq!(
         Action::ShellExec {
             command: "rm -rf /".to_owned()
         }
         .risk(),
         RiskTier::Critical
     );
+}
+
+#[test]
+fn automotive_labels_distinguish_offline_virtual_and_physical_access() {
+    assert_eq!(
+        Action::AutomotiveOffline {
+            operation: "analyze_pcap".to_owned(),
+        }
+        .label(),
+        "automotive offline analyze_pcap"
+    );
+    assert!(Action::AutomotiveVirtualCan {
+        protocol: "uds".to_owned(),
+        duration_secs: 5,
+    }
+    .label()
+    .contains("virtual CAN"));
+    assert!(Action::AutomotivePhysicalBench {
+        interface: "can0".to_owned(),
+        protocol: "uds".to_owned(),
+        duration_secs: 5,
+    }
+    .label()
+    .contains("physical CAN interface can0"));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
 
 // Shared loading primitives so spinners and placeholders look the same
 // everywhere (the complement to EmptyState).

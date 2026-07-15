@@ -29,6 +29,7 @@ all under human-in-the-loop supervision.
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |
 | Engine integration | hf-engine | `FuzzEngine`, `FuzzRunHandle` | engine-integration-design.md |
+| Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |
 | Crash triage | hf-crash | `Crash`, `CrashReport` | crash-triage-design.md |
 | Corpus management | hf-corpus | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
@@ -46,6 +47,9 @@ all under human-in-the-loop supervision.
 - Domain crates (`hf-discovery`, `hf-harness`, `hf-engine`, `hf-crash`,
   `hf-corpus`, `hf-coverage`) depend on `hf-core` and may depend on each other
   only through `hf-core` traits or via `hf-service`.
+- `hf-automotive` is a pure optional schema leaf: it has no execution or
+  service dependency. Future orchestrators consume it optionally behind the
+  `automotive-scapy` feature; it never depends outward on them.
 - `hf-service` depends on domain + infrastructure crates; presentation crates
   (`hf-cli`, `hf-web`) depend only on `hf-service`.
 - No presentation crate imports a domain or infrastructure crate directly.
@@ -58,6 +62,43 @@ serialized UI state. Provider token prices are copied into the corresponding
 values. Global knowledge, session, and scheduler settings are resolved by
 `hf-service` and passed to their owning infrastructure components. Unsupported
 settings are rejected or removed instead of being accepted as no-ops.
+
+Operator fuzzing settings are a service-owned execution policy. The validated
+`[fuzzing]` table in `hobot-fuzz.toml` defines the allowed engine set, the
+default engine and duration presented to interactive clients, the maximum
+requested duration, and the memory/CPU limits recorded in each
+`FuzzRunConfig`. `hf-service` resolves that policy immediately before harness
+work or execution, so desktop, REST, CLI, agents, and schedules cannot bypass a
+disabled engine. An already-running campaign keeps the policy snapshot it
+started with.
+
+Mandatory safety boundaries are deliberately not configurable: generated
+harnesses still require smoke evidence and explicit human promotion, all builds
+and runs still use `hf-runtime`, and fuzzer network access remains disabled.
+Presentation layers may display those guarantees but must not expose switches
+that imply they can be weakened.
+
+Automotive protocol support follows the same split. The feature-disabled core
+has no Scapy or Python requirement. The optional `hf-automotive` crate owns only
+versioned, serializable protocol contracts and deterministic evidence hashing.
+The pinned Scapy adapter is a separately packaged runtime component;
+`hf-service` owns runtime enablement, capability negotiation, policy, scoped
+approval, immutable artifact staging, retained evidence, and state-corpus
+promotion. REST, CLI, and desktop surfaces call those service operations and do
+not construct sidecar commands or resolve host interfaces themselves.
+
+Browser configuration uses service-owned typed DTOs for protected integration
+settings. Secret values, secret environment names, headers, and absolute paths
+are never returned; omitted protected fields are preserved and replacement or
+clearing must be explicit. The same service boundary returns the validated
+fuzzing policy so clients fail closed instead of rebuilding defaults from raw
+TOML.
+
+Integration patch read-modify-write transactions are serialized per resolved
+config directory within a process. Potentially path-shaped values use an opaque
+configured/value state and never round-trip a redaction marker. Atomic file
+replacement protects integrity across processes, but cross-process updates are
+not serialized and therefore remain last-writer-wins.
 
 Schedule definitions inherit scheduler defaults when a per-schedule policy is
 absent. Once resolved, concurrency and hourly-rate policies are enforced before
@@ -86,7 +127,8 @@ non-UTC schedules use the explicit `CRON_TZ=<zone> <expression>` form.
 
 ## 7. Validation Checklist
 
-- [ ] Every domain crate exposes a trait in `hf-core`.
+- [ ] Execution-oriented domain crates expose shared traits in `hf-core`; pure
+      schema crates expose an explicitly versioned serialization contract.
 - [ ] No presentation crate imports a domain crate.
 - [ ] `cargo check --workspace` passes.
 - [ ] `cargo clippy --workspace -- -D warnings` passes.

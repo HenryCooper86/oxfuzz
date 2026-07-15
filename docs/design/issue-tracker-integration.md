@@ -57,6 +57,32 @@ Registered in `config.rs` `CONFIG_SECTIONS` + `bundled_example`. The live
 | Tauri | `commands.rs`: `issue_export`, `file_issue`, `issue_tracker_configured`, `issue_tracker_test_connection` |
 | GUI | Settings > **Issue Tracker** section (config form + Test connection + Open repo); Dashboard issue draft: provider-labelled, "File issue" (API) + "Open in browser" |
 
+### Settings transport
+
+The network settings boundary uses `GET/PATCH /config/issue-tracker`, backed by
+`hf_service::config::IntegrationConfigStore`. The public DTO returns safe forge,
+repository, label, username, and TLS values plus credential configured-state
+booleans. It never returns the direct token or the name of its secret environment
+variable. Omitted protected fields are preserved; replacement and clearing use
+explicit patch operations. The trusted desktop mirrors this contract through
+`get_issue_tracker_config` / `patch_issue_tracker_config`.
+
+The repository uses the same keep/replace/clear contract. A normal provider
+identifier remains visible, while a legacy absolute host path is represented as
+`configured: true, value: null`. Clients never receive or submit a redaction
+marker, so unrelated edits preserve the opaque stored value.
+
+`hf-service` validates the provider, enabled-provider repository requirement,
+host URL, credential environment name, and labels before atomically replacing
+the owner-only file. A rejected patch does not modify persisted settings. The
+generic web `/config/write` route rejects this section so redacted config text
+cannot erase hidden credentials.
+
+Read-modify-write patches for the same resolved config directory are serialized
+within one process. Atomic replacement prevents partial files, but the current
+dependency set provides no cross-process advisory lock; separate application
+processes remain last-writer-wins and should not edit the same config concurrently.
+
 ## Provider specifics
 
 | | GitHub | GitLab |

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Minus, RotateCcw } from "lucide-react";
-import { usePipeline } from "../providers/PipelineContext";
-import { useI18n } from "../i18n";
+import { usePipeline } from "../providers/pipeline";
+import { useI18n } from "../i18nContext";
 
 export function ProgressPanel() {
   const { coreStages, reset } = usePipeline();

@@ -9,6 +9,8 @@
 //! build/run through `hf-runtime` sandboxing (AGENTS.md 2.12).
 
 pub mod agent;
+#[cfg(feature = "automotive-scapy")]
+pub mod automotive;
 pub mod campaign_state;
 pub mod checkpoints;
 pub mod config;
@@ -47,13 +49,13 @@ pub use hf_skills::{SkillDefinition, SkillRegistry, TrustTier};
 
 pub use agent::AgentTurnRequest;
 pub use container::{
-    build_sandbox_image, copy_project_sources, generate_target_seeds, project_workspace_dir,
-    provider_pool_from_config, provider_pool_from_env, repo_root, runtime_from_env, workspace_dir,
-    workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot, ArtifactSummary, CompileOutcome,
-    CoverageSample, EffectiveAutoRevert, MemorySnapshot, MinimizeOutcome, ProviderSnapshot,
-    RegressionResult, RunCancelOutcome, RunControlStatus, RunHistoryItem, RunLifecycleStatus,
-    RunSummary, SchedulableTarget, SeedEntry, ServiceContainer, SystemSnapshot, SyzkallerRunOpts,
-    SyzkallerSummary,
+    build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
+    project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,
+    runtime_from_env, workspace_dir, workspace_root, AgentInstanceSnapshot, AgentPoolSnapshot,
+    ArtifactSummary, CompileOutcome, CoverageSample, EffectiveAutoRevert, MemorySnapshot,
+    MinimizeOutcome, ProviderSnapshot, RegressionResult, RunCancelOutcome, RunControlStatus,
+    RunHistoryItem, RunLifecycleStatus, RunSummary, SchedulableTarget, SeedEntry, ServiceContainer,
+    SystemSnapshot, SyzkallerRunOpts, SyzkallerSummary,
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};

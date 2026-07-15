@@ -45,7 +45,7 @@ panel, the REST `/system/status`, and the CLI agree on one answer.
 
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
-| Config | `config/defectdojo.toml` (+ `.example`), registered in `config.rs` `CONFIG_SECTIONS` | url, `api_token_env`, verify_tls, product/engagement, auto_create, reimport, `[lifecycle]` |
+| Config | `config/defectdojo.toml` (+ `.example`), registered in `config.rs` `CONFIG_SECTIONS` | url, optional direct `api_token`, `api_token_env`, verify_tls, product/engagement, auto_create, reimport, `[lifecycle]` |
 | Lifecycle | `hf-service/src/defectdojo_lifecycle.rs` | `DefectDojoState`/`DefectDojoStatus`, compose discovery, `status`/`start`/`stop`/`autostart`, HTTP readiness probe |
 | Logic | `hf-service/src/defectdojo.rs` | `DefectDojoConfig`, `crashes_to_generic` mapper, `severity_bucket`, `DefectDojoClient` (import/reimport + test_connection) |
 | Orchestration | `container.rs`: `push_to_defectdojo`, `defectdojo_test_connection`, `defectdojo_configured` | resolve crashes -> map -> POST |
@@ -54,13 +54,42 @@ panel, the REST `/system/status`, and the CLI agree on one answer.
 | Tauri | `commands.rs`: `push_to_defectdojo`, `defectdojo_test_connection`, `defectdojo_configured`, `defectdojo_status`/`_start`/`_stop`, `autostart_defectdojo` (from `setup()`) | |
 | GUI | Settings > Integrations panel (URL/token + Test connection); "Push to DefectDojo" in Triage and Reports; DefectDojo row in Dashboard > Health; the embedded view gates on `Ready` and offers Start | |
 
+### Settings transport
+
+The network settings boundary uses `GET/PATCH /config/defectdojo`, backed by
+`hf_service::config::IntegrationConfigStore`. The public DTO exposes only safe
+fields and configured-state booleans; it never returns a direct token, the name
+of a secret environment variable, or compose-file paths. A patch omits protected
+fields to preserve them. Replacing or clearing a protected field requires an
+explicit `{ "operation": "replace", "value": "..." }` or
+`{ "operation": "clear" }` request. The trusted desktop exposes the same contract through
+`get_defectdojo_config` / `patch_defectdojo_config`.
+
+A Compose project override is also modeled as keep/replace/clear. A normal
+project name may be returned for context; a legacy absolute path is returned
+only as `configured: true, value: null`. No redaction marker becomes editable
+form state or patch input, so an unrelated save preserves the original value.
+
+The service merges the patch into the stored typed config, validates URL,
+credential-source, environment-name, timeout, and path-list semantics, then
+atomically replaces the owner-only config file. Validation failure leaves the
+previous file intact. The generic web `/config/write` route rejects this section
+so a redacted browser snapshot cannot overwrite hidden values.
+
+Read-modify-write patches for the same resolved config directory are serialized
+across store instances inside one process. Files are replaced atomically, but no
+cross-process advisory lock is available in the current dependency set; two
+independent hobot_fuzz processes can still race with last-writer-wins semantics.
+
 ## Secrets
 
-The config stores only the **name** of an environment variable (`api_token_env`,
-default `HF_DEFECTDOJO_TOKEN`); the token is read from the environment at call
-time and never persisted or logged. This mirrors the provider `api_key_env`
-convention. Errors redact the token and classify 401/403 -> Validation (user
-action), 5xx -> Provider (transient/server).
+CLI/CI should store only the **name** of an environment variable
+(`api_token_env`, default `HF_DEFECTDOJO_TOKEN`); the token is read from the
+environment at call time and never logged. A trusted desktop may instead store
+a direct `api_token` in the owner-only config file. The network DTO returns
+neither value. This mirrors the provider credential convention. Errors redact
+the token and classify 401/403 -> Validation (user action), 5xx -> Provider
+(transient/server).
 
 ## Crash -> Finding mapping
 

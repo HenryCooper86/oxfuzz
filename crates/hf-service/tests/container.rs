@@ -69,10 +69,16 @@ async fn delete_corpus_entry_removes_the_managed_file_and_exact_row() {
 fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_it_workspace"),
-        );
+        let root = std::env::temp_dir().join(format!(
+            "hobot_fuzz_it_workspace_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::env::set_var("HF_WORKSPACE_DIR", &root);
+        let initialized = hf_service::initialize_workspace_root()
+            .expect("initialize managed integration-test workspace");
+        assert_eq!(initialized, std::fs::canonicalize(&root).unwrap());
+        assert!(root.join(".hobot-fuzz-workspace.json").is_file());
     });
 }
 
@@ -805,6 +811,7 @@ async fn provider_pool_swap_is_visible_across_container_clones() {
 struct CorpusMinimizeRuntime {
     saw_minimize: std::sync::atomic::AtomicBool,
     saw_hardened_mounts: std::sync::atomic::AtomicBool,
+    minimize_limits: std::sync::Mutex<Option<hf_core::runtime::ResourceLimits>>,
     minimize_run_root: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
@@ -837,6 +844,7 @@ impl hf_core::runtime::RuntimeAdapter for CorpusMinimizeRuntime {
         if cmd.iter().any(|arg| arg == "-merge=1") {
             self.saw_minimize
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            *self.minimize_limits.lock().unwrap() = Some(limits.clone());
             assert_ne!(cmd.first().map(String::as_str), Some("sh"));
             let output_container = cmd.get(2).expect("merge output argument");
             let corpus_container = cmd.get(3).expect("merge corpus argument");
@@ -926,17 +934,6 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     )
     .unwrap();
 
-    let workspace = hf_service::workspace_dir(&project, target);
-    let corpus = workspace.join("corpus");
-    fs::create_dir_all(&corpus).unwrap();
-    fs::write(corpus.join("a"), b"aaa").unwrap();
-    fs::write(corpus.join("b"), b"bbb").unwrap();
-    fs::write(
-        workspace.join(format!("fuzz_{target}")),
-        b"qualified binary",
-    )
-    .unwrap();
-
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("minimize.db"))
             .await
@@ -954,6 +951,16 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
         )
         .await
         .unwrap();
+    let workspace = hf_service::workspace_dir(&project, target);
+    let corpus = workspace.join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(corpus.join("a"), b"aaa").unwrap();
+    fs::write(corpus.join("b"), b"bbb").unwrap();
+    fs::write(
+        workspace.join(format!("fuzz_{target}")),
+        b"qualified binary",
+    )
+    .unwrap();
     container
         .harness_smoke(
             &project,
@@ -978,6 +985,15 @@ async fn corpus_minimize_uses_the_promoted_revision_and_an_isolated_snapshot() {
     assert!(runtime
         .saw_hardened_mounts
         .load(std::sync::atomic::Ordering::Relaxed));
+    let resolved = hf_service::config::resolve_fuzzing_run(
+        Some(hf_core::engine::EngineKind::LibFuzzer),
+        Some(300),
+    )
+    .unwrap();
+    let limits = runtime.minimize_limits.lock().unwrap().clone().unwrap();
+    assert_eq!(limits.max_mem_mb, resolved.max_mem_mb);
+    assert_eq!(limits.max_cpus, resolved.max_cpus);
+    assert_eq!(limits.max_duration_secs, resolved.duration_secs);
     assert_eq!(fs::read(corpus.join("a")).unwrap(), b"aaa");
     assert!(!corpus.join("survivor").exists());
     assert!(!corpus.join("b").exists());

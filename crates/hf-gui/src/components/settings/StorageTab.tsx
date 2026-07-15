@@ -1,10 +1,10 @@
 // Storage tab -- service-resolved workspace location and cleanup.
 
 import { useEffect, useState } from "react";
-import { Database } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { getTransport, emitDataChanged } from "../../lib";
-import { useI18n } from "../../i18n";
-import { useToast } from "../ui/Toast";
+import { useI18n } from "../../i18nContext";
+import { useToast } from "../ui/toastContext";
 import { Button, Input } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 
@@ -55,17 +55,35 @@ export function StorageTab() {
             <Input value={workspacePath} readOnly mono />
           </div>
         </SettingsItem>
-        <SettingsItem title={t("common.reset")}>
-          <Button variant={confirmClear ? "danger" : "outline"} onClick={clearWorkspace} disabled={clearing}>
-            {clearing ? t("settings.storage.clearing") : confirmClear ? t("settings.storage.clickAgain") : t("settings.storage.clearWorkspace")}
-          </Button>
-        </SettingsItem>
-        <div className="settings-item" style={{ padding: "10px 14px" }}>
-          <div className="flex items-center gap-2 text-xs text-text-muted">
-            <Database size={12} />
-            <span>
-              {t("settings.storage.workspaceNotePre")} <code>HF_WORKSPACE_DIR</code> {t("settings.storage.workspaceNotePost")}
+        <div
+          role="note"
+          aria-label={t("common.warning")}
+          className="settings-item flex items-start gap-3"
+          style={{
+            padding: "var(--space-md)",
+            borderLeft: "3px solid var(--warning, #d9a441)",
+            background: "var(--surface-secondary)",
+          }}
+        >
+          <AlertTriangle
+            size={18}
+            style={{ color: "var(--warning, #d9a441)", flexShrink: 0, marginTop: 1 }}
+          />
+          <div className="flex flex-1 flex-col gap-1 min-w-0">
+            <span className="text-sm font-semibold text-text-primary">{t("common.warning")}</span>
+            <span className="text-xs text-text-secondary">
+              {t("settings.storage.workspaceNotePre")} <code>HF_WORKSPACE_DIR</code>{" "}
+              {t("settings.storage.workspaceNotePost")}
             </span>
+          </div>
+          <div className="shrink-0">
+            <Button variant="danger" onClick={clearWorkspace} disabled={clearing}>
+              {clearing
+                ? t("settings.storage.clearing")
+                : confirmClear
+                  ? t("settings.storage.clickAgain")
+                  : t("settings.storage.clearWorkspace")}
+            </Button>
           </div>
         </div>
       </SettingsGroup>

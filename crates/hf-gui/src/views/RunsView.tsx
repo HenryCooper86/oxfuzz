@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { getTransport, onDataChanged, emitDataChanged } from "../lib";
-import { useI18n } from "../i18n";
-import { useProject } from "../providers/ProjectContext";
-import { useToast } from "../components/ui/Toast";
-import { useConfirm } from "../providers/ConfirmContext";
+import { useI18n } from "../i18nContext";
+import { useProject } from "../providers/project";
+import { useToast } from "../components/ui/toastContext";
+import { useConfirm } from "../providers/confirm";
 import type { RunHistoryItem, CoverageSample } from "../types";
 import { ViewHeader, EmptyState, Button, IconButton, Input } from "../components/ui";
 import { Play, Bug, Clock, GitCompare, X, Search, Activity, Zap, TrendingUp, LineChart, AlertTriangle, RotateCcw, Trash2 } from "lucide-react";

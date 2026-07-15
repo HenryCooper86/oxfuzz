@@ -1,13 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import mermaid from "mermaid";
 
-let initialized = false;
-function ensureInit() {
-  if (initialized) return;
-  initialized = true;
-  // The app is dark-themed; render diagrams to match. startOnLoad is off
-  // because we render explicitly per block.
-  mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+type MermaidApi = (typeof import("mermaid"))["default"];
+
+let mermaidPromise: Promise<MermaidApi> | null = null;
+
+function loadMermaid(): Promise<MermaidApi> {
+  if (!mermaidPromise) {
+    mermaidPromise = import("mermaid").then(({ default: mermaid }) => {
+      // Render explicitly per block and keep generated SVG isolated from
+      // executable page content.
+      mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+      return mermaid;
+    });
+  }
+  return mermaidPromise;
 }
 
 let seq = 0;
@@ -22,11 +28,10 @@ export function Mermaid({ code }: { code: string }) {
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    ensureInit();
     let alive = true;
     const id = `mmd-${(seq += 1)}`;
-    mermaid
-      .render(id, code)
+    void loadMermaid()
+      .then((mermaid) => mermaid.render(id, code))
       .then(({ svg }) => {
         if (alive && ref.current) {
           ref.current.innerHTML = svg;

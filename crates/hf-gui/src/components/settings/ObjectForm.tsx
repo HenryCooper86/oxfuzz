@@ -12,7 +12,8 @@ import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
 import { EmptyState } from "../ui";
 import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
-import { useI18n } from "../../i18n";
+import { useI18n } from "../../i18nContext";
+import { isSecretFieldName } from "../../lib/secretFields";
 
 type Cfg = Record<string, unknown>;
 
@@ -30,12 +31,12 @@ function isPrimitiveArray(v: unknown): v is unknown[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string" || typeof x === "number" || typeof x === "boolean");
 }
 
-function Field({ label, value, onSet }: { label: string; value: unknown; onSet: (v: unknown) => void }) {
+function Field({ name, label, value, onSet }: { name: string; label: string; value: unknown; onSet: (v: unknown) => void }) {
   const { t } = useI18n();
   if (typeof value === "boolean") {
     return (
       <SettingsItem title={label}>
-        <Switch checked={value} onChange={onSet} />
+        <Switch checked={value} onChange={onSet} ariaLabel={label} />
       </SettingsItem>
     );
   }
@@ -43,7 +44,7 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
     return (
       <SettingsItem title={label}>
         <div style={{ width: 140 }}>
-          <Input type="number" value={value} onChange={(e) => onSet(e.target.value === "" ? 0 : Number(e.target.value))} />
+          <Input aria-label={label} type="number" value={value} onChange={(e) => onSet(e.target.value === "" ? 0 : Number(e.target.value))} />
         </div>
       </SettingsItem>
     );
@@ -53,6 +54,7 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
       <SettingsItem title={label} description={t("settings.objectForm.commaSeparated")}>
         <div style={{ width: 260 }}>
           <Input
+            aria-label={label}
             mono
             value={(value as unknown[]).join(", ")}
             onChange={(e) => onSet(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
@@ -74,7 +76,15 @@ function Field({ label, value, onSet }: { label: string; value: unknown; onSet: 
   return (
     <SettingsItem title={label}>
       <div style={{ width: 260 }}>
-        <Input mono value={value == null ? "" : String(value)} onChange={(e) => onSet(e.target.value)} />
+        <Input
+          aria-label={label}
+          autoComplete={isSecretFieldName(name) ? "new-password" : undefined}
+          mono
+          spellCheck={isSecretFieldName(name) ? false : undefined}
+          type={isSecretFieldName(name) ? "password" : "text"}
+          value={value == null ? "" : String(value)}
+          onChange={(e) => onSet(e.target.value)}
+        />
       </div>
     </SettingsItem>
   );
@@ -109,14 +119,14 @@ export function ObjectForm({ value, onChange }: { value: Cfg; onChange: (next: C
       {scalars.length > 0 && (
         <SettingsGroup title={t("settings.objectForm.settings")}>
           {scalars.map(([key, v]) => (
-            <Field key={key} label={humanize(key)} value={v} onSet={(nv) => setKey(key, nv)} />
+            <Field key={key} name={key} label={humanize(key)} value={v} onSet={(nv) => setKey(key, nv)} />
           ))}
         </SettingsGroup>
       )}
       {tables.map(([table, obj]) => (
         <SettingsGroup key={table} title={humanize(table)}>
           {Object.entries(obj).map(([key, v]) => (
-            <Field key={key} label={humanize(key)} value={v} onSet={(nv) => setTableKey(table, key, nv)} />
+            <Field key={key} name={key} label={humanize(key)} value={v} onSet={(nv) => setTableKey(table, key, nv)} />
           ))}
         </SettingsGroup>
       ))}

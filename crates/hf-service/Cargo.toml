@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Business logic orchestrating discovery, harness, engine, crash, corpus, coverage"
 
+[features]
+default = []
+automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
+
 [dependencies]
 hf-core = { workspace = true }
 hf-agent = { workspace = true }
@@ -24,6 +28,7 @@ hf-session = { workspace = true }
 hf-storage = { workspace = true }
 hf-runtime = { workspace = true }
 hf-guardrails = { workspace = true }
+hf-automotive = { workspace = true, optional = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

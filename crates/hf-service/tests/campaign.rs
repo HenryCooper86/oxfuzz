@@ -7,16 +7,6 @@ use hf_core::engine::EngineKind;
 use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
-fn isolate_workspace() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_campaign_it_workspace"),
-        );
-    });
-}
-
 /// A runtime that writes files for real (so the harness source lands on disk)
 /// and reports every command as a clean success with smoke activity.
 struct WritingRuntime;
@@ -99,8 +89,9 @@ impl hf_core::provider::ProviderPool for CodeBlockPool {
 
 #[tokio::test]
 async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
-    isolate_workspace();
     let dir = tempfile::tempdir().unwrap();
+    let workspace_root = dir.path().join("workspace");
+    std::env::set_var("HF_WORKSPACE_DIR", &workspace_root);
     let project = dir.path().join("campproj");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(
@@ -109,12 +100,6 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
          int parse_entry(const uint8_t *data, size_t size){ return size>0 && data[0]=='A'; }\n",
     )
     .unwrap();
-
-    // Pre-create the compiled harness binary the runner checks for (a real
-    // Docker build would produce it; the fake runtime does not).
-    let workspace = hf_service::workspace_dir(&project, "parse_entry");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("fuzz_parse_entry"), b"#!/bin/true").unwrap();
 
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("campaign.db"))
@@ -133,6 +118,17 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         )
         .await
         .expect("prepare harness");
+    assert!(
+        workspace_root.join(".hobot-fuzz-workspace.json").is_file(),
+        "the production initializer must claim the empty test workspace"
+    );
+
+    // Pre-create the compiled harness binary the runner checks for (a real
+    // Docker build would produce it; the fake runtime does not). This happens
+    // only after harness generation has initialized the managed root and
+    // committed its ownership manifest.
+    let workspace = hf_service::workspace_dir(&project, "parse_entry");
+    std::fs::write(workspace.join("fuzz_parse_entry"), b"#!/bin/true").unwrap();
     container
         .harness_smoke(
             &project,

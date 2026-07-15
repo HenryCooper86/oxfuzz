@@ -1,18 +1,14 @@
 //! Integration test for LLM seed generation (`generate_seeds_llm`).
 
+mod common;
+
 use std::sync::Arc;
 
 use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        std::env::set_var(
-            "HF_WORKSPACE_DIR",
-            std::env::temp_dir().join("hobot_fuzz_seedgen_it_workspace"),
-        );
-    });
+    common::install_managed_workspace("hobot_fuzz_seedgen_it");
 }
 
 /// A pool that returns a JSON array of hex-encoded seeds for every completion.
