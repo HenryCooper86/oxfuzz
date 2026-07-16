@@ -123,6 +123,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   automotive_build_replay_plan: { method: "POST", path: "/automotive/replay-plan" },
   automotive_execute_replay: { method: "POST", path: "/automotive/replay" },
   list_automotive_operations: { method: "GET", path: "/automotive/operations" },
+  generate_automotive_report: { method: "POST", path: "/automotive/report" },
   get_providers: { method: "GET", path: "/config/providers" },
   set_providers: { method: "POST", path: "/config/providers" },
   get_defectdojo_config: { method: "GET", path: "/config/defectdojo" },

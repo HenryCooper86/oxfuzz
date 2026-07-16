@@ -322,6 +322,19 @@ enum AutomotiveOp {
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
+    /// Compose an evidence-backed automotive campaign report.
+    Report {
+        project: PathBuf,
+        /// Append a grounded provider interpretation when a provider is configured.
+        #[arg(long)]
+        ai: bool,
+        /// Export format used with --output: md, html, pdf, or docx.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Write the report to a file instead of printing Markdown to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1333,6 +1346,32 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 .await?;
             println!("{}", serde_json::to_string_pretty(&operations)?);
         }
+        AutomotiveOp::Report {
+            project,
+            ai,
+            format,
+            output,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let report = container.generate_automotive_report(&project, ai).await?;
+            if let Some(output) = output {
+                container.export_markdown(
+                    &report.markdown,
+                    &format!(
+                        "Automotive Fuzzing Campaign Report: {}",
+                        report.project_name
+                    ),
+                    &format,
+                    &output,
+                )?;
+                println!("{}", output.display());
+            } else {
+                if !matches!(format.as_str(), "md" | "markdown") {
+                    anyhow::bail!("--format requires --output for automotive reports");
+                }
+                println!("{}", report.markdown);
+            }
+        }
     }
     Ok(())
 }
@@ -1464,7 +1503,9 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(all(test, feature = "automotive-scapy"))]
 mod automotive_tests {
-    use super::parse_virtual_replay_plan;
+    use clap::Parser as _;
+
+    use super::{parse_virtual_replay_plan, AutomotiveOp, Cli, Commands};
 
     fn plan(mode: &str) -> String {
         format!(
@@ -1481,6 +1522,42 @@ mod automotive_tests {
         assert!(error.to_string().contains("virtual_can"));
 
         assert!(parse_virtual_replay_plan("{not-json").is_err());
+    }
+
+    #[test]
+    fn cli_exposes_ai_assisted_automotive_report_export() {
+        let cli = Cli::try_parse_from([
+            "hobot-fuzz",
+            "automotive",
+            "report",
+            "/tmp/project",
+            "--ai",
+            "--format",
+            "html",
+            "--output",
+            "/tmp/automotive-report.html",
+        ])
+        .unwrap();
+
+        let Commands::Automotive {
+            op:
+                AutomotiveOp::Report {
+                    project,
+                    ai,
+                    format,
+                    output,
+                },
+        } = cli.command
+        else {
+            panic!("expected the automotive report command");
+        };
+        assert_eq!(project, std::path::PathBuf::from("/tmp/project"));
+        assert!(ai);
+        assert_eq!(format, "html");
+        assert_eq!(
+            output,
+            Some(std::path::PathBuf::from("/tmp/automotive-report.html"))
+        );
     }
 }
 

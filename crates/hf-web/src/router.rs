@@ -490,6 +490,7 @@ fn automotive_routes() -> Router<AppState> {
             post(automotive_build_replay_plan),
         )
         .route("/automotive/replay", post(automotive_execute_replay))
+        .route("/automotive/report", post(generate_automotive_report))
         .route(
             "/automotive/operations",
             get(list_automotive_operations_query).post(list_automotive_operations),
@@ -2454,6 +2455,28 @@ async fn automotive_execute_replay(
 struct AutomotiveOperationListRequest {
     project_root: PathBuf,
     limit: Option<u32>,
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveReportRequest {
+    project_root: PathBuf,
+    #[serde(default)]
+    include_ai: bool,
+}
+
+#[cfg(feature = "automotive-scapy")]
+async fn generate_automotive_report(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveReportRequest>,
+) -> ApiResult<hf_service::automotive_report::AutomotiveCampaignReport> {
+    let project_root = approved_project(&state, &request.project_root)?;
+    state
+        .container
+        .generate_automotive_report(&project_root, request.include_ai)
+        .await
+        .map(Json)
+        .map_err(classified_api_error)
 }
 
 #[cfg(feature = "automotive-scapy")]

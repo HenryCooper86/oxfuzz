@@ -446,6 +446,29 @@ async fn automotive_replay_route_is_typed_and_rejects_an_incomplete_request() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_report_route_is_typed_and_rejects_an_incomplete_request() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build_with_state(hf_web::router::AppState::new(
+        hf_service::ServiceContainer::stubbed(),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/automotive/report")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 async fn system_status_returns_json_flags() {
     allow_open_dev_mode();

@@ -84,8 +84,11 @@ versioned, serializable protocol contracts and deterministic evidence hashing.
 The pinned Scapy adapter is a separately packaged runtime component;
 `hf-service` owns runtime enablement, capability negotiation, policy, scoped
 approval, immutable artifact staging, retained evidence, and state-corpus
-promotion. REST, CLI, and desktop surfaces call those service operations and do
-not construct sidecar commands or resolve host interfaces themselves.
+promotion. It also owns deterministic campaign synthesis and citation-validated,
+advisory AI interpretation; state novelty is never recast as source coverage or
+a vulnerability. REST, CLI, and desktop surfaces call those service operations
+and do not construct sidecar commands, resolve host interfaces, or recompute
+report findings themselves.
 
 Browser configuration uses service-owned typed DTOs for protected integration
 settings. Secret values, secret environment names, headers, and absolute paths

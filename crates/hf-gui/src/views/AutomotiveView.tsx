@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   CarFront,
+  FileText,
   FileSearch,
   History,
   RefreshCw,
@@ -9,14 +10,16 @@ import {
   Upload,
 } from "lucide-react";
 import { useI18n } from "../i18nContext";
-import { isTauriEnvironment, pickFile } from "../lib";
+import { emitDataChanged, getTransport, isTauriEnvironment, pickFile } from "../lib";
 import {
   analyzeAutomotiveCapture,
+  generateAutomotiveReport,
   getAutomotiveSettings,
   inspectAutomotiveCapabilities,
   listAutomotiveOperations,
   type AutomotiveCapabilitiesResult,
   type AutomotiveCaptureAnalysisResult,
+  type AutomotiveCampaignReport,
   type AutomotiveOperationOutcome,
   type AutomotiveOperationSummary,
   type AutomotiveProtocol,
@@ -34,6 +37,10 @@ import {
   Select,
   ViewHeader,
 } from "../components/ui";
+
+const ReportPreview = lazy(() =>
+  import("../components/ReportPreview").then((module) => ({ default: module.ReportPreview })),
+);
 
 function displayPathName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -71,6 +78,10 @@ export function AutomotiveView() {
   const [loadingSettings, setLoadingSettings] = useState(true);
   const [loadingOperations, setLoadingOperations] = useState(false);
   const [busy, setBusy] = useState<"capabilities" | "analysis" | null>(null);
+  const [reporting, setReporting] = useState<"deterministic" | "ai" | null>(null);
+  const [report, setReport] = useState<AutomotiveCampaignReport | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [reportFormats, setReportFormats] = useState<string[]>(["md", "html"]);
   const [error, setError] = useState<string | null>(null);
   const operationsRequestRef = useRef(0);
   const operationsProjectRef = useRef("");
@@ -122,6 +133,13 @@ export function AutomotiveView() {
   }, []);
 
   useEffect(() => {
+    getTransport()
+      .invoke<string[]>("report_formats")
+      .then(setReportFormats)
+      .catch(() => setReportFormats(["md", "html"]));
+  }, []);
+
+  useEffect(() => {
     queueMicrotask(() => void refreshOperations());
     return () => {
       operationsRequestRef.current += 1;
@@ -133,6 +151,8 @@ export function AutomotiveView() {
       setCapabilityOutcome(null);
       setAnalysisOutcome(null);
       setCapturePath("");
+      setReport(null);
+      setPreviewOpen(false);
     });
   }, [activeProject]);
 
@@ -205,6 +225,86 @@ export function AutomotiveView() {
       });
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function composeReport(includeAi: boolean) {
+    if (!activeProject || reporting) return;
+    setReporting(includeAi ? "ai" : "deterministic");
+    setError(null);
+    try {
+      const next = await generateAutomotiveReport(activeProject, includeAi);
+      setReport(next);
+      setPreviewOpen(true);
+      try {
+        await getTransport().invoke("save_report_draft", {
+          title: `Automotive campaign report — ${next.project_name}`,
+          project: activeProject,
+          target: null,
+          status: "Draft",
+          content: next.markdown,
+        });
+        emitDataChanged();
+      } catch (reason) {
+        setError(t("automotive.report.draftFailed", { error: String(reason) }));
+      }
+      toast({
+        title: t("automotive.report.composed"),
+        description: next.ai_status === "applied"
+          ? t("automotive.report.aiApplied")
+          : t("automotive.report.deterministic"),
+        variant: "success",
+      });
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      toast({
+        title: t("automotive.report.failed"),
+        description: message,
+        variant: "error",
+      });
+    } finally {
+      setReporting(null);
+    }
+  }
+
+  async function exportReport(format: string) {
+    if (!report) return;
+    try {
+      if (desktop) {
+        const saved = await getTransport().invoke<string | null>("export_markdown", {
+          content: report.markdown,
+          title: `Automotive campaign report — ${report.project_name}`,
+          format,
+        });
+        if (saved) {
+          toast({
+            title: t("automotive.report.exported"),
+            description: saved,
+            variant: "success",
+          });
+        }
+      } else if (format === "md") {
+        const blob = new Blob([report.markdown], { type: "text/markdown" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `automotive_campaign_${report.project_name.replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      } else {
+        toast({
+          title: t("automotive.report.exportUnavailable"),
+          description: t("automotive.report.exportDesktopOnly", { format: format.toUpperCase() }),
+          variant: "default",
+        });
+      }
+    } catch (reason) {
+      toast({
+        title: t("automotive.report.exportFailed"),
+        description: String(reason),
+        variant: "error",
+      });
     }
   }
 
@@ -434,6 +534,70 @@ export function AutomotiveView() {
         />
       )}
 
+      <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <FileText size={18} className="mt-0.5 shrink-0 text-accent" />
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-semibold">{t("automotive.report.title")}</h2>
+                <Badge variant="accent">{t("automotive.report.evidenceBacked")}</Badge>
+                {report?.ai_status === "applied" && (
+                  <Badge variant="success">{t("automotive.report.aiApplied")}</Badge>
+                )}
+                {report?.ai_status === "fallback" && (
+                  <Badge variant="warning">{t("automotive.report.aiFallback")}</Badge>
+                )}
+                {report && report.ai_status !== "applied" && report.ai_status !== "fallback" && (
+                  <Badge>{t("automotive.report.deterministicLabel")}</Badge>
+                )}
+              </div>
+              <p className="mt-1 max-w-3xl text-12px text-text-secondary">
+                {t("automotive.report.description")}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {report && (
+              <Button variant="ghost" onClick={() => setPreviewOpen(true)}>
+                {t("automotive.report.preview")}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              loading={reporting === "deterministic"}
+              disabled={reporting !== null}
+              onClick={() => void composeReport(false)}
+            >
+              {t("automotive.report.compose")}
+            </Button>
+            <Button
+              variant="primary"
+              loading={reporting === "ai"}
+              disabled={reporting !== null || operations.length === 0}
+              onClick={() => void composeReport(true)}
+            >
+              {t("automotive.report.composeAi")}
+            </Button>
+          </div>
+        </div>
+        {report && (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              [t("automotive.report.operations"), report.operation_count],
+              [t("automotive.report.failures"), report.failed_operation_count],
+              [t("automotive.report.states"), report.unique_state_count],
+              [t("automotive.report.promoted"), report.promoted_state_count],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="rounded-md border border-border bg-surface-primary p-3">
+                <div className="text-lg font-semibold text-text-primary">{value}</div>
+                <div className="text-11px text-text-muted">{label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-4" aria-label={t("automotive.readiness")}>
         <div className="surface-card flex items-start gap-3" style={{ padding: "var(--space-md)" }}>
           <ShieldAlert size={18} className="shrink-0 text-warning" />
@@ -530,6 +694,16 @@ export function AutomotiveView() {
           </div>
         )}
       </section>
+      {report && previewOpen && (
+        <Suspense fallback={<LoadingState label={t("automotive.report.loadingPreview")} />}>
+          <ReportPreview
+            markdown={report.markdown}
+            formats={reportFormats}
+            onClose={() => setPreviewOpen(false)}
+            onExport={(format) => void exportReport(format)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

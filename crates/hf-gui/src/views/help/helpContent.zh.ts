@@ -463,12 +463,16 @@ const SCREEN_AUTOMOTIVE = `
   仍需通过服务策略、安全护栏、沙箱检查和确认。
 - **物理台架**默认禁用，也不能从此工作区直接启用。每次操作都需要精确允许列表，并且必须
   在计划和预算确定后获得新的、绑定到该计划的人工批准。
+- **活动汇总与报告**将保留的操作、失败、协议状态、结果计数、安全策略和证据摘要整理为
+  确定性报告。**使用 AI 生成**可选择追加与提供方无关的解读，其中的操作、状态和记录引用
+  必须与保留证据一致。AI 文本仅供参考，不能更改或授权回放计划。
 
 智能体可以提出分析或回放计划，但不能启用该功能、选择未列入允许列表的接口、伪造批准证据
 或放宽限额。能力检查是证据，不是发送流量的许可。默认测试和发布检查绝不会连接物理接口。
 
 **它显示什么：** 策略状态、离线分析控件、适配器能力证据、虚拟/物理就绪说明、受限变异
-控件以及保留的操作历史。
+控件、保留的操作历史，以及操作数、失败数、唯一状态数和已提升状态证据等报告指标。每份
+生成的报告也会保存为**报告**中的草稿，供审查和导出。
 `;
 
 const SCREEN_DEFECTDOJO = `
@@ -596,6 +600,10 @@ hobot-fuzz harness  /path/to/project --target parse_value --engine libfuzzer   #
 hobot-fuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m   # 第 4-5 步
 hobot-fuzz triage   /path/to/project --target parse_value   # 第 6 步
 hobot-fuzz corpus   /path/to/project --target parse_value --op seed|grow|prune|list
+
+# 可选汽车协议功能：报告保留的离线/虚拟证据。
+hobot-fuzz automotive report /path/to/project --output automotive-report.html --format html
+hobot-fuzz automotive report /path/to/project --ai
 \`\`\`
 
 此外还有 \`hobot-fuzz serve\`（REST + SSE API）和 \`hobot-fuzz tui\`（终端 UI）。完整的命
@@ -659,7 +667,7 @@ export const HELP_SECTIONS_ZH: HelpSection[] = [
   { id: "skills", group: "library", title: "技能", keywords: "操作手册 领域 内置 自定义 root.md", body: SCREEN_SKILLS },
   { id: "knowledge", group: "library", title: "知识库", keywords: "bm25 搜索 索引 摄取 文档 pdf 已学习", body: SCREEN_KNOWLEDGE },
   { id: "automation", group: "library", title: "自动化", keywords: "调度 测试活动 cron 间隔 无头 已批准 并发 预算", body: SCREEN_AUTOMATION },
-  { id: "automotive", group: "library", title: "汽车协议", keywords: "can uds pcap 离线 vcan 回放 sidecar 物理台架 策略 证据", body: SCREEN_AUTOMOTIVE },
+  { id: "automotive", group: "library", title: "汽车协议", keywords: "can uds pcap 离线 vcan 回放 sidecar 物理台架 策略 证据 ai 活动 报告 导出 状态", body: SCREEN_AUTOMOTIVE },
   { id: "defectdojo", group: "library", title: "DefectDojo", keywords: "漏洞管理 发现 嵌入 推送 集成", body: SCREEN_DEFECTDOJO },
 
   { id: "settings", group: "config", title: "设置", keywords: "提供方 模糊测试 汽车协议 沙箱 引擎 存储 集成 问题跟踪器 表单 原始 toml", body: SCREEN_SETTINGS },
