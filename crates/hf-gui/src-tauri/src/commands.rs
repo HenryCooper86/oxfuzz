@@ -8,8 +8,7 @@ use std::path::PathBuf;
 
 use hf_service::{
     Action, ApprovalGate, CommandTermination, EngineKind, FuzzProgress, GuardrailPolicy,
-    Guardrails, Message, Role, SessionId, SkillDefinition, SkillRegistry, TargetLanguage,
-    TrustTier,
+    Guardrails, Message, Role, SessionId, SkillDefinition, TargetLanguage,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -506,7 +505,6 @@ pub async fn ensure_docker(
 }
 
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn show_window(app: tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         win.show().ok();
@@ -716,24 +714,16 @@ pub async fn provider_statuses(
         .collect())
 }
 
-/// Live system snapshot for the Observability panel: providers, agent pool, and
-/// memory. Fills the agent pool's available slots from the agent registry (the
-/// service layer does not load it).
+/// Live service-owned system snapshot for the Observability panel.
 #[tauri::command]
 pub async fn system_snapshot(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<hf_service::SystemSnapshot, String> {
-    let mut snapshot = state
+    state
         .container
         .system_snapshot()
         .await
-        .map_err(|error| error.to_string())?;
-    let agent_count = hf_service::AgentRegistry::with_user_dir(agents_dir())
-        .list()
-        .len();
-    snapshot.agents.available_slots = agent_count;
-    snapshot.agents.total_instances = snapshot.agents.instances.len();
-    Ok(snapshot)
+        .map_err(|error| error.to_string())
 }
 
 /// Internal-team dashboard summary for the active project/target.
@@ -897,7 +887,6 @@ pub async fn push_to_defectdojo(
 
 /// Saved editable report drafts.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn list_report_drafts(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Vec<hf_service::ReportDraft>, String> {
@@ -909,7 +898,6 @@ pub fn list_report_drafts(
 
 /// Save or update one editable report draft.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn save_report_draft(
     state: tauri::State<'_, crate::state::AppState>,
     id: Option<String>,
@@ -927,7 +915,6 @@ pub fn save_report_draft(
 
 /// Delete one editable report draft.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn delete_report_draft(
     state: tauri::State<'_, crate::state::AppState>,
     id: String,
@@ -941,7 +928,6 @@ pub fn delete_report_draft(
 /// Cheap on-disk artifact snapshot (harness built?, corpus size, crash inputs)
 /// for the Info panel.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn artifact_summary(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
@@ -1046,7 +1032,6 @@ pub async fn clear_all_runs(state: tauri::State<'_, crate::state::AppState>) -> 
 /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
 /// reproducers), reclaiming disk space. Persistent DB records are untouched.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn clear_workspace(state: tauri::State<'_, crate::state::AppState>) -> Result<(), String> {
     state.container.clear_workspace().map_err(|e| e.to_string())
 }
@@ -1066,7 +1051,6 @@ pub async fn diagnostics_cost_summary(
 /// Runs interrupted by a prior crash/quit, awaiting recovery.
 #[tauri::command]
 #[must_use]
-#[allow(clippy::needless_pass_by_value)]
 pub fn interrupted_runs(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Vec<hf_service::recovery::InterruptedRun> {
@@ -1075,7 +1059,6 @@ pub fn interrupted_runs(
 
 /// Dismiss an interrupted run; returns the updated list.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn dismiss_interrupted_run(
     state: tauri::State<'_, crate::state::AppState>,
     run_id: String,
@@ -1142,7 +1125,6 @@ pub async fn schedule_targets(
 /// Create a scheduled fuzz campaign; returns the updated list. An empty `target`
 /// makes a portfolio campaign that rotates through all promoted targets.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn schedule_create(
     state: tauri::State<'_, crate::state::AppState>,
     name: String,
@@ -1253,7 +1235,6 @@ pub async fn schedule_set_enabled(
 
 /// Index a project's source files into its BM25 knowledge base.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn knowledge_index(project: String) -> Result<hf_service::knowledge::KnowledgeStats, String> {
     hf_service::knowledge::index_project(std::path::Path::new(&project)).map_err(|e| e.to_string())
 }
@@ -1261,7 +1242,6 @@ pub fn knowledge_index(project: String) -> Result<hf_service::knowledge::Knowled
 /// Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
 /// sandbox and index it into the project knowledge base.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn knowledge_ingest(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
@@ -1279,7 +1259,6 @@ pub async fn knowledge_ingest(
 /// nothing). Runs on Tauri's blocking command pool, so the tree walk is fine.
 #[tauri::command]
 #[must_use]
-#[allow(clippy::needless_pass_by_value)]
 pub fn knowledge_search(
     project: String,
     query: String,
@@ -1292,70 +1271,18 @@ pub fn knowledge_search(
     )
 }
 
-/// The AI agent's identity: configured model, guardrail mode, and the tools it
-/// can call. Powers the Agents view.
-#[derive(Debug, Serialize)]
-pub struct AgentInfo {
-    pub model: String,
-    pub provider_type: String,
-    pub guardrails: String,
-    pub tools: Vec<serde_json::Value>,
-}
-
 #[tauri::command]
-pub fn agent_info() -> AgentInfo {
-    let models = list_models();
-    let first = models.first();
-    let model = first.map_or_else(|| "(none configured)".to_owned(), |m| m.model.clone());
-    let provider_type = first.map(|m| m.provider_type.clone()).unwrap_or_default();
-    // Default is env-gated (high-risk actions need approval/HF_AUTO_APPROVE);
-    // HF_GUARDRAILS=permissive opts into auto-approve-with-audit.
-    let guardrails = match std::env::var("HF_GUARDRAILS").as_deref() {
-        Ok("permissive") => "permissive (audited)".to_owned(),
-        _ => "approval required".to_owned(),
-    };
-    let tools = hf_service::TOOL_SPECS
-        .iter()
-        .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
-        .collect();
-    AgentInfo {
-        model,
-        provider_type,
-        guardrails,
-        tools,
-    }
+pub fn agent_info(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> hf_service::AgentRegistryInfo {
+    state.container.agent_registry_info()
 }
 
 /// List all skills -- built-in fuzzing skills plus any user-authored ones.
 #[tauri::command]
 #[must_use]
-pub fn list_skills() -> Vec<SkillDefinition> {
-    SkillRegistry::with_user_dir(skills_dir()).list()
-}
-
-/// Validate a file-backed entity name: alphanumeric, dash, underscore only
-/// (no path traversal). Returns the trimmed name.
-fn safe_name(name: &str) -> Result<String, String> {
-    let n = name.trim();
-    if n.is_empty()
-        || !n
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("name must be non-empty and only letters, digits, '-' or '_'".to_owned());
-    }
-    Ok(n.to_owned())
-}
-
-fn skills_dir() -> std::path::PathBuf {
-    hf_service::repo_root().map_or_else(|| std::path::PathBuf::from("skills"), |r| r.join("skills"))
-}
-
-fn agents_dir() -> std::path::PathBuf {
-    hf_service::repo_root().map_or_else(
-        || std::path::PathBuf::from("config/agents"),
-        |r| r.join("config").join("agents"),
-    )
+pub fn list_skills(state: tauri::State<'_, crate::state::AppState>) -> Vec<SkillDefinition> {
+    state.container.list_skill_definitions()
 }
 
 // -- Skills (registry-backed) -----------------------------------------------
@@ -1368,49 +1295,36 @@ fn agents_dir() -> std::path::PathBuf {
 /// Read a single skill (built-in or user) for editing.
 #[tauri::command]
 #[must_use]
-#[allow(clippy::needless_pass_by_value)]
-pub fn read_skill(name: String) -> Option<SkillDefinition> {
-    SkillRegistry::with_user_dir(skills_dir())
-        .get(&name)
-        .cloned()
+pub fn read_skill(
+    state: tauri::State<'_, crate::state::AppState>,
+    name: String,
+) -> Option<SkillDefinition> {
+    state.container.get_skill_definition(&name)
 }
 
 /// Create or update a user skill (writes `skills/<name>/{skill.toml,root.md}`).
 /// Overriding a built-in name shadows it until reset via `delete_skill`.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn save_skill(
-    name: String,
-    description: String,
-    version: String,
-    domain: Vec<String>,
-    content: String,
+    state: tauri::State<'_, crate::state::AppState>,
+    definition: SkillDefinition,
 ) -> Result<(), String> {
-    let name = safe_name(&name)?;
-    let version = if version.trim().is_empty() {
-        "0.1.0".to_owned()
-    } else {
-        version
-    };
-    let def = SkillDefinition {
-        name,
-        version,
-        description,
-        domain,
-        body: content,
-        max_input_tokens: 0,
-        trust_tier: TrustTier::UserDefined,
-    };
-    let mut reg = SkillRegistry::with_user_dir(skills_dir());
-    reg.save(def).map_err(|e| e.to_string())
+    state
+        .container
+        .save_skill_definition(definition)
+        .map_err(|error| error.to_string())
 }
 
 /// Delete a user skill, or reset a built-in override to its shipped version.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
-pub fn delete_skill(name: String) -> Result<(), String> {
-    let mut reg = SkillRegistry::with_user_dir(skills_dir());
-    reg.delete(&name).map_err(|e| e.to_string())
+pub fn delete_skill(
+    state: tauri::State<'_, crate::state::AppState>,
+    name: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_skill_definition(&name)
+        .map_err(|error| error.to_string())
 }
 
 // -- Agents (registry-backed) -----------------------------------------------
@@ -1423,45 +1337,54 @@ pub fn delete_skill(name: String) -> Result<(), String> {
 /// List all agents -- built-in fuzzing agents plus any user-authored ones.
 #[tauri::command]
 #[must_use]
-pub fn list_agents() -> Vec<hf_service::AgentDefinition> {
-    hf_service::AgentRegistry::with_user_dir(agents_dir()).list()
+pub fn list_agents(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Vec<hf_service::AgentDefinition> {
+    state.container.list_agent_definitions()
 }
 
 /// Fetch a single agent definition by id.
 #[tauri::command]
 #[must_use]
-#[allow(clippy::needless_pass_by_value)]
-pub fn get_agent(id: String) -> Option<hf_service::AgentDefinition> {
-    hf_service::AgentRegistry::with_user_dir(agents_dir())
-        .get(&id)
-        .cloned()
+pub fn get_agent(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> Option<hf_service::AgentDefinition> {
+    state.container.get_agent_definition(&id)
 }
 
 /// The runtime tool roster an agent may be granted, for the editor checklist.
 #[tauri::command]
 #[must_use]
-pub fn agent_tools() -> Vec<serde_json::Value> {
-    hf_service::TOOL_SPECS
-        .iter()
-        .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
-        .collect()
+pub fn agent_tools(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Vec<hf_service::AgentToolDefinition> {
+    state.container.agent_tool_definitions()
 }
 
 /// Create or update a user agent (writes `config/agents/<id>.toml`). Overriding
 /// a built-in id shadows it until deleted.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
-pub fn save_agent(def: hf_service::AgentDefinition) -> Result<(), String> {
-    let mut reg = hf_service::AgentRegistry::with_user_dir(agents_dir());
-    reg.save(def).map_err(|e| e.to_string())
+pub fn save_agent(
+    state: tauri::State<'_, crate::state::AppState>,
+    definition: hf_service::AgentDefinition,
+) -> Result<(), String> {
+    state
+        .container
+        .save_agent_definition(definition)
+        .map_err(|error| error.to_string())
 }
 
 /// Delete a user agent, or reset a built-in override to its shipped version.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
-pub fn delete_agent(id: String) -> Result<(), String> {
-    let mut reg = hf_service::AgentRegistry::with_user_dir(agents_dir());
-    reg.delete(&id).map_err(|e| e.to_string())
+pub fn delete_agent(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .container
+        .delete_agent_definition(&id)
+        .map_err(|error| error.to_string())
 }
 
 /// Create a new persistent conversation session and return its id.
@@ -1689,7 +1612,6 @@ pub async fn chat_agent(
 /// `hf-engine::runner::EngineRunner` and `hf-runtime::DockerRuntime` (with
 /// `--network=none` isolation).
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn run_fuzzer(
     state: tauri::State<'_, crate::state::AppState>,
     app: tauri::AppHandle,
@@ -1851,7 +1773,6 @@ pub async fn run_fuzzer(
 /// its partial results and the run is recorded as cancelled. Returns the number
 /// of runs that were signalled.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
     // The active-run registry is shared (Arc) across container clones, so the
     // base container sees runs started by the guardrail-adjusted clone in
@@ -1862,7 +1783,6 @@ pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
 /// Compose the Markdown campaign report for a target and return it as a string,
 /// so the GUI can preview or download it.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn generate_report(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
@@ -1878,7 +1798,6 @@ pub async fn generate_report(
 /// Generate the campaign report and save it to a user-chosen `.md` file via a
 /// native save dialog. Returns the saved path, or `None` if the user cancelled.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn save_report(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -1913,7 +1832,6 @@ pub async fn save_report(
 
 /// Reveal a file or directory in the OS file manager (Finder / Explorer).
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -1923,7 +1841,6 @@ pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
 
 /// Open a file or directory with the OS default handler (e.g. `$EDITOR`).
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -1935,7 +1852,6 @@ pub fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
 /// Tauri webview, so external links (GitLab issue drafts, docs) must go through
 /// the opener instead.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -1950,7 +1866,6 @@ pub fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 /// without leaving `hobot_fuzz`. The URL comes from the saved config, so callers
 /// (sidebar, dashboard, settings) never pass it.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn open_defectdojo(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -1996,7 +1911,6 @@ pub fn open_defectdojo(
 /// webview is the only way to render it in-app; it overlays the region below the
 /// view's toolbar and tracks it on resize.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn defectdojo_embed(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -2040,7 +1954,6 @@ pub fn defectdojo_embed(
 
 /// Remove the embedded `DefectDojo` webview (when leaving the in-app view).
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn defectdojo_embed_close(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -2061,7 +1974,6 @@ pub fn defectdojo_embed_close(
 
 /// Reload the embedded `DefectDojo` webview.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn defectdojo_embed_reload(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(view) = app.get_webview("dd-embed") {
         view.reload().map_err(|e| e.to_string())?;
@@ -2228,7 +2140,6 @@ pub async fn clear_project_auto_revert_override(
 /// Export a project's fuzzing data (targets, runs, harnesses, crashes, corpus)
 /// as a JSON bundle via a native save dialog. Returns the saved path or `None`.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn export_project_data(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -2270,7 +2181,6 @@ pub async fn export_project_data(
 /// Report export formats available on this host (always includes md + html;
 /// docx/pdf when pandoc and a PDF engine are installed).
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn report_formats(state: tauri::State<'_, crate::state::AppState>) -> Vec<String> {
     state.container.report_formats()
 }
@@ -2279,7 +2189,6 @@ pub fn report_formats(state: tauri::State<'_, crate::state::AppState>) -> Vec<St
 /// via a native save dialog with the matching extension. Returns the saved path
 /// or `None` if the dialog was cancelled.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn export_report(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -2321,7 +2230,6 @@ pub async fn export_report(
 /// Export already-composed report `content` (e.g. a saved draft) in `format`
 /// via a native save dialog. Returns the saved path or `None` if cancelled.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn export_markdown(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
@@ -2393,7 +2301,6 @@ pub struct SyzkallerOpts {
 /// `hf-runtime` sandbox. This command only maps options in and streams
 /// [`FuzzProgress`] back to the GUI as `run:progress` events.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn run_syzkaller(
     state: tauri::State<'_, crate::state::AppState>,
     app: tauri::AppHandle,
@@ -2766,7 +2673,6 @@ pub fn patch_issue_tracker_config(
 /// then reload it into the live container so the change applies immediately --
 /// no app restart needed.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn set_providers(
     state: tauri::State<'_, crate::state::AppState>,
     providers: Vec<ProviderConfig>,
@@ -2778,7 +2684,6 @@ pub fn set_providers(
 
 /// Test a provider configuration with a live probe request.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub async fn provider_test(provider: ProviderConfig) -> Result<String, String> {
     hf_service::config::test_provider(provider).await
 }
@@ -2792,28 +2697,24 @@ pub fn list_configs() -> Vec<ConfigSection> {
 
 /// Read a config section's raw TOML.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn read_config(name: String) -> Result<String, String> {
     hf_service::config::read_config(&name)
 }
 
 /// Write a config section's raw TOML to its live file.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn write_config(name: String, content: String) -> Result<(), String> {
     hf_service::config::write_config(&name, &content)
 }
 
 /// Parse raw TOML into a JSON value, for driving a structured settings form.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn config_toml_to_value(content: String) -> Result<serde_json::Value, String> {
     hf_service::config::toml_to_json(&content)
 }
 
 /// Serialize a settings form's JSON value back into TOML text.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)]
 pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> {
     hf_service::config::json_to_toml(&value)
 }

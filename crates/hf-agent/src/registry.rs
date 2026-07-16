@@ -6,7 +6,9 @@
 //! built-in (a reset); deleting a purely user-defined agent removes it.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
@@ -31,6 +33,46 @@ const BUILTINS: &[(&str, &str)] = &[
         include_str!("builtins/corpus-curator.toml"),
     ),
 ];
+
+static STAGED_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_replace(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "agent path has no parent")
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agent file name is not UTF-8",
+            )
+        })?;
+    let sequence = STAGED_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staged = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staged)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&staged, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
 
 /// The agent that drives a chat when the user has not chosen one.
 pub const DEFAULT_AGENT_ID: &str = "orchestrator";
@@ -208,7 +250,7 @@ impl AgentRegistry {
         def.trust_tier = TrustTier::UserDefined;
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{}.toml", def.id));
-        std::fs::write(&path, def.to_toml()?)?;
+        atomic_replace(&path, def.to_toml()?.as_bytes())?;
         self.agents.insert(def.id.clone(), def);
         Ok(())
     }
@@ -310,5 +352,36 @@ mod tests {
             TrustTier::BuiltIn
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_a_read_only_definition_atomically() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = AgentRegistry::with_user_dir(dir.path());
+        let mut definition = registry.get("crash-triager").unwrap().clone();
+        definition.id = "durable-agent".to_owned();
+        definition.name = "First revision".to_owned();
+        registry.save(definition.clone()).unwrap();
+        let path = dir.path().join("durable-agent.toml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        definition.name = "Second revision".to_owned();
+        registry
+            .save(definition)
+            .expect("replacement must stage a new file instead of truncating the old one");
+
+        let loaded = AgentRegistry::with_user_dir(dir.path());
+        assert_eq!(loaded.get("durable-agent").unwrap().name, "Second revision");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
+            "successful commits must not leave staging files"
+        );
     }
 }

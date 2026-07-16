@@ -20,7 +20,7 @@ driven by `syz-manager`, which needs three artifacts you provide:
 
 ### 1.1 Sandbox image with the syzkaller toolchain
 
-The shared sandbox image (`hobot/fuzz-sandbox:latest`) must contain the
+The shared sandbox image (`hobot/fuzz-sandbox:0.1.0`) must contain the
 syzkaller toolchain (Go 1.26, qemu, and the `syz-*` binaries). The Docker layer
 that installs it lives in `docker/sandbox/Dockerfile`.
 
@@ -30,12 +30,12 @@ Build it one of two ways:
   image for your host architecture and then verifies `syz-manager` is present.
 - Or, in the app: open Settings > General > Sandbox and switch the Architecture
   (this forces a rebuild). To force a same-arch rebuild instead, remove the
-  image first: `docker image rm hobot/fuzz-sandbox:latest`.
+  image first: `docker image rm hobot/fuzz-sandbox:0.1.0`.
 
 Confirm the toolchain is present:
 
 ```bash
-docker run --rm hobot/fuzz-sandbox:latest bash -lc 'which syz-manager && syz-manager --help | head -1'
+docker run --rm hobot/fuzz-sandbox:0.1.0 bash -lc 'which syz-manager && syz-manager --help | head -1'
 ```
 
 ### 1.2 Architecture matching

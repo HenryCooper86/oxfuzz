@@ -113,6 +113,11 @@ async fn coverage_prune_collapses_same_coverage_inputs() {
     let project = dir.path().join("covproj");
     std::fs::create_dir_all(&project).unwrap();
     let target = "parse_entry";
+    std::fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_entry(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
 
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("coverage.db"))
@@ -181,6 +186,11 @@ async fn coverage_prune_propagates_sandbox_failure_without_pruning() {
     let project = dir.path().join("covprune-failure-project");
     std::fs::create_dir_all(&project).unwrap();
     let target = "parse_failure";
+    std::fs::write(
+        project.join("parse.c"),
+        "#include <stddef.h>\nint parse_failure(const unsigned char *data, size_t size) { return size && data[0]; }\n",
+    )
+    .unwrap();
 
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("failure.db"))

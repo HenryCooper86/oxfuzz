@@ -90,6 +90,16 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   system_status_cmd: { method: "GET", path: "/system/status" },
   ensure_docker: { method: "GET", path: "/system/status" },
   chat_agent: { method: "POST", path: "/chat/agent" },
+  agent_info: { method: "GET", path: "/agents/info" },
+  agent_tools: { method: "GET", path: "/agents/tools" },
+  list_agents: { method: "GET", path: "/agents" },
+  get_agent: { method: "POST", path: "/agents/read" },
+  save_agent: { method: "POST", path: "/agents/save" },
+  delete_agent: { method: "POST", path: "/agents/delete" },
+  list_skills: { method: "GET", path: "/skills" },
+  read_skill: { method: "POST", path: "/skills/read" },
+  save_skill: { method: "POST", path: "/skills/save" },
+  delete_skill: { method: "POST", path: "/skills/delete" },
   create_session: { method: "POST", path: "/chat/session" },
   delete_session: { method: "POST", path: "/chat/delete" },
   chat_history: { method: "POST", path: "/chat/history" },
@@ -386,10 +396,8 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
           }
           return undefined as T;
         }
-        // Agent/session/skills/knowledge commands (chat_agent aside) have no
-        // hf-web endpoint yet. Fail loudly so callers fall back gracefully
-        // instead of silently mapping to the wrong route. Their UI callers
-        // already `.catch()` this and degrade to an empty/offline state.
+        // Fail loudly for commands without an HTTP equivalent so callers can
+        // present an accurate unsupported/offline state.
         throw new Error(`Unsupported command in web mode: ${command}`);
       }
       const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"

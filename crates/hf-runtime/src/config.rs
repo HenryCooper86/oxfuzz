@@ -1,5 +1,6 @@
 //! Runtime configuration.
 
+use hf_core::engine::EngineKind;
 use hf_core::runtime::ResourceLimits;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,19 +10,11 @@ use std::sync::OnceLock;
 ///
 /// Single source of truth -- referenced by `hf-service`, `hf-cli`, and
 /// `hf-gui` so the tag never drifts across presentation layers.
-pub const SANDBOX_IMAGE: &str = "hobot/fuzz-sandbox:latest";
+pub const SANDBOX_IMAGE: &str = "hobot/fuzz-sandbox:0.1.0";
 
-/// Which backend the runtime uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeBackend {
-    Docker,
-    Native,
-}
-
-/// Configuration for the sandbox runtime.
+/// Configuration for the production Docker sandbox runtime.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    pub backend: RuntimeBackend,
     pub image: String,
     pub container_workspace: String,
     pub default_limits: ResourceLimits,
@@ -33,7 +26,6 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            backend: RuntimeBackend::Docker,
             image: SANDBOX_IMAGE.to_owned(),
             container_workspace: "/work".to_owned(),
             default_limits: ResourceLimits {
@@ -156,16 +148,23 @@ pub fn sandbox_image_arch() -> Option<String> {
 /// Which fuzzing-engine toolchains are actually present in the loaded sandbox
 /// image. Engines run inside the image, so this -- not the host -- determines
 /// what can run.
-// One bool per supported engine: a flat record is the clearest mapping to the
-// engine set and mirrors `SystemStatus`, so the bool count is intrinsic.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SandboxEngines {
-    pub libfuzzer: bool,
-    pub aflplusplus: bool,
-    pub honggfuzz: bool,
-    pub clusterfuzzlite: bool,
-    pub syzkaller: bool,
+    available: [bool; 5],
+}
+
+impl SandboxEngines {
+    /// Whether the sandbox contains the toolchain required by `engine`.
+    #[must_use]
+    pub const fn supports(self, engine: EngineKind) -> bool {
+        self.available[match engine {
+            EngineKind::LibFuzzer => 0,
+            EngineKind::AflPlusPlus => 1,
+            EngineKind::Honggfuzz => 2,
+            EngineKind::ClusterFuzzLite => 3,
+            EngineKind::Syzkaller => 4,
+        }]
+    }
 }
 
 /// The `docker image inspect --format {{.Id}}` of the loaded sandbox image, used
@@ -191,11 +190,13 @@ fn sandbox_image_id() -> Option<String> {
 fn engines_from_probe_output(found: &str) -> SandboxEngines {
     let has = |bin: &str| found.lines().any(|l| l.trim() == bin);
     SandboxEngines {
-        libfuzzer: has("clang"),
-        aflplusplus: has("afl-fuzz"),
-        honggfuzz: has("honggfuzz"),
-        clusterfuzzlite: has("python3"),
-        syzkaller: has("syz-manager"),
+        available: [
+            has("clang"),
+            has("afl-fuzz"),
+            has("honggfuzz"),
+            has("python3"),
+            has("syz-manager"),
+        ],
     }
 }
 
@@ -320,22 +321,19 @@ pub fn can_run_platform(platform: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{engines_from_probe_output, SandboxEngines};
+    use super::{engines_from_probe_output, SandboxEngines, SANDBOX_IMAGE};
+    use hf_core::engine::EngineKind;
 
     #[test]
     fn probe_output_maps_present_binaries_to_engines() {
         // The image bundles clang/afl-fuzz/honggfuzz/syz-manager but not python3.
         let out = "clang\nafl-fuzz\nhonggfuzz\nsyz-manager\n";
-        assert_eq!(
-            engines_from_probe_output(out),
-            SandboxEngines {
-                libfuzzer: true,
-                aflplusplus: true,
-                honggfuzz: true,
-                clusterfuzzlite: false,
-                syzkaller: true,
-            }
-        );
+        let engines = engines_from_probe_output(out);
+        assert!(engines.supports(EngineKind::LibFuzzer));
+        assert!(engines.supports(EngineKind::AflPlusPlus));
+        assert!(engines.supports(EngineKind::Honggfuzz));
+        assert!(!engines.supports(EngineKind::ClusterFuzzLite));
+        assert!(engines.supports(EngineKind::Syzkaller));
     }
 
     #[test]
@@ -347,7 +345,16 @@ mod tests {
     fn probe_output_clusterfuzzlite_needs_python3() {
         let out = "clang\npython3\n";
         let e = engines_from_probe_output(out);
-        assert!(e.libfuzzer && e.clusterfuzzlite);
-        assert!(!e.aflplusplus && !e.honggfuzz && !e.syzkaller);
+        assert!(e.supports(EngineKind::LibFuzzer));
+        assert!(e.supports(EngineKind::ClusterFuzzLite));
+        assert!(!e.supports(EngineKind::AflPlusPlus));
+        assert!(!e.supports(EngineKind::Honggfuzz));
+        assert!(!e.supports(EngineKind::Syzkaller));
+    }
+
+    #[test]
+    fn production_sandbox_image_is_version_pinned() {
+        assert!(!SANDBOX_IMAGE.ends_with(":latest"));
+        assert_eq!(SANDBOX_IMAGE, "hobot/fuzz-sandbox:0.1.0");
     }
 }

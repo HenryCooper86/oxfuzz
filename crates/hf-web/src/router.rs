@@ -400,6 +400,16 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/defectdojo/stop", post(defectdojo_stop))
         .route("/chat/send", post(chat_send))
         .route("/chat/agent", post(chat_agent))
+        .route("/agents", get(list_agents))
+        .route("/agents/info", get(agent_info))
+        .route("/agents/tools", get(agent_tools))
+        .route("/agents/read", post(get_agent))
+        .route("/agents/save", post(save_agent))
+        .route("/agents/delete", post(delete_agent))
+        .route("/skills", get(list_skills))
+        .route("/skills/read", post(read_skill))
+        .route("/skills/save", post(save_skill))
+        .route("/skills/delete", post(delete_skill))
         // Session management (parity with the desktop shell).
         .route("/chat/session", post(create_session))
         .route("/chat/history", post(chat_history))
@@ -1997,6 +2007,105 @@ async fn schedule_set_enabled(
 
 async fn list_models(State(_): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!(hf_service::config::list_models()))
+}
+
+// -- Agent and skill registries -------------------------------------------
+//
+// All registry resolution, validation, and persistence is service-owned. The
+// REST layer only maps typed request bodies to the same methods used by Tauri.
+
+async fn agent_info(State(state): State<AppState>) -> Json<hf_service::AgentRegistryInfo> {
+    Json(state.container.agent_registry_info())
+}
+
+async fn agent_tools(State(state): State<AppState>) -> Json<Vec<hf_service::AgentToolDefinition>> {
+    Json(state.container.agent_tool_definitions())
+}
+
+async fn list_agents(State(state): State<AppState>) -> Json<Vec<hf_service::AgentDefinition>> {
+    Json(state.container.list_agent_definitions())
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentIdRequest {
+    id: String,
+}
+
+async fn get_agent(
+    State(state): State<AppState>,
+    Json(request): Json<AgentIdRequest>,
+) -> Json<Option<hf_service::AgentDefinition>> {
+    Json(state.container.get_agent_definition(&request.id))
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveAgentRequest {
+    definition: hf_service::AgentDefinition,
+}
+
+async fn save_agent(
+    State(state): State<AppState>,
+    Json(request): Json<SaveAgentRequest>,
+) -> ApiResult<()> {
+    state
+        .container
+        .save_agent_definition(request.definition)
+        .map_err(classified_api_error)?;
+    Ok(Json(()))
+}
+
+async fn delete_agent(
+    State(state): State<AppState>,
+    Json(request): Json<AgentIdRequest>,
+) -> ApiResult<()> {
+    state
+        .container
+        .delete_agent_definition(&request.id)
+        .map_err(classified_api_error)?;
+    Ok(Json(()))
+}
+
+async fn list_skills(State(state): State<AppState>) -> Json<Vec<hf_service::SkillDefinition>> {
+    Json(state.container.list_skill_definitions())
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillNameRequest {
+    name: String,
+}
+
+async fn read_skill(
+    State(state): State<AppState>,
+    Json(request): Json<SkillNameRequest>,
+) -> Json<Option<hf_service::SkillDefinition>> {
+    Json(state.container.get_skill_definition(&request.name))
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveSkillRequest {
+    definition: hf_service::SkillDefinition,
+}
+
+async fn save_skill(
+    State(state): State<AppState>,
+    Json(request): Json<SaveSkillRequest>,
+) -> ApiResult<()> {
+    state
+        .container
+        .save_skill_definition(request.definition)
+        .map_err(classified_api_error)?;
+    Ok(Json(()))
+}
+
+async fn delete_skill(
+    State(state): State<AppState>,
+    Json(request): Json<SkillNameRequest>,
+) -> ApiResult<()> {
+    state
+        .container
+        .delete_skill_definition(&request.name)
+        .map_err(classified_api_error)?;
+    Ok(Json(()))
 }
 
 async fn list_configs(State(_): State<AppState>) -> Json<serde_json::Value> {

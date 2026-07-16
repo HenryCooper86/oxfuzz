@@ -7,7 +7,12 @@
 # Multi-arch: built per fuzzing target via `docker build --platform=linux/amd64`
 # or `linux/arm64` so the produced harness binaries match the target ABI.
 
-FROM ubuntu:24.04
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+FROM ${UBUNTU_IMAGE}
+
+LABEL org.opencontainers.image.title="hobot_fuzz sandbox" \
+      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.source="https://github.com/hobot/hobot_fuzz"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -33,14 +38,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip python3-venv \
     && python3 -m pip install --no-cache-dir --break-system-packages \
-       'markitdown[pdf,docx,pptx,xlsx]' \
+       'markitdown[pdf,docx,pptx,xlsx]==0.1.6' \
     && rm -rf /var/lib/apt/lists/*
 
-# Build honggfuzz from source (not in Ubuntu repos).
+# Build the pinned honggfuzz 2.6 release from source (not in Ubuntu repos).
+ARG HONGGFUZZ_COMMIT=83a8415a372d84dcc69ac1e2c2f152190bcf76d1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libbfd-dev \
     libunwind-dev \
-    && git clone --depth=1 https://github.com/google/honggfuzz.git /tmp/honggfuzz \
+    && git init /tmp/honggfuzz \
+    && git -C /tmp/honggfuzz remote add origin https://github.com/google/honggfuzz.git \
+    && git -C /tmp/honggfuzz fetch --depth=1 origin "${HONGGFUZZ_COMMIT}" \
+    && git -C /tmp/honggfuzz checkout --detach FETCH_HEAD \
     && cd /tmp/honggfuzz && make && make install \
     && rm -rf /tmp/honggfuzz \
     && rm -rf /var/lib/apt/lists/*
@@ -54,19 +63,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # manager.cfg supplied at runtime; this layer provides the toolchain only.
 #
 # IMPORTANT: syzkaller tracks a very recent Go toolchain (its go.mod currently
-# requires Go >= 1.26), newer than the distro `golang-go` package. We therefore
-# install a pinned Go from go.dev. GOTOOLCHAIN=auto lets `go` fetch a newer
-# toolchain automatically if a future syzkaller checkout requires one.
+# requires Go >= 1.26), newer than the distro `golang-go` package. We install a
+# checksum-verified Go toolchain and keep automatic toolchain downloads off.
 # ---------------------------------------------------------------------------
-ENV GO_VERSION=1.26.0
+ARG GO_VERSION=1.26.5
+ARG GO_SHA256_AMD64=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
+ARG GO_SHA256_ARM64=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
 RUN arch="$(dpkg --print-architecture)" \
     && wget -q "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" -O /tmp/go.tgz \
+    && case "$arch" in \
+         amd64) checksum="$GO_SHA256_AMD64" ;; \
+         arm64) checksum="$GO_SHA256_ARM64" ;; \
+         *) echo "unsupported Go architecture: $arch" >&2; exit 1 ;; \
+       esac \
+    && echo "${checksum}  /tmp/go.tgz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 
 ENV PATH="/usr/local/go/bin:/root/go/bin:/opt/syzkaller/bin:${PATH}"
-ENV GOTOOLCHAIN=auto
+ENV GOTOOLCHAIN=local
 
+ARG SYZKALLER_COMMIT=27a8bd60fa3a186e2b15eb9c4706689e3d2be6f2
 RUN apt-get update && apt-get install -y --no-install-recommends \
     qemu-system-x86 \
     qemu-system-arm \
@@ -76,7 +93,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
     libelf-dev \
     libssl-dev \
-    && git clone --depth=1 https://github.com/google/syzkaller.git /opt/syzkaller \
+    && git init /opt/syzkaller \
+    && git -C /opt/syzkaller remote add origin https://github.com/google/syzkaller.git \
+    && git -C /opt/syzkaller fetch --depth=1 origin "${SYZKALLER_COMMIT}" \
+    && git -C /opt/syzkaller checkout --detach FETCH_HEAD \
     && make -C /opt/syzkaller \
     && ln -sf /opt/syzkaller/bin/syz-manager /usr/local/bin/syz-manager \
     && rm -rf /var/lib/apt/lists/*
@@ -92,6 +112,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # binaries land in /usr/local/bin; the toolchain + caches are then removed to
 # keep the image slim. pkg-config/libssl-dev satisfy the build.
 # ---------------------------------------------------------------------------
+ARG CASR_VERSION=2.13.1
+ARG CASR_BUILD_TOOLCHAIN=1.94.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     lsb-release \
@@ -100,9 +122,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal \
+        | sh -s -- -y --profile minimal --default-toolchain "${CASR_BUILD_TOOLCHAIN}" \
     && . "$HOME/.cargo/env" \
-    && cargo install casr --root /usr/local --locked \
+    && cargo install casr --version "${CASR_VERSION}" --root /usr/local --locked \
     && rustup self uninstall -y \
     && rm -rf "$HOME/.cargo" "$HOME/.rustup"
 
@@ -121,16 +143,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo \
     PATH=/opt/rust/cargo/bin:${PATH}
+ARG RUST_NIGHTLY=nightly-2026-06-10
+ARG CARGO_FUZZ_VERSION=0.13.2
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal --default-toolchain nightly \
-    && rustup component add --toolchain nightly llvm-tools-preview \
-    && cargo install cargo-fuzz --locked
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_NIGHTLY}" \
+    && rustup component add --toolchain "${RUST_NIGHTLY}" llvm-tools-preview \
+    && cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
-# Verify tools are present.
-RUN clang --version && afl-fuzz --version && honggfuzz --version 2>&1 || true
-RUN syz-manager --help 2>&1 | head -1 || true
-RUN casr-san --help 2>&1 | head -1 && casr-cluster --help 2>&1 | head -1 || true
-RUN cargo fuzz --version 2>&1 | head -1 && cargo +nightly --version 2>&1 | head -1 || true
+# Fail the image build when any advertised toolchain is absent.
+# honggfuzz 2.6 exposes help, but intentionally has no version flag.
+RUN clang --version \
+    && afl-fuzz --version \
+    && honggfuzz --help >/dev/null \
+    && command -v syz-manager \
+    && command -v casr-san \
+    && command -v casr-cluster \
+    && cargo fuzz --version \
+    && cargo +"${RUST_NIGHTLY}" --version
 
 WORKDIR /work
 

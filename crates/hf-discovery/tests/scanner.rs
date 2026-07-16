@@ -23,14 +23,61 @@ async fn discover_returns_non_empty_inventory() {
 #[tokio::test]
 async fn candidates_carry_their_project_root() {
     let root = fixture_root();
+    let canonical = std::fs::canonicalize(&root).expect("fixture root should resolve");
     let inv = hf_discovery::discover(&root, TargetLanguage::C)
         .await
         .expect("discover should succeed");
     // Every candidate must know which project it belongs to, so persistence can
     // dedup by (project, symbol) and reports can attribute targets.
     assert!(
-        inv.candidates.iter().all(|c| c.project_root == root),
-        "all candidates should carry the project root"
+        inv.project_root == canonical
+            && inv
+                .candidates
+                .iter()
+                .all(|candidate| candidate.project_root == canonical),
+        "the inventory and candidates should carry the canonical project root"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_aliases_share_one_inventory_and_target_identity() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("parser.c"),
+        "int parse_alias(const unsigned char *data, unsigned long size) { return size && data[0]; }\n",
+    )
+    .unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let alias = links.path().join("project-link");
+    std::os::unix::fs::symlink(project.path(), &alias).unwrap();
+
+    let direct = hf_discovery::discover(project.path(), TargetLanguage::C)
+        .await
+        .expect("direct discovery");
+    let linked = hf_discovery::discover(&alias, TargetLanguage::C)
+        .await
+        .expect("linked discovery");
+
+    assert_eq!(direct.project_root, linked.project_root);
+    assert_eq!(direct.candidates.len(), linked.candidates.len());
+    assert_eq!(direct.candidates[0].id, linked.candidates[0].id);
+    assert_eq!(
+        direct.candidates[0].project_root,
+        linked.candidates[0].project_root
+    );
+}
+
+#[tokio::test]
+async fn rust_discovery_rejects_a_missing_project_root() {
+    let parent = tempfile::tempdir().unwrap();
+    let missing = parent.path().join("missing-project");
+    let error = hf_discovery::discover(&missing, TargetLanguage::Rust)
+        .await
+        .expect_err("a missing project root must not look like an empty project");
+    assert!(
+        error.to_string().contains("project root"),
+        "unexpected error: {error}"
     );
 }
 

@@ -9,6 +9,18 @@ fuzzer processes, crash reproduction, minimization, and coverage tooling. The
 production adapter launches ephemeral Docker containers with explicit resource,
 network, capability, process-count, and wall-clock limits.
 
+`RuntimeConfig` configures that Docker boundary directly; it does not expose a
+backend selector. Test doubles implement `RuntimeAdapter` explicitly, but there
+is no production native-host fallback for generated or untrusted execution.
+
+The production image uses the release-version tag
+`hobot/fuzz-sandbox:0.1.0`; floating `latest` references are forbidden. Its
+Dockerfile pins the base-image digest, source revisions, language toolchains,
+and top-level installed tool versions. The canonical build script rejects a
+floating tag and runs a network-disabled, read-only toolchain smoke check after
+the build. Dockerfile verification steps are release gates and must fail rather
+than masking missing advertised tools.
+
 ## 2. Host Workspace Boundary
 
 Each `DockerRuntime` is constructed with one approved host workspace root.

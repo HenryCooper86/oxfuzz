@@ -107,7 +107,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             .unwrap(),
     );
     let container = ServiceContainer::new(Arc::new(WritingRuntime), Some(Arc::new(CodeBlockPool)))
-        .with_store(store);
+        .with_store(Arc::clone(&store));
     container
         .harness_generate(
             &project,
@@ -149,7 +149,6 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
             EngineKind::LibFuzzer,
             TargetLanguage::C,
             1, // duration secs (fake runtime returns instantly)
-            1, // max repairs
             2, // max iterations
         )
         .await
@@ -163,4 +162,45 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
     assert!(outcome.iterations >= 1, "should run at least one iteration");
     // Clean fake runtime => no crashes.
     assert_eq!(outcome.crashes, 0);
+    assert!(
+        serde_json::to_value(&outcome)
+            .unwrap()
+            .get("repairs_used")
+            .is_none(),
+        "an approved-harness campaign must not claim a repair phase it never ran"
+    );
+
+    let evidence = container
+        .export_project_data(Some(&project))
+        .await
+        .expect("release evidence bundle");
+    assert_eq!(evidence["schema"], "hobot_fuzz.export.v2");
+    assert_eq!(evidence["targets"].as_array().unwrap().len(), 1);
+    assert!(!evidence["harnesses"].as_array().unwrap().is_empty());
+    assert!(!evidence["runs"].as_array().unwrap().is_empty());
+    assert_eq!(evidence["evidence"][0]["binary_present"], true);
+    assert!(
+        evidence["evidence"][0]["active_harness_id"]
+            .as_str()
+            .is_some(),
+        "the hand-off bundle must identify the exact active revision"
+    );
+
+    let reporting = ServiceContainer::new(Arc::new(WritingRuntime), None).with_store(store);
+    let report = reporting
+        .generate_report(&project, "parse_entry")
+        .await
+        .expect("deterministic campaign report");
+    assert!(report.starts_with("# Fuzzing Report: `parse_entry`"));
+    assert!(report.contains("No crashes were found"));
+    assert!(report.contains("| Status | Done |"));
+
+    let report_path = dir.path().join("campaign-report.md");
+    reporting
+        .export_report(&project, "parse_entry", "markdown", &report_path)
+        .await
+        .expect("release report export");
+    let exported_report = std::fs::read_to_string(report_path).unwrap();
+    assert!(exported_report.starts_with("# Fuzzing Report: `parse_entry`"));
+    assert!(exported_report.contains("| Status | Done |"));
 }
