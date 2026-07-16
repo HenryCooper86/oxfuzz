@@ -1,0 +1,5 @@
+export const PROJECT_REPOSITORY_URL =
+  "https://gitlab-ce.orb.local/hobot/hobot_fuzz";
+
+export const GETTING_STARTED_GUIDE_URL =
+  `${PROJECT_REPOSITORY_URL}/-/blob/main/docs/guides/GETTING_STARTED.md`;

@@ -37,10 +37,11 @@ export const HELP_GROUPS: HelpGroup[] = [
 const WELCOME = `
 # Welcome to hobot_fuzz
 
-**hobot_fuzz is an AI fuzzing agent.** You point it at a codebase and it finds
-the functions most worth testing, writes the test code for them, runs a real
-fuzzing engine inside a safe sandbox, and explains any bugs it finds -- asking
-for your approval at the steps that matter.
+**hobot_fuzz is an AI-assisted fuzzing workbench.** You point it at a codebase
+and it ranks candidate targets, drafts and qualifies test harnesses, runs real
+fuzzing engines inside a mandatory sandbox, and retains evidence for the bugs
+it finds. Human approval is bound to the exact harness revision allowed to
+enter a full campaign.
 
 ## What is fuzzing?
 
@@ -48,7 +49,7 @@ Fuzzing throws millions of malformed and random inputs at a program as fast as
 possible, watching for any that make it crash or misbehave. Each crash is a
 potential bug, often a security vulnerability. It is one of the most effective
 ways to find serious bugs -- and normally a lot of expert work. hobot_fuzz
-automates that work.
+coordinates that work with AI and deterministic tooling.
 
 ## The safety model (why this is safe to run)
 
@@ -59,8 +60,9 @@ depth so nothing dangerous happens without you:
   Docker sandbox, never directly on your machine.
 - **Human-in-the-loop (HITL) gates.** Generated harness source is reviewed by an
   LLM triage step *and* by you before it is promoted for full campaigns.
-- **Never run without approval.** hobot_fuzz never runs generated code on your
-  host without your explicit approval.
+- **No generated host execution.** Generated harnesses and fuzzing engines
+  never execute on the host. Approval authorizes the exact promoted revision
+  for a bounded sandboxed campaign; it never weakens isolation.
 
 ## Who it is for
 
@@ -518,6 +520,41 @@ at least 10 seconds; cron needs five fields; "once" needs an RFC3339 timestamp.
 notification wherever you are.
 `;
 
+const SCREEN_AUTOMOTIVE = `
+# Automotive Protocols
+
+**Purpose:** analyze immutable automotive captures, inspect sidecar
+capabilities, prepare deterministic mutations and typed replay plans, and
+review retained operation evidence without weakening the normal sandbox and
+approval boundaries.
+
+**Default posture:** the subsystem is compile-time optional and disabled by
+runtime policy until an operator configures it in **Settings -> Automotive**.
+Protocol names describe the contract vocabulary; the pinned sidecar's validated
+capabilities determine what the current build can actually decode or execute.
+
+**Available workflows:**
+
+- **Offline capture analysis** stages a digest-verified capture read-only and
+  decodes it in a network-disabled sidecar sandbox. It never opens a vehicle
+  interface.
+- **Mutation and virtual replay** creates deterministic mutations and a typed
+  plan. Execution is limited to a configured \`vcanN\` interface and still
+  passes service policy, guardrails, sandbox checks, and confirmation.
+- **Physical bench** is disabled by default and is not enabled from this
+  workspace. Each operation requires an exact allowlist plus fresh,
+  plan-scoped human approval after the plan and budgets are known.
+
+Agents may propose analysis or replay plans, but cannot enable the feature,
+choose an unlisted interface, manufacture approval evidence, or relax limits.
+Capability inspection is evidence, not permission to send traffic. Default
+tests and release checks never connect to a physical interface.
+
+**What it shows:** policy state, offline analysis controls, adapter capability
+evidence, virtual/physical readiness explanations, bounded mutation controls,
+and retained operation history.
+`;
+
 const SCREEN_DEFECTDOJO = `
 # DefectDojo
 
@@ -722,6 +759,7 @@ export const HELP_SECTIONS: HelpSection[] = [
   { id: "skills", group: "library", title: "Skills", keywords: "playbooks domain built-in custom root.md", body: SCREEN_SKILLS },
   { id: "knowledge", group: "library", title: "Knowledge", keywords: "bm25 search index ingest documents pdf learned", body: SCREEN_KNOWLEDGE },
   { id: "automation", group: "library", title: "Automation", keywords: "schedule campaign cron interval headless promoted concurrency budget", body: SCREEN_AUTOMATION },
+  { id: "automotive", group: "library", title: "Automotive", keywords: "can uds pcap offline vcan replay sidecar physical bench policy evidence", body: SCREEN_AUTOMOTIVE },
   { id: "defectdojo", group: "library", title: "DefectDojo", keywords: "vulnerability management findings embed push integration", body: SCREEN_DEFECTDOJO },
 
   { id: "settings", group: "config", title: "Settings", keywords: "providers fuzzing automotive sandbox engines storage integrations issue tracker form raw toml", body: SCREEN_SETTINGS },

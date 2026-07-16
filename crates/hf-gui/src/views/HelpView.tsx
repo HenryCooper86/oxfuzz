@@ -1,17 +1,18 @@
 import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { BookOpen, Github, LifeBuoy, Search } from "lucide-react";
+import { BookOpen, Gitlab, LifeBuoy, Search } from "lucide-react";
 import { Button, ViewHeader } from "../components/ui";
 import { Mermaid } from "../components/Mermaid";
 import { codeInfo } from "../lib/reportPreviewCode";
+import {
+  GETTING_STARTED_GUIDE_URL,
+  PROJECT_REPOSITORY_URL,
+} from "../lib/projectLinks";
 import { openExternal } from "../lib";
 import { useI18n } from "../i18nContext";
 import { HELP_GROUPS, HELP_SECTIONS, type HelpSection } from "./help/helpContent";
 import { HELP_GROUPS_ZH, HELP_SECTIONS_ZH } from "./help/helpContent.zh";
-
-const REPO_URL = "https://github.com/hobot/hobot_fuzz";
-const GUIDE_URL = "https://github.com/hobot/hobot_fuzz/blob/main/docs/guides/GETTING_STARTED.md";
 
 /** Case-insensitive match of a query against a section's title, keywords, body. */
 function matches(section: HelpSection, query: string): boolean {
@@ -64,11 +65,11 @@ export function HelpView() {
           )}
         />
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void openExternal(GUIDE_URL)} title={L("Open the getting-started guide", "打开入门指南")}>
+          <Button variant="outline" size="sm" onClick={() => void openExternal(GETTING_STARTED_GUIDE_URL)} title={L("Open the getting-started guide", "打开入门指南")}>
             <LifeBuoy size={14} /> {L("Getting Started", "入门")}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void openExternal(REPO_URL)} title={L("Open the GitHub repository", "打开 GitHub 仓库")}>
-            <Github size={14} /> GitHub
+          <Button variant="outline" size="sm" onClick={() => void openExternal(PROJECT_REPOSITORY_URL)} title={L("Open the GitLab repository", "打开 GitLab 仓库")}>
+            <Gitlab size={14} /> GitLab
           </Button>
         </div>
       </div>
@@ -153,7 +154,7 @@ export function HelpView() {
             <span className="text-xs text-text-muted">
               {L("Looking for the deep-dive design docs? See the ", "想查看深入的设计文档？请访问")}
               <button
-                onClick={() => void openExternal(REPO_URL)}
+                onClick={() => void openExternal(PROJECT_REPOSITORY_URL)}
                 style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer" }}
               >
                 {L("project repository", "项目仓库")}
