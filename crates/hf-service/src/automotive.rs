@@ -396,6 +396,145 @@ impl ServiceContainer {
             .collect()
     }
 
+    /// Compose a project-level automotive campaign report from retained
+    /// evidence, optionally appending a grounded provider interpretation.
+    ///
+    /// The deterministic fact sheet is always authoritative and remains
+    /// available when no provider is configured or provider validation fails.
+    /// This operation never invokes the automotive sidecar or contacts an
+    /// interface.
+    ///
+    /// # Errors
+    /// Returns an error for invalid project/configuration, unavailable storage,
+    /// or malformed retained evidence.
+    pub async fn generate_automotive_report(
+        &self,
+        project_root: &Path,
+        include_ai: bool,
+    ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
+        let settings =
+            crate::config::effective_automotive_settings().map_err(ClassifiedError::Validation)?;
+        self.generate_automotive_report_with_settings(project_root, include_ai, &settings)
+            .await
+    }
+
+    async fn generate_automotive_report_with_settings(
+        &self,
+        project_root: &Path,
+        include_ai: bool,
+        settings: &AutomotiveSettings,
+    ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
+        use crate::automotive_report::{
+            append_ai_interpretation, render_automotive_report, AutomotiveCampaignReport,
+            AutomotiveReportAiStatus, AutomotiveReportData, AutomotiveReportSafetyPosture,
+        };
+
+        let project_root = canonical_project_root(project_root)?;
+        let project_root_text = project_root.display().to_string();
+        let store = self.store().ok_or_else(|| {
+            ClassifiedError::Storage(
+                "automotive reporting requires durable evidence storage".to_owned(),
+            )
+        })?;
+        let operations = store
+            .automotive_operations(&project_root_text, 200)
+            .await?
+            .into_iter()
+            .map(report_operation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let state_corpus = store
+            .automotive_state_corpus(&project_root_text, 200)
+            .await?
+            .into_iter()
+            .map(state_corpus_entry)
+            .collect::<Result<Vec<_>, _>>()?;
+        let generated_at = Utc::now().to_rfc3339();
+        let project_name = project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("project")
+            .to_owned();
+        let data = AutomotiveReportData {
+            generated_at: generated_at.clone(),
+            project_name: project_name.clone(),
+            tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+            safety: AutomotiveReportSafetyPosture::from_settings(settings),
+            operations,
+            state_corpus,
+        };
+        let metrics = data.metrics();
+        let facts = render_automotive_report(&data);
+        let mut markdown = facts.clone();
+        let mut ai_model = None;
+        let ai_status = if !include_ai {
+            AutomotiveReportAiStatus::NotRequested
+        } else if data.operations.is_empty() {
+            AutomotiveReportAiStatus::NotApplicable
+        } else if let Some(pool) = self.provider_pool() {
+            match self
+                .compose_automotive_report_interpretation(&pool, &facts, &data)
+                .await
+            {
+                Ok((interpretation, model)) => {
+                    markdown = append_ai_interpretation(&facts, &interpretation, &model);
+                    ai_model = Some(model);
+                    AutomotiveReportAiStatus::Applied
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "automotive AI report composition failed, retaining fact sheet: {error}"
+                    );
+                    AutomotiveReportAiStatus::Fallback
+                }
+            }
+        } else {
+            AutomotiveReportAiStatus::NotConfigured
+        };
+
+        Ok(AutomotiveCampaignReport {
+            generated_at,
+            project_name,
+            ai_status,
+            ai_model,
+            operation_count: metrics.operation_count,
+            failed_operation_count: metrics.failed_operation_count,
+            unique_state_count: metrics.unique_state_count,
+            promoted_state_count: metrics.promoted_state_count,
+            markdown,
+        })
+    }
+
+    async fn compose_automotive_report_interpretation(
+        &self,
+        pool: &std::sync::Arc<dyn hf_core::provider::ProviderPool>,
+        facts: &str,
+        data: &crate::automotive_report::AutomotiveReportData,
+    ) -> Result<(String, String), ClassifiedError> {
+        use hf_core::provider::{ChatRequest, RouteRequest};
+        use hf_core::types::Message;
+
+        let messages = vec![
+            Message::system(crate::automotive_report::automotive_report_system_prompt()),
+            Message::user(crate::automotive_report::automotive_report_user_prompt(
+                facts, data,
+            )),
+        ];
+        let response = pool
+            .chat_completion(
+                &ChatRequest::from_messages(messages),
+                &RouteRequest::with_tags(&["reasoning", "security", "general"]),
+            )
+            .await?;
+        self.diagnostics()
+            .record("automotive_report", &response.model, &response.usage)
+            .await;
+        let interpretation = response.text().trim();
+        crate::automotive_report::validate_ai_interpretation(interpretation, data)
+            .map_err(ClassifiedError::Provider)?;
+        Ok((interpretation.to_owned(), response.model))
+    }
+
     async fn promote_automotive_state_artifact_with_context(
         &self,
         request: AutomotiveStatePromotionRequest,
@@ -687,24 +826,9 @@ impl ServiceContainer {
 fn operation_summary(
     record: AutomotiveOperationRecord,
 ) -> Result<AutomotiveOperationSummary, ClassifiedError> {
-    let state_signatures = match record.result_json.as_deref() {
-        Some(result) => {
-            let result: AutomotiveResult = serde_json::from_str(result).map_err(|error| {
-                ClassifiedError::Storage(format!(
-                    "automotive operation {} has malformed retained result: {error}",
-                    record.id
-                ))
-            })?;
-            match result {
-                AutomotiveResult::CaptureAnalysis(result) => result.state_signatures,
-                AutomotiveResult::Replay(result) => result.state_signatures,
-                AutomotiveResult::Capabilities(_)
-                | AutomotiveResult::Mutations(_)
-                | AutomotiveResult::ReplayPlan(_) => Vec::new(),
-            }
-        }
-        None => Vec::new(),
-    };
+    let state_signatures = retained_operation_result(&record)?
+        .as_ref()
+        .map_or_else(Vec::new, |result| result_state_signatures(result).to_vec());
     Ok(AutomotiveOperationSummary {
         id: record.id,
         project_root: record.project_root,
@@ -719,6 +843,141 @@ fn operation_summary(
         error: record.error,
         state_signatures,
     })
+}
+
+fn report_operation(
+    record: AutomotiveOperationRecord,
+) -> Result<crate::automotive_report::AutomotiveReportOperation, ClassifiedError> {
+    for (field, digest) in [
+        ("request", Some(record.request_hash.as_str())),
+        ("transcript", record.transcript_hash.as_deref()),
+    ] {
+        if let Some(digest) = digest {
+            validate_retained_digest(field, record.id, digest)?;
+        }
+    }
+    let artifact_dir = Path::new(&record.artifact_dir);
+    if artifact_dir.is_absolute()
+        || !artifact_dir
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Storage(format!(
+            "automotive operation {} has an invalid retained artifact directory",
+            record.id
+        )));
+    }
+    let retained_result = retained_operation_result(&record)?;
+    let state_signatures = retained_result
+        .as_ref()
+        .map_or_else(Vec::new, |result| result_state_signatures(result).to_vec());
+    let result_summary = retained_result.as_ref().map(automotive_result_summary);
+    let result_complete = retained_result.as_ref().map(automotive_result_complete);
+    Ok(crate::automotive_report::AutomotiveReportOperation {
+        id: record.id,
+        operation: record.operation,
+        mode: record.mode,
+        protocol: record.protocol,
+        status: record.status,
+        started_at: record.started_at,
+        ended_at: record.ended_at,
+        request_sha256: record.request_hash,
+        transcript_sha256: record.transcript_hash,
+        artifact_dir: record.artifact_dir,
+        error: record.error,
+        state_signatures,
+        result_summary,
+        result_complete,
+    })
+}
+
+fn retained_operation_result(
+    record: &AutomotiveOperationRecord,
+) -> Result<Option<AutomotiveResult>, ClassifiedError> {
+    let Some(retained) = record.result_json.as_deref() else {
+        return Ok(None);
+    };
+    let result: AutomotiveResult = serde_json::from_str(retained).map_err(|error| {
+        ClassifiedError::Storage(format!(
+            "automotive operation {} has malformed retained result: {error}",
+            record.id
+        ))
+    })?;
+    result.validate().map_err(|error| {
+        ClassifiedError::Storage(format!(
+            "automotive operation {} has invalid retained result: {error}",
+            record.id
+        ))
+    })?;
+    Ok(Some(result))
+}
+
+fn automotive_result_summary(result: &AutomotiveResult) -> String {
+    match result {
+        AutomotiveResult::Capabilities(capabilities) => format!(
+            "adapter {} {}; {} protocol(s), {} mode(s), {} capability/capabilities",
+            capabilities.adapter_name,
+            capabilities.adapter_version,
+            capabilities.protocols.len(),
+            capabilities.modes.len(),
+            capabilities.capabilities.len()
+        ),
+        AutomotiveResult::CaptureAnalysis(analysis) => format!(
+            "{} decoded event(s); {} protocol-state signature(s)",
+            analysis.event_count,
+            analysis.state_signatures.len()
+        ),
+        AutomotiveResult::Mutations(mutations) => format!(
+            "{} deterministic mutation(s); {} retained artifact(s)",
+            mutations.generated,
+            mutations.artifacts.len()
+        ),
+        AutomotiveResult::ReplayPlan(plan) => format!(
+            "{} typed replay step(s); target mode {}; deterministic seed {}",
+            plan.steps.len(),
+            mode_id(plan.mode),
+            plan.deterministic_seed
+        ),
+        AutomotiveResult::Replay(replay) => format!(
+            "{} of {} replay event(s) executed; {}; {} protocol-state signature(s)",
+            replay.executed_events,
+            replay.planned_events,
+            if replay.completed {
+                "complete"
+            } else {
+                "partial"
+            },
+            replay.state_signatures.len()
+        ),
+    }
+}
+
+fn automotive_result_complete(result: &AutomotiveResult) -> bool {
+    match result {
+        AutomotiveResult::Replay(replay) => replay.completed,
+        AutomotiveResult::Capabilities(_)
+        | AutomotiveResult::CaptureAnalysis(_)
+        | AutomotiveResult::Mutations(_)
+        | AutomotiveResult::ReplayPlan(_) => true,
+    }
+}
+
+fn validate_retained_digest(
+    field: &str,
+    operation_id: Uuid,
+    digest: &str,
+) -> Result<(), ClassifiedError> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(ClassifiedError::Storage(format!(
+            "automotive operation {operation_id} has an invalid retained {field} digest"
+        )))
+    }
 }
 
 fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ClassifiedError> {
@@ -2148,6 +2407,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use hf_automotive::{
         ArtifactRef, AutomotiveError, AutomotiveErrorCode, AutomotiveMode, AutomotiveProtocol,
         AutomotiveResult, CaptureAnalysisResult, ModeConfig, MutationResult, OperationLimits,
@@ -2155,10 +2415,15 @@ mod tests {
         Sha256Digest, StateSignature,
     };
     use hf_core::error::ClassifiedError;
+    use hf_core::provider::{
+        ChatRequest, ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderPool,
+        ProviderStatus, RouteRequest,
+    };
     use hf_core::runtime::{
         CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter, SandboxCapability,
         SandboxNetworkMode, SandboxOptions,
     };
+    use hf_core::types::{ProviderId, TokenUsage};
     use hf_storage::Store;
     use uuid::Uuid;
 
@@ -2167,6 +2432,7 @@ mod tests {
         AutomotiveApprovalEvidence, AutomotiveCommand, AutomotiveOperationRequest,
         AutomotiveStateArtifactSource, AutomotiveStatePromotionRequest, REQUEST_EVIDENCE_FILE,
     };
+    use crate::automotive_report::AutomotiveReportAiStatus;
     use crate::config::AutomotiveSettings;
     use crate::ServiceContainer;
 
@@ -2212,6 +2478,55 @@ mod tests {
 
         fn calls(&self) -> Vec<(Vec<String>, ResourceLimits, SandboxOptions)> {
             self.calls.lock().unwrap().clone()
+        }
+    }
+
+    struct ReportPool {
+        content: String,
+    }
+
+    #[async_trait]
+    impl ProviderPool for ReportPool {
+        async fn chat_completion(
+            &self,
+            _request: &ChatRequest,
+            _route: &RouteRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            Ok(ChatResponse {
+                id: "automotive-report-test".to_owned(),
+                model: "grounded-test-model".to_owned(),
+                content: Some(self.content.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+                finish_reason: FinishReason::Stop,
+                raw_request: None,
+                raw_response: None,
+                provider_id: None,
+                generated_images: Vec::new(),
+            })
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+            _route: &RouteRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "streaming is not used for automotive reports".to_owned(),
+            })
+        }
+
+        fn report_error(&self, _provider_id: &ProviderId, _error: &ProviderError) {}
+
+        async fn provider_statuses(&self) -> Vec<ProviderStatus> {
+            Vec::new()
+        }
+
+        async fn freeze(&self, _provider_id: &ProviderId, _reason: String) {}
+
+        async fn thaw(&self, _provider_id: &ProviderId) -> Result<(), ProviderError> {
+            Ok(())
         }
     }
 
@@ -2397,6 +2712,135 @@ mod tests {
         settings.physical_bench.interfaces = vec!["can0".to_owned()];
         settings.physical_bench.arbitration_ids = vec![0x7e0];
         settings.physical_bench.uds_services = vec![0x22];
+    }
+
+    #[tokio::test]
+    async fn campaign_report_is_composed_from_retained_service_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let (service, store, project, _, operation_id, _) =
+            completed_analysis_with_state(temp.path()).await;
+        let failed_id = Uuid::new_v4();
+        let started_at = Utc::now();
+        store
+            .insert_automotive_operation(&hf_storage::AutomotiveOperationRecord {
+                id: failed_id,
+                project_root: std::fs::canonicalize(&project)
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                operation: "execute_replay".to_owned(),
+                mode: "virtual_can".to_owned(),
+                protocol: Some("uds".to_owned()),
+                status: hf_storage::AutomotiveOperationStatus::Running,
+                started_at,
+                ended_at: None,
+                request_hash: "12".repeat(32),
+                transcript_hash: None,
+                artifact_dir: format!("project/.service/automotive/{failed_id}"),
+                approval_json: None,
+                result_json: None,
+                error: None,
+            })
+            .await
+            .unwrap();
+        store
+            .complete_automotive_operation(
+                failed_id,
+                hf_storage::AutomotiveOperationStatus::Failed,
+                started_at,
+                None,
+                None,
+                Some("virtual replay transcript failed validation"),
+            )
+            .await
+            .unwrap();
+
+        let report = service
+            .generate_automotive_report_with_settings(
+                &project,
+                false,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.ai_status, AutomotiveReportAiStatus::NotRequested);
+        assert_eq!(report.operation_count, 2);
+        assert_eq!(report.failed_operation_count, 1);
+        assert_eq!(report.unique_state_count, 1);
+        assert!(report.markdown.contains(&format!("[OP:{operation_id}]")));
+        assert!(report.markdown.contains(&format!("[OP:{failed_id}]")));
+        assert!(report
+            .markdown
+            .contains("virtual replay transcript failed validation"));
+        assert!(!report.markdown.contains(&project.display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn campaign_report_appends_only_grounded_ai_interpretation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, operation_id, _) =
+            completed_analysis_with_state(temp.path()).await;
+        let interpretation = format!(
+            "### Evidence-backed interpretation\nThe offline analysis retained validated state evidence \
+             [OP:{operation_id}].\n\n### Hypotheses\nNo hypothesis is asserted.\n\n### Missing \
+             evidence\nNo virtual replay is retained.\n\n### Recommended next actions\nReview the \
+             captured states before deterministic mutation [OP:{operation_id}]."
+        );
+        let service = service.with_provider_pool(Arc::new(ReportPool {
+            content: interpretation,
+        }));
+
+        let report = service
+            .generate_automotive_report_with_settings(
+                &project,
+                true,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.ai_status, AutomotiveReportAiStatus::Applied);
+        assert_eq!(report.ai_model.as_deref(), Some("grounded-test-model"));
+        assert!(report.markdown.contains("## AI-Assisted Interpretation"));
+        assert!(report
+            .markdown
+            .contains("Retained evidence and service validation"));
+    }
+
+    #[tokio::test]
+    async fn campaign_report_falls_back_when_ai_invents_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, _, _) = completed_analysis_with_state(temp.path()).await;
+        let service = service.with_provider_pool(Arc::new(ReportPool {
+            content: "### Evidence-backed interpretation\nInvented evidence \
+                [OP:00000000-0000-0000-0000-000000000001].\n\n### Hypotheses\nNone.\n\n\
+                ### Missing evidence\nNone.\n\n### Recommended next actions\nNone."
+                .to_owned(),
+        }));
+
+        let report = service
+            .generate_automotive_report_with_settings(
+                &project,
+                true,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.ai_status, AutomotiveReportAiStatus::Fallback);
+        assert_eq!(report.ai_model, None);
+        assert!(!report.markdown.contains("## AI-Assisted Interpretation"));
+        assert!(report.markdown.contains("## Evidence Manifest"));
     }
 
     #[tokio::test]

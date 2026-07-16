@@ -404,6 +404,10 @@ describe("transport", () => {
         projectRoot: "/tmp/project",
         limit: 25,
       });
+      await transport.invoke("generate_automotive_report", {
+        projectRoot: "/tmp/project",
+        includeAi: true,
+      });
 
       expect(calls.map((call) => [call.init.method, call.url])).toEqual([
         ["GET", "http://localhost:8081/config/automotive"],
@@ -414,6 +418,7 @@ describe("transport", () => {
           "GET",
           "http://localhost:8081/automotive/operations?project_root=%2Ftmp%2Fproject&limit=25",
         ],
+        ["POST", "http://localhost:8081/automotive/report"],
       ]);
       expect(JSON.parse(String(calls[1].init.body))).toEqual({ settings });
       expect(JSON.parse(String(calls[2].init.body))).toEqual({
@@ -423,6 +428,10 @@ describe("transport", () => {
         project_root: "/tmp/project",
         protocol: "uds",
         capture_path: "/tmp/capture.pcap",
+      });
+      expect(JSON.parse(String(calls[5].init.body))).toEqual({
+        project_root: "/tmp/project",
+        include_ai: true,
       });
     } finally {
       globalThis.fetch = originalFetch;

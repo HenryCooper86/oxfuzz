@@ -42,7 +42,7 @@ the native application unless the documented feature is web-only.
 | `triage.png` | Triage | A deduplicated finding with sanitizer kind and exploitability classification. |
 | `artifacts.png` | Artifacts | Persisted crash reproducers and corpus entries with operator actions. |
 | `settings.png` | Settings > Fuzzing | Engine availability, bounded resource defaults, and mandatory protections that cannot be weakened. |
-| `automotive.png` | Automotive | Offline-only analysis, policy gating, virtual replay boundaries, and retained operation history. |
+| `automotive.png` | Automotive | Evidence-backed report composition, AI advisory boundaries, virtual versus physical replay policy, and retained operation history. |
 
 Optional additions should tell a materially different product story, not repeat
 an existing view. Candidates include Reports, Run History, Policy Audit,

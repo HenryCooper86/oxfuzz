@@ -77,6 +77,20 @@ Automotive support remains disabled by runtime policy until an operator enables
 the subsystem and exact allowlists. Do not connect a physical interface as a
 release test.
 
+Verify the automotive report path with retained fixture evidence only. The
+deterministic report must work without a provider; the fake-provider tests must
+accept known citations, reject invented operation/state/transcript citations,
+and retain the deterministic fact sheet on fallback:
+
+```bash
+./scripts/cargo-test-filtered.sh -p hf-service --features automotive-scapy \
+  --test automotive_report
+./scripts/cargo-test-filtered.sh -p hf-service --features automotive-scapy \
+  campaign_report_
+./scripts/cargo-test-filtered.sh -p hf-web --features automotive-scapy \
+  --test api automotive_report_route_
+```
+
 ## 4. Verify CLI behavior
 
 ```bash
