@@ -1319,26 +1319,49 @@ impl Store {
     /// # Errors
     /// Returns an error on a SQL failure or serialization failure.
     pub async fn upsert_crash(&self, c: &Crash) -> Result<(), StorageError> {
-        let bug_json = match &c.bug_report {
-            Some(b) => Some(serde_json::to_string(b)?),
-            None => None,
-        };
-        sqlx::query(
-            "INSERT OR REPLACE INTO crashes
-                (id, run_id, target_id, stack_signature, kind, summary, minimized, bug_report_json, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        )
-        .bind(c.id.to_string())
-        .bind(c.run_id.to_string())
-        .bind(c.target_id.to_string())
-        .bind(&c.stack_signature)
-        .bind(enum_str(&c.kind))
-        .bind(&c.summary)
-        .bind(i64::from(c.minimized))
-        .bind(bug_json)
-        .bind(serde_json::to_string(c)?)
-        .execute(&self.pool)
-        .await?;
+        self.upsert_crashes(std::slice::from_ref(c)).await
+    }
+
+    /// Insert or replace one triage result as an atomic crash batch.
+    ///
+    /// A triage pass is one evidence-producing operation. Committing only a
+    /// prefix would make retries and reports disagree about the run's result,
+    /// so any failed row rolls back the entire batch.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or serialization failure.
+    pub async fn upsert_crashes(&self, crashes: &[Crash]) -> Result<(), StorageError> {
+        let serialized = crashes
+            .iter()
+            .map(|crash| {
+                let bug_json = crash
+                    .bug_report
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
+                Ok((bug_json, serde_json::to_string(crash)?))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let mut transaction = self.pool.begin().await?;
+        for (crash, (bug_json, data_json)) in crashes.iter().zip(serialized) {
+            sqlx::query(
+                "INSERT OR REPLACE INTO crashes
+                    (id, run_id, target_id, stack_signature, kind, summary, minimized, bug_report_json, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .bind(crash.id.to_string())
+            .bind(crash.run_id.to_string())
+            .bind(crash.target_id.to_string())
+            .bind(&crash.stack_signature)
+            .bind(enum_str(&crash.kind))
+            .bind(&crash.summary)
+            .bind(i64::from(crash.minimized))
+            .bind(bug_json)
+            .bind(data_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 

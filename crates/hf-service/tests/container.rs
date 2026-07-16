@@ -1031,10 +1031,15 @@ async fn system_snapshot_reports_memory_and_empty_providers_without_a_pool() {
         .await
         .expect("diagnostics snapshot");
 
-    // No provider pool -> no provider cards; agent pool empty by default.
+    // No provider pool -> no provider cards; active agent pool empty by default.
     assert!(snap.providers.is_empty());
     assert_eq!(snap.agents.active_instances, 0);
     assert!(snap.agents.instances.is_empty());
+    assert_eq!(
+        snap.agents.available_slots,
+        container.list_agent_definitions().len(),
+        "the service snapshot owns the configured agent roster"
+    );
     // Memory counters are real and start at zero on a fresh store.
     assert_eq!(snap.memory.pending_runs, 0);
     assert_eq!(snap.memory.targets, 0);

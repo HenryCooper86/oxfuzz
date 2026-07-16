@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hf_agent::{Agent, AgentBackend, AgentRegistry, EventSink};
+use hf_agent::{Agent, AgentBackend, AgentDefinition, AgentRegistry, EventSink, RegistryError};
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
 use hf_core::target::TargetLanguage;
@@ -11,6 +11,44 @@ use hf_core::types::{Message, SessionId, TokenUsage};
 use serde_json::Value;
 
 use crate::ServiceContainer;
+
+/// One executable capability shown in agent editors.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentToolDefinition {
+    pub name: String,
+    pub description: String,
+}
+
+/// Service-resolved summary for the Agents surface.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentRegistryInfo {
+    pub model: String,
+    pub provider_type: String,
+    pub guardrails: String,
+    pub tools: Vec<AgentToolDefinition>,
+}
+
+fn agent_registry_error(error: &RegistryError) -> ClassifiedError {
+    match error {
+        RegistryError::InvalidId(_) | RegistryError::NotFound(_) => {
+            ClassifiedError::Validation(error.to_string())
+        }
+        RegistryError::NoUserDir | RegistryError::Io(_) | RegistryError::Serialize(_) => {
+            ClassifiedError::Internal(error.to_string())
+        }
+    }
+}
+
+fn skill_registry_error(error: &hf_skills::SkillError) -> ClassifiedError {
+    match error {
+        hf_skills::SkillError::InvalidName(_) | hf_skills::SkillError::NotFound(_) => {
+            ClassifiedError::Validation(error.to_string())
+        }
+        hf_skills::SkillError::NoUserDir | hf_skills::SkillError::Io(_) => {
+            ClassifiedError::Internal(error.to_string())
+        }
+    }
+}
 
 /// Inputs for one service-orchestrated chat turn.
 pub struct AgentTurnRequest {
@@ -25,6 +63,118 @@ pub struct AgentTurnRequest {
 }
 
 impl ServiceContainer {
+    /// Resolve the active provider identity, guardrail mode, and executable
+    /// agent tool roster for presentation layers.
+    #[must_use]
+    pub fn agent_registry_info(&self) -> AgentRegistryInfo {
+        let models = crate::config::list_models();
+        let first = models.first();
+        AgentRegistryInfo {
+            model: first.map_or_else(|| "(none configured)".to_owned(), |item| item.model.clone()),
+            provider_type: first
+                .map(|item| item.provider_type.clone())
+                .unwrap_or_default(),
+            guardrails: match std::env::var("HF_GUARDRAILS").as_deref() {
+                Ok("permissive") => "permissive (audited)".to_owned(),
+                _ => "approval required".to_owned(),
+            },
+            tools: self.agent_tool_definitions(),
+        }
+    }
+
+    /// Return the authoritative roster of tools assignable to a user agent.
+    #[must_use]
+    pub fn agent_tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        hf_agent::TOOL_SPECS
+            .iter()
+            .map(|(name, description)| AgentToolDefinition {
+                name: (*name).to_owned(),
+                description: (*description).to_owned(),
+            })
+            .collect()
+    }
+
+    /// List shipped and user-authored agent definitions from the canonical
+    /// service-owned registry.
+    #[must_use]
+    pub fn list_agent_definitions(&self) -> Vec<AgentDefinition> {
+        AgentRegistry::with_user_dir(agent_definitions_dir()).list()
+    }
+
+    /// Read one agent definition from the canonical registry.
+    #[must_use]
+    pub fn get_agent_definition(&self, id: &str) -> Option<AgentDefinition> {
+        AgentRegistry::with_user_dir(agent_definitions_dir())
+            .get(id)
+            .cloned()
+    }
+
+    /// Save one user-authored agent definition using atomic replacement.
+    ///
+    /// # Errors
+    /// Returns a validation error for an invalid id, or an internal error when
+    /// the canonical registry cannot be written.
+    pub fn save_agent_definition(
+        &self,
+        definition: AgentDefinition,
+    ) -> Result<(), ClassifiedError> {
+        validate_agent_definition(&definition, &self.list_skill_definitions())?;
+        AgentRegistry::with_user_dir(agent_definitions_dir())
+            .save(definition)
+            .map_err(|error| agent_registry_error(&error))
+    }
+
+    /// Delete a user agent, or reset a built-in override.
+    ///
+    /// # Errors
+    /// Returns a validation error for an invalid or unknown id, or an internal
+    /// error when the canonical registry cannot be updated.
+    pub fn delete_agent_definition(&self, id: &str) -> Result<(), ClassifiedError> {
+        AgentRegistry::with_user_dir(agent_definitions_dir())
+            .delete(id)
+            .map_err(|error| agent_registry_error(&error))
+    }
+
+    /// List shipped and user-authored skills from the canonical registry.
+    #[must_use]
+    pub fn list_skill_definitions(&self) -> Vec<hf_skills::SkillDefinition> {
+        hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir()).list()
+    }
+
+    /// Read one skill definition from the canonical registry.
+    #[must_use]
+    pub fn get_skill_definition(&self, name: &str) -> Option<hf_skills::SkillDefinition> {
+        hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir())
+            .get(name)
+            .cloned()
+    }
+
+    /// Save one user-authored skill using atomic file replacement.
+    ///
+    /// # Errors
+    /// Returns a validation error for an invalid name, or an internal error
+    /// when the canonical registry cannot be written.
+    pub fn save_skill_definition(
+        &self,
+        definition: hf_skills::SkillDefinition,
+    ) -> Result<(), ClassifiedError> {
+        validate_skill_definition(&definition)?;
+        hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir())
+            .save(definition)
+            .map_err(|error| skill_registry_error(&error))
+    }
+
+    /// Delete a user skill, or reset a built-in override.
+    ///
+    /// # Errors
+    /// Returns a validation error for an invalid or unknown name, or an
+    /// internal error when the canonical registry cannot be updated.
+    pub fn delete_skill_definition(&self, name: &str) -> Result<(), ClassifiedError> {
+        hf_skills::SkillRegistry::with_user_dir(skill_definitions_dir())
+            .delete(name)
+            .map_err(|error| skill_registry_error(&error))
+    }
+
     /// Run one agent turn with service-owned tools, persistence, diagnostics,
     /// and guardrails.
     ///
@@ -49,12 +199,13 @@ impl ServiceContainer {
                 request.history_fallback
             };
         let registry = AgentRegistry::with_user_dir(agent_definitions_dir());
-        let definition = request
-            .agent_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .and_then(|id| registry.get(id).cloned())
-            .unwrap_or_else(|| registry.default_agent());
+        let definition = match request.agent_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => registry
+                .get(id)
+                .cloned()
+                .ok_or_else(|| ClassifiedError::Validation(format!("unknown agent '{id}'")))?,
+            None => registry.default_agent(),
+        };
         let backend: Arc<dyn AgentBackend> = Arc::new(self.clone());
         let agent = Agent::with_definition(backend, request.project, definition);
         let answer = agent.run_turn(history, &request.message, sink).await?;
@@ -252,7 +403,7 @@ impl AgentBackend for ServiceContainer {
     }
 
     fn skills_dir(&self) -> PathBuf {
-        crate::repo_root().map_or_else(|| PathBuf::from("skills"), |root| root.join("skills"))
+        skill_definitions_dir()
     }
 }
 
@@ -271,5 +422,94 @@ fn parse_engine(value: &str) -> Result<EngineKind, ClassifiedError> {
 }
 
 fn agent_definitions_dir() -> PathBuf {
-    crate::repo_root().map_or_else(|| PathBuf::from("agents"), |root| root.join("agents"))
+    crate::init::config_dir().join("agents")
+}
+
+fn skill_definitions_dir() -> PathBuf {
+    crate::init::config_dir().join("skills")
+}
+
+fn validate_agent_definition(
+    definition: &AgentDefinition,
+    skills: &[hf_skills::SkillDefinition],
+) -> Result<(), ClassifiedError> {
+    if definition.name.trim().is_empty() {
+        return Err(ClassifiedError::Validation(
+            "agent name must not be empty".to_owned(),
+        ));
+    }
+    if definition.system_prompt.trim().is_empty() {
+        return Err(ClassifiedError::Validation(
+            "agent system prompt must not be empty".to_owned(),
+        ));
+    }
+    if !(1..=50).contains(&definition.max_iterations) {
+        return Err(ClassifiedError::Validation(
+            "agent max_iterations must be between 1 and 50".to_owned(),
+        ));
+    }
+    if definition
+        .temperature
+        .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+    {
+        return Err(ClassifiedError::Validation(
+            "agent temperature must be finite and between 0 and 2".to_owned(),
+        ));
+    }
+    let known_tool = |candidate: &str| {
+        candidate == hf_agent::DELEGATE_TOOL
+            || hf_agent::TOOL_SPECS
+                .iter()
+                .any(|(name, _)| *name == candidate)
+    };
+    if let Some(unknown) = definition
+        .allowed_tools
+        .iter()
+        .find(|candidate| !known_tool(candidate))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "unknown agent tool '{unknown}'"
+        )));
+    }
+    if let Some(unknown) = definition
+        .skills
+        .iter()
+        .find(|candidate| !skills.iter().any(|skill| skill.name == candidate.as_str()))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "unknown agent skill '{unknown}'"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_skill_definition(
+    definition: &hf_skills::SkillDefinition,
+) -> Result<(), ClassifiedError> {
+    if definition.name.trim() != definition.name {
+        return Err(ClassifiedError::Validation(
+            "skill name must not contain surrounding whitespace".to_owned(),
+        ));
+    }
+    if definition.version.trim().is_empty() {
+        return Err(ClassifiedError::Validation(
+            "skill version must not be empty".to_owned(),
+        ));
+    }
+    if definition.description.trim().is_empty() {
+        return Err(ClassifiedError::Validation(
+            "skill description must not be empty".to_owned(),
+        ));
+    }
+    if definition.body.trim().is_empty() {
+        return Err(ClassifiedError::Validation(
+            "skill body must not be empty".to_owned(),
+        ));
+    }
+    if definition.body.chars().count() > 8_000 {
+        return Err(ClassifiedError::Validation(
+            "skill body exceeds the 8,000 character prompt budget".to_owned(),
+        ));
+    }
+    Ok(())
 }

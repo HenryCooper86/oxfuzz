@@ -291,7 +291,7 @@ export function AgentsView() {
     setBusy(true);
     setError(null);
     try {
-      await getTransport().invoke("save_agent", { def });
+      await getTransport().invoke("save_agent", { definition: def });
       setDraft(null);
       reload();
     } catch (e) {
@@ -587,7 +587,8 @@ interface SkillDefinition {
   max_input_tokens: number;
   trust_tier: TrustTier;
 }
-// Editable form state. The markdown body is bound here and sent as `content` on save.
+// Editable form state. The markdown body is bound here and saved as part of a
+// typed SkillDefinition through either transport.
 interface SkillDraft {
   name: string;
   description: string;
@@ -671,11 +672,15 @@ export function SkillsView() {
     setError(null);
     try {
       await getTransport().invoke("save_skill", {
-        name,
-        description: draft.description,
-        version: draft.version,
-        domain: splitList(draft.domain),
-        content: draft.body,
+        definition: {
+          name,
+          description: draft.description,
+          version: draft.version,
+          domain: splitList(draft.domain),
+          body: draft.body,
+          max_input_tokens: 0,
+          trust_tier: "user-defined",
+        },
       });
       setDraft(null);
       reload();

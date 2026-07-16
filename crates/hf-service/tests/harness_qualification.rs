@@ -104,8 +104,9 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
         .await
         .unwrap();
 
+    let project_root = std::fs::canonicalize(project.path()).unwrap();
     let targets = store
-        .list_targets(&project.path().to_string_lossy())
+        .list_targets(&project_root.to_string_lossy())
         .await
         .unwrap();
     let target = targets.iter().find(|t| t.symbol == "parse_entry").unwrap();
@@ -138,7 +139,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
     assert!(smoked.smoke_run.as_ref().is_some_and(|run| run.passed));
 
     let smoke_runs = store
-        .list_runs(Some(&project.path().to_string_lossy()))
+        .list_runs(Some(&project_root.to_string_lossy()))
         .await
         .unwrap();
     assert_eq!(smoke_runs.len(), 1);
