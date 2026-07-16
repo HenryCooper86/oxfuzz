@@ -1520,6 +1520,36 @@ fn defectdojo_project_name(project: &Path) -> String {
         .unwrap_or_else(|| project.to_string_lossy().into_owned())
 }
 
+fn canonical_project_root(project: &Path) -> Result<PathBuf, ClassifiedError> {
+    let canonical = std::fs::canonicalize(project).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve project root {}: {error}",
+            project.display()
+        ))
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "inspect project root {}: {error}",
+            canonical.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "project root {} is not a directory",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn stored_project_matches(stored: &Path, canonical: &Path) -> bool {
+    stored == canonical || std::fs::canonicalize(stored).is_ok_and(|resolved| resolved == canonical)
+}
+
+fn project_lookup_identity(project: &Path) -> PathBuf {
+    std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
+}
+
 /// A per-project workspace directory name: the human-readable basename plus a
 /// short deterministic hash of the full path. The hash disambiguates projects
 /// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
@@ -1529,12 +1559,13 @@ fn defectdojo_project_name(project: &Path) -> String {
 /// to the same workspace on every invocation.
 fn project_slug(project: &Path) -> String {
     use sha2::{Digest, Sha256};
-    let name = project
+    let identity = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let name = identity
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("default");
     let mut hasher = Sha256::new();
-    hasher.update(project.to_string_lossy().as_bytes());
+    hasher.update(identity.to_string_lossy().as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     format!("{name}-{}", &digest[..8])
 }
@@ -2937,9 +2968,8 @@ impl ServiceContainer {
     /// A live system snapshot for the Observability panel: per-provider health
     /// and usage, the agent pool, and runtime memory counters. Merges live
     /// provider stats (concurrency/requests/errors) with the provider config
-    /// (model/tags/limits) and session diagnostics (tokens/cost by model).
-    /// `agents.available_slots` is left for the caller to fill from the agent
-    /// registry.
+    /// (model/tags/limits), the canonical agent registry, and session
+    /// diagnostics (tokens/cost by model).
     pub async fn system_snapshot(
         &self,
     ) -> Result<SystemSnapshot, crate::diagnostics::DiagnosticsError> {
@@ -2953,7 +2983,6 @@ impl ServiceContainer {
                 let cfg = configs.iter().find(|c| c.id == s.id.0);
                 let model = cfg.map(|c| c.model.clone()).unwrap_or_default();
                 let by_model = cost.by_model.iter().find(|m| m.model == model);
-                #[allow(clippy::cast_precision_loss)]
                 let error_rate = if s.total_requests > 0 {
                     s.total_errors as f64 / s.total_requests as f64
                 } else {
@@ -2992,9 +3021,12 @@ impl ServiceContainer {
             crashes,
         };
 
+        let mut agents = self.active_agent_pool();
+        agents.available_slots = self.list_agent_definitions().len();
+
         Ok(SystemSnapshot {
             providers,
-            agents: self.active_agent_pool(),
+            agents,
             memory,
         })
     }
@@ -3285,8 +3317,17 @@ impl ServiceContainer {
         let Some(store) = self.store.as_ref() else {
             return Ok(Vec::new());
         };
-        let key = project.map(|p| p.to_string_lossy().to_string());
-        let runs = store.list_runs(key.as_deref()).await?;
+        let canonical_project = project.map(project_lookup_identity);
+        let runs = store
+            .list_runs(None)
+            .await?
+            .into_iter()
+            .filter(|run| {
+                canonical_project.as_ref().is_none_or(|canonical| {
+                    stored_project_matches(Path::new(&run.project_root), canonical)
+                })
+            })
+            .collect::<Vec<_>>();
         let crashes = store.list_all_crashes().await?;
         let harnesses: std::collections::HashMap<Uuid, Harness> = store
             .list_all_harnesses()
@@ -3855,12 +3896,15 @@ impl ServiceContainer {
         let Some(store) = self.store.as_ref() else {
             return Ok(serde_json::json!({ "error": "no database configured" }));
         };
-        let key = project.map(|p| p.to_string_lossy().to_string());
+        let canonical_project = project.map(canonical_project_root).transpose()?;
+        let key = canonical_project
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string());
         let targets = store.list_all_targets().await?;
-        let scoped_targets: Vec<_> = match &key {
-            Some(k) => targets
+        let scoped_targets: Vec<_> = match canonical_project.as_ref() {
+            Some(canonical) => targets
                 .into_iter()
-                .filter(|t| t.project_root.to_string_lossy() == *k)
+                .filter(|target| stored_project_matches(&target.project_root, canonical))
                 .collect(),
             None => targets,
         };
@@ -3885,7 +3929,7 @@ impl ServiceContainer {
             .filter(|(target_id, _)| key.is_none() || target_ids.contains(target_id))
             .map(|(_, entry)| entry)
             .collect();
-        let runs = self.run_history(project).await?;
+        let runs = self.run_history(canonical_project.as_deref()).await?;
         let evidence: Vec<_> = scoped_targets
             .iter()
             .map(|target| {
@@ -4461,9 +4505,7 @@ impl ServiceContainer {
     ) -> Result<TargetInventory, ClassifiedError> {
         let inv = hf_discovery::discover(project, lang).await?;
         if let Some(store) = &self.store {
-            if let Err(e) = store.save_inventory(&inv, Utc::now()).await {
-                tracing::warn!("failed to persist target inventory: {e}");
-            }
+            store.save_inventory(&inv, Utc::now()).await?;
         }
         Ok(inv)
     }
@@ -4484,9 +4526,7 @@ impl ServiceContainer {
             LlmProviderBridge::new(pool).with_diagnostics(Arc::clone(&self.diagnostics), "rank");
         let ranked = hf_discovery::rank(inventory, Box::new(bridge)).await?;
         if let Some(store) = &self.store {
-            if let Err(e) = store.save_inventory(&ranked, Utc::now()).await {
-                tracing::warn!("failed to persist ranked inventory: {e}");
-            }
+            store.save_inventory(&ranked, Utc::now()).await?;
         }
         Ok(ranked)
     }
@@ -4541,32 +4581,35 @@ impl ServiceContainer {
         }
     }
 
-    /// Resolve a target symbol to its discovered candidate id, using the nil
-    /// UUID only when discovery succeeds but the symbol is absent. Shared by
-    /// harness compilation and triage so persisted records key off the same id.
+    /// Resolve a target symbol to its discovered candidate id.
+    ///
+    /// Unknown symbols are rejected rather than being attached to the nil UUID.
+    /// Shared by harness compilation and triage so persisted records key off the
+    /// same canonical project and target identity.
     async fn resolve_target_id(
         &self,
         project: &Path,
         target: &str,
         lang: TargetLanguage,
     ) -> Result<Uuid, ClassifiedError> {
+        let project = canonical_project_root(project)?;
         if let Some(store) = &self.store {
-            let targets = store.list_targets(&project.to_string_lossy()).await?;
-            if let Some(candidate) = targets
-                .iter()
-                .find(|candidate| candidate.symbol == target && candidate.language == lang)
-            {
+            let targets = store.list_all_targets().await?;
+            if let Some(candidate) = targets.iter().find(|candidate| {
+                stored_project_matches(&candidate.project_root, &project)
+                    && candidate.symbol == target
+                    && candidate.language == lang
+            }) {
                 return Ok(candidate.id);
             }
         }
-        Ok(self
-            .discover(project, lang)
+        self.discover(&project, lang)
             .await?
             .candidates
             .iter()
             .find(|c| c.symbol == target)
             .map(|c| c.id)
-            .unwrap_or_default())
+            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))
     }
 
     /// Targets in `project` that a scheduled campaign can legally run: those a
@@ -4627,10 +4670,10 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Uuid, ClassifiedError> {
-        Ok(self
-            .resolve_target_candidate_any_language(project, target)
+        self.resolve_target_candidate_any_language(project, target)
             .await?
-            .map_or_else(Uuid::nil, |candidate| candidate.id))
+            .map(|candidate| candidate.id)
+            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))
     }
 
     async fn resolve_target_candidate_any_language(
@@ -4638,9 +4681,13 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<Option<TargetCandidate>, ClassifiedError> {
+        let project = canonical_project_root(project)?;
         if let Some(store) = &self.store {
-            let targets = store.list_targets(&project.to_string_lossy()).await?;
-            if let Some(candidate) = targets.iter().find(|candidate| candidate.symbol == target) {
+            let targets = store.list_all_targets().await?;
+            if let Some(candidate) = targets.iter().find(|candidate| {
+                stored_project_matches(&candidate.project_root, &project)
+                    && candidate.symbol == target
+            }) {
                 return Ok(Some(candidate.clone()));
             }
         }
@@ -4651,14 +4698,19 @@ impl ServiceContainer {
             TargetLanguage::Go,
             TargetLanguage::Python,
         ] {
-            if let Ok(inventory) = self.discover(project, language).await {
-                if let Some(candidate) = inventory
-                    .candidates
-                    .into_iter()
-                    .find(|candidate| candidate.symbol == target)
-                {
-                    return Ok(Some(candidate));
+            match self.discover(&project, language).await {
+                Ok(inventory) => {
+                    if let Some(candidate) = inventory
+                        .candidates
+                        .into_iter()
+                        .find(|candidate| candidate.symbol == target)
+                    {
+                        return Ok(Some(candidate));
+                    }
                 }
+                Err(ClassifiedError::Validation(message))
+                    if message.contains("not yet supported by the scanner") => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(None)
@@ -4845,17 +4897,18 @@ impl ServiceContainer {
             smoke_run: None,
         };
         let compiled = hf_harness::compile(harness, self.runtime.as_ref(), &workspace).await?;
-        write_current_harness_source(&workspace, &compiled.source)?;
-        write_current_harness_id(&workspace, compiled.id)?;
         // Persist the compiled harness so it survives restarts and the
-        // Harness/list views can show it. Qualification is safety-critical, so
-        // a configured store must durably accept the record.
+        // Harness/list views can show it before pointing the active marker at
+        // the record. Qualification is safety-critical, so a configured store
+        // must durably accept the record.
         if let Some(store) = &self.store {
             store
                 .upsert_harness(&compiled)
                 .await
                 .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
         }
+        write_current_harness_source(&workspace, &compiled.source)?;
+        write_current_harness_id(&workspace, compiled.id)?;
         Ok(CompileOutcome {
             status: compiled.status,
             binary_name: compiled
@@ -4973,6 +5026,12 @@ impl ServiceContainer {
             };
             match hf_harness::try_compile(harness, self.runtime.as_ref(), workspace).await? {
                 hf_harness::CompileResult::Ok(compiled) => {
+                    if let Some(store) = &self.store {
+                        store
+                            .upsert_harness(&compiled)
+                            .await
+                            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+                    }
                     write_current_harness_source(workspace, &compiled.source)?;
                     // Point `harness.active` at the freshly-compiled harness, as
                     // `harness_compile` does. Without this, a repair/refine that
@@ -4981,11 +5040,6 @@ impl ServiceContainer {
                     // longer matches and hard-errors ("compile it again") even
                     // though the refined harness built cleanly.
                     write_current_harness_id(workspace, compiled.id)?;
-                    if let Some(store) = &self.store {
-                        if let Err(e) = store.upsert_harness(&compiled).await {
-                            tracing::warn!("failed to persist harness {}: {e}", compiled.id);
-                        }
-                    }
                     let binary_name = compiled
                         .build_cmd
                         .output
@@ -5126,9 +5180,8 @@ impl ServiceContainer {
     /// fixed run. Each iteration is bounded by `duration_secs`.
     ///
     /// # Errors
-    /// Returns `ClassifiedError` if discovery finds no target, or harness
-    /// qualification / the first run fails. Triage failures within the loop are
-    /// logged and do not abort the campaign.
+    /// Returns `ClassifiedError` if discovery finds no target or any mandatory
+    /// qualification, persistence, run, or triage step fails.
     pub async fn run_campaign(
         &self,
         project: &Path,
@@ -5136,10 +5189,11 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
         duration_secs: u64,
-        _max_repairs: usize,
         max_iterations: usize,
     ) -> Result<CampaignOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         let resolved = resolve_fuzzing_run(engine, duration_secs)?;
         let engine = resolved.engine;
         // 1. Choose a target: the caller's, else the top-ranked candidate.
@@ -5207,7 +5261,6 @@ impl ServiceContainer {
         Ok(CampaignOutcome {
             target,
             harness_status: harness.status,
-            repairs_used: 0,
             crashes,
             edges,
             iterations,
@@ -5237,6 +5290,8 @@ impl ServiceContainer {
             )));
         }
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         self.guardrails.authorize(Action::RunHarness).await?;
         let workspace = workspace_dir(project, target);
         let harness = self.active_harness(project, target, engine).await?;
@@ -5837,6 +5892,8 @@ impl ServiceContainer {
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
 
         let engine = resolved.engine;
         let duration_secs = resolved.duration_secs;
@@ -6414,6 +6471,8 @@ impl ServiceContainer {
         target: &str,
         run_id: Uuid,
     ) -> Result<Vec<hf_core::crash::Crash>, ClassifiedError> {
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         let store = self
             .store
             .as_ref()
@@ -6423,7 +6482,7 @@ impl ServiceContainer {
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
-        if run.project_root != project.to_string_lossy()
+        if !stored_project_matches(Path::new(&run.project_root), project)
             || !run_has_crash_evidence(run.status)
             || self.run_target_id(store, &run).await?
                 != Some(self.resolve_target_id_any_language(project, target).await?)
@@ -6563,11 +6622,10 @@ impl ServiceContainer {
             let _ = run_source_path(&workspace, &run)?;
         }
         if let Some(store) = &self.store {
-            for crash in &deduped {
-                if let Err(e) = store.upsert_crash(crash).await {
-                    tracing::warn!("failed to persist crash {}: {e}", crash.id);
-                }
-            }
+            store
+                .upsert_crashes(&deduped)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         }
         Ok(deduped)
     }
@@ -7010,6 +7068,9 @@ impl ServiceContainer {
     ) -> Result<String, ClassifiedError> {
         use crate::report::{render_markdown, ReportData};
 
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
+
         // Resolve the target candidate (best-effort) and its id.
         let candidate = self
             .resolve_target_candidate_any_language(project, target)
@@ -7238,10 +7299,17 @@ impl ServiceContainer {
         project: &Path,
         target: Option<&str>,
     ) -> Result<Option<RunRecord>, ClassifiedError> {
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let runs = store.list_runs(Some(&project.to_string_lossy())).await?;
+        let runs = store
+            .list_runs(None)
+            .await?
+            .into_iter()
+            .filter(|run| stored_project_matches(Path::new(&run.project_root), project))
+            .collect::<Vec<_>>();
         let Some(target) = target else {
             return Ok(runs
                 .into_iter()
@@ -7706,6 +7774,8 @@ impl ServiceContainer {
         target: &str,
         run_id: Uuid,
     ) -> Result<usize, ClassifiedError> {
+        let project_root = canonical_project_root(project)?;
+        let project = project_root.as_path();
         let store = self
             .store
             .as_ref()
@@ -7717,7 +7787,7 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
         let target_id = self.resolve_target_id_any_language(project, target).await?;
         if target_id.is_nil()
-            || run.project_root != project.to_string_lossy()
+            || !stored_project_matches(Path::new(&run.project_root), project)
             || !run_has_crash_evidence(run.status)
             || self.run_target_id(store, &run).await? != Some(target_id)
         {
@@ -7761,9 +7831,11 @@ impl ServiceContainer {
         }
 
         let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
-        let target_id = self.resolve_target_id_any_language(project, target).await?;
-        corpus.target_id = target_id;
-        self.persist_corpus(target_id, &corpus).await?;
+        if self.store.is_some() {
+            let target_id = self.resolve_target_id_any_language(project, target).await?;
+            corpus.target_id = target_id;
+            self.persist_corpus(target_id, &corpus).await?;
+        }
         Ok(added)
     }
 
@@ -8067,10 +8139,8 @@ pub struct MinimizeOutcome {
 pub struct CampaignOutcome {
     /// The target the campaign fuzzed (chosen automatically when not supplied).
     pub target: String,
-    /// Harness build status after generation + repair.
+    /// Status of the promoted harness revision used by the campaign.
     pub harness_status: HarnessStatus,
-    /// Number of LLM repair passes the harness needed.
-    pub repairs_used: usize,
     /// Unique crashes surfaced by the final triage.
     pub crashes: usize,
     /// Peak edge coverage observed across the campaign's runs.
@@ -8117,8 +8187,7 @@ pub struct ProviderSnapshot {
     pub estimated_cost_usd: f64,
 }
 
-/// A single running agent instance (hobot has no live agent pool yet, so this is
-/// reserved for forward compatibility and always empty for now).
+/// A single agent turn currently executing.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentInstanceSnapshot {
     pub instance_id: String,
@@ -8129,9 +8198,8 @@ pub struct AgentInstanceSnapshot {
     pub tokens_used: u64,
 }
 
-/// Agent pool state. `available_slots` is the number of agent definitions that
-/// can be run; hobot runs agents per-turn rather than as a persistent pool, so
-/// `active`/`total`/`instances` stay zero/empty until that lands.
+/// Agent pool state. `available_slots` is the number of registered definitions;
+/// `active_instances` and `instances` describe live per-turn executions.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AgentPoolSnapshot {
     pub active_instances: usize,

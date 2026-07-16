@@ -28,6 +28,12 @@ dashboard DTO with state, score, blockers, and detail text instead of
 re-deriving readiness from raw counts. This keeps REST, Tauri, CLI, and future
 surfaces aligned on the same operational status.
 
+Operational health follows the same ownership rule. The service probes the
+mandatory Docker boundary and the engine tools inside the sandbox image, then
+derives core fuzzing readiness. CLI, web, and desktop surfaces may format that
+result, but they must not infer readiness from host engine binaries or make an
+optional integration such as DefectDojo a release gate.
+
 ### 3.1 CI Gate Ownership
 
 The non-interactive CI pipeline is a service operation. `hf-service` selects an
@@ -49,6 +55,11 @@ mutates process-global guardrail environment variables.
 5. Background: `corpus_ops` + `coverage_report` loop; on stagnation, propose
    new harness.
 
+`run_campaign` consumes an already smoke-qualified, explicitly promoted
+harness. It does not generate, repair, refine, or promote code in a headless
+flow, and its outcome reports only work that it actually performed. Harness
+generation and repair remain separate reviewable operations.
+
 Every engine-specific harness or execution entrypoint first resolves the
 service-owned fuzzing policy. A disabled engine, zero duration, or request above
 the configured duration ceiling fails before filesystem staging, database run
@@ -68,6 +79,21 @@ Every persisted execution, including smoke qualification, carries the harness
 identifier in its run configuration. Target-specific consumers resolve the run
 through `run.config.harness_id -> harness.target_id`; they never infer target
 ownership from whichever project run happened most recently.
+
+Project identity is service-owned and canonical. Every project-scoped entrypoint
+resolves an existing project root before discovery, persistence, workspace
+selection, or deterministic target-id derivation. Relative paths and symlink
+aliases therefore address the same project. A requested target must resolve to
+a discovered or durably stored candidate; the nil UUID is reserved for legacy
+fixtures and is never a valid service persistence identity.
+
+Configured persistence is part of an evidence-bearing operation's success
+contract. Discovery, ranking, compiled harness revisions, triaged crashes, and
+other authoritative results return a storage error when their required write
+fails. Filesystem markers are committed only after the corresponding database
+record is durable, or are compensated before returning an error. Best-effort
+maintenance may warn and continue only when its outcome cannot be presented as
+durable evidence.
 
 Before smoke or full execution, the service allocates the run id and its
 evidence directory. The run stores its kind (`smoke` or `campaign`), full source
@@ -275,6 +301,19 @@ manifest tests enforce this boundary and prevent a service/agent cycle.
 - `harness-agent` -- owns harness draft/iterate.
 - `triage-agent` -- owns crash classification and bug report drafting.
 - `coverage-agent` -- owns stagnation detection and harness proposals.
+
+### 5.1 User Agents and Skills
+
+User-authored agent and skill registries are service-owned configuration. Agent
+definitions live under `config_dir()/agents`; skill definitions live under
+`config_dir()/skills`. This makes source-checkout CLI/web use `<repo>/config`
+while an installed desktop app uses its pinned per-user configuration root.
+
+`ServiceContainer` owns list/read/save/delete operations and chat execution uses
+the same resolvers. Registry writes use same-directory atomic replacement. Tauri
+and REST handlers are typed transports only; neither constructs a registry or
+chooses a path. A missing selected agent is a validation error rather than a
+silent fallback, while an omitted agent id intentionally selects the default.
 
 ## 6. Tests
 

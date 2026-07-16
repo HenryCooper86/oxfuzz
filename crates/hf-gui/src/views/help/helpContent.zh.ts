@@ -77,13 +77,14 @@ const FIRST_RUN = `
 1. **欢迎** —— 概述。
 2. **提供方** —— 粘贴你的 **API 密钥**，设置**模型**（例如 \`gpt-4o\`）和 **Base URL**。
    这是唯一必需的步骤：没有提供方，AI 就无法编写测试桩或报告。
-3. **沙箱** —— 保持**使用 Docker 沙箱**开启（推荐）。
+3. **沙箱** —— 确认强制使用的 Docker 隔离边界，并显示沙箱镜像的构建方式。
 4. **安全护栏** —— 编译测试桩和启动运行的人工批准关卡。
 5. **存储** —— 运行数据、语料库和崩溃的存放位置（仅供参考）。
 6. **完成** —— 点击 **Get Started**。
 
-你可以稍后在**设置**中添加更多提供方、调整每个引擎并更改安全护栏。首次启动时，应用还会
-构建沙箱镜像，这可能需要几分钟。
+你可以稍后在**设置**中添加提供方、调整启用的引擎和受限资源。沙箱隔离、网络阻断和人工批准
+是不可关闭的安全保证，而不是可编辑开关。首次启动时，应用还会构建沙箱镜像，这可能需要几
+分钟。
 
 ## 然后呢？
 
@@ -464,9 +465,8 @@ const SCREEN_DEFECTDOJO = `
 const SCREEN_SETTINGS = `
 # 设置
 
-设置是一个全窗口编辑器。每个由配置支撑的部分都有一个 **FORM / RAW** 切换开关——表单和原
-始 TOML 是同一文件的两个无损视图——以及一个**保存更改**按钮，用于持久化当前处于激活状态
-的那个视图。
+设置是一个全窗口编辑器。由配置支撑的部分使用经过验证的表单；**模糊测试**和**提供方**还提
+供无损的 **FORM / RAW** TOML 切换。一个**保存更改**按钮用于持久化当前可编辑部分。
 
 **各部分：**
 
@@ -475,14 +475,11 @@ const SCREEN_SETTINGS = `
 - **提供方** —— 添加和配置 LLM 提供方（OpenAI、OpenAI 兼容、Anthropic、DeepSeek、
   Gemini、Ollama、Azure）：模型、Base URL、API 密钥、标签、成本、并发数、上下文窗口，以
   及**测试连接**。
-- **会话 / 工具** —— 通用的键/值配置表单。
-- **运行时** —— 沙箱后端（推荐 Docker；Native 仅用于开发）、Docker 镜像、资源限制，以及
-  构建期与模糊测试期的网络访问。
-- **引擎** —— 启用/禁用每个引擎并设置其二进制文件、默认时长、内存和支持的语言。已禁用的引
-  擎会从运行界面消失。
-- **安全护栏** —— 权限模式（Strict / Auto / Manual）、HITL 批准关卡（测试桩编译、模糊测试
-  执行、缺陷报告发布）、HITL 风险阈值，以及循环检测。
-- **存储** —— SQLite 路径、转录文件目录，以及**清除工作区**。
+- **模糊测试** —— 启用生产引擎、选择默认引擎，并设置受限时长、CPU 和内存。强制沙箱、网络
+  阻断和人工批准以不可关闭的保护项显示。
+- **汽车协议** —— 在该功能可用时，配置单独沙箱化的 sidecar、协议、模式、限额和显式物理台
+  架允许列表。
+- **存储** —— 服务解析出的工作区路径和需要确认的**清除工作区**操作。
 - **集成** —— DefectDojo 连接以及**测试连接**。
 - **问题跟踪器** —— 用于提交问题的 GitHub/GitLab 仓库和令牌，以及**测试连接**。
 - **关于** —— 版本、许可证和链接。
@@ -638,7 +635,7 @@ export const HELP_SECTIONS_ZH: HelpSection[] = [
   { id: "automation", group: "library", title: "自动化", keywords: "调度 测试活动 cron 间隔 无头 已批准 并发 预算", body: SCREEN_AUTOMATION },
   { id: "defectdojo", group: "library", title: "DefectDojo", keywords: "漏洞管理 发现 嵌入 推送 集成", body: SCREEN_DEFECTDOJO },
 
-  { id: "settings", group: "config", title: "设置", keywords: "提供方 运行时 引擎 安全护栏 存储 集成 问题跟踪器 表单 原始 toml", body: SCREEN_SETTINGS },
+  { id: "settings", group: "config", title: "设置", keywords: "提供方 模糊测试 汽车协议 沙箱 引擎 存储 集成 问题跟踪器 表单 原始 toml", body: SCREEN_SETTINGS },
 
   { id: "shortcuts", group: "reference", title: "键盘快捷键", keywords: "热键 命令面板 cmd k ctrl", body: REF_SHORTCUTS },
   { id: "troubleshooting", group: "reference", title: "疑难解答", keywords: "错误 问题 docker 提供方 关卡 消息 修复 帮助", body: REF_TROUBLESHOOTING },

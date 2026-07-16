@@ -22,11 +22,17 @@ struct Cli {
 enum Commands {
     /// Initialize configuration.
     Init,
+    /// Check whether the mandatory sandbox and at least one fuzzing engine are ready.
+    Doctor {
+        /// Emit the service-owned status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Discover fuzzing targets in a project.
     Discover {
         /// Project root path.
         project: PathBuf,
-        /// Target language (c, cpp, rust, go, python).
+        /// Target language (c, cpp, rust).
         #[arg(long)]
         lang: String,
         /// Enable LLM-assisted ranking (requires `HF_PROVIDER_API_KEY`).
@@ -43,7 +49,7 @@ enum Commands {
         /// Fuzzing engine (afl++, honggfuzz, libfuzzer, clusterfuzzlite).
         #[arg(long)]
         engine: String,
-        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        /// Target language (c, cpp, rust). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Skip compile and smoke fuzz (draft only).
@@ -72,7 +78,7 @@ enum Commands {
         /// Fuzzing engine.
         #[arg(long)]
         engine: String,
-        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        /// Target language (c, cpp, rust). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Duration (e.g. 60m).
@@ -90,13 +96,13 @@ enum Commands {
         /// Fuzzing engine.
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
-        /// Target language (c, cpp). Defaults to c.
+        /// Target language (c, cpp, rust). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Per-iteration fuzz duration in seconds.
         #[arg(long, default_value_t = 60)]
         duration_secs: u64,
-        /// Max run -> triage -> refine iterations.
+        /// Max run -> triage iterations.
         #[arg(long, default_value_t = 3)]
         iterations: usize,
     },
@@ -107,7 +113,7 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        /// Target language (c, cpp, rust). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
     },
@@ -141,7 +147,7 @@ enum Commands {
         /// Fuzzing engine. Defaults to libfuzzer.
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
-        /// Target language (c, cpp). Defaults to c.
+        /// Target language (c, cpp, rust). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Fuzz duration (e.g. 120s, 5m). Defaults to 120s.
@@ -352,7 +358,7 @@ enum ScheduleOp {
         target: String,
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
-        /// Target language of the promoted harness: c | cpp | rust | go | python.
+        /// Target language of the promoted harness: c | cpp | rust.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Trigger kind: interval | cron | once.
@@ -397,11 +403,62 @@ enum SessionOp {
 }
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
-    s.parse().map_err(|e: String| anyhow::anyhow!(e))
+    let lang: TargetLanguage = s.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    match lang {
+        TargetLanguage::C | TargetLanguage::Cpp | TargetLanguage::Rust => Ok(lang),
+        TargetLanguage::Go | TargetLanguage::Python => anyhow::bail!(
+            "target language '{s}' is planned but not available in the production discovery pipeline (expected c, cpp, or rust)"
+        ),
+    }
 }
 
 fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
     s.parse().map_err(|e: String| anyhow::anyhow!(e))
+}
+
+fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
+    let required =
+        |ready: bool, label: &str| format!("{}  {label}", if ready { "READY" } else { "MISSING" });
+    let engine = |ready: bool, label: &str| {
+        format!("{}  {label}", if ready { "READY" } else { "UNAVAILABLE" })
+    };
+
+    vec![
+        required(status.docker.is_ready(), "Docker daemon"),
+        required(status.sandbox_image.is_ready(), "sandbox image"),
+        engine(status.libfuzzer.is_ready(), "libFuzzer"),
+        engine(status.aflplusplus.is_ready(), "AFL++"),
+        engine(status.honggfuzz.is_ready(), "honggfuzz"),
+        engine(status.clusterfuzzlite.is_ready(), "ClusterFuzzLite"),
+        engine(status.syzkaller.is_ready(), "syzkaller"),
+        format!(
+            "{}  DefectDojo",
+            if status.defectdojo.is_ready() {
+                "READY"
+            } else {
+                "OPTIONAL"
+            }
+        ),
+    ]
+}
+
+async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
+    let status = hf_service::system_status().await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!("hobot_fuzz sandbox readiness");
+        for line in doctor_lines(&status) {
+            println!("{line}");
+        }
+    }
+
+    if !status.fuzzing_ready() {
+        anyhow::bail!(
+            "fuzzing is not ready: start Docker, build the sandbox image, and verify at least one engine"
+        );
+    }
+    Ok(())
 }
 
 async fn cmd_export(project: Option<PathBuf>, output: PathBuf) -> anyhow::Result<()> {
@@ -1092,13 +1149,12 @@ async fn cmd_campaign(
     let container = ServiceContainer::bootstrap().await;
     println!("--- Running autonomous campaign ---");
     let outcome = container
-        .run_campaign(&project, target, engine, lang, duration_secs, 2, iterations)
+        .run_campaign(&project, target, engine, lang, duration_secs, iterations)
         .await?;
     println!(
-        "target={} harness={:?} repairs={} iterations={} edges={} crashes={} termination={:?}",
+        "target={} harness={:?} iterations={} edges={} crashes={} termination={:?}",
         outcome.target,
         outcome.harness_status,
-        outcome.repairs_used,
         outcome.iterations,
         outcome.edges,
         outcome.crashes,
@@ -1297,6 +1353,7 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("  database: {}", report.db_path.display());
         }
+        Commands::Doctor { json } => cmd_doctor(json).await?,
         Commands::Discover {
             project,
             lang,
@@ -1424,5 +1481,42 @@ mod automotive_tests {
         assert!(error.to_string().contains("virtual_can"));
 
         assert!(parse_virtual_replay_plan("{not-json").is_err());
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::{doctor_lines, parse_lang};
+    use hf_service::system::StatusFlag;
+    use hf_service::SystemStatus;
+
+    #[test]
+    fn doctor_output_distinguishes_required_and_optional_checks() {
+        let status = SystemStatus {
+            docker: StatusFlag::from(true),
+            sandbox_image: StatusFlag::from(true),
+            libfuzzer: StatusFlag::from(true),
+            aflplusplus: StatusFlag::from(false),
+            honggfuzz: StatusFlag::from(false),
+            clusterfuzzlite: StatusFlag::from(false),
+            syzkaller: StatusFlag::from(false),
+            defectdojo: StatusFlag::from(false),
+        };
+
+        let output = doctor_lines(&status).join("\n");
+        assert!(output.contains("READY  Docker daemon"));
+        assert!(output.contains("READY  sandbox image"));
+        assert!(output.contains("READY  libFuzzer"));
+        assert!(output.contains("OPTIONAL  DefectDojo"));
+        assert!(status.fuzzing_ready());
+    }
+
+    #[test]
+    fn cli_rejects_languages_without_a_production_discovery_pipeline() {
+        assert!(parse_lang("c").is_ok());
+        assert!(parse_lang("cpp").is_ok());
+        assert!(parse_lang("rust").is_ok());
+        assert!(parse_lang("go").is_err());
+        assert!(parse_lang("python").is_err());
     }
 }

@@ -95,15 +95,17 @@ inside the sandbox image.
 2. **Providers** -- paste your **API key**, set the **Model** (e.g. \`gpt-4o\`)
    and **Base URL**. This is the one required step: without a provider the AI
    cannot write harnesses or reports.
-3. **Sandbox** -- keep **Use Docker sandbox** on (recommended).
+3. **Sandbox** -- confirms the mandatory Docker boundary and shows how to build
+   the sandbox image.
 4. **Guardrails** -- the human-approval gates for compiling harnesses and
    starting runs.
 5. **Storage** -- where run data, corpora, and crashes live (informational).
 6. **Complete** -- click **Get Started**.
 
-You can add more providers, tune every engine, and change guardrails later in
-**Settings**. On first launch the app also builds the sandbox image, which can
-take a few minutes.
+You can add providers and tune enabled engines and bounded resource limits later
+in **Settings**. Sandbox isolation, blocked networking, and human approval are
+enforced guarantees rather than editable switches. On first launch the app also
+builds the sandbox image, which can take a few minutes.
 
 ## Then what?
 
@@ -539,9 +541,9 @@ ready. Configure it in **Settings -> Integrations**.
 const SCREEN_SETTINGS = `
 # Settings
 
-Settings is a full-window editor. Every config-backed section has a **FORM / RAW**
-toggle -- the form and the raw TOML are two lossless views of the same file --
-and one **Save Changes** button that persists whichever view is active.
+Settings is a full-window editor. Config-backed sections use validated forms;
+**Fuzzing** and **Providers** also offer a lossless **FORM / RAW** TOML toggle.
+One **Save Changes** button persists the active editable section.
 
 **Sections:**
 
@@ -551,16 +553,14 @@ and one **Save Changes** button that persists whichever view is active.
 - **Providers** -- add and configure LLM providers (OpenAI, OpenAI-compatible,
   Anthropic, DeepSeek, Gemini, Ollama, Azure): model, base URL, API key, tags,
   cost, concurrency, context window, and **Test Connection**.
-- **Session / Tools** -- generic key/value config forms.
-- **Runtime** -- sandbox backend (Docker recommended; Native is dev-only),
-  Docker image, resource limits, and network access during build vs fuzz.
-- **Engines** -- enable/disable each engine and set its binary, default
-  duration, memory, and supported languages. Disabled engines disappear from the
-  Run screen.
-- **Guardrails** -- permission mode (Strict / Auto / Manual), HITL approval gates
-  (harness compilation, fuzzer execution, bug-report publication), the HITL risk
-  threshold, and loop detection.
-- **Storage** -- SQLite path, transcript directory, and **Clear Workspace**.
+- **Fuzzing** -- enable production engines, choose the default, and set bounded
+  duration, CPU, and memory limits. Mandatory sandboxing, blocked networking,
+  and human approval are displayed as enforced protections.
+- **Automotive** -- configure the separately sandboxed sidecar, protocols,
+  modes, limits, and explicit physical-bench allowlists when that feature is
+  available.
+- **Storage** -- the service-resolved workspace path and a confirmed
+  **Clear Workspace** operation.
 - **Integrations** -- DefectDojo connection and **Test connection**.
 - **Issue Tracker** -- GitHub/GitLab repo and token for filing issues, with
   **Test connection**.
@@ -724,7 +724,7 @@ export const HELP_SECTIONS: HelpSection[] = [
   { id: "automation", group: "library", title: "Automation", keywords: "schedule campaign cron interval headless promoted concurrency budget", body: SCREEN_AUTOMATION },
   { id: "defectdojo", group: "library", title: "DefectDojo", keywords: "vulnerability management findings embed push integration", body: SCREEN_DEFECTDOJO },
 
-  { id: "settings", group: "config", title: "Settings", keywords: "providers runtime engines guardrails storage integrations issue tracker form raw toml", body: SCREEN_SETTINGS },
+  { id: "settings", group: "config", title: "Settings", keywords: "providers fuzzing automotive sandbox engines storage integrations issue tracker form raw toml", body: SCREEN_SETTINGS },
 
   { id: "shortcuts", group: "reference", title: "Keyboard Shortcuts", keywords: "hotkeys command palette cmd k ctrl", body: REF_SHORTCUTS },
   { id: "troubleshooting", group: "reference", title: "Troubleshooting", keywords: "errors problems docker provider gating messages fix help", body: REF_TROUBLESHOOTING },

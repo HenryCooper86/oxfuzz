@@ -12,12 +12,12 @@ ARCH="$(uname -m)"
 
 echo "=== Building frontend ==="
 cd crates/hf-gui
-npm install --silent
+npm ci --silent
 npm run build
 
 echo ""
 echo "=== Building Tauri app ($OS $ARCH) ==="
-node_modules/.bin/tauri build --features automotive-scapy
+node_modules/.bin/tauri build --ci --features automotive-scapy -- --locked
 
 cd ../..
 
@@ -32,17 +32,33 @@ if [[ "$OS" == "Darwin" ]]; then
   if [[ -n "$APP" ]]; then
     echo ""
     echo "=== Fixing code signing (ad-hoc) ==="
-    codesign --force --deep -s - "$APP"
+    SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+    codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP"
     xattr -cr "$APP"
+    codesign --verify --deep --strict --verbose=2 "$APP"
   fi
+fi
+
+ARTIFACTS="$(find "$BUNDLE" -maxdepth 2 -type f \
+  \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
+  -print 2>/dev/null || true)"
+if [[ -z "$APP" && -z "$ARTIFACTS" ]]; then
+  echo "Tauri completed without producing an application bundle" >&2
+  exit 1
+fi
+
+if [[ "$OS" == "Darwin" ]]; then
+  while IFS= read -r dmg; do
+    [[ -n "$dmg" ]] && hdiutil verify "$dmg"
+  done <<< "$(find "$BUNDLE/dmg" -maxdepth 1 -name '*.dmg' -type f -print 2>/dev/null || true)"
 fi
 
 echo ""
 echo "=== Build complete ==="
 echo "Artifacts:"
-find "$BUNDLE" -maxdepth 2 -type f \
-  \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
-  -print 2>/dev/null | sed 's/^/  /'
+if [[ -n "$ARTIFACTS" ]]; then
+  echo "$ARTIFACTS" | sed 's/^/  /'
+fi
 if [[ -n "$APP" ]]; then echo "  $APP"; fi
 
 echo ""

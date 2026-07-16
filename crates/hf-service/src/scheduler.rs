@@ -679,7 +679,6 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                 engine,
                 lang,
                 params.duration_secs,
-                2,
                 3,
             )
             .await;
@@ -736,7 +735,6 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                         "crashes": outcome.crashes,
                         "edges": outcome.edges,
                         "iterations": outcome.iterations,
-                        "repairs_used": outcome.repairs_used,
                         "auto_reverts": outcome.auto_reverts,
                         "termination": outcome.termination,
                         "runs_done": advanced.runs_done,
