@@ -30,25 +30,28 @@ exactly what hobot_fuzz automates.
 
 ## What does hobot_fuzz do for you?
 
-hobot_fuzz is an **AI fuzzing assistant**. You point it at a codebase, and it
-walks through the whole process for you, asking for your approval at the
-important steps:
+hobot_fuzz is an **AI-assisted fuzzing workbench**. You point it at a codebase,
+and it coordinates the whole process while retaining the evidence and asking
+for your approval at the important steps:
 
 1. **Finds what to test.** It scans the project and ranks the functions most
    worth fuzzing (the ones that handle untrusted input).
 2. **Writes the test code.** An AI model writes the small "harness" program that
    feeds fuzz input into a chosen function -- the part that normally takes an
    engineer.
-3. **Builds and runs it safely.** All untrusted code is compiled and executed
-   inside an isolated **sandbox** (a locked-down container), so nothing touches
-   your real machine without permission.
+3. **Builds and qualifies it safely.** All untrusted code is compiled and
+   executed inside an isolated **sandbox** (a locked-down container). Human
+   approval never turns host execution on; it promotes one exact harness
+   revision for sandboxed campaigns.
 4. **Runs the fuzzer.** It drives a real, industry-standard fuzzing engine
-   (libFuzzer, AFL++, or honggfuzz) for as long as you want.
+   (libFuzzer, AFL++, or honggfuzz) for an operator-selected, policy-bounded
+   duration.
 5. **Explains the crashes.** When it finds bugs, it groups duplicates, rates how
    serious each one is, and drafts a human-readable bug report.
 
-You stay in control the whole time: hobot_fuzz never runs generated code on your
-computer without your approval.
+You stay in control the whole time: generated harnesses and fuzzing engines do
+not run on the host. Your approval authorizes a bounded sandboxed campaign for
+the exact promoted revision.
 
 ## Who is this for?
 
@@ -78,7 +81,7 @@ inside the sandbox.
 If you have a prebuilt app, just open it. To build it from source:
 
 ```bash
-git clone https://github.com/hobot/hobot_fuzz.git
+git clone <your-hobot_fuzz-gitlab-remote>
 cd hobot_fuzz
 ./scripts/build-app.sh
 open target/release/bundle/macos/hobot_fuzz.app
@@ -90,9 +93,9 @@ The first launch builds the sandbox image, which can take a few minutes.
 
 ## Your first run, step by step
 
-Open the app. You will see a left sidebar (the pipeline), a main panel, and a
-**Progress 0/6** checklist on the right. Here is what each step means and what to
-click.
+Open the app. You will see a left sidebar, a main panel, and a **Progress 0/4**
+checklist. The Dashboard summarizes operational readiness and points to the
+next blocked or incomplete action.
 
 ### 0. Connect your AI provider
 
@@ -102,24 +105,24 @@ defaults out of the box; you only need to fill in the key.)
 
 ### 1. Pick a project
 
-On the **AI Assistant** screen, click the **No project** dropdown and choose the
-folder of code you want to test. Then either use the **Fuzzing Workflow** screen
-(which walks you through all six steps) or just tell the assistant what you want
-in plain English ("discover targets and fuzz the riskiest one").
+Click **Open project** and choose the folder of code you want to test. Then use
+the **Fuzzing Workflow** for a guided campaign, move through the four pipeline
+views directly, or ask the assistant for a recommendation in plain English.
 
-### 2. The six-step pipeline (what the Progress checklist tracks)
+### 2. The four-stage campaign (what Progress tracks)
 
-| Step | Plain-language meaning |
+| Stage | Plain-language meaning |
 | --- | --- |
-| **1. Discover targets** | Scan the project and list the functions most worth fuzzing, ranked by risk. |
-| **2. Generate harness** | The AI writes the small test-driver program for the function you picked. |
-| **3. Compile in sandbox** | Build that test program inside the isolated container. |
-| **4. Generate seed corpus** | Create a starter set of example inputs to give the fuzzer a head start. |
-| **5. Run fuzzer** | Launch a real fuzzing engine and let it hammer the target for a set time. |
-| **6. Triage crashes** | Collect any crashes, remove duplicates, rate severity, and draft bug reports. |
+| **1. Discover targets** | Scan the project and rank the functions most worth fuzzing. |
+| **2. Generate harness** | Draft the test driver, compile and smoke-qualify it in the sandbox, review the exact revision, explicitly promote it, and prepare seed inputs. |
+| **3. Run fuzzer** | Launch an enabled engine against the promoted harness under bounded sandbox limits. |
+| **4. Triage crashes** | Collect crashes, remove duplicates, minimize reproducers, classify severity, and prepare reports for review. |
 
-You approve the actions that matter (e.g. compiling and running generated code).
-Each finished step gets a checkmark.
+The Harness screen makes its internal qualification flow explicit: generate,
+compile in the sandbox, run bounded smoke qualification, review and promote,
+then generate a seed corpus. Promotion is stored against the exact active
+revision; changing the harness requires a new review. Each completed core stage
+gets a checkmark in Progress.
 
 ### 3. Read your results
 
@@ -143,13 +146,16 @@ Everything above is also available as a command-line tool, `hobot-fuzz`. A full
 campaign looks like this:
 
 ```bash
-hobot-fuzz discover /path/to/project --lang c            # step 1
-hobot-fuzz harness  /path/to/project --target parse_value --engine libfuzzer  # steps 2-3
-hobot-fuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m  # steps 4-5
-hobot-fuzz triage   /path/to/project --target parse_value  # step 6
+hobot-fuzz doctor
+hobot-fuzz discover /path/to/project --lang c --rank
+hobot-fuzz harness /path/to/project --target parse_value \
+  --engine libfuzzer --promote
+hobot-fuzz run /path/to/project --target parse_value \
+  --engine libfuzzer --duration 30m
+hobot-fuzz triage /path/to/project --target parse_value
 ```
 
-See the [README](../../README.md#quick-start) for the full command reference.
+See the [README](../../README.md#quick-start-cli) for the full command reference.
 
 ---
 
@@ -193,6 +199,8 @@ Plain-language definitions, in the order you are likely to meet them.
 
 - [README](../../README.md) -- features, configuration, and the command-line
   reference.
+- [Release checklist](RELEASE_CHECKLIST.md) -- professional source, sandbox,
+  packaging, and handoff gates.
 - [docs/design/](../design/) -- how each part works under the hood.
 - [docs/standards/](../standards/) -- the engineering standards the project
   follows.
