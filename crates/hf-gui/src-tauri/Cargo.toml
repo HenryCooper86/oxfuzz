@@ -48,5 +48,20 @@ hf-service = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 
-[lints]
-workspace = true
+# Tauri's command ABI requires deserializable owned arguments and injects
+# `tauri::State` by value. Keep that framework exception at the presentation
+# crate boundary rather than scattering inline suppressions across commands.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+struct_field_names = "allow"
+too_many_arguments = "allow"
+needless_pass_by_value = "allow"
+undocumented_unsafe_blocks = "deny"
+
+[lints.rust]
+unused_assignments = "allow"

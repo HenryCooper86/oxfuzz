@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { getTransport, pickFolder } from "../lib";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
@@ -7,6 +7,7 @@ import type { TargetInventory, TargetCandidate } from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { useI18n } from "../i18nContext";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
+import { shouldLoadCoverage } from "../lib/discoverCoverage";
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { t } = useI18n();
@@ -143,26 +144,35 @@ function CandidateCard({ candidate: c, callGraph, project }: { candidate: Target
   const [covered, setCovered] = useState<Set<string> | null>(null);
   const [covLoading, setCovLoading] = useState(false);
 
-  useEffect(() => {
-    if (!treeOpen || covered !== null || covLoading || !project) return;
-    let cancelled = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  async function loadCoverage() {
     setCovLoading(true);
-    getTransport()
-      .invoke<string[]>("coverage_functions", { project, target: c.symbol })
-      .then((fns) => !cancelled && setCovered(new Set(fns)))
-      .catch(() => !cancelled && setCovered(new Set()))
-      .finally(() => !cancelled && setCovLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [treeOpen, covered, covLoading, project, c.symbol]);
+    try {
+      const functions = await getTransport().invoke<string[]>("coverage_functions", {
+        project,
+        target: c.symbol,
+      });
+      setCovered(new Set(functions));
+    } catch {
+      setCovered(new Set());
+    } finally {
+      setCovLoading(false);
+    }
+  }
+
+  function toggleTree() {
+    const opening = !treeOpen;
+    setTreeOpen(opening);
+    if (shouldLoadCoverage(opening, covered, covLoading, project)) {
+      void loadCoverage();
+    }
+  }
+
   return (
     <div className="surface-card flex flex-col" style={{ padding: 0 }}>
     <div
       className="flex items-center gap-3 transition-all duration-150"
       style={{ padding: "var(--space-md)", cursor: hasTree ? "pointer" : "default" }}
-      onClick={hasTree ? () => setTreeOpen((o) => !o) : undefined}
+      onClick={hasTree ? toggleTree : undefined}
       onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--border-focus)")}
       onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
     >

@@ -1,0 +1,82 @@
+stages:
+  - verify
+  - test
+  - release
+
+default:
+  interruptible: true
+
+.rust-job:
+  image: rust:1.94.0-bookworm
+  before_script:
+    - rustup component add rustfmt clippy
+    - apt-get update
+    - apt-get install --yes --no-install-recommends libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+  cache:
+    key: rust-${CI_COMMIT_REF_SLUG}
+    paths:
+      - target/
+      - .cargo/registry/
+      - .cargo/git/
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+
+rust-quality:
+  extends: .rust-job
+  stage: verify
+  script:
+    - cargo fmt --all -- --check
+    - cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+    - cargo check --locked --workspace --all-targets --all-features
+    - RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+
+rust-tests:
+  extends: .rust-job
+  stage: test
+  script:
+    - ./scripts/cargo-test-filtered.sh --locked --workspace --all-features
+    - ./scripts/cargo-test-filtered.sh --locked -p hf-service --test release_readiness
+
+frontend:
+  image: node:22-bookworm
+  stage: test
+  cache:
+    key: npm-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .npm/
+  variables:
+    npm_config_cache: $CI_PROJECT_DIR/.npm
+  script:
+    - cd crates/hf-gui
+    - npm ci
+    - npm test
+    - npm run build
+    - npm run lint
+
+automotive-sidecar:
+  image: python:3.12.9-slim-bookworm
+  stage: test
+  cache:
+    key: pip-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cache/pip/
+  variables:
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  script:
+    - cd sidecars/scapy_automotive
+    - python -m pip install --disable-pip-version-check -r requirements-dev.txt
+    - python -m pip install --disable-pip-version-check --no-deps .
+    - python -m unittest discover -s tests -v
+    - ruff check --no-cache src tests
+
+release-cli:
+  extends: .rust-job
+  stage: release
+  needs: [rust-quality, rust-tests, frontend, automotive-sidecar]
+  script:
+    - ./scripts/build-release.sh
+  artifacts:
+    name: hobot-fuzz-${CI_COMMIT_SHORT_SHA}
+    paths:
+      - target/release/hobot-fuzz
+    expire_in: 14 days

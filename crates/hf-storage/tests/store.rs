@@ -638,6 +638,45 @@ async fn list_all_crashes_is_newest_first_by_insertion_order() {
     );
 }
 
+#[tokio::test]
+async fn crash_batch_persistence_is_atomic() {
+    let (store, _dir) = temp_store().await;
+    let run = RunRecord::new("/proj", EngineKind::LibFuzzer, None, Utc::now());
+    store.insert_run(&run).await.unwrap();
+    let target_id = Uuid::new_v4();
+    let crash = |summary: &str| Crash {
+        id: Uuid::new_v4(),
+        run_id: run.id,
+        target_id,
+        input_path: PathBuf::from(format!("out/{summary}")),
+        stack_signature: summary.to_owned(),
+        kind: CrashKind::Asan,
+        summary: summary.to_owned(),
+        minimized: false,
+        bug_report: None,
+        casr: None,
+    };
+    sqlx::query(
+        "CREATE TRIGGER reject_crash_batch
+         BEFORE INSERT ON crashes
+         WHEN NEW.summary = 'reject'
+         BEGIN
+           SELECT RAISE(ABORT, 'rejected crash');
+         END",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let error = store
+        .upsert_crashes(&[crash("accepted"), crash("reject")])
+        .await
+        .expect_err("one failed crash must roll back the entire triage batch");
+
+    assert!(matches!(error, StorageError::Db(_)));
+    assert!(store.list_crashes_by_run(run.id).await.unwrap().is_empty());
+}
+
 fn sample_harness(target_id: Uuid) -> Harness {
     Harness {
         id: Uuid::new_v4(),

@@ -17,6 +17,8 @@ fn assert_storage_error(error: &ClassifiedError) {
 #[tokio::test]
 async fn persisted_read_views_propagate_a_closed_store() {
     let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let store = Arc::new(
         hf_storage::Store::connect(dir.path().join("closed.db"))
             .await
@@ -44,39 +46,34 @@ async fn persisted_read_views_propagate_a_closed_store() {
     assert_storage_error(&service.auto_revert_events(None, 20).await.unwrap_err());
     assert_storage_error(
         &service
-            .project_auto_revert_override(Path::new("/project"))
+            .project_auto_revert_override(&project)
             .await
             .unwrap_err(),
     );
     assert_storage_error(
         &service
-            .effective_auto_revert_view(Path::new("/project"))
+            .effective_auto_revert_view(&project)
             .await
             .unwrap_err(),
     );
     assert_storage_error(&service.project_auto_revert_overrides().await.unwrap_err());
     assert_storage_error(&service.export_project_data(None).await.unwrap_err());
+    assert_storage_error(&service.schedulable_targets(&project).await.unwrap_err());
     assert_storage_error(
         &service
-            .schedulable_targets(Path::new("/project"))
+            .generate_report(&project, "target")
             .await
             .unwrap_err(),
     );
     assert_storage_error(
         &service
-            .generate_report(Path::new("/project"), "target")
+            .corpus_absorb_crashes(&project, "target")
             .await
             .unwrap_err(),
     );
     assert_storage_error(
         &service
-            .corpus_absorb_crashes(Path::new("/project"), "target")
-            .await
-            .unwrap_err(),
-    );
-    assert_storage_error(
-        &service
-            .workbench_dashboard(Some(Path::new("/project")), None)
+            .workbench_dashboard(Some(&project), None)
             .await
             .unwrap_err(),
     );

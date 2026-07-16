@@ -27,9 +27,10 @@ pub async fn discover(
     lang: TargetLanguage,
 ) -> Result<TargetInventory, ClassifiedError> {
     tokio::task::yield_now().await;
+    let project_root = canonical_project_root(project_root)?;
     let (mut candidates, call_graph) = match lang {
-        TargetLanguage::C | TargetLanguage::Cpp => scan_c(project_root, lang)?,
-        TargetLanguage::Rust => scan_rust(project_root),
+        TargetLanguage::C | TargetLanguage::Cpp => scan_c(&project_root, lang)?,
+        TargetLanguage::Rust => scan_rust(&project_root)?,
         _ => {
             return Err(ClassifiedError::Validation(format!(
                 "language {lang:?} not yet supported by the scanner"
@@ -47,14 +48,36 @@ pub async fn discover(
     // discovery ran. A UUIDv5 over the identity key keeps the id stable across
     // passes and processes while distinct symbols still get distinct ids.
     for c in &mut candidates {
-        c.project_root = project_root.to_path_buf();
-        c.id = deterministic_target_id(project_root, &c.symbol);
+        c.project_root.clone_from(&project_root);
+        c.id = deterministic_target_id(&project_root, &c.symbol);
     }
     Ok(TargetInventory {
-        project_root: project_root.to_path_buf(),
+        project_root,
         candidates,
         call_graph,
     })
+}
+
+fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ClassifiedError> {
+    let canonical = std::fs::canonicalize(project_root).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve project root {}: {error}",
+            project_root.display()
+        ))
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "inspect project root {}: {error}",
+            canonical.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "project root {} is not a directory",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 /// Fixed namespace for `hobot_fuzz` target ids so `UUIDv5` derivation is stable
@@ -92,19 +115,21 @@ type ScanResult = (
 /// parameter-bearing, non-test -- and scores them with the same heuristics as
 /// the C scanner. It is intentionally conservative: a missed multi-line
 /// signature is a lost candidate, never a wrong one.
-fn scan_rust(root: &Path) -> ScanResult {
+fn scan_rust(root: &Path) -> Result<ScanResult, ClassifiedError> {
     let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
     let mut candidates = Vec::new();
-    for entry in walker.flatten() {
+    for entry in walker {
+        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        if let Ok(src) = std::fs::read_to_string(path) {
-            extract_rust_functions(&src, path, &mut candidates);
-        }
+        let src = std::fs::read_to_string(path).map_err(|error| {
+            ClassifiedError::Internal(format!("read {}: {error}", path.display()))
+        })?;
+        extract_rust_functions(&src, path, &mut candidates);
     }
-    (candidates, std::collections::HashMap::new())
+    Ok((candidates, std::collections::HashMap::new()))
 }
 
 /// Extract public, parameter-bearing function definitions from Rust source.
@@ -311,9 +336,9 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         }
         let src = std::fs::read_to_string(path)
             .map_err(|e| ClassifiedError::Internal(format!("read {}: {e}", path.display())))?;
-        let Some(tree) = parser.parse(&src, None) else {
-            continue;
-        };
+        let tree = parser.parse(&src, None).ok_or_else(|| {
+            ClassifiedError::Internal(format!("parse {}: parser returned no tree", path.display()))
+        })?;
         extract_functions(
             &tree,
             path,
@@ -344,7 +369,6 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
     Ok((candidates, call_graph))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn extract_functions(
     tree: &tree_sitter::Tree,
     path: &Path,

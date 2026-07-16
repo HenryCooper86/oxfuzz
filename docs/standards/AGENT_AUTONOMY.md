@@ -17,7 +17,9 @@ crash report publication.
 ## 2. Delegation
 
 - Parent agent delegates to sub-agents via the `Task` tool.
-- Each sub-agent has a TOML definition in `config/agents/`.
+- Each sub-agent has a TOML definition in `config_dir()/agents/`; this resolves
+  to `config/agents/` in a source checkout and the pinned per-user config root
+  in an installed desktop application.
 - Sub-agents return a single result message; they do not stream to the user.
 
 ## 3. Sub-Agents

@@ -90,7 +90,7 @@ async fn runner_libfuzzer_parses_progress_and_coverage() {
     );
     assert_eq!(coverage.edges, 1024, "should pick max edge count");
     assert!(progress.iter().any(|event| {
-        matches!(event, hf_core::engine::FuzzProgress::ExecsPerSec(value) if *value == 3000.0)
+        matches!(event, hf_core::engine::FuzzProgress::ExecsPerSec(value) if (*value - 3000.0).abs() < f64::EPSILON)
     }));
 }
 
@@ -121,7 +121,7 @@ async fn runner_retains_late_metrics_after_log_capture_is_truncated() {
 
     assert_eq!(result.coverage.edges, 4096);
     assert!(result.progress.iter().any(|event| {
-        matches!(event, hf_core::engine::FuzzProgress::ExecsPerSec(value) if *value == 777.0)
+        matches!(event, hf_core::engine::FuzzProgress::ExecsPerSec(value) if (*value - 777.0).abs() < f64::EPSILON)
     }));
     assert!(result
         .progress

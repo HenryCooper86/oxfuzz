@@ -4,7 +4,7 @@
 //! builds container exec arguments from a `RuntimeConfig` and per-call limits.
 
 use hf_core::runtime::ResourceLimits;
-use hf_runtime::config::{RuntimeBackend, RuntimeConfig};
+use hf_runtime::config::RuntimeConfig;
 use std::collections::HashMap;
 
 /// Per-call limits with the given memory/cpu and otherwise inert values.
@@ -20,8 +20,7 @@ fn limits(max_mem_mb: u64, max_cpus: u32) -> ResourceLimits {
 
 fn cfg_with(default_limits: ResourceLimits) -> RuntimeConfig {
     RuntimeConfig {
-        backend: RuntimeBackend::Docker,
-        image: "hobot/fuzz-sandbox:latest".to_owned(),
+        image: "hobot/fuzz-sandbox:0.1.0".to_owned(),
         container_workspace: "/work".to_owned(),
         default_limits,
         max_pids: 512,
@@ -37,7 +36,7 @@ fn build_exec_args_includes_image_and_command() {
         &["clang".to_owned(), "--version".to_owned()],
     );
     let joined = args.join(" ");
-    assert!(joined.contains("hobot/fuzz-sandbox:latest"));
+    assert!(joined.contains("hobot/fuzz-sandbox:0.1.0"));
     assert!(joined.contains("clang"));
     assert!(joined.contains("--version"));
 }
@@ -394,5 +393,5 @@ fn specialized_sandbox_profile_can_select_a_pinned_sidecar_image() {
     let joined = args.join(" ");
 
     assert!(joined.contains("hobot/scapy-automotive:2.7.0"));
-    assert!(!joined.contains("hobot/fuzz-sandbox:latest"));
+    assert!(!joined.contains("hobot/fuzz-sandbox:0.1.0"));
 }

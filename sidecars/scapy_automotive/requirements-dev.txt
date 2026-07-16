@@ -1,0 +1,2 @@
+-r requirements-can.txt
+ruff==0.15.8
