@@ -300,10 +300,10 @@ require a stronger boundary.
 
 The `automotive-scapy` feature adds sandboxed automotive capture analysis,
 deterministic mutation and replay-plan generation, retained operation evidence,
-and state-signature corpus promotion. It is compile-time optional and also
-disabled at runtime by default. The Rust application never imports Scapy or
-runs host Python; Scapy 2.7.0 and optional `python-can` support live in a
-separately built GPL-2.0 sidecar image.
+state-signature corpus promotion, and evidence-backed campaign reporting. It is
+compile-time optional and also disabled at runtime by default. The Rust
+application never imports Scapy or runs host Python; Scapy 2.7.0 and optional
+`python-can` support live in a separately built GPL-2.0 sidecar image.
 
 ```bash
 # Build the separately distributed, pinned sidecar image.
@@ -319,7 +319,28 @@ target/debug/hobot-fuzz automotive enable
 # Offline capture analysis never contacts a CAN interface.
 target/debug/hobot-fuzz automotive analyze /path/to/project \
   --protocol uds --capture /path/to/capture.pcap
+
+# Compose a deterministic report from retained operations and protocol states.
+target/debug/hobot-fuzz automotive report /path/to/project \
+  --output automotive-campaign.html --format html
+
+# Optionally append provider-neutral AI interpretation. Unknown evidence
+# citations are rejected and the deterministic report remains authoritative.
+target/debug/hobot-fuzz automotive report /path/to/project --ai
 ```
+
+The Automotive workspace follows a practical evidence pipeline: inspect the
+pinned adapter, analyze an immutable capture, generate deterministic mutations,
+build a typed replay plan, optionally perform a separately confirmed virtual
+replay, and compose a campaign report. Reports retain failed and partial
+operations, distinguish protocol-state novelty from source coverage, cite
+operation/request/transcript/state evidence, show the effective safety posture,
+and list concrete missing stages and next actions. When an LLM provider is
+configured, AI may add a clearly labelled interpretation with hypotheses and
+recommendations; it cannot modify a plan, enable policy, approve traffic, or
+replace deterministic facts. Composed reports are saved to the shared Reports
+workspace and can be exported as Markdown or HTML, plus DOCX/PDF when the host
+has the required document tools.
 
 Offline analysis uses a network-disabled sandbox. Virtual CAN additionally
 requires an allowlisted `vcanN` interface and a high-risk guardrail approval.
@@ -328,7 +349,7 @@ enablement, an exact interface/arbitration/service allowlist, a fresh
 plan-scoped human approval, and stricter limits. No generated plan is executed
 on a host or vehicle as part of the normal test or build process.
 
-![Automotive workspace -- offline analysis and policy-gated replay readiness](docs/screenshots/automotive.png)
+![Automotive workspace -- evidence-backed report composition and policy-gated replay](docs/screenshots/automotive.png)
 
 ---
 

@@ -275,6 +275,23 @@ distinct policy and approval requirements. Failure before persistence leaves no
 operation record; failure after persistence is retained with a terminal status
 and redacted failure reason.
 
+Campaign synthesis is also service-owned, but it is read-only and never invokes
+the sidecar. The service loads a bounded operation/state-corpus snapshot,
+validates every retained typed result and digest, removes canonical host paths,
+and renders the deterministic Automotive report. The report carries workflow
+stage status, typed result summaries, failed and partial operations,
+protocol-state evidence, request/transcript attribution, safety posture,
+limitations, and deterministic next actions. State novelty remains explicitly
+separate from source coverage and vulnerability claims.
+
+When requested and a provider is configured, the service sends the complete
+fact sheet through the provider pool and accepts only bounded prose whose
+`[OP:<uuid>]`, `[STATE:<sha256>]`, and `[TRANSCRIPT:<sha256>]` citations resolve
+to the snapshot. Accepted AI interpretation is appended after the fact sheet;
+empty, malformed, uncited, or ungrounded output falls back to the deterministic
+report. REST, CLI, Tauri, and React transport this one service DTO and do not
+recompute its metrics or authority boundaries.
+
 ### 4.5 Session Diagnostics
 
 The diagnostics recorder assigns a fresh identifier to each recorder instance.
