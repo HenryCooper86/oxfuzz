@@ -7,12 +7,14 @@ import { Separator } from "../ui/Separator";
 import { useToast } from "../ui/toastContext";
 import { useI18n } from "../../i18nContext";
 import { getTransport, openExternal } from "../../lib";
+import {
+  GETTING_STARTED_GUIDE_URL,
+  PROJECT_REPOSITORY_URL,
+} from "../../lib/projectLinks";
 import type { SystemStatus } from "../../types";
-import { Crosshair, Github, BookOpen, ClipboardCheck } from "lucide-react";
+import { Crosshair, Gitlab, BookOpen, ClipboardCheck } from "lucide-react";
 
 const APP_VERSION = "0.1.0";
-const REPO_URL = "https://github.com/hobot/hobot_fuzz";
-const DOCS_URL = "https://github.com/hobot/hobot_fuzz/blob/main/docs/guides/GETTING_STARTED.md";
 
 /** Build a Markdown environment report from the live system status, for pasting
  * into a bug report. Deliberately plain text (no emoji) per project convention. */
@@ -131,14 +133,14 @@ export function AboutTab() {
         <h3 className="text-sm font-semibold">{t("settings.about.links")}</h3>
         <div className="flex flex-col gap-1 items-start">
           <button
-            onClick={() => void openExternal(REPO_URL)}
+            onClick={() => void openExternal(PROJECT_REPOSITORY_URL)}
             className="text-xs text-accent flex items-center gap-2 hover:underline"
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
-            <Github size={14} /> {t("settings.about.repo")}
+            <Gitlab size={14} /> {t("settings.about.repo")}
           </button>
           <button
-            onClick={() => void openExternal(DOCS_URL)}
+            onClick={() => void openExternal(GETTING_STARTED_GUIDE_URL)}
             className="text-xs text-accent flex items-center gap-2 hover:underline"
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
