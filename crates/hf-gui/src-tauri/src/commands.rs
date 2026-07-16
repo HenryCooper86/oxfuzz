@@ -2636,6 +2636,30 @@ pub async fn list_automotive_operations(
     }
 }
 
+/// Compose the service-owned automotive campaign report without invoking the
+/// sidecar or contacting an interface.
+#[tauri::command]
+pub async fn generate_automotive_report(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    include_ai: bool,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let report = state
+            .container
+            .generate_automotive_report(&project_root, include_ai)
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(report).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, include_ai);
+        Err(automotive_feature_unavailable())
+    }
+}
+
 #[cfg(not(feature = "automotive-scapy"))]
 fn automotive_feature_unavailable() -> String {
     "automotive Scapy support is not included in this application build".to_owned()

@@ -3,6 +3,7 @@ import {
   analyzeAutomotiveCapture,
   buildAutomotiveReplayPlan,
   executeAutomotiveReplay,
+  generateAutomotiveReport,
   generateAutomotiveMutations,
   getAutomotiveSettings,
   inspectAutomotiveCapabilities,
@@ -108,6 +109,7 @@ describe("automotive frontend transport", () => {
       transport,
     );
     await listAutomotiveOperations("/tmp/project", 25, transport);
+    await generateAutomotiveReport("/tmp/project", true, transport);
 
     expect(invoke.mock.calls).toEqual([
       ["get_automotive_settings"],
@@ -167,6 +169,7 @@ describe("automotive frontend transport", () => {
         },
       ],
       ["list_automotive_operations", { projectRoot: "/tmp/project", limit: 25 }],
+      ["generate_automotive_report", { projectRoot: "/tmp/project", includeAi: true }],
     ]);
   });
 });

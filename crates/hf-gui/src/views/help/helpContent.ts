@@ -544,6 +544,11 @@ capabilities determine what the current build can actually decode or execute.
 - **Physical bench** is disabled by default and is not enabled from this
   workspace. Each operation requires an exact allowlist plus fresh,
   plan-scoped human approval after the plan and budgets are known.
+- **Campaign synthesis and report** turns retained operations, failures,
+  protocol states, result counts, safety posture, and evidence digests into a
+  deterministic report. **Compose with AI** optionally appends a provider-neutral
+  interpretation whose operation/state/transcript citations must match retained
+  evidence. AI prose is advisory and cannot alter or authorize a replay plan.
 
 Agents may propose analysis or replay plans, but cannot enable the feature,
 choose an unlisted interface, manufacture approval evidence, or relax limits.
@@ -552,7 +557,9 @@ tests and release checks never connect to a physical interface.
 
 **What it shows:** policy state, offline analysis controls, adapter capability
 evidence, virtual/physical readiness explanations, bounded mutation controls,
-and retained operation history.
+retained operation history, and report metrics for operations, failures,
+unique states, and promoted state evidence. Every composed report is also saved
+as a draft in **Reports**, where it can be reviewed and exported.
 `;
 
 const SCREEN_DEFECTDOJO = `
@@ -688,6 +695,10 @@ hobot-fuzz harness  /path/to/project --target parse_value --engine libfuzzer   #
 hobot-fuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m   # steps 4-5
 hobot-fuzz triage   /path/to/project --target parse_value   # step 6
 hobot-fuzz corpus   /path/to/project --target parse_value --op seed|grow|prune|list
+
+# Optional automotive feature: report retained offline/virtual evidence.
+hobot-fuzz automotive report /path/to/project --output automotive-report.html --format html
+hobot-fuzz automotive report /path/to/project --ai
 \`\`\`
 
 There is also \`hobot-fuzz serve\` (REST + SSE API) and \`hobot-fuzz tui\` (a
@@ -759,7 +770,7 @@ export const HELP_SECTIONS: HelpSection[] = [
   { id: "skills", group: "library", title: "Skills", keywords: "playbooks domain built-in custom root.md", body: SCREEN_SKILLS },
   { id: "knowledge", group: "library", title: "Knowledge", keywords: "bm25 search index ingest documents pdf learned", body: SCREEN_KNOWLEDGE },
   { id: "automation", group: "library", title: "Automation", keywords: "schedule campaign cron interval headless promoted concurrency budget", body: SCREEN_AUTOMATION },
-  { id: "automotive", group: "library", title: "Automotive", keywords: "can uds pcap offline vcan replay sidecar physical bench policy evidence", body: SCREEN_AUTOMOTIVE },
+  { id: "automotive", group: "library", title: "Automotive", keywords: "can uds pcap offline vcan replay sidecar physical bench policy evidence ai campaign report export state", body: SCREEN_AUTOMOTIVE },
   { id: "defectdojo", group: "library", title: "DefectDojo", keywords: "vulnerability management findings embed push integration", body: SCREEN_DEFECTDOJO },
 
   { id: "settings", group: "config", title: "Settings", keywords: "providers fuzzing automotive sandbox engines storage integrations issue tracker form raw toml", body: SCREEN_SETTINGS },

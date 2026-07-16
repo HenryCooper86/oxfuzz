@@ -195,6 +195,25 @@ export interface AutomotiveOperationSummary {
   state_signatures: AutomotiveStateSignature[];
 }
 
+export type AutomotiveReportAiStatus =
+  | "not_requested"
+  | "not_configured"
+  | "not_applicable"
+  | "applied"
+  | "fallback";
+
+export interface AutomotiveCampaignReport {
+  generated_at: string;
+  project_name: string;
+  ai_status: AutomotiveReportAiStatus;
+  ai_model: string | null;
+  operation_count: number;
+  failed_operation_count: number;
+  unique_state_count: number;
+  promoted_state_count: number;
+  markdown: string;
+}
+
 export interface AnalyzeAutomotiveCaptureInput {
   projectRoot: string;
   protocol: AutomotiveProtocol;
@@ -295,5 +314,16 @@ export function listAutomotiveOperations(
   return transport.invoke<AutomotiveOperationSummary[]>("list_automotive_operations", {
     projectRoot,
     limit,
+  });
+}
+
+export function generateAutomotiveReport(
+  projectRoot: string,
+  includeAi: boolean,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveCampaignReport> {
+  return transport.invoke<AutomotiveCampaignReport>("generate_automotive_report", {
+    projectRoot,
+    includeAi,
   });
 }
