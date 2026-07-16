@@ -30,4 +30,21 @@ describe("automotive surface boundaries", () => {
     expect(replay).toContain("useConfirm");
     expect(replay).not.toContain('mode: "physical_bench"');
   });
+
+  it("registers a thin Tauri command for the service-owned automotive report", () => {
+    const commands = source("../../src-tauri/src/commands.rs");
+    const app = source("../../src-tauri/src/lib.rs");
+    expect(commands).toContain("pub async fn generate_automotive_report");
+    expect(commands).toContain(".generate_automotive_report(&project_root, include_ai)");
+    expect(app).toContain("generate_automotive_report,");
+  });
+
+  it("offers report composition, retained draft handoff, preview, and export", () => {
+    const workspace = source("../views/AutomotiveView.tsx");
+    expect(workspace).toContain("generateAutomotiveReport");
+    expect(workspace).toContain("includeAi");
+    expect(workspace).toContain('"save_report_draft"');
+    expect(workspace).toContain("<ReportPreview");
+    expect(workspace).toContain('"export_markdown"');
+  });
 });

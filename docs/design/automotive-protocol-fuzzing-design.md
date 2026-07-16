@@ -1,8 +1,8 @@
 # Automotive Protocol Fuzzing Design
 
-Status: **software-scoped implementation complete; live vcan and physical-bench
-validation remain separately approved activities**. Owner: `hf-automotive` for
-the pure contract and `hf-service` for orchestration.
+Status: **professional campaign workflow implementation active; live vcan and
+physical-bench validation remain separately approved activities**. Owner:
+`hf-automotive` for the pure contract and `hf-service` for orchestration.
 
 ## 1. Goal and Current Boundary
 
@@ -161,7 +161,49 @@ still sandboxed through the sidecar. Virtual execution is supervised.
 Every physical-bench operation requires a fresh service-verified human approval
 after the exact plan and budgets are known.
 
-## 7. Distribution and Licensing
+## 7. Campaign Synthesis, Reporting, and AI Assistance
+
+Automotive reporting is a service-owned campaign operation over durable
+evidence, not a sidecar operation and not a source-fuzzer report with renamed
+fields. `hf-service` gathers a bounded project snapshot from retained automotive
+operations and the promoted protocol-state corpus, then renders a deterministic
+Markdown fact sheet. The snapshot and report include:
+
+- operation totals and lifecycle outcomes, including retained failures and
+  interrupted work;
+- protocol and mode distribution without treating state novelty as source
+  coverage;
+- unique validated state-signature digests and promoted state-corpus evidence;
+- an evidence manifest binding every row to the operation id, request digest,
+  transcript digest when present, and workspace-relative artifact directory;
+- the effective safety posture and explicit limits on what the campaign proves;
+- prioritized, deterministic next actions based on missing workflow stages,
+  failures, unpromoted state evidence, and unvalidated live modes.
+
+The deterministic report is always available without a model provider. When a
+provider is configured, the service may request a clearly labelled
+**AI-assisted interpretation** of that fact sheet. Provider routing remains
+model-agnostic. The prompt requires evidence citations in the stable
+`[OP:<uuid>]`, `[STATE:<sha256>]`, and `[TRANSCRIPT:<sha256>]` forms. The service
+rejects an empty response or any citation that is not present in the retained
+snapshot and falls back to the deterministic report on provider or validation
+failure. AI prose is appended to, and never replaces, the deterministic
+evidence sections.
+
+AI interpretation may explain observed states, identify campaign gaps, and
+recommend additional offline analysis, deterministic mutation, or supervised
+virtual validation. It must label hypotheses and missing evidence. It cannot
+claim a vulnerability from protocol novelty alone, modify a replay plan, enable
+policy, relax a limit, choose an interface, manufacture approval, or cause
+traffic. An AI recommendation becomes executable only through the existing
+typed planning, validation, guardrail, and human-approval flow.
+
+REST, CLI, Tauri, and GUI surfaces consume the same serialized campaign-report
+DTO. Export uses the existing service-owned report exporters. Presentation
+layers may choose a destination or render a preview, but they do not recompute
+totals, readiness, findings, citations, or safety posture.
+
+## 8. Distribution and Licensing
 
 The Rust core remains MIT and has no Scapy dependency. Scapy 2.7.0 is pinned as
 a GPL-2.0 sidecar dependency distributed separately from the default
@@ -170,7 +212,7 @@ applicable license notices and source-availability obligations. Release review
 must verify those obligations before enabling sidecar packaging; this design is
 an engineering boundary, not legal advice.
 
-## 8. Rejected Alternatives
+## 9. Rejected Alternatives
 
 - **Vendoring Scapy into the Rust/core distribution** -- couples the default
   MIT artifact to an optional GPL component and obscures upgrade provenance.
@@ -182,8 +224,12 @@ an engineering boundary, not legal advice.
   is not source-fuzzer argument construction or source coverage.
 - **Treating state signatures as coverage edges** -- creates false coverage and
   invalid comparisons with AFL++, honggfuzz, or libFuzzer.
+- **Letting an LLM replace or mutate the evidence report** -- makes a
+  non-deterministic provider response authoritative and breaks traceability.
+- **Calling the model from CLI, REST, Tauri, or React directly** -- duplicates
+  prompts and policy outside `hf-service` and produces inconsistent reports.
 
-## 9. Verification
+## 10. Verification
 
 The implemented contract is covered by feature-enabled pure Rust tests for the
 complete vocabulary, serde names, mode/approval validation, capability reports,
@@ -195,3 +241,10 @@ Service and presentation tests use fake-runtime JSONL transcripts and immutable
 fixtures. Unit and CI tests must not open a CAN interface or execute a real
 fuzzer. A live vcan or physical-bench test requires separate explicit operator
 approval and is never part of the default quality gate.
+
+Campaign-report tests construct retained operation and state-corpus fixtures in
+SQLite, render the deterministic report without a provider, and use a fake
+provider for accepted and rejected AI citations. They prove that failures stay
+visible, host paths do not leak into shareable report prose, state novelty is
+not described as source coverage or a vulnerability, and feature-disabled
+builds retain no automotive or Python dependency.
