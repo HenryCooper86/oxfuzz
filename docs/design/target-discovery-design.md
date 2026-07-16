@@ -28,15 +28,18 @@ pub struct TargetCandidate {
 
 ## 3. Pipeline
 
-1. **Index** -- walk project with `ignore` crate; parse with Tree-sitter
-   (C/C++, Rust, Go) or AST (Python).
-2. **Filter** -- drop symbols that are trivially not fuzzable (pure
+1. **Resolve** -- canonicalize the existing project root so relative paths and
+   symlink aliases have one persistence and workspace identity.
+2. **Index** -- walk project with `ignore`; parse C/C++ with Tree-sitter and
+   conservatively scan public Rust functions lexically. Walk, read, and parse
+   failures are surfaced rather than converted into a successful partial scan.
+3. **Filter** -- drop symbols that are trivially not fuzzable (pure
    formatting, no input).
-3. **Enrich** -- compute complexity, detect input surface, infer sanitizers
+4. **Enrich** -- compute complexity, detect input surface, infer sanitizers
    from build flags.
-4. **Rank** -- LLM-assisted scoring: the agent receives the candidate list
+5. **Rank** -- LLM-assisted scoring: the agent receives the candidate list
    with signatures and produces fit scores + rationale.
-5. **Emit** -- `TargetInventory` persisted to `hf-storage`; surfaced to user
+6. **Emit** -- `TargetInventory` persisted to `hf-storage`; surfaced to user
    for HITL selection.
 
 ## 4. Fit Score Heuristics
@@ -52,9 +55,9 @@ pub struct TargetCandidate {
 | Language | Parser | Harness template |
 | --- | --- | --- |
 | C/C++ | Tree-sitter (C/C++ grammar) | `fuzz_*.c` with `LLVMFuzzerTestOneInput` |
-| Rust | syn / cargo-metadata | `cargo-fuzz` target |
-| Go | go/parser | `go-fuzz` / native fuzz |
-| Python | ast | Atheris `FuzzedDataProvider` |
+| Rust | conservative lexical scanner | `cargo-fuzz` target |
+| Go | planned | planned native fuzz target |
+| Python | planned | planned Atheris target |
 
 ## 6. Open Questions
 

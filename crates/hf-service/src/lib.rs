@@ -47,7 +47,7 @@ pub use hf_runtime::{
 };
 pub use hf_skills::{SkillDefinition, SkillRegistry, TrustTier};
 
-pub use agent::AgentTurnRequest;
+pub use agent::{AgentRegistryInfo, AgentToolDefinition, AgentTurnRequest};
 pub use container::{
     build_sandbox_image, copy_project_sources, generate_target_seeds, initialize_workspace_root,
     project_workspace_dir, provider_pool_from_config, provider_pool_from_env, repo_root,

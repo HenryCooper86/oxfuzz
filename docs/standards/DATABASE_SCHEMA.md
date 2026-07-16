@@ -374,3 +374,16 @@ with partial database state. CLI, REST, and Tauri adapters translate that error
 without re-reading storage or inventing substitute data. Best-effort internal
 maintenance may continue only when it emits a structured error and its result
 cannot be mistaken for an authoritative persisted-data view.
+
+## 8. Write failure contract
+
+Once a store is configured, a required evidence write is part of the service
+operation's success condition. Target inventories, harness revisions,
+qualification state, runs, crashes, corpus state, and operator-visible audit
+records must propagate `ClassifiedError::Storage` when the write fails.
+
+Filesystem state that refers to a database identifier is committed after the
+database record, or restored to its prior value if a later step fails. A service
+method must not return an authoritative model that the configured store rejected.
+Optional stores may remain absent, but a present broken store is never treated as
+if persistence were disabled.

@@ -1,29 +1,21 @@
 #!/usr/bin/env bash
-# hobot_fuzz -- health check
-# Verifies engine binaries and provider config are present.
+# hobot_fuzz -- production sandbox health check
+# Delegates readiness derivation to hf-service through the CLI.
 set -euo pipefail
 
-echo "hobot_fuzz health check"
-echo "------------------------"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-check_bin() {
-    if command -v "$1" >/dev/null 2>&1; then
-        echo "OK  $1 -> $(command -v "$1")"
-    else
-        echo "MISSING  $1"
-    fi
-}
-
-check_bin afl-fuzz
-check_bin honggfuzz
-check_bin clang
-check_bin cargo
-check_bin docker
-
-if [ -f config/providers.toml ]; then
-    echo "OK  config/providers.toml"
+if [[ -n "${HOBOT_FUZZ_BIN:-}" ]]; then
+    CLI="$HOBOT_FUZZ_BIN"
+elif command -v hobot-fuzz >/dev/null 2>&1; then
+    CLI="$(command -v hobot-fuzz)"
+elif [[ -x "$ROOT_DIR/target/release/hobot-fuzz" ]]; then
+    CLI="$ROOT_DIR/target/release/hobot-fuzz"
+elif [[ -x "$ROOT_DIR/target/debug/hobot-fuzz" ]]; then
+    CLI="$ROOT_DIR/target/debug/hobot-fuzz"
 else
-    echo "MISSING  config/providers.toml (run: hobot-fuzz init)"
+    echo "MISSING  hobot-fuzz CLI (run: ./scripts/build-release.sh)" >&2
+    exit 1
 fi
 
-echo "Done."
+exec "$CLI" doctor "$@"

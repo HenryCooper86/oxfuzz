@@ -2136,6 +2136,126 @@ fn enum_str<T: Serialize>(v: &T) -> Option<String> {
         .and_then(|j| j.as_str().map(str::to_owned))
 }
 
+fn render_provider(body: &mut String, provider: &ProviderConfig) {
+    body.push_str("[[providers]]\n");
+    let _ = writeln!(body, "id = {}", toml_string(&provider.id));
+    let _ = writeln!(
+        body,
+        "provider_type = {}",
+        toml_string(&provider.provider_type)
+    );
+    let _ = writeln!(body, "model = {}", toml_string(&provider.model));
+    if !provider.enabled {
+        let _ = writeln!(body, "enabled = false");
+    }
+    if !provider.tags.is_empty() {
+        let values = provider
+            .tags
+            .iter()
+            .map(|tag| toml_string(tag))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(body, "tags = [{values}]");
+    }
+    if !provider.capabilities.is_empty() {
+        let values = provider
+            .capabilities
+            .iter()
+            .filter_map(enum_str)
+            .map(|capability| toml_string(&capability))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(body, "capabilities = [{values}]");
+    }
+    let _ = writeln!(body, "max_concurrency = {}", provider.max_concurrency);
+    let _ = writeln!(body, "context_window = {}", provider.context_window);
+    if provider.cost_per_1k_input > 0.0 {
+        let _ = writeln!(body, "cost_per_1k_input = {}", provider.cost_per_1k_input);
+    }
+    if provider.cost_per_1k_output > 0.0 {
+        let _ = writeln!(body, "cost_per_1k_output = {}", provider.cost_per_1k_output);
+    }
+    render_provider_optional_fields(body, provider);
+    body.push('\n');
+}
+
+fn render_provider_optional_fields(body: &mut String, provider: &ProviderConfig) {
+    if let Some(value) = provider.api_key.as_ref().filter(|value| !value.is_empty()) {
+        let _ = writeln!(body, "api_key = {}", toml_string(value));
+    }
+    if let Some(value) = provider
+        .api_key_env
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        let _ = writeln!(body, "api_key_env = {}", toml_string(value));
+    }
+    if let Some(value) = provider.base_url.as_ref().filter(|value| !value.is_empty()) {
+        let _ = writeln!(body, "base_url = {}", toml_string(value));
+    }
+    if enum_str(&provider.http_protocol).as_deref() == Some("http2") {
+        let _ = writeln!(body, "http_protocol = \"http2\"");
+    }
+    if let Some(value) = provider.include_usage {
+        let _ = writeln!(body, "include_usage = {value}");
+    }
+    if let Some(value) = provider.use_max_completion_tokens {
+        let _ = writeln!(body, "use_max_completion_tokens = {value}");
+    }
+    if let Some(value) = provider.temperature {
+        let _ = writeln!(body, "temperature = {value}");
+    }
+    if let Some(value) = provider.top_p {
+        let _ = writeln!(body, "top_p = {value}");
+    }
+    if let Some(value) = provider.tool_calling_mode.as_ref().and_then(enum_str) {
+        let _ = writeln!(body, "tool_calling_mode = {}", toml_string(&value));
+    }
+    if let Some(value) = provider.icon.as_ref().filter(|value| !value.is_empty()) {
+        let _ = writeln!(body, "icon = {}", toml_string(value));
+    }
+    render_azure_provider_fields(body, provider);
+    render_provider_headers(body, provider);
+}
+
+fn render_azure_provider_fields(body: &mut String, provider: &ProviderConfig) {
+    if let Some(value) = provider
+        .azure_resource_name
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        let _ = writeln!(body, "azure_resource_name = {}", toml_string(value));
+    }
+    if let Some(value) = provider
+        .azure_api_version
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        let _ = writeln!(body, "azure_api_version = {}", toml_string(value));
+    }
+    if let Some(value) = provider.azure_use_deployment_urls {
+        let _ = writeln!(body, "azure_use_deployment_urls = {value}");
+    }
+    if let Some(value) = provider.azure_auth_mode.as_ref().and_then(enum_str) {
+        let _ = writeln!(body, "azure_auth_mode = {}", toml_string(&value));
+    }
+}
+
+fn render_provider_headers(body: &mut String, provider: &ProviderConfig) {
+    let headers: Vec<_> = provider
+        .headers
+        .iter()
+        .filter(|(key, _)| !key.trim().is_empty())
+        .collect();
+    if headers.is_empty() {
+        return;
+    }
+    let _ = writeln!(body, "[providers.headers]");
+    for (key, value) in headers {
+        let _ = writeln!(body, "{} = {}", toml_string(key), toml_string(value));
+    }
+}
+
 /// Persist the provider pool back to `providers.toml`, preserving the
 /// pool-level preamble (freeze/health/proxy settings) ahead of the provider
 /// entries. Emits every field of the full schema, with the optional
@@ -2143,7 +2263,6 @@ fn enum_str<T: Serialize>(v: &T) -> Option<String> {
 ///
 /// # Errors
 /// Returns an error string if the rendered TOML is invalid or cannot be written.
-#[allow(clippy::too_many_lines)]
 pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     let existing = read_config("providers")?;
     let preamble = existing.find("[[providers]]").map_or_else(
@@ -2158,95 +2277,8 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     );
 
     let mut body = String::new();
-    for p in providers {
-        body.push_str("[[providers]]\n");
-        let _ = writeln!(body, "id = {}", toml_string(&p.id));
-        let _ = writeln!(body, "provider_type = {}", toml_string(&p.provider_type));
-        let _ = writeln!(body, "model = {}", toml_string(&p.model));
-        if !p.enabled {
-            let _ = writeln!(body, "enabled = false");
-        }
-        if !p.tags.is_empty() {
-            let tags = p
-                .tags
-                .iter()
-                .map(|t| toml_string(t))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(body, "tags = [{tags}]");
-        }
-        if !p.capabilities.is_empty() {
-            let caps = p
-                .capabilities
-                .iter()
-                .filter_map(enum_str)
-                .map(|c| toml_string(&c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(body, "capabilities = [{caps}]");
-        }
-        let _ = writeln!(body, "max_concurrency = {}", p.max_concurrency);
-        let _ = writeln!(body, "context_window = {}", p.context_window);
-        if p.cost_per_1k_input > 0.0 {
-            let _ = writeln!(body, "cost_per_1k_input = {}", p.cost_per_1k_input);
-        }
-        if p.cost_per_1k_output > 0.0 {
-            let _ = writeln!(body, "cost_per_1k_output = {}", p.cost_per_1k_output);
-        }
-        if let Some(k) = p.api_key.as_ref().filter(|s| !s.is_empty()) {
-            let _ = writeln!(body, "api_key = {}", toml_string(k));
-        }
-        if let Some(k) = p.api_key_env.as_ref().filter(|s| !s.is_empty()) {
-            let _ = writeln!(body, "api_key_env = {}", toml_string(k));
-        }
-        if let Some(u) = p.base_url.as_ref().filter(|s| !s.is_empty()) {
-            let _ = writeln!(body, "base_url = {}", toml_string(u));
-        }
-        if enum_str(&p.http_protocol).as_deref() == Some("http2") {
-            let _ = writeln!(body, "http_protocol = \"http2\"");
-        }
-        if let Some(b) = p.include_usage {
-            let _ = writeln!(body, "include_usage = {b}");
-        }
-        if let Some(b) = p.use_max_completion_tokens {
-            let _ = writeln!(body, "use_max_completion_tokens = {b}");
-        }
-        if let Some(t) = p.temperature {
-            let _ = writeln!(body, "temperature = {t}");
-        }
-        if let Some(t) = p.top_p {
-            let _ = writeln!(body, "top_p = {t}");
-        }
-        if let Some(m) = p.tool_calling_mode.as_ref().and_then(enum_str) {
-            let _ = writeln!(body, "tool_calling_mode = {}", toml_string(&m));
-        }
-        if let Some(i) = p.icon.as_ref().filter(|s| !s.is_empty()) {
-            let _ = writeln!(body, "icon = {}", toml_string(i));
-        }
-        if let Some(r) = p.azure_resource_name.as_ref().filter(|s| !s.is_empty()) {
-            let _ = writeln!(body, "azure_resource_name = {}", toml_string(r));
-        }
-        if let Some(v) = p.azure_api_version.as_ref().filter(|s| !s.is_empty()) {
-            let _ = writeln!(body, "azure_api_version = {}", toml_string(v));
-        }
-        if let Some(b) = p.azure_use_deployment_urls {
-            let _ = writeln!(body, "azure_use_deployment_urls = {b}");
-        }
-        if let Some(m) = p.azure_auth_mode.as_ref().and_then(enum_str) {
-            let _ = writeln!(body, "azure_auth_mode = {}", toml_string(&m));
-        }
-        let headers: Vec<_> = p
-            .headers
-            .iter()
-            .filter(|(k, _)| !k.trim().is_empty())
-            .collect();
-        if !headers.is_empty() {
-            let _ = writeln!(body, "[providers.headers]");
-            for (k, v) in headers {
-                let _ = writeln!(body, "{} = {}", toml_string(k), toml_string(v));
-            }
-        }
-        body.push('\n');
+    for provider in providers {
+        render_provider(&mut body, provider);
     }
 
     let content = format!("{preamble}{body}");

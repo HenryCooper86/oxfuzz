@@ -58,7 +58,7 @@ of every term. The rest of this README is the technical reference.
 | **Corpus & Coverage** | Seed, grow, prune, and merge corpora; track coverage deltas; feed crashes back into the corpus. |
 | **AI Assistant** | A conversational agent that drives the whole pipeline with tool calls, live tool-activity updates, and human approval gates. |
 | **Multi-Provider LLM Pool** | Tag-based routing, automatic failover, provider freeze/thaw across OpenAI, Anthropic, Gemini, and OpenAI-compatible backends. |
-| **Sandboxed Execution** | Every build and fuzz run goes through `hf-runtime` (Docker or native); nothing untrusted runs on the host without approval. |
+| **Sandboxed Execution** | Every harness build and fuzz run goes through the mandatory Docker-backed `hf-runtime`; there is no production host-execution fallback. |
 | **Scheduled Campaigns** | Headless, budget-bounded fuzzing on an interval/cron/once schedule, rotating through a project's promoted targets. |
 | **Issue & Vuln Tracking** | File crashes as GitHub/GitLab issues or push them to DefectDojo as findings; export SARIF for code scanning. |
 | **Desktop, CLI & Web** | A native macOS app (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
@@ -147,9 +147,9 @@ enforced guarantees rather than switches.
 | --- | --- | --- |
 | **Rust 1.94+** | Yes | Pinned in `rust-toolchain.toml` |
 | **Node 18+ / npm** | Desktop app | For the Tauri v2 frontend (`crates/hf-gui`) |
-| **Docker** | Recommended | Sandboxed builds/runs; the app brings it up on launch |
+| **Docker** | Yes | Mandatory boundary for harness builds, fuzz runs, and crash parsing |
 | **SQLite 3.35+** | Embedded | Bundled, no action needed |
-| **AFL++ / honggfuzz** | Optional | For those engines (libFuzzer ships with clang) |
+| **Fuzzing engines** | Bundled | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and syzkaller live in the sandbox image |
 
 ### The CLI binary
 
@@ -158,6 +158,9 @@ git clone <your-hobot_fuzz-remote>
 cd hobot_fuzz
 cargo build --release
 # Binary: target/release/hobot-fuzz
+
+# Build and verify the versioned sandbox toolchain.
+./scripts/build-sandbox.sh
 ```
 
 ### The desktop app (macOS)
@@ -168,7 +171,9 @@ cargo build --release
 # DMG:  target/release/bundle/dmg/hobot_fuzz_0.1.0_aarch64.dmg
 ```
 
-`scripts/health-check.sh` verifies engine binaries and config presence.
+`scripts/health-check.sh` delegates to `hobot-fuzz doctor`, which probes the
+Docker daemon, sandbox image, and engine tools inside that image. Host engine
+binaries and optional integrations do not determine core readiness.
 
 ---
 
@@ -178,8 +183,7 @@ cargo build --release
 
 ```bash
 hobot-fuzz init
-# Or non-interactive:
-hobot-fuzz init --non-interactive --provider openai
+hobot-fuzz doctor
 ```
 
 This materializes the supported `config/*.example.toml` templates and creates
@@ -227,10 +231,11 @@ hobot-fuzz triage /path/to/project --target parse_value
 | Command | What it does |
 | --- | --- |
 | `init` | Scaffold config from templates and create/migrate the database. |
+| `doctor [--json]` | Probe the mandatory Docker sandbox and its bundled engines; exit non-zero when fuzzing is not ready. |
 | `discover <project> --lang c [--rank]` | Scan a project and produce a ranked Target Inventory. |
 | `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a harness; `--promote` is the explicit approval step. |
 | `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). |
-| `campaign <project> --target <sym> --engine <e>` | Autonomous loop: draft, compile (with repair), qualify, run, and triage without stopping at each gate. |
+| `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
 | `triage <project> --target <sym>` | Ingest, dedup, classify (CASR), and draft reports for crashes. |
 | `corpus <project> --target <sym> --op seed\|llmseed\|grow\|prune\|cprune\|minimize\|cmin\|absorb\|list` | Manage the corpus (`llmseed` = LLM-authored seeds, `cprune`/`cmin` = coverage-guided prune/minimize). |
 | `coverage <project> --target <sym>` | Summarize line/region/function coverage. |
@@ -246,7 +251,7 @@ hobot-fuzz triage /path/to/project --target parse_value
 | `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
 | `serve --host 127.0.0.1 --port 8081` | Start the REST + SSE API (`hf-web`). Non-loopback hosts require `HF_WEB_TOKEN`. |
-| `tui <project>` | Terminal UI. |
+| `tui <project>` | Browse the target inventory and copy accurate next-step commands. |
 
 Engines: `afl++`, `honggfuzz`, `libfuzzer`, `clusterfuzzlite`, `syzkaller`.
 
@@ -323,9 +328,9 @@ value as `HF_WEB_TOKEN`).
 
 Defense in depth, non-negotiable:
 
-1. **Sandboxed build & run** -- every harness build and fuzzer invocation goes
-   through `hf-runtime` (Docker or native); engine binaries and generated
-   harnesses are treated as untrusted.
+1. **Sandboxed build & run** -- every harness build, fuzzer invocation, and
+   crash parse goes through Docker-backed `hf-runtime`; engine binaries and
+   generated harnesses are treated as untrusted and never execute on the host.
 2. **Middleware interception** -- `hf-guardrails` scores each action, enforces a
    permission policy, and detects agent loops.
 3. **Human-approved execution** -- generated harnesses are reviewed by an LLM
@@ -334,7 +339,8 @@ Defense in depth, non-negotiable:
    approval. Crash artifacts are parsed in the sandbox and never touch the host
    outside the workspace.
 
-**Generated harnesses are never run on the host without explicit approval.**
+**Generated harnesses are never run on the host. Human approval authorizes a
+sandboxed run of the exact promoted revision; it never weakens isolation.**
 
 ---
 
@@ -372,7 +378,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-skills` | Skill registry, versioning, experience capture. |
 | `hf-prompt` | Prompt templates for discovery, harness, triage. |
 | `hf-storage` | SQLite storage (sqlx), transcript persistence. |
-| `hf-runtime` | Sandbox (Docker/native), resource limits, build isolation. |
+| `hf-runtime` | Mandatory Docker sandbox, resource limits, and build isolation. |
 | `hf-scheduler` | Cron-style and one-shot campaign scheduling. |
 | `hf-knowledge` | Full-text (BM25) retrieval over project source and ingested documents; optional vector search behind the `vector_qdrant` feature. |
 | `hf-diagnostics` | Persistent LLM trace, token-usage, and cost evidence. |

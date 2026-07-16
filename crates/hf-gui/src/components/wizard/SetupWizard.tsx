@@ -1,7 +1,7 @@
 // Setup Wizard -- first-run onboarding for safety-first fuzzing.
 // Modeled after y-agent's SetupWizard with 6 steps.
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Crosshair, Server, Shield, Database, CheckCircle2, ArrowRight, ArrowLeft } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
@@ -11,6 +11,7 @@ import { useToast } from "../ui/toastContext";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18nContext";
 import { normalizeProvider, type Provider } from "../settings/providerTypes";
+import { wizardStoragePaths, type WizardStoragePaths } from "../../lib/wizardPaths";
 
 type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
 
@@ -28,12 +29,26 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const { toast } = useToast();
   const [step, setStep] = useState<Step>("welcome");
   const [saving, setSaving] = useState(false);
+  const [storagePaths, setStoragePaths] = useState<WizardStoragePaths>({
+    database: "--",
+    transcripts: "--",
+    workspace: "--",
+  });
   const stepIdx = STEPS.findIndex((s) => s.id === step);
 
   // Config state
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("gpt-4o");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
+
+  useEffect(() => {
+    getTransport()
+      .invoke<{ data_dir: string; workspace_dir: string }>("app_paths")
+      .then((paths) => setStoragePaths(wizardStoragePaths(paths)))
+      .catch(() => {
+        // Keep neutral placeholders when the service cannot resolve its paths.
+      });
+  }, []);
 
   function next() {
     const nextIdx = stepIdx + 1;
@@ -212,9 +227,9 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
               <h2 className="text-sm font-semibold">{t("wizard.storageTitle")}</h2>
               <p className="text-xs text-text-secondary">{t("wizard.storageDesc")}</p>
               <div className="text-xs text-text-muted p-3 rounded-md" style={{ background: "var(--surface-code)", border: "1px solid var(--border)" }}>
-                <div className="flex justify-between mb-1"><span>{t("wizard.dbLabel")}</span><code style={{ color: "var(--accent)" }}>data/hobot_fuzz.db</code></div>
-                <div className="flex justify-between mb-1"><span>{t("wizard.transcriptsLabel")}</span><code style={{ color: "var(--accent)" }}>data/transcripts/</code></div>
-                <div className="flex justify-between"><span>{t("wizard.workspaceLabel")}</span><code style={{ color: "var(--accent)" }}>/tmp/hobot_fuzz_workspace/</code></div>
+                <div className="flex justify-between mb-1"><span>{t("wizard.dbLabel")}</span><code style={{ color: "var(--accent)" }}>{storagePaths.database}</code></div>
+                <div className="flex justify-between mb-1"><span>{t("wizard.transcriptsLabel")}</span><code style={{ color: "var(--accent)" }}>{storagePaths.transcripts}</code></div>
+                <div className="flex justify-between"><span>{t("wizard.workspaceLabel")}</span><code style={{ color: "var(--accent)" }}>{storagePaths.workspace}</code></div>
               </div>
             </div>
           )}

@@ -211,6 +211,124 @@ async fn fuzzing_config_endpoint_returns_the_service_validated_policy() {
     assert!(policy["sandbox"]["max_duration_secs"].is_number());
 }
 
+#[tokio::test]
+async fn agent_and_skill_registries_have_web_crud_parity() {
+    allow_open_dev_mode();
+    let registry_root = tempfile::tempdir().unwrap();
+    std::env::set_var("HF_CONFIG_DIR", registry_root.path());
+    let app = hf_web::router::build();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .unwrap();
+    let agents: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+    let mut agent = agents.first().expect("shipped agents").clone();
+    agent["id"] = "web-release-agent".into();
+    agent["name"] = "Web Release Agent".into();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/agents/save")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "definition": agent }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(registry_root
+        .path()
+        .join("agents/web-release-agent.toml")
+        .is_file());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/skills")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .unwrap();
+    let skills: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+    let mut skill = skills.first().expect("shipped skills").clone();
+    skill["name"] = "web-release-skill".into();
+    skill["description"] = "Web registry parity".into();
+    skill["body"] = "Retain release evidence.".into();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/skills/save")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "definition": skill }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(registry_root
+        .path()
+        .join("skills/web-release-skill/root.md")
+        .is_file());
+
+    for (uri, body) in [
+        (
+            "/agents/delete",
+            serde_json::json!({ "id": "web-release-agent" }),
+        ),
+        (
+            "/skills/delete",
+            serde_json::json!({ "name": "web-release-skill" }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert!(!registry_root
+        .path()
+        .join("agents/web-release-agent.toml")
+        .exists());
+    assert!(!registry_root
+        .path()
+        .join("skills/web-release-skill")
+        .exists());
+}
+
 #[cfg(feature = "automotive-scapy")]
 #[tokio::test]
 async fn automotive_config_endpoint_round_trips_only_the_typed_policy() {

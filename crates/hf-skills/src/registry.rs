@@ -6,7 +6,9 @@
 //! deleting a user skill restores the built-in (a reset).
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -43,6 +45,46 @@ const BUILTINS: &[(&str, &str, &str)] = &[
         include_str!("builtins/coverage-analysis/root.md"),
     ),
 ];
+
+static STAGED_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_replace(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "skill path has no parent")
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "skill file name is not UTF-8",
+            )
+        })?;
+    let sequence = STAGED_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staged = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staged)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&staged, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
 
 /// Provenance of a skill: a shipped built-in or a user-authored one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -343,8 +385,12 @@ impl SkillRegistry {
         def.trust_tier = TrustTier::UserDefined;
         let skill_dir = dir.join(&def.name);
         std::fs::create_dir_all(&skill_dir)?;
-        std::fs::write(skill_dir.join("skill.toml"), def.manifest_toml())?;
-        std::fs::write(skill_dir.join("root.md"), &def.body)?;
+        let manifest = def.manifest_toml();
+        // Commit the body first and the manifest last. A reader that races the
+        // two atomic replacements never sees a manifest for a body that was not
+        // durably staged yet.
+        atomic_replace(&skill_dir.join("root.md"), def.body.as_bytes())?;
+        atomic_replace(&skill_dir.join("skill.toml"), manifest.as_bytes())?;
         self.skills.insert(def.name.clone(), def);
         Ok(())
     }
@@ -462,6 +508,50 @@ mod tests {
         assert_eq!(
             reg.get("target-triage").unwrap().trust_tier,
             TrustTier::BuiltIn
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_read_only_skill_files_atomically() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "hf-skills-atomic-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut registry = SkillRegistry::with_user_dir(&dir);
+        let mut definition = registry.get("target-triage").unwrap().clone();
+        definition.name = "durable-skill".to_owned();
+        definition.description = "First revision".to_owned();
+        definition.body = "first body".to_owned();
+        registry.save(definition.clone()).unwrap();
+        let skill_dir = dir.join("durable-skill");
+        for name in ["skill.toml", "root.md"] {
+            std::fs::set_permissions(skill_dir.join(name), std::fs::Permissions::from_mode(0o400))
+                .unwrap();
+        }
+
+        definition.description = "Second revision".to_owned();
+        definition.body = "second body".to_owned();
+        registry
+            .save(definition)
+            .expect("replacement must stage complete files before committing them");
+
+        let loaded = SkillRegistry::with_user_dir(&dir);
+        let skill = loaded.get("durable-skill").unwrap();
+        assert_eq!(skill.description, "Second revision");
+        assert_eq!(skill.body, "second body");
+        assert!(
+            std::fs::read_dir(&skill_dir).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
+            "successful commits must not leave staging files"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

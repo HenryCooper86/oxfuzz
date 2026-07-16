@@ -105,7 +105,7 @@ impl VectorIndexer {
 #[cfg(feature = "vector_qdrant")]
 use qdrant_client::{
     qdrant::{
-        CreateCollectionBuilder, DeleteCollectionBuilder, DeletePointsBuilder, Distance, Filter,
+        CreateCollectionBuilder, DeleteCollectionBuilder, DeletePointsBuilder, Distance,
         PointStruct, PointsIdsList, QueryPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
     },
     Qdrant,
@@ -116,9 +116,17 @@ use qdrant_client::{
 /// Manages Qdrant collections for knowledge base vector storage.
 /// Uses the Qdrant gRPC API via `qdrant-client` crate.
 #[cfg(feature = "vector_qdrant")]
-#[derive(Debug)]
 pub struct VectorIndexer {
     client: Qdrant,
+}
+
+#[cfg(feature = "vector_qdrant")]
+impl std::fmt::Debug for VectorIndexer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VectorIndexer")
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "vector_qdrant")]
