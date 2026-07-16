@@ -5,7 +5,7 @@
 **Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **Self-Evolving Skills**
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="hobot_fuzz desktop app -- the AI Assistant driving a fuzzing campaign" width="900">
+  <img src="docs/screenshots/hero.png" alt="hobot_fuzz Dashboard showing operational readiness, harness review, recent runs, and crash handoff" width="900">
 </p>
 
 ---
@@ -18,10 +18,11 @@ is a potential bug, often a security hole. Doing this by hand takes expert work:
 deciding what to test, writing test code, running it safely, and making sense of
 the crashes.
 
-**hobot_fuzz automates all of that with AI.** You point it at a codebase and it
-finds the riskiest functions, writes the test code for them, runs a real fuzzing
-engine inside a safe sandbox, and explains any bugs it finds -- asking for your
-approval at the steps that matter.
+**hobot_fuzz coordinates that workflow with AI and deterministic tooling.** You
+point it at a codebase and it ranks candidate targets, drafts and qualifies test
+harnesses, drives a real fuzzing engine inside a mandatory sandbox, and retains
+evidence for the crashes it finds. Human approval is bound to the exact harness
+revision that is allowed to enter a full campaign.
 
 If you are not a fuzzing engineer, read the **[Getting Started
 guide](docs/guides/GETTING_STARTED.md)** first -- it explains everything from
@@ -36,6 +37,7 @@ of every term. The rest of this README is the technical reference.
 - [Highlights](#highlights)
 - [The Desktop App](#the-desktop-app)
 - [Install & Build](#install--build)
+- [Release Readiness](#release-readiness)
 - [Quick Start (CLI)](#quick-start-cli)
 - [Command Reference](#command-reference)
 - [Configuration Reference](#configuration-reference)
@@ -51,16 +53,18 @@ of every term. The rest of this README is the technical reference.
 
 | Capability | Description |
 | --- | --- |
+| **Operational Dashboard** | Readiness, harness-review state, recent campaigns, crash handoff, and evidence counts in one operator-focused view. |
 | **Target Discovery** | Semantic + static-analysis scan of a project producing a ranked Target Inventory (fit score, input surface, complexity, call-graph reachability). |
 | **Harness Generation** | LLM-authored, compile-validated, smoke-fuzzed harnesses per target. |
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and Syzkaller behind one `EngineAdapter` trait. |
 | **Crash Triage** | Dedup by stack signature, CASR severity/exploitability, minimize, and LLM-drafted bug reports under human review. |
 | **Corpus & Coverage** | Seed, grow, prune, and merge corpora; track coverage deltas; feed crashes back into the corpus. |
-| **AI Assistant** | A conversational agent that drives the whole pipeline with tool calls, live tool-activity updates, and human approval gates. |
+| **AI Assistant** | A conversational control surface for the same service-owned workflow, with visible tool activity and policy-enforced human approval gates. |
 | **Multi-Provider LLM Pool** | Tag-based routing, automatic failover, provider freeze/thaw across OpenAI, Anthropic, Gemini, and OpenAI-compatible backends. |
 | **Sandboxed Execution** | Every harness build and fuzz run goes through the mandatory Docker-backed `hf-runtime`; there is no production host-execution fallback. |
 | **Scheduled Campaigns** | Headless, budget-bounded fuzzing on an interval/cron/once schedule, rotating through a project's promoted targets. |
 | **Issue & Vuln Tracking** | File crashes as GitHub/GitLab issues or push them to DefectDojo as findings; export SARIF for code scanning. |
+| **Retained Evidence** | Run history, policy decisions, reports, crash reproducers, corpora, coverage, and exportable project evidence remain available for review. |
 | **Desktop, CLI & Web** | A native macOS app (Tauri v2 + React) with a built-in Help guide, a full CLI/TUI, and a REST + SSE API -- all over the same service core. |
 
 ---
@@ -78,11 +82,18 @@ open target/release/bundle/macos/hobot_fuzz.app
 
 On first launch a short setup wizard configures your LLM provider, checks the
 sandbox, and points hobot_fuzz at your first project. After that the left
-sidebar is your control panel:
-
-**AI Assistant &middot; Fuzzing Workflow &middot; Discover &middot; Harness &middot; Run &middot; Triage &middot; Corpus &middot; Projects &middot; Artifacts &middot; Agents &middot; Skills &middot; Knowledge &middot; Settings**
+sidebar is your control panel. Pipeline surfaces cover the Dashboard, AI
+Assistant, guided workflow, Discover, Harness, Run, Triage, and Corpus. Library
+and operations surfaces add Projects, Artifacts, Reports, Run History, Policy
+Audit, Agents, Skills, Knowledge, Automation, Automotive, DefectDojo, Help &
+Docs, and Settings.
 
 ### A campaign, end to end
+
+**0. Confirm readiness and the next operator action.** The Dashboard summarizes
+sandbox and engine readiness, retained evidence, harness promotion state,
+recent campaigns, and crash handoff. A blocked requirement stays visible
+instead of being hidden behind a generic status.
 
 **1. Discover the attack surface.** Point hobot_fuzz at a C/C++ project and it
 scans for fuzzable functions, ranking them into a Target Inventory by fit score,
@@ -90,39 +101,41 @@ input surface, complexity, and reachability from entry points.
 
 ![Discover -- ranked Target Inventory](docs/screenshots/discover.png)
 
-**2. Generate and validate a harness.** Pick a target and the agent writes a
-harness for it, compiles it in the sandbox, and runs a 60-second smoke fuzz to
-prove it exercises the target. You then review and explicitly approve that
-exact revision before any full campaign can start.
+**2. Generate, qualify, and promote a harness.** Pick a target and the agent
+drafts a harness, compiles it in the sandbox, runs bounded smoke qualification,
+and prepares a seed corpus. You then review and explicitly promote that exact
+revision before any full campaign can start. Regeneration invalidates the prior
+promotion.
 
-![Harness -- generate, compile, and seed](docs/screenshots/harness.png)
+![Harness -- promoted revision and five-step sandbox qualification flow](docs/screenshots/harness.png)
 
-**3. Run the fuzzer.** Launch AFL++, honggfuzz, or libFuzzer against the harness.
-The Run view streams live progress -- executions/sec, coverage edges, elapsed
-time, and any findings -- with a Stop button that cancels the sandboxed run
-cooperatively.
+**3. Run the fuzzer.** Launch an enabled engine against the promoted harness.
+The Run view shows campaign limits and retained metrics -- executions/sec,
+coverage edges, elapsed time, and findings -- with cooperative cancellation for
+an active sandboxed run.
 
-![Run -- live fuzzing dashboard](docs/screenshots/run.png)
+![Run -- approved target, bounded campaign configuration, and retained metrics](docs/screenshots/run.png)
 
 **4. Triage the crashes.** Crashes are ingested, deduplicated by stack
-signature, and classified with CASR for severity and exploitability. The agent
-drafts a bug report for each unique finding, and you can export a full Markdown
-campaign report with graphs.
+signature, minimized, and classified with CASR for severity and exploitability.
+The agent can draft a report from retained evidence for human review, and the
+result can be exported or handed off to DefectDojo.
 
-![Triage -- crashes, severity, and drafted bug reports](docs/screenshots/triage.png)
+![Triage -- deduplicated sanitizer crash and exploitability classification](docs/screenshots/triage.png)
 
-**5. Browse the artifacts.** The Artifacts view collects every persisted crash
-and corpus input across your targets in one place.
+**Review retained evidence.** The Artifacts view collects persisted crash
+reproducers and corpus inputs across the selected project in one place. Reports,
+run history, policy audit, and evidence export provide the wider audit trail.
 
 ![Artifacts -- crashes and corpus](docs/screenshots/artifacts.png)
 
 ### Talk to it instead
 
-Everything above is also available conversationally. The **AI Assistant** drives
-discovery, harnessing, running, and triage through tool calls -- ask it to "find
-the riskiest parsers in this project and fuzz the top one," approve the steps
-that matter, and watch it work. Approval gates (HITL) are enforced at every
-untrusted-execution point.
+Everything above is also available conversationally. The **AI Assistant** uses
+the same service tools for discovery, harnessing, running, and triage. It can
+recommend and prepare work, but it cannot turn a draft into an approved full
+campaign by itself. Guardrails, sandbox policy, and the human promotion record
+remain authoritative.
 
 ### Settings
 
@@ -132,7 +145,7 @@ storage cleanup, and external integrations. Mandatory sandboxing, blocked
 fuzzer networking, and human promotion before full campaigns are displayed as
 enforced guarantees rather than switches.
 
-![Settings -- provider pool configuration](docs/screenshots/settings.png)
+![Fuzzing settings -- engine availability, campaign limits, and mandatory protections](docs/screenshots/settings.png)
 
 > The GUI also runs in the browser against the REST API for development:
 > `cd crates/hf-gui && npm run dev:web` (talks to `hobot-fuzz serve` over HTTP).
@@ -146,7 +159,7 @@ enforced guarantees rather than switches.
 | Dependency | Required? | Notes |
 | --- | --- | --- |
 | **Rust 1.94+** | Yes | Pinned in `rust-toolchain.toml` |
-| **Node 18+ / npm** | Desktop app | For the Tauri v2 frontend (`crates/hf-gui`) |
+| **Node 20.19+ or 22.12+ / npm** | Desktop app | Vite 7 requirement; GitLab CI uses Node 22 |
 | **Docker** | Yes | Mandatory boundary for harness builds, fuzz runs, and crash parsing |
 | **SQLite 3.35+** | Embedded | Bundled, no action needed |
 | **Fuzzing engines** | Bundled | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and syzkaller live in the sandbox image |
@@ -174,6 +187,29 @@ cargo build --release
 `scripts/health-check.sh` delegates to `hobot-fuzz doctor`, which probes the
 Docker daemon, sandbox image, and engine tools inside that image. Host engine
 binaries and optional integrations do not determine core readiness.
+
+---
+
+## Release Readiness
+
+A release candidate is ready only when its source gates, sandbox health, CLI
+artifact, and platform bundle have all been verified from the same commit. The
+repository provides a local gate runner, GitLab CI jobs for locked all-feature
+coverage, and release build scripts:
+
+```bash
+./scripts/tests/gates.sh
+./scripts/build-sandbox.sh
+./scripts/build-release.sh
+target/release/hobot-fuzz doctor
+./scripts/build-app.sh
+```
+
+On macOS, `build-app.sh` verifies the `.app` signature and the generated DMG.
+Its default ad-hoc signature is suitable for local QA, not public distribution;
+a distributed build still needs the organization's Developer ID signing and
+notarization workflow. Use the **[release checklist](docs/guides/RELEASE_CHECKLIST.md)**
+for the full evidence, packaging, safety, and handoff gates.
 
 ---
 
@@ -292,6 +328,8 @@ enablement, an exact interface/arbitration/service allowlist, a fresh
 plan-scoped human approval, and stricter limits. No generated plan is executed
 on a host or vehicle as part of the normal test or build process.
 
+![Automotive workspace -- offline analysis and policy-gated replay readiness](docs/screenshots/automotive.png)
+
 ---
 
 ## Configuration Reference
@@ -400,14 +438,19 @@ Core:                          hf-core            <- traits, types, contracts
 
 ## Documentation
 
-- **`docs/guides/GETTING_STARTED.md` -- plain-language intro for non-experts (start here).**
-- `VISION.md` -- project vision.
-- `AGENTS.md` -- engineering protocol (TDD, risk tiers, quality gates).
-- `docs/design/` -- detailed design documents.
-- `docs/standards/` -- engineering, testing, harness, target, engine standards.
+- **[Getting Started](docs/guides/GETTING_STARTED.md) -- plain-language intro for non-experts (start here).**
+- [Documentation map](docs/README.md) -- routes readers by audience and task.
+- [Release checklist](docs/guides/RELEASE_CHECKLIST.md) -- source, sandbox, packaging, and handoff gates.
+- [Screenshot guide](docs/screenshots/README.md) -- reproducible capture and privacy requirements.
+- [Contributing](CONTRIBUTING.md) -- contribution workflow, safety requirements, and quality gates.
+- [Security policy](SECURITY.md) -- supported versions, private reporting, and safe research expectations.
+- [Vision](VISION.md) -- project vision.
+- [Engineering protocol](AGENTS.md) -- TDD, risk tiers, and quality gates.
+- [Design documents](docs/design/) -- detailed subsystem designs.
+- [Engineering standards](docs/standards/) -- testing, harness, target, engine, database, and tool-call standards.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
