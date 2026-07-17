@@ -15,6 +15,24 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// BM25 candidate pool sizing
+// ---------------------------------------------------------------------------
+
+/// Minimum number of BM25 candidates fetched before applying post-search
+/// filters (domain/collection/level/freshness).
+///
+/// A fixed cap of 100 starved selective filters: with more than 100 matching
+/// chunks, any match ranked 101+ was dropped before the filter ran, and a
+/// keyword search could never return more than 100 results even when the
+/// caller requested more. The pool is floored here and scaled with the
+/// requested limit (see [`BM25_CANDIDATE_MULTIPLIER`]).
+const BM25_CANDIDATE_FLOOR: usize = 500;
+
+/// Multiplier applied to the requested result limit when sizing the BM25
+/// candidate pool, giving post-search filters headroom above the limit.
+const BM25_CANDIDATE_MULTIPLIER: usize = 5;
+
+// ---------------------------------------------------------------------------
 // Search Strategy
 // ---------------------------------------------------------------------------
 
@@ -153,15 +171,39 @@ impl<T: Tokenizer> HybridRetriever<T> {
     }
 
     /// Index a chunk for retrieval.
+    ///
+    /// Upsert semantics: `Bm25Index::add` already replaces an existing
+    /// posting for the same `chunk_id`, so re-indexing a deterministic
+    /// `chunk_id` (`{document_id}-L{level}-{i}`) must also drop the stale
+    /// chunk (and its quality score / embedding) from the in-memory stores.
+    /// Otherwise the chunks vec keeps a duplicate whose content is returned
+    /// by search even though BM25 scored the newer copy.
     pub fn index(&mut self, chunk: Chunk) {
+        self.remove_indexed_chunk(&chunk.id);
         self.bm25.add(&chunk.id, &chunk.content);
         self.chunks.push(chunk);
     }
 
+    /// Remove any previously indexed chunk with this id from the in-memory
+    /// stores (chunks vec, quality scores, embeddings).
+    ///
+    /// The BM25 index is intentionally left untouched: its own `add` performs
+    /// the upsert. Callers of [`Self::index`] that carry a fresh quality score
+    /// or embedding must set it *after* `index` so this cleanup does not wipe
+    /// the new value.
+    fn remove_indexed_chunk(&mut self, chunk_id: &str) {
+        self.chunks.retain(|c| c.id != chunk_id);
+        self.quality_scores.remove(chunk_id);
+        self.embeddings.remove(chunk_id);
+    }
+
     /// Index a chunk with an associated quality score.
     pub fn index_with_quality(&mut self, chunk: Chunk, quality_score: f32) {
-        self.quality_scores.insert(chunk.id.clone(), quality_score);
+        let id = chunk.id.clone();
+        // `index` clears any stale quality score for this id, so the fresh
+        // score is inserted afterwards.
         self.index(chunk);
+        self.quality_scores.insert(id, quality_score);
     }
 
     /// Remove all chunks belonging to a document from the retriever.
@@ -200,8 +242,11 @@ impl<T: Tokenizer> HybridRetriever<T> {
 
     /// Index a chunk with an embedding vector and quality score.
     pub fn index_with_embedding(&mut self, chunk: Chunk, embedding: Vec<f32>, quality_score: f32) {
-        self.embeddings.insert(chunk.id.clone(), embedding);
+        let id = chunk.id.clone();
+        // `index` (via `index_with_quality`) clears any stale embedding for
+        // this id, so the fresh embedding is inserted afterwards.
         self.index_with_quality(chunk, quality_score);
+        self.embeddings.insert(id, embedding);
     }
 
     /// Index multiple chunks with quality scores in a single call.
@@ -322,9 +367,21 @@ impl<T: Tokenizer> HybridRetriever<T> {
         results
     }
 
+    /// Number of BM25 candidates to fetch before applying post-search filters.
+    ///
+    /// Scales with the requested limit so a caller asking for more than the
+    /// legacy 100-result cap is honored, with a floor that keeps selective
+    /// filters from being starved of matches ranked beyond the top few.
+    fn bm25_candidate_count(filter: &RetrievalFilter) -> usize {
+        let requested = if filter.limit == 0 { 10 } else { filter.limit };
+        requested
+            .saturating_mul(BM25_CANDIDATE_MULTIPLIER)
+            .max(BM25_CANDIDATE_FLOOR)
+    }
+
     /// BM25 keyword search only.
     fn keyword_search(&self, query: &str, filter: &RetrievalFilter) -> Vec<RetrievalResult> {
-        let bm25_results = self.bm25.search(query, 100);
+        let bm25_results = self.bm25.search(query, Self::bm25_candidate_count(filter));
         let bm25_map: HashMap<&str, f64> = bm25_results
             .iter()
             .map(|r| (r.chunk_id.as_str(), r.score))
@@ -397,7 +454,7 @@ impl<T: Tokenizer> HybridRetriever<T> {
         let query_lower = query.to_lowercase();
 
         // Get BM25 scores.
-        let bm25_results = self.bm25.search(query, 100);
+        let bm25_results = self.bm25.search(query, Self::bm25_candidate_count(filter));
         let bm25_map: HashMap<&str, f64> = bm25_results
             .iter()
             .map(|r| (r.chunk_id.as_str(), r.score))
@@ -410,10 +467,16 @@ impl<T: Tokenizer> HybridRetriever<T> {
             .iter()
             .filter(|c| Self::matches_filter(c, filter))
             .filter_map(|c| {
-                // Semantic score: use cosine similarity when embeddings available.
+                // Semantic score, normalized to a comparable [0, 1] scale so a
+                // single `min_similarity_threshold` applies consistently even
+                // during partial indexing (some chunks embedded, some not).
+                //
+                // - Cosine similarity is in [-1, 1] -> map via (x + 1) / 2
+                //   (i.e. the midpoint of the score and 1.0).
+                // - Text-similarity fallback is already in [0, 0.5] ⊂ [0, 1].
                 let semantic =
                     if let (Some(qe), Some(ce)) = (query_embedding, self.embeddings.get(&c.id)) {
-                        cosine_similarity(qe, ce)
+                        f32::midpoint(cosine_similarity(qe, ce), 1.0)
                     } else {
                         let content_lower = c.content.to_lowercase();
                         Self::compute_text_similarity(&query_lower, &content_lower)
@@ -1330,5 +1393,121 @@ mod tests {
         // Blend should have both vector and BM25 scores.
         assert!(results[0].vector_score.is_some());
         assert!(results[0].bm25_score.is_some());
+    }
+
+    // --- Re-index upsert (stale duplicate) ---
+
+    #[test]
+    fn reindexing_same_chunk_id_replaces_stale_content() {
+        let config = RetrievalConfig {
+            min_similarity_threshold: 0.0,
+            enable_dedup: false,
+            ..Default::default()
+        };
+        let mut retriever = HybridRetriever::with_config(SimpleTokenizer::new(), config);
+
+        retriever.index(make_chunk("dup", "original rust content alpha", "rust"));
+        // Re-index the same deterministic chunk_id with new content.
+        retriever.index(make_chunk("dup", "updated rust content beta", "rust"));
+
+        // Only one chunk with this id should remain (no stale duplicate).
+        let count = retriever.chunks.iter().filter(|c| c.id == "dup").count();
+        assert_eq!(count, 1, "re-indexing must not leave a stale duplicate");
+
+        let filter = RetrievalFilter {
+            limit: 10,
+            ..Default::default()
+        };
+        let results = retriever.search("rust content", &filter);
+        assert_eq!(
+            results.len(),
+            1,
+            "search must return a single, current entry"
+        );
+        assert!(
+            results[0].chunk.content.contains("beta"),
+            "search must return the new content"
+        );
+        assert!(
+            !results[0].chunk.content.contains("alpha"),
+            "search must not return stale content"
+        );
+    }
+
+    // --- BM25 candidate pool scaling ---
+
+    #[test]
+    fn keyword_search_pool_is_not_starved_by_selective_filter_beyond_top_100() {
+        let config = RetrievalConfig {
+            min_similarity_threshold: 0.0,
+            enable_dedup: false,
+            strategy: SearchStrategy::KeywordSearch,
+            ..Default::default()
+        };
+        let mut retriever = HybridRetriever::with_config(SimpleTokenizer::new(), config);
+
+        // 120 short, high-scoring chunks in the "common" domain.
+        for i in 0..120 {
+            retriever.index(make_chunk(&format!("common-{i}"), "rust", "common"));
+        }
+        // One low-scoring chunk (long body -> BM25 length normalization sinks
+        // it below every "common" chunk) in a selective "special" domain. It
+        // ranks 121st, i.e. beyond the legacy fixed pool of 100.
+        let long_body = "lorem ipsum ".repeat(60);
+        retriever.index(make_chunk(
+            "target",
+            &format!("rust {long_body}"),
+            "special",
+        ));
+
+        let filter = RetrievalFilter {
+            domain: Some("special".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let results = retriever.search("rust", &filter);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "a selective filter matching only a chunk ranked beyond the top 100 must not be starved"
+        );
+        assert_eq!(results[0].chunk.id, "target");
+    }
+
+    // --- Blend semantic-score normalization ---
+
+    #[test]
+    fn blend_normalizes_orthogonal_cosine_to_midpoint() {
+        let config = RetrievalConfig {
+            min_similarity_threshold: 0.0,
+            strategy: SearchStrategy::Hybrid,
+            enable_dedup: false,
+            bm25_weight: 0.0, // isolate the semantic component
+            ..Default::default()
+        };
+        let mut retriever = HybridRetriever::with_config(SimpleTokenizer::new(), config);
+
+        // Chunk embedding orthogonal to the query embedding (cosine == 0).
+        let c1 = make_chunk("c1", "orthogonal topic content", "misc");
+        retriever.index_with_embedding(c1, vec![0.0, 1.0], 1.0);
+
+        let query_embedding = vec![1.0, 0.0];
+        let filter = RetrievalFilter {
+            limit: 10,
+            ..Default::default()
+        };
+        let results = retriever.search_with_embedding("unrelated", Some(&query_embedding), &filter);
+
+        assert_eq!(results.len(), 1);
+        let vs = results[0]
+            .vector_score
+            .expect("blend records a vector score");
+        // Orthogonal cosine (0) maps to 0.5 under the (x + 1) / 2 normalization,
+        // sharing a [0, 1] scale with the text-similarity fallback.
+        assert!(
+            (vs - 0.5).abs() < 1e-6,
+            "orthogonal cosine should normalize to 0.5, got {vs}"
+        );
     }
 }

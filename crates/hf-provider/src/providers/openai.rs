@@ -24,7 +24,6 @@ use hf_core::types::ToolCallRequest;
 use hf_core::types::{ProviderId, TokenUsage};
 
 /// `OpenAI` Response API / OpenAI-compatible LLM provider.
-#[derive(Debug)]
 pub struct OpenAiProvider {
     client: Client,
     api_key: String,
@@ -45,6 +44,23 @@ pub struct OpenAiProvider {
     /// `reasoning: { effort }` object (`OpenAI` Response API shape). Defaults to
     /// `false`; set `true` for `openai-compat`/`custom`/`deepseek` provider types.
     use_reasoning_effort: bool,
+}
+
+impl std::fmt::Debug for OpenAiProvider {
+    // Hand-written so the plaintext `api_key` is never printed via `{:?}`
+    // (logs, panic messages, error chains). All other fields are preserved.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("custom_headers", &self.custom_headers)
+            .field("metadata", &self.metadata)
+            .field("include_usage", &self.include_usage)
+            .field("use_max_completion_tokens", &self.use_max_completion_tokens)
+            .field("use_reasoning_effort", &self.use_reasoning_effort)
+            .finish()
+    }
 }
 
 impl OpenAiProvider {
@@ -267,10 +283,10 @@ impl OpenAiProvider {
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthenticationFailed {
-                provider: self.metadata.id.to_string(),
-                message: error_body,
-            });
+            return Err(crate::error_classifier::auth_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                &error_body,
+            ));
         }
 
         if !status.is_success() {
@@ -604,12 +620,12 @@ impl LlmProvider for OpenAiProvider {
             });
         }
 
-        if status == reqwest::StatusCode::UNAUTHORIZED {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthenticationFailed {
-                provider: self.metadata.id.to_string(),
-                message: error_body,
-            });
+            return Err(crate::error_classifier::auth_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                &error_body,
+            ));
         }
 
         if !status.is_success() {
@@ -742,11 +758,13 @@ impl LlmProvider for OpenAiProvider {
                     provider: self.metadata.id.to_string(),
                     retry_after_secs: retry_after.unwrap_or(60),
                 }
-            } else if status == reqwest::StatusCode::UNAUTHORIZED {
-                ProviderError::AuthenticationFailed {
-                    provider: self.metadata.id.to_string(),
-                    message: error_body,
-                }
+            } else if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                crate::error_classifier::auth_failure_to_provider_error(
+                    &self.metadata.id.to_string(),
+                    &error_body,
+                )
             } else {
                 ProviderError::ServerError {
                     provider: self.metadata.id.to_string(),
@@ -1266,6 +1284,32 @@ mod tests {
     use super::*;
     use crate::sse::extract_sse_data;
     use hf_core::provider::ToolCallingMode;
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let provider = OpenAiProvider::new(
+            "test-openai",
+            "gpt-4o",
+            "sk-super-secret-value".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+            5,
+            128_000,
+            ToolCallingMode::default(),
+        );
+
+        let dbg = format!("{provider:?}");
+        assert!(
+            !dbg.contains("sk-super-secret-value"),
+            "api key leaked: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker: {dbg}"
+        );
+    }
 
     #[test]
     fn test_openai_provider_metadata() {

@@ -383,6 +383,27 @@ async fn malformed_json_final_does_not_leak_thought_to_user() {
 }
 
 #[tokio::test]
+async fn thought_only_step_continues_instead_of_leaking_json() {
+    // A protocol-shaped step with a thought but neither `tool` nor `final` is an
+    // incomplete emission. The agent must NOT surface the raw JSON as the answer
+    // or end the turn; it should continue and use the next step's final answer.
+    let agent = agent_with(
+        vec![
+            r#"{"thought":"let me discover targets first"}"#,
+            r#"{"thought":"done","final":"here is the answer"}"#,
+        ],
+        Some(std::env::temp_dir()),
+    );
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "do something", &sink).await.unwrap();
+    assert_eq!(out, "here is the answer");
+    assert!(
+        !out.contains("\"thought\""),
+        "raw protocol JSON leaked to the user: {out}"
+    );
+}
+
+#[tokio::test]
 async fn tool_call_then_final() {
     // Step 1 calls an unknown tool (deterministic error fed back), step 2 ends.
     let agent = agent_with(

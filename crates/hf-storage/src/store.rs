@@ -967,12 +967,19 @@ impl Store {
         // Identity is (project, symbol), not the scanner's fresh UUID. Preserve
         // the first persisted id so rediscovery cannot orphan harness, corpus,
         // and crash rows that reference the target.
+        //
+        // The read (stable id), duplicate-collapse, and write run in a single
+        // transaction so two concurrent discover/save_inventory operations on
+        // the same project cannot both observe "no existing row" and each insert
+        // a distinct id; the unique index on (project_root, symbol) is the
+        // backstop that rejects a duplicate even if the ordering ever slips.
+        let mut tx = self.pool.begin().await?;
         let stable_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM targets WHERE project_root = ?1 AND symbol = ?2 LIMIT 1",
         )
         .bind(&project)
         .bind(&t.symbol)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         let mut persisted = t.clone();
         if let Some(id) = stable_id {
@@ -986,7 +993,7 @@ impl Store {
             .bind(&project)
             .bind(&persisted.symbol)
             .bind(persisted.id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query(
             "INSERT INTO targets
@@ -1009,8 +1016,9 @@ impl Store {
         .bind(&persisted.rationale)
         .bind(discovered_at.to_rfc3339())
         .bind(serde_json::to_string(&persisted)?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1025,6 +1033,8 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         // `auto_revert_events` is campaign history, so it is cleared too;
         // `project_settings` is configuration and is intentionally left intact.
+        // `automotive_state_corpus` is deleted before `automotive_operations`
+        // because it holds a foreign key into it.
         for table in [
             "crashes",
             "corpus_entries",
@@ -1032,6 +1042,8 @@ impl Store {
             "runs",
             "targets",
             "auto_revert_events",
+            "automotive_state_corpus",
+            "automotive_operations",
         ] {
             sqlx::query(&format!("DELETE FROM {table}"))
                 .execute(&mut *tx)
@@ -1094,6 +1106,17 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM auto_revert_events WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        // Automotive evidence is also keyed by project_root; delete the state
+        // corpus before the operations it references (FK), so re-adding the same
+        // path cannot resurface stale automotive evidence.
+        sqlx::query("DELETE FROM automotive_state_corpus WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM automotive_operations WHERE project_root = ?1")
             .bind(project_root)
             .execute(&mut *tx)
             .await?;
@@ -1344,10 +1367,23 @@ impl Store {
             .collect::<Result<Vec<_>, StorageError>>()?;
         let mut transaction = self.pool.begin().await?;
         for (crash, (bug_json, data_json)) in crashes.iter().zip(serialized) {
+            // ON CONFLICT(id) DO UPDATE (not INSERT OR REPLACE) so re-triaging
+            // an existing crash keeps its original rowid; list_all_crashes
+            // orders by rowid to mean "first seen", and a delete+reinsert would
+            // jump a re-processed old crash to the top of that view.
             sqlx::query(
-                "INSERT OR REPLACE INTO crashes
+                "INSERT INTO crashes
                     (id, run_id, target_id, stack_signature, kind, summary, minimized, bug_report_json, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                    run_id = excluded.run_id,
+                    target_id = excluded.target_id,
+                    stack_signature = excluded.stack_signature,
+                    kind = excluded.kind,
+                    summary = excluded.summary,
+                    minimized = excluded.minimized,
+                    bug_report_json = excluded.bug_report_json,
+                    data_json = excluded.data_json",
             )
             .bind(crash.id.to_string())
             .bind(crash.run_id.to_string())

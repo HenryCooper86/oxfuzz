@@ -190,8 +190,13 @@ impl MetadataParser {
         }
 
         // Try finding a JSON object in the output.
-        if let Some(start) = cleaned.find('{') {
-            if let Some(end) = cleaned.rfind('}') {
+        //
+        // Guard against a leading `}` appearing before the first `{`
+        // (e.g. malformed input like "} {"), which would make `start > end`
+        // and panic on the inclusive slice `&cleaned[start..=end]`. Only slice
+        // when `start < end`; otherwise fall through to the error return below.
+        if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+            if start < end {
                 let json_str = &cleaned[start..=end];
                 tracing::debug!(
                     json_preview = %&json_str[..floor_char_boundary(json_str, 300)],
@@ -313,8 +318,13 @@ impl SummaryParser {
         }
 
         // Try finding a JSON object in the output.
-        if let Some(start) = cleaned.find('{') {
-            if let Some(end) = cleaned.rfind('}') {
+        //
+        // Guard against a leading `}` appearing before the first `{`
+        // (e.g. malformed input like "} {"), which would make `start > end`
+        // and panic on the inclusive slice `&cleaned[start..=end]`. Only slice
+        // when `start < end`; otherwise fall through to the error return below.
+        if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+            if start < end {
                 let json_str = &cleaned[start..=end];
                 tracing::debug!(
                     json_preview = %&json_str[..floor_char_boundary(json_str, 300)],
@@ -797,6 +807,14 @@ mod tests {
         assert!(MetadataParser::parse(output).is_err());
     }
 
+    #[test]
+    fn test_metadata_parser_closing_brace_before_opening_does_not_panic() {
+        // The first `{` appears after the last `}`, so `start > end`. The
+        // inclusive-slice fallback must not panic; it must return an error.
+        assert!(MetadataParser::parse("} {").is_err());
+        assert!(MetadataParser::parse("garbage } then { partial").is_err());
+    }
+
     // --- SummaryParser tests ---
 
     #[test]
@@ -825,6 +843,14 @@ mod tests {
     fn test_summary_parser_invalid() {
         let output = "Not valid JSON";
         assert!(SummaryParser::parse(output).is_err());
+    }
+
+    #[test]
+    fn test_summary_parser_closing_brace_before_opening_does_not_panic() {
+        // The first `{` appears after the last `}`, so `start > end`. The
+        // inclusive-slice fallback must not panic; it must return an error.
+        assert!(SummaryParser::parse("} {").is_err());
+        assert!(SummaryParser::parse("garbage } then { partial").is_err());
     }
 
     // --- strip_think_tags tests ---

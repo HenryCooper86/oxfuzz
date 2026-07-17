@@ -173,8 +173,27 @@ pub fn is_configured() -> bool {
 }
 
 /// The bundled example ships a placeholder URL; treat it as "not configured".
+///
+/// Matches the RFC 2606 reserved example domains on a host-label boundary rather
+/// than by bare substring, so a real instance such as
+/// `https://dojo.example.com.corp.internal` is NOT misread as the placeholder.
 fn is_placeholder_url(url: &str) -> bool {
-    url.trim().is_empty() || url.contains("example.com")
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Extract the host: strip the scheme, then take up to the first `/`, `:`,
+    // `?`, or `#`. Lowercased for a case-insensitive host comparison.
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    let host = after_scheme
+        .split(['/', ':', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme)
+        .to_ascii_lowercase();
+    const EXAMPLE_DOMAINS: [&str; 3] = ["example.com", "example.net", "example.org"];
+    EXAMPLE_DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 /// Load the live `DefectDojo` config, rejecting the unconfigured placeholder.
@@ -728,5 +747,15 @@ mod tests {
         assert!(is_placeholder_url("https://defectdojo.example.com"));
         assert!(is_placeholder_url("  "));
         assert!(!is_placeholder_url("https://dd.corp.internal"));
+        // A real host that merely embeds "example.com" as a non-boundary
+        // substring must NOT be treated as the placeholder.
+        assert!(!is_placeholder_url(
+            "https://dojo.example.com.corp.internal"
+        ));
+        assert!(!is_placeholder_url("https://example.company.io"));
+        // The reserved example domains are matched on a label boundary and
+        // case-insensitively, with or without a path/port.
+        assert!(is_placeholder_url("https://EXAMPLE.COM/api"));
+        assert!(is_placeholder_url("http://dojo.example.org:8080/finding"));
     }
 }

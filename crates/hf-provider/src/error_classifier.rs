@@ -163,6 +163,55 @@ pub fn classify_provider_error(error: &hf_core::provider::ProviderError) -> Stan
     }
 }
 
+/// Build a [`ProviderError`] for an authentication-class HTTP failure (401/403),
+/// sub-classifying the response body so a permanently-dead key or an exhausted
+/// account reaches a permanent freeze instead of an hourly auth backoff.
+///
+/// Reuses [`classify_auth_error`]/[`classify_forbidden_error`] rather than
+/// duplicating the substring lists:
+/// - a revoked / invalid / expired / deactivated key maps to
+///   [`ProviderError::KeyInvalid`] (permanent);
+/// - an insufficient balance or exhausted quota maps to
+///   [`ProviderError::QuotaExhausted`] (permanent — `ProviderError` has no
+///   dedicated `InsufficientBalance` variant, so quota/balance collapse onto it);
+/// - anything else stays [`ProviderError::AuthenticationFailed`] (transient).
+///
+/// The dead-key signal can appear under either a 401 or a 403, so the body is
+/// the source of truth here and the status code is not needed.
+///
+/// [`ProviderError`]: hf_core::provider::ProviderError
+/// [`ProviderError::KeyInvalid`]: hf_core::provider::ProviderError::KeyInvalid
+/// [`ProviderError::QuotaExhausted`]: hf_core::provider::ProviderError::QuotaExhausted
+/// [`ProviderError::AuthenticationFailed`]: hf_core::provider::ProviderError::AuthenticationFailed
+pub(crate) fn auth_failure_to_provider_error(
+    provider_id: &str,
+    body: &str,
+) -> hf_core::provider::ProviderError {
+    use hf_core::provider::ProviderError;
+    // Check the key-death signal first (401 rules), then fall back to the
+    // quota/balance signal (403 rules); either can appear on either status.
+    let classified = match classify_auth_error(body) {
+        StandardError::KeyInvalid => StandardError::KeyInvalid,
+        _ => classify_forbidden_error(body),
+    };
+    match classified {
+        StandardError::KeyInvalid => ProviderError::KeyInvalid {
+            provider: provider_id.to_string(),
+            message: body.to_string(),
+        },
+        StandardError::QuotaExhausted | StandardError::InsufficientBalance => {
+            ProviderError::QuotaExhausted {
+                provider: provider_id.to_string(),
+                message: body.to_string(),
+            }
+        }
+        _ => ProviderError::AuthenticationFailed {
+            provider: provider_id.to_string(),
+            message: body.to_string(),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal classification helpers
 // ---------------------------------------------------------------------------
@@ -172,6 +221,7 @@ fn classify_auth_error(body: &str) -> StandardError {
     if (lower.contains("invalid") && lower.contains("key"))
         || lower.contains("expired")
         || lower.contains("revoked")
+        || lower.contains("deactivated")
     {
         StandardError::KeyInvalid
     } else {
@@ -354,6 +404,67 @@ mod tests {
             message: String::new(),
         };
         assert_eq!(classify_provider_error(&err), StandardError::KeyInvalid);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auth-failure -> ProviderError sub-classification (dead-key permanent path)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_key_401_body_yields_permanent_freeze() {
+        // A 401 whose body names an invalid key must escalate to KeyInvalid so
+        // the pool freezes the provider permanently (no auto-thaw -> retry loop).
+        let err = auth_failure_to_provider_error("openai", "Invalid API key provided");
+        assert!(matches!(
+            err,
+            hf_core::provider::ProviderError::KeyInvalid { .. }
+        ));
+        assert!(classify_provider_error(&err).is_permanent());
+    }
+
+    #[test]
+    fn generic_401_body_stays_transient() {
+        // A generic 401 (e.g. a token-service blip) must remain a transient
+        // AuthenticationFailed so the provider is retried after a backoff.
+        let err = auth_failure_to_provider_error("openai", "unauthorized");
+        assert!(matches!(
+            err,
+            hf_core::provider::ProviderError::AuthenticationFailed { .. }
+        ));
+        let std_err = classify_provider_error(&err);
+        assert!(!std_err.is_permanent());
+        assert!(std_err.is_transient() || std_err == StandardError::AuthenticationFailed);
+    }
+
+    #[test]
+    fn revoked_and_deactivated_keys_are_permanent() {
+        for body in [
+            "API key revoked",
+            "this key has expired",
+            "account deactivated",
+        ] {
+            let err = auth_failure_to_provider_error("p", body);
+            assert!(
+                matches!(err, hf_core::provider::ProviderError::KeyInvalid { .. }),
+                "expected KeyInvalid for body {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn insufficient_balance_or_quota_maps_to_permanent_quota() {
+        for body in [
+            "insufficient balance",
+            "insufficient_quota",
+            "billing hard limit reached",
+        ] {
+            let err = auth_failure_to_provider_error("p", body);
+            assert!(
+                matches!(err, hf_core::provider::ProviderError::QuotaExhausted { .. }),
+                "expected QuotaExhausted for body {body:?}"
+            );
+            assert!(classify_provider_error(&err).is_permanent());
+        }
     }
 
     #[test]

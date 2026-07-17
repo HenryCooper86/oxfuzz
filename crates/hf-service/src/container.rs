@@ -1062,59 +1062,85 @@ fn verify_run_artifacts(artifacts: &RunArtifacts) -> Result<(), ClassifiedError>
     Ok(())
 }
 
-/// Return whether a run-owned output tree remains within its retained-evidence
-/// budget. Symlinks, special files, excessive entry counts, and metadata/read
-/// failures all fail closed.
-fn run_output_within_budget(
+/// Outcome of scanning a run-owned output tree against its retained-evidence
+/// budget.
+///
+/// The third state matters: a running fuzzer creates, renames, and deletes
+/// files continuously, so an entry enumerated by `read_dir` can vanish before
+/// its `symlink_metadata` call. That transient race must not be conflated with
+/// a genuine budget overflow -- doing so let the live monitor kill a perfectly
+/// valid campaign and discard its results.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutputBudget {
+    /// Definitely within budget.
+    Within,
+    /// A definite violation: total/file bytes or entry count over the limit, or
+    /// a symlink/special file that actually exists in the tree.
+    Exceeded,
+    /// The scan could not be completed because the tree changed underneath it
+    /// (a transient `NotFound`/read error). Neither within nor over budget.
+    Indeterminate,
+}
+
+/// Scan a run-owned output tree, distinguishing a real budget overflow from a
+/// transient filesystem race. A definite overflow or structural violation
+/// (symlink/special file) is [`OutputBudget::Exceeded`]; a metadata/read error
+/// on an individual entry is [`OutputBudget::Indeterminate`] rather than a
+/// false overflow.
+fn output_budget_status(
     root: &Path,
     max_bytes: u64,
     max_entries: usize,
     max_file_bytes: u64,
-) -> bool {
+) -> OutputBudget {
     let mut pending = vec![root.to_path_buf()];
     let mut total_bytes = 0_u64;
     let mut entries = 0usize;
     while let Some(directory) = pending.pop() {
         let Ok(metadata) = std::fs::symlink_metadata(&directory) else {
-            return false;
+            return OutputBudget::Indeterminate;
         };
         if !metadata.file_type().is_dir() {
-            return false;
+            return OutputBudget::Exceeded;
         }
         let Ok(children) = std::fs::read_dir(&directory) else {
-            return false;
+            return OutputBudget::Indeterminate;
         };
         for child in children {
             let Ok(child) = child else {
-                return false;
+                return OutputBudget::Indeterminate;
             };
             entries += 1;
             if entries > max_entries {
-                return false;
+                return OutputBudget::Exceeded;
             }
             let path = child.path();
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                return false;
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                // The entry vanished between enumeration and stat -- normal
+                // fuzzer churn, not an overflow. Skip it.
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return OutputBudget::Indeterminate,
             };
             if metadata.file_type().is_dir() {
                 pending.push(path);
             } else if metadata.file_type().is_file() {
                 if metadata.len() > max_file_bytes {
-                    return false;
+                    return OutputBudget::Exceeded;
                 }
                 let Some(next) = total_bytes.checked_add(metadata.len()) else {
-                    return false;
+                    return OutputBudget::Exceeded;
                 };
                 total_bytes = next;
                 if total_bytes > max_bytes {
-                    return false;
+                    return OutputBudget::Exceeded;
                 }
             } else {
-                return false;
+                return OutputBudget::Exceeded;
             }
         }
     }
-    true
+    OutputBudget::Within
 }
 
 async fn monitor_run_output(
@@ -1132,22 +1158,26 @@ async fn monitor_run_output(
             _ = interval.tick() => {
                 let path = output.clone();
                 let corpus_path = corpus.clone();
-                let within = tokio::task::spawn_blocking(move || {
-                    run_output_within_budget(
+                // Only a *definite* overflow cancels the run. A transient scan
+                // error (a file the fuzzer just deleted) is Indeterminate and is
+                // retried on the next tick rather than latching a false kill.
+                let exceeded_now = tokio::task::spawn_blocking(move || {
+                    output_budget_status(
                         &path,
                         MAX_RUN_OUTPUT_BYTES,
                         MAX_RUN_OUTPUT_ENTRIES,
                         max_output_file_bytes,
-                    ) && run_output_within_budget(
-                        &corpus_path,
-                        hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
-                        hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
-                        hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
-                    )
+                    ) == OutputBudget::Exceeded
+                        || output_budget_status(
+                            &corpus_path,
+                            hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
+                            hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
+                            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+                        ) == OutputBudget::Exceeded
                 })
                 .await
                 .unwrap_or(false);
-                if !within {
+                if exceeded_now {
                     exceeded.store(true, std::sync::atomic::Ordering::Release);
                     run_cancel.cancel();
                     return;
@@ -1157,21 +1187,26 @@ async fn monitor_run_output(
     }
 }
 
+/// Whether a finished run's artifacts may be retained. Returns false only on a
+/// *definite* overflow; a transient scan race (Indeterminate) does not fail a
+/// completed run, mirroring the live monitor so results are not discarded over
+/// a filesystem hiccup.
 async fn run_artifacts_within_budget(artifacts: &RunArtifacts, max_output_file_bytes: u64) -> bool {
     let output = artifacts.output_host.clone();
     let corpus = artifacts.corpus_host.clone();
     tokio::task::spawn_blocking(move || {
-        run_output_within_budget(
+        output_budget_status(
             &output,
             MAX_RUN_OUTPUT_BYTES,
             MAX_RUN_OUTPUT_ENTRIES,
             max_output_file_bytes,
-        ) && run_output_within_budget(
-            &corpus,
-            hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
-            hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
-            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
-        )
+        ) != OutputBudget::Exceeded
+            && output_budget_status(
+                &corpus,
+                hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
+                hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
+                hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+            ) != OutputBudget::Exceeded
     })
     .await
     .unwrap_or(false)
@@ -1275,7 +1310,16 @@ async fn terminal_run_metrics(
             terminal_afl_crashes = stats.saved_crashes.unwrap_or(0);
         }
     }
-    let artifact_crashes = collect_crash_inputs(engine, &artifacts.output_host).len() as u64;
+    // Recursive crash-artifact walk over a possibly large output tree: run it on
+    // the blocking pool, like the AFL stats read above, rather than stalling a
+    // tokio worker (and progress streaming) on synchronous filesystem I/O.
+    let crash_out = artifacts.output_host.clone();
+    let artifact_crashes =
+        tokio::task::spawn_blocking(move || collect_crash_inputs(engine, &crash_out).len() as u64)
+            .await
+            .map_err(|error| {
+                ClassifiedError::Internal(format!("join crash-artifact scan task: {error}"))
+            })?;
     Ok(TerminalRunMetrics {
         edges,
         execs,
@@ -2821,6 +2865,18 @@ impl ServiceContainer {
             .delete_session(session)
             .await
             .map_err(|error| chat_storage_error("delete chat session", error))?;
+        // Drop the per-session turn lock now that the session is gone, so a
+        // long-lived server does not accumulate one dead mutex per deleted
+        // session for its entire lifetime. `_guard` still holds a clone of the
+        // Arc, so the mutex is released only when this call returns; a later
+        // caller for a (recreated) id simply gets a fresh lock.
+        {
+            let mut locks = self
+                .session_turn_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locks.remove(session);
+        }
         Ok(true)
     }
 
@@ -2949,7 +3005,13 @@ impl ServiceContainer {
     /// an app restart.
     #[must_use]
     pub fn with_provider_pool(self, pool: Arc<dyn ProviderPool>) -> Self {
-        if let Ok(mut guard) = self.provider_pool.write() {
+        // Recover a poisoned lock so the pool is installed rather than silently
+        // dropped (see `reload_providers`).
+        {
+            let mut guard = self
+                .provider_pool
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = Some(pool);
         }
         self
@@ -4151,9 +4213,15 @@ impl ServiceContainer {
         // (e.g. after saving an unrelated setting) until a restart.
         let pool = provider_pool_from_config().or_else(provider_pool_from_env);
         let loaded = pool.is_some();
-        if let Ok(mut guard) = self.provider_pool.write() {
-            *guard = pool;
-        }
+        // Recover a poisoned lock rather than skipping the swap: dropping the
+        // write on poison would keep the stale pool while still returning
+        // `loaded = true`, so the caller (UI) believes a reload that never
+        // happened succeeded.
+        let mut guard = self
+            .provider_pool
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = pool;
         loaded
     }
 
@@ -4627,6 +4695,15 @@ impl ServiceContainer {
         &self,
         project: &Path,
     ) -> Result<Vec<SchedulableTarget>, ClassifiedError> {
+        // Resolve targets the same way `resolve_target_id` does -- with the
+        // path-tolerant `stored_project_matches` over every stored target --
+        // rather than an exact `list_targets(project_root)` string match. A
+        // trailing-slash/symlinked/relative project path otherwise reports "no
+        // schedulable targets" for a project that `run_campaign` would happily
+        // run, because the two disagreed on path normalization. Uses the same
+        // graceful identity (canonicalize-or-raw), so a project that does not
+        // exist yields an empty list rather than an error.
+        let identity = project_lookup_identity(project);
         let fuzzing = crate::config::effective_fuzzing_settings()
             .map_err(|error| fuzzing_policy_error(&error))?;
         let store = self.store.as_ref().ok_or_else(|| {
@@ -4635,12 +4712,15 @@ impl ServiceContainer {
             )
         })?;
         let targets = store
-            .list_targets(&project.to_string_lossy())
+            .list_all_targets()
             .await
             .map_err(ClassifiedError::from)?;
 
         let mut schedulable = Vec::new();
-        for candidate in targets {
+        for candidate in targets
+            .into_iter()
+            .filter(|candidate| stored_project_matches(&candidate.project_root, &identity))
+        {
             let harnesses = store
                 .list_harnesses(candidate.id)
                 .await
@@ -5355,7 +5435,25 @@ impl ServiceContainer {
             }
             return Err(ClassifiedError::Storage(error.to_string()));
         }
-        let mut persisted_run = PersistedRunGuard::new(Arc::clone(store), None, smoke_record.id);
+        // Journal the smoke run like a campaign run. Without this, a process
+        // kill/crash during the ~60s smoke window leaves a permanent `Running`
+        // row: clear_all_runs and delete_run both reject a run with no crash
+        // evidence, so that orphan makes clear_all_runs fail forever and cannot
+        // be removed via the service API. Journaling lets bootstrap reconcile it
+        // to Failed on the next launch, exactly like a full run.
+        self.run_journal
+            .open_run(smoke_record.id, project, target, engine);
+        if let Err(error) = ensure_run_journal_durable(&self.run_journal) {
+            let _ = store
+                .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
+                .await;
+            return Err(error);
+        }
+        let mut persisted_run = PersistedRunGuard::new(
+            Arc::clone(store),
+            Some(Arc::clone(&self.run_journal)),
+            smoke_record.id,
+        );
         if let Err(error) = store
             .set_run_harness_source(smoke_record.id, &harness.source)
             .await
@@ -5392,17 +5490,21 @@ impl ServiceContainer {
                 return Err(error);
             }
         };
-        if !run_output_within_budget(
+        // Fail smoke only on a definite overflow; a transient scan race must not
+        // fail a valid smoke run (mirrors the campaign monitor).
+        if output_budget_status(
             &artifacts.output_host,
             MAX_RUN_OUTPUT_BYTES,
             MAX_RUN_OUTPUT_ENTRIES,
             64 * 1024 * 1024,
-        ) || !run_output_within_budget(
-            &artifacts.corpus_host,
-            hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
-            hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
-            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
-        ) {
+        ) == OutputBudget::Exceeded
+            || output_budget_status(
+                &artifacts.corpus_host,
+                hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
+                hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
+                hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
+            ) == OutputBudget::Exceeded
+        {
             let _ = store
                 .set_run_status(smoke_record.id, RunStatus::Failed, Some(Utc::now()))
                 .await;
@@ -5444,6 +5546,9 @@ impl ServiceContainer {
             .upsert_harness(&smoked)
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
+        // Close the journal entry on success before disarming the guard, so a
+        // cleanly-completed smoke run is not reconciled to Failed on restart.
+        self.run_journal.close_run(smoke_record.id);
         persisted_run.disarm();
         Ok(summary)
     }
@@ -6122,7 +6227,7 @@ impl ServiceContainer {
         // write only to this run's disposable snapshot/output; after the
         // sandbox exits, bounded corpus APIs preflight those discoveries and
         // atomically merge unique inputs into the live corpus.
-        let mut retained = match merge_run_discoveries(engine, &artifacts, &corpus_dir).await {
+        let retained = match merge_run_discoveries(engine, &artifacts, &corpus_dir).await {
             Ok(corpus) => corpus,
             Err(error) => {
                 store
@@ -6133,7 +6238,9 @@ impl ServiceContainer {
                 return Err(error);
             }
         };
-        retained.target_id = qualified.target_id;
+        // persist_corpus derives the target from the explicit `qualified.target_id`
+        // argument and `retained.entries`, never `retained.target_id`, so no
+        // identity copy is needed here.
         if let Err(error) = self.persist_corpus(qualified.target_id, &retained).await {
             store
                 .set_run_status(run_record.id, RunStatus::Failed, Some(Utc::now()))
@@ -6352,6 +6459,9 @@ impl ServiceContainer {
         let peak_edges = AtomicU64::new(0);
         let last_execs = AtomicU64::new(0);
         let peak_crashes = AtomicU64::new(0);
+        // Previous (sample time, cumulative execs) for deriving an exec *rate*
+        // from syzkaller's cumulative counter.
+        let exec_rate_state = std::sync::Mutex::new(Option::<(std::time::Instant, u64)>::None);
         let on_line = |line: &str| {
             if let Some((cover, executed, crash_ct)) =
                 hf_engine::progress::parse_syzkaller_status(line)
@@ -6366,7 +6476,20 @@ impl ServiceContainer {
                     peak_crashes.store(crash_ct, Ordering::Relaxed);
                 }
                 on_progress(FuzzProgress::EdgesCovered(cover));
-                on_progress(FuzzProgress::ExecsPerSec(executed as f64));
+                // syzkaller reports a cumulative execution count; convert it to a
+                // per-second rate before emitting on the rate channel so the
+                // throughput chart does not render a monotonically climbing total.
+                if let Ok(mut guard) = exec_rate_state.lock() {
+                    let now = std::time::Instant::now();
+                    if let Some((prev_time, prev_execs)) = *guard {
+                        let elapsed = now.duration_since(prev_time).as_secs_f64();
+                        if elapsed > 0.0 && executed >= prev_execs {
+                            let rate = (executed - prev_execs) as f64 / elapsed;
+                            on_progress(FuzzProgress::ExecsPerSec(rate));
+                        }
+                    }
+                    *guard = Some((now, executed));
+                }
                 on_progress(FuzzProgress::LogLine(line.to_owned()));
             } else if !line.trim().is_empty() {
                 on_progress(FuzzProgress::LogLine(line.to_owned()));
@@ -6392,13 +6515,18 @@ impl ServiceContainer {
             .runtime
             .run_command_streaming_opts(&cmd, &workspace, &limits, &sandbox_opts, &cancel, &on_line)
             .await;
-        if !writable_monitor.finish().await {
+        // Always stop the monitor, but surface a genuine run failure (Docker
+        // died, container setup error) ahead of the budget verdict: otherwise a
+        // real failure that also happened to trip the scratch budget would be
+        // reported as a generic budget error, hiding the root cause.
+        let within_budget = writable_monitor.finish().await;
+        let result = run_result?;
+        if !within_budget {
             return Err(ClassifiedError::Sandbox(
                 "syzkaller scratch/workdir exceeded its 4 GiB growth or 100000-entry budget"
                     .to_owned(),
             ));
         }
-        let result = run_result?;
 
         // GNU `timeout` uses 124 when the requested campaign budget expires;
         // that is the normal bounded completion path. Any other non-zero exit
@@ -6567,6 +6695,20 @@ impl ServiceContainer {
         // duplicates (the report lists every persisted crash for the run).
         for crash in &mut deduped {
             crash.id = deterministic_crash_id(run_id, &crash.stack_signature, &crash.input_path);
+        }
+
+        // Persist the completed classification NOW, before the optional (and
+        // slower) minimization and LLM bug-report phases. Those phases run under
+        // the same end-to-end triage budget; without this early write, a run
+        // with many crashes or a slow provider would time out mid-enrichment and
+        // discard all classification, and because ids are deterministic the
+        // re-run would time out identically -- triage could never persist. The
+        // final upsert below re-writes the same rows with the enriched fields.
+        if let Some(store) = &self.store {
+            store
+                .upsert_crashes(&deduped)
+                .await
+                .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
         }
 
         // Native minimizers execute against the immutable run-owned harness and
@@ -6858,8 +7000,15 @@ impl ServiceContainer {
         };
         match self.runtime.run_command(&cmd, &workspace, &limits).await {
             // Cache successful runs (even empty -- the signature invalidates them
-            // when the corpus changes); do not cache infra failures, so they retry.
-            Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
+            // when the corpus changes); do not cache infra failures, so they
+            // retry. The pipeline can finish (Completed) yet exit non-zero when
+            // the coverage build itself fails (clang error, transient OOM);
+            // caching that empty result would wrongly pin "0 functions covered"
+            // until the corpus changes, so the exit code is checked too.
+            Ok(result)
+                if result.termination == hf_core::runtime::CommandTermination::Completed
+                    && result.exit_code == 0 =>
+            {
                 let covered = parse_covered_functions(&result.stdout);
                 if let Ok(mut map) = coverage_cache().lock() {
                     map.insert(cache_key, (signature, covered.clone()));
@@ -6867,7 +7016,11 @@ impl ServiceContainer {
                 covered
             }
             Ok(result) => {
-                tracing::warn!(termination = ?result.termination, "coverage collection was force-stopped");
+                tracing::warn!(
+                    termination = ?result.termination,
+                    exit_code = result.exit_code,
+                    "coverage collection did not complete cleanly; not caching so it retries"
+                );
                 Vec::new()
             }
             Err(e) => {
@@ -6969,8 +7122,10 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<String, ClassifiedError> {
+        let project_root = canonical_project_root(project)?;
         let crashes = self.crashes_for_latest_run(project, Some(target)).await?;
-        let sarif = crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"));
+        let sarif =
+            crate::sarif::crashes_to_sarif(&crashes, env!("CARGO_PKG_VERSION"), &project_root);
         serde_json::to_string_pretty(&sarif)
             .map_err(|e| ClassifiedError::Internal(format!("serialize sarif: {e}")))
     }
@@ -8051,7 +8206,10 @@ pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
         .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
     // Build a single-provider pool through the TOML schema so every
     // ProviderConfig field receives its serde default without an unwieldy
-    // struct literal.
+    // struct literal. Values are escaped as TOML basic strings via the `toml`
+    // serializer so a `"`, `\`, or newline in the API key/model/base URL cannot
+    // produce malformed TOML that silently parses to `None` and disables the LLM.
+    let quote = |value: &str| toml::Value::String(value.to_owned()).to_string();
     let toml_str = format!(
         "[[providers]]
 \
@@ -8059,14 +8217,17 @@ pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
 \
          provider_type = \"openai-compat\"
 \
-         model = \"{model}\"
+         model = {model_q}
 \
-         api_key = \"{api_key}\"
+         api_key = {api_key_q}
 \
-         base_url = \"{base_url}\"
+         base_url = {base_url_q}
 \
          tags = [\"general\", \"reasoning\", \"code\"]
-"
+",
+        model_q = quote(&model),
+        api_key_q = quote(&api_key),
+        base_url_q = quote(&base_url),
     );
     let cfg: hf_provider::ProviderPoolConfig = toml::from_str(&toml_str).ok()?;
     hf_provider::ProviderPoolImpl::from_config(&cfg)
@@ -8981,11 +9142,11 @@ mod coverage_tests {
 #[cfg(test)]
 mod workspace_tests {
     use super::{
-        document_staging_dir, prepare_managed_workspace_root,
+        document_staging_dir, output_budget_status, prepare_managed_workspace_root,
         prepare_managed_workspace_root_with_adoption, project_workspace_dir,
         read_current_harness_source, run_binary_path, run_context_digest, run_output_dir,
-        run_output_relative, run_output_within_budget, stage_run_artifacts, verify_run_artifacts,
-        workspace_dir, workspace_lock_file, workspace_root_selection, write_current_harness_source,
+        run_output_relative, stage_run_artifacts, verify_run_artifacts, workspace_dir,
+        workspace_lock_file, workspace_root_selection, write_current_harness_source, OutputBudget,
         ServiceContainer, WORKSPACE_MANIFEST_FILE,
     };
     use std::path::{Component, Path};
@@ -9416,11 +9577,39 @@ mod workspace_tests {
     fn run_output_budget_rejects_oversized_or_excessive_evidence() {
         let output = tempfile::tempdir().unwrap();
         std::fs::write(output.path().join("one"), b"1234").unwrap();
-        assert!(run_output_within_budget(output.path(), 4, 1, 4));
-        assert!(!run_output_within_budget(output.path(), 3, 1, 4));
-        assert!(!run_output_within_budget(output.path(), 4, 1, 3));
+        let within = |max_bytes, max_entries, max_file_bytes| {
+            output_budget_status(output.path(), max_bytes, max_entries, max_file_bytes)
+                == OutputBudget::Within
+        };
+        assert!(within(4, 1, 4));
+        assert!(!within(3, 1, 4));
+        assert!(!within(4, 1, 3));
         std::fs::write(output.path().join("two"), b"x").unwrap();
-        assert!(!run_output_within_budget(output.path(), 10, 1, 10));
+        assert!(!within(10, 1, 10));
+    }
+
+    #[test]
+    fn output_budget_status_distinguishes_overflow_from_transient_scan_error() {
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(output.path().join("one"), b"1234").unwrap();
+        // Clean, within limits.
+        assert_eq!(
+            output_budget_status(output.path(), 4, 1, 4),
+            OutputBudget::Within
+        );
+        // Definite overflow (byte budget exceeded).
+        assert_eq!(
+            output_budget_status(output.path(), 3, 1, 4),
+            OutputBudget::Exceeded
+        );
+        // A root that does not exist is a transient/indeterminate scan result,
+        // NOT an overflow -- the live monitor must not treat this as a reason to
+        // kill the run.
+        let missing = output.path().join("gone");
+        assert_eq!(
+            output_budget_status(&missing, 10, 10, 10),
+            OutputBudget::Indeterminate
+        );
     }
 
     #[test]

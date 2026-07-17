@@ -230,6 +230,10 @@ pub fn build_exec_args_with(
         "run".to_owned(),
         "--rm".to_owned(),
         format!("--memory={}m", limits.max_mem_mb),
+        // Pin swap to the memory ceiling so Docker does not default `--memory-swap`
+        // to 2x memory (which would silently grant a malicious harness extra
+        // swap-backed memory beyond the intended cap).
+        format!("--memory-swap={}m", limits.max_mem_mb),
         format!("--cpus={}", limits.max_cpus),
     ];
 
@@ -546,6 +550,19 @@ impl DockerRuntime {
                     resolved.display()
                 )));
             }
+            // Re-check the RESOLVED path: `confined_existing_path` follows
+            // symlinks, so a benign-looking source may canonicalize to a path
+            // whose name embeds a comma (or NUL). Because the resolved path is
+            // what gets emitted verbatim as the comma-delimited
+            // `--mount type=bind,source=...` value, an unchecked comma there
+            // would inject arbitrary mount options.
+            let resolved_str = resolved.to_string_lossy();
+            if resolved_str.contains(',') || resolved_str.contains('\0') {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "resolved host mount path contains an unsupported delimiter: {}",
+                    resolved.display()
+                )));
+            }
             mount.host_path = resolved;
         }
         Ok(validated)
@@ -560,7 +577,17 @@ impl DockerRuntime {
         cwd: &Path,
         limits: &ResourceLimits,
         opts: &hf_core::runtime::SandboxOptions,
-    ) -> (Vec<String>, String) {
+    ) -> Result<(Vec<String>, String), ClassifiedError> {
+        // The workspace mount uses `-v` short syntax, which Docker splits on
+        // `:` into source/target/mode. A colon in the resolved host cwd would
+        // corrupt that split (redirecting the mount target or mode), so reject
+        // it before substituting the real path into the mount argument.
+        if cwd.to_string_lossy().contains(':') {
+            return Err(ClassifiedError::Sandbox(format!(
+                "workspace path contains an unsupported ':' delimiter: {}",
+                cwd.display()
+            )));
+        }
         let mut args = build_exec_args_with(&self.cfg, limits, cmd, opts);
         let placeholder = "/tmp/hobot_fuzz_workspace";
         let placeholder_mount = format!(
@@ -581,7 +608,7 @@ impl DockerRuntime {
         // `args[0]` is "run"; the name must precede the image/command.
         let container_name = format!("hf-run-{}", uuid::Uuid::new_v4());
         args.insert(1, format!("--name={container_name}"));
-        (args, container_name)
+        Ok((args, container_name))
     }
 
     /// Spawn `docker run` with `args` and stream stdout/stderr line-by-line to
@@ -851,7 +878,7 @@ impl RuntimeAdapter for DockerRuntime {
 
         let opts = self.validate_sandbox_options(opts)?;
         let timeout = Duration::from_secs(limits.max_duration_secs);
-        let (args, container_name) = self.prepare_stream_args(cmd, &cwd, limits, &opts);
+        let (args, container_name) = self.prepare_stream_args(cmd, &cwd, limits, &opts)?;
         Box::pin(self.stream_docker_run(
             &args,
             &container_name,
@@ -883,6 +910,48 @@ impl RuntimeAdapter for DockerRuntime {
         tokio::fs::read_to_string(path)
             .await
             .map_err(|e| ClassifiedError::Sandbox(format!("read: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod prepare_args_tests {
+    use super::DockerRuntime;
+    use crate::config::RuntimeConfig;
+    use hf_core::runtime::{ResourceLimits, SandboxOptions};
+    use std::path::Path;
+
+    fn limits() -> ResourceLimits {
+        ResourceLimits {
+            max_mem_mb: 512,
+            max_cpus: 1,
+            max_duration_secs: 60,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        }
+    }
+
+    #[test]
+    fn prepare_stream_args_rejects_a_colon_in_the_resolved_workspace_path() {
+        // A `:` in the resolved cwd would corrupt the `-v source:target:mode`
+        // short syntax, so the workspace mount must refuse it up front.
+        let runtime = DockerRuntime::new(RuntimeConfig::default(), Path::new("/tmp/ws"));
+        let cmd = vec!["echo".to_owned()];
+        let opts = SandboxOptions::default();
+
+        let rejected = runtime.prepare_stream_args(&cmd, Path::new("/work/a:b"), &limits(), &opts);
+        assert!(
+            rejected.is_err(),
+            "a colon in the workspace path must be rejected"
+        );
+
+        let accepted =
+            runtime.prepare_stream_args(&cmd, Path::new("/work/clean"), &limits(), &opts);
+        let (args, _name) = accepted.expect("a clean workspace path must build args");
+        assert!(
+            args.join(" ").contains("/work/clean:/work"),
+            "clean workspace path must be mounted: {}",
+            args.join(" ")
+        );
     }
 }
 

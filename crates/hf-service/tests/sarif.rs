@@ -84,14 +84,14 @@ fn sarif_document_is_well_formed() {
         ),
         crash(CrashKind::Segv, CrashSeverity::Undefined, "SEGV", ""),
     ];
-    let doc = crashes_to_sarif(&crashes, "9.9.9");
+    let doc = crashes_to_sarif(&crashes, "9.9.9", std::path::Path::new("/work"));
 
     assert_eq!(doc["version"], "2.1.0");
     assert_eq!(doc["runs"][0]["tool"]["driver"]["name"], "hobot_fuzz");
     assert_eq!(doc["runs"][0]["tool"]["driver"]["version"], "9.9.9");
     let results = doc["runs"][0]["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    // First result anchors to the CASR crash line.
+    // First result anchors to the CASR crash line (relative, passes through).
     assert_eq!(
         results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
         "src/parse.c"
@@ -103,6 +103,11 @@ fn sarif_document_is_well_formed() {
     assert_eq!(results[0]["ruleId"], "CWE-787");
     assert_eq!(results[0]["level"], "error");
     assert_eq!(results[0]["properties"]["security-severity"], "9.0");
+    // Second result falls back to the crash input path, made project-relative.
+    assert_eq!(
+        results[1]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "out/crash-1"
+    );
     // Rules are deduped per CWE (787 + 476 = 2 rules).
     assert_eq!(
         doc["runs"][0]["tool"]["driver"]["rules"]
@@ -114,8 +119,53 @@ fn sarif_document_is_well_formed() {
 }
 
 #[test]
+fn rule_security_severity_reflects_most_severe_finding_for_a_cwe() {
+    // Two crashes with the SAME CWE (787) but different exploitability: the
+    // less-severe one is processed first. GitHub reads the rule-level severity,
+    // so it must reflect the MAX (9.0), not the first-seen (lower) score.
+    let crashes = vec![
+        crash(
+            CrashKind::Asan,
+            CrashSeverity::NotExploitable,
+            "heap-buffer-overflow(write)",
+            "",
+        ),
+        crash(
+            CrashKind::Asan,
+            CrashSeverity::Exploitable,
+            "heap-buffer-overflow(write)",
+            "",
+        ),
+    ];
+    let doc = crashes_to_sarif(&crashes, "1.0.0", std::path::Path::new("/work"));
+    let rules = doc["runs"][0]["tool"]["driver"]["rules"]
+        .as_array()
+        .unwrap();
+    assert_eq!(rules.len(), 1, "same CWE collapses to one rule");
+    assert_eq!(rules[0]["id"], "CWE-787");
+    assert_eq!(rules[0]["properties"]["security-severity"], "9.0");
+}
+
+#[test]
+fn absolute_host_paths_outside_project_are_redacted() {
+    // A CASR crashline with an absolute build path outside the project must not
+    // leak into the SARIF uri.
+    let crashes = vec![crash(
+        CrashKind::Asan,
+        CrashSeverity::Exploitable,
+        "heap-buffer-overflow(write)",
+        "/home/builder/secret/parse.c:10:1",
+    )];
+    let doc = crashes_to_sarif(&crashes, "1.0.0", std::path::Path::new("/work"));
+    assert_eq!(
+        doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "<redacted-host-path>"
+    );
+}
+
+#[test]
 fn empty_crashes_yield_empty_results() {
-    let doc = crashes_to_sarif(&[], "0.1.0");
+    let doc = crashes_to_sarif(&[], "0.1.0", std::path::Path::new("/work"));
     assert!(doc["runs"][0]["results"].as_array().unwrap().is_empty());
     assert_eq!(doc["version"], "2.1.0");
 }

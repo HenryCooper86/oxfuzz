@@ -12,8 +12,11 @@ use hf_core::runtime::{CommandTermination, RuntimeAdapter};
 use uuid::Uuid;
 
 /// Extra wall-clock seconds the sandbox is allowed beyond the fuzzer's own
-/// `-max_total_time`, covering corpus loading and sanitizer shutdown.
-const SANDBOX_TIMEOUT_HEADROOM_SECS: u64 = 60;
+/// `-max_total_time`, covering corpus loading and sanitizer shutdown. Shared
+/// with the smoke-qualification path in `hf-harness` so a non-crashing harness
+/// that runs its full time budget is not killed at the sandbox cap before its
+/// activity can be measured.
+pub const SANDBOX_TIMEOUT_HEADROOM_SECS: u64 = 60;
 
 /// Default run duration (seconds) applied when a `FuzzRunConfig` carries no
 /// explicit duration, so the fuzzer always gets a self-limit and exits cleanly
