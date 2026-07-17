@@ -576,6 +576,34 @@ impl Validate for ReplayRequest {
                 actual: self.plan.steps.len() as u64,
             });
         }
+        // Peak-rate guard: the average check above does not bound a burst -- a plan
+        // can front-load many zero-delay steps and pad the tail to keep the average
+        // under the cap while blasting frames onto the bus in an instant. Enforce
+        // that no 1-second sliding window over cumulative fire time contains more
+        // than `max_rate_per_second` steps.
+        let max_rate = u64::from(self.limits.max_rate_per_second);
+        let mut fire_times: Vec<u64> = Vec::with_capacity(self.plan.steps.len());
+        let mut fire = 0_u64;
+        for step in &self.plan.steps {
+            fire = fire.saturating_add(step.delay_micros);
+            fire_times.push(fire);
+        }
+        let mut window_start = 0usize;
+        for (index, &now) in fire_times.iter().enumerate() {
+            if let Some(lower) = now.checked_sub(1_000_000) {
+                while fire_times[window_start] <= lower {
+                    window_start += 1;
+                }
+            }
+            let in_window = (index - window_start + 1) as u64;
+            if in_window > max_rate {
+                return Err(ContractError::LimitExceeded {
+                    field: "replay.peak_rate",
+                    maximum: max_rate,
+                    actual: in_window,
+                });
+            }
+        }
         Ok(())
     }
 }
