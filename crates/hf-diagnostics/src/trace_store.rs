@@ -307,7 +307,11 @@ impl TraceStore for InMemoryTraceStore {
     }
 
     async fn delete_traces_by_session(&self, session_id: &str) -> Result<u64, TraceStoreError> {
-        let target = Uuid::parse_str(session_id).unwrap_or_default();
+        // A malformed id must match nothing, not silently coerce to the nil UUID
+        // and delete traces that happen to carry a nil session_id.
+        let Ok(target) = Uuid::parse_str(session_id) else {
+            return Ok(0);
+        };
         let mut traces = self
             .traces
             .write()
@@ -363,7 +367,10 @@ impl TraceStore for InMemoryTraceStore {
             .traces
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let target = Uuid::parse_str(session_id).unwrap_or_default();
+        // A malformed id matches nothing rather than coercing to the nil UUID.
+        let Ok(target) = Uuid::parse_str(session_id) else {
+            return Ok(Vec::new());
+        };
         let mut results: Vec<Trace> = map
             .values()
             .filter(|t| t.session_id == target)

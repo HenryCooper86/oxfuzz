@@ -27,13 +27,25 @@ use hf_core::types::{ProviderId, TokenUsage};
 const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Google Gemini provider.
-#[derive(Debug)]
 pub struct GeminiProvider {
     client: Client,
     api_key: String,
     base_url: String,
     custom_headers: reqwest::header::HeaderMap,
     metadata: ProviderMetadata,
+}
+
+impl std::fmt::Debug for GeminiProvider {
+    // Hand-written so the plaintext `api_key` is never printed via `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("custom_headers", &self.custom_headers)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl GeminiProvider {
@@ -369,10 +381,10 @@ impl LlmProvider for GeminiProvider {
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthenticationFailed {
-                provider: self.metadata.id.to_string(),
-                message: error_body,
-            });
+            return Err(crate::error_classifier::auth_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                &error_body,
+            ));
         }
 
         if !status.is_success() {
@@ -434,20 +446,30 @@ impl LlmProvider for GeminiProvider {
 
         let status = response.status();
         if !status.is_success() {
+            // Parse Retry-After from the response headers before consuming the
+            // body: `text()` moves the response, so the header must be read first.
+            // The non-stream path already honors this header; the streaming path
+            // previously hardcoded 60s and ignored it.
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60u64);
             let error_body = response.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(ProviderError::RateLimited {
                     provider: self.metadata.id.to_string(),
-                    retry_after_secs: 60,
+                    retry_after_secs: retry_after,
                 });
             }
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                return Err(ProviderError::AuthenticationFailed {
-                    provider: self.metadata.id.to_string(),
-                    message: error_body,
-                });
+                return Err(crate::error_classifier::auth_failure_to_provider_error(
+                    &self.metadata.id.to_string(),
+                    &error_body,
+                ));
             }
             return Err(ProviderError::ServerError {
                 provider: self.metadata.id.to_string(),
@@ -788,6 +810,32 @@ mod tests {
     use super::*;
     use crate::sse::extract_sse_data;
     use hf_core::provider::ToolCallingMode;
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let provider = GeminiProvider::new(
+            "gemini-main",
+            "gemini-2.0-flash",
+            "AIza-super-secret-value".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+            5,
+            1_000_000,
+            ToolCallingMode::default(),
+        );
+
+        let dbg = format!("{provider:?}");
+        assert!(
+            !dbg.contains("AIza-super-secret-value"),
+            "api key leaked: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker: {dbg}"
+        );
+    }
 
     #[test]
     fn test_gemini_provider_metadata() {

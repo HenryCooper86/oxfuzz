@@ -165,23 +165,26 @@ impl ChunkingStrategy {
             ChunkerType::HeadingBased => split_by_headings(content),
         };
 
-        sections
-            .into_iter()
-            .enumerate()
-            .map(|(i, section)| {
-                let text = truncate_to_chars(&section, max_chars);
+        // Emit one chunk per piece. An oversized section is split into
+        // multiple pieces (rather than truncated) so no content is lost; the
+        // running index keeps chunk ids and `section_index` sequential.
+        let mut chunks = Vec::with_capacity(sections.len());
+        for section in sections {
+            for piece in split_into_pieces(&section, max_chars) {
+                let i = chunks.len();
                 let mut meta = metadata.clone();
                 meta.section_index = i;
-                Chunk {
+                chunks.push(Chunk {
                     id: format!("{document_id}-L1-{i}"),
                     document_id: document_id.to_string(),
                     level: ChunkLevel::L1,
-                    content: text.to_string(),
-                    token_estimate: estimate_tokens(text),
+                    content: piece.to_string(),
+                    token_estimate: estimate_tokens(piece),
                     metadata: meta,
-                }
-            })
-            .collect()
+                });
+            }
+        }
+        chunks
     }
 
     /// L2: Split by paragraphs (algorithm depends on chunker type).
@@ -199,23 +202,26 @@ impl ChunkingStrategy {
             ChunkerType::HeadingBased | ChunkerType::TextSplit => split_by_single_newline(content),
         };
 
-        paragraphs
-            .into_iter()
-            .enumerate()
-            .map(|(i, para)| {
-                let text = truncate_to_chars(&para, max_chars);
+        // Emit one chunk per piece. An oversized paragraph is split into
+        // multiple pieces (rather than truncated) so no content is lost; the
+        // running index keeps chunk ids and `section_index` sequential.
+        let mut chunks = Vec::with_capacity(paragraphs.len());
+        for para in paragraphs {
+            for piece in split_into_pieces(&para, max_chars) {
+                let i = chunks.len();
                 let mut meta = metadata.clone();
                 meta.section_index = i;
-                Chunk {
+                chunks.push(Chunk {
                     id: format!("{document_id}-L2-{i}"),
                     document_id: document_id.to_string(),
                     level: ChunkLevel::L2,
-                    content: text.to_string(),
-                    token_estimate: estimate_tokens(text),
+                    content: piece.to_string(),
+                    token_estimate: estimate_tokens(piece),
                     metadata: meta,
-                }
-            })
-            .collect()
+                });
+            }
+        }
+        chunks
     }
 }
 
@@ -227,6 +233,10 @@ impl ChunkingStrategy {
 ///
 /// Returns the original string if it's already within limit.
 /// Safe for CJK / multi-byte text — never splits inside a character.
+///
+/// Used only for L0 summary chunks, where a single compact chunk is desired
+/// and dropping the tail is intentional. L1/L2 chunking uses
+/// [`split_into_pieces`] instead so no content is lost.
 fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
     if s.chars().count() <= max_chars {
         return s;
@@ -237,6 +247,41 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
         .nth(max_chars)
         .map_or(s.len(), |(idx, _)| idx);
     &s[..byte_offset]
+}
+
+/// Split a single unit into consecutive pieces of at most `max_chars`
+/// **characters** (not bytes), preserving all content.
+///
+/// Used instead of truncation so an oversized unit (a long paragraph, a
+/// markdown table row, a base64 blob, or space-less CJK) is emitted as
+/// several chunks rather than losing its tail and becoming unsearchable.
+///
+/// Returns exactly one slice (the whole unit) when it already fits or when
+/// `max_chars == 0`. Concatenating the returned slices always reproduces the
+/// input. Safe for CJK / multi-byte text — never splits inside a character.
+fn split_into_pieces(unit: &str, max_chars: usize) -> Vec<&str> {
+    let total = unit.chars().count();
+    if max_chars == 0 || total <= max_chars {
+        return vec![unit];
+    }
+
+    // Byte offset of every char boundary, plus the end-of-string offset.
+    // `boundaries[k]` is the byte offset of the k-th character;
+    // `boundaries[total]` is `unit.len()`.
+    let boundaries: Vec<usize> = unit
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(unit.len()))
+        .collect();
+
+    let mut pieces = Vec::with_capacity(total.div_ceil(max_chars));
+    let mut start_char = 0;
+    while start_char < total {
+        let end_char = (start_char + max_chars).min(total);
+        pieces.push(&unit[boundaries[start_char]..boundaries[end_char]]);
+        start_char = end_char;
+    }
+    pieces
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +627,71 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|c| c.metadata.source == "https://example.com/doc"));
+    }
+
+    /// An L1 unit longer than the char budget must be split into multiple
+    /// chunks with no content lost (concatenation reproduces the input).
+    #[test]
+    fn test_chunk_l1_splits_oversized_unit_without_loss() {
+        let config = KnowledgeConfig {
+            l1_max_tokens: 10, // small budget -> ~40 chars per chunk
+            ..Default::default()
+        };
+        let strategy = ChunkingStrategy::new(config); // TextSplit -> split_by_double_newline
+                                                      // A single line (no blank line) far longer than the char budget.
+        let content = "abcdefghij".repeat(50); // 500 chars, one unit
+        let chunks = strategy.chunk("doc-1", &content, ChunkLevel::L1, &test_metadata());
+
+        assert!(
+            chunks.len() > 1,
+            "oversized unit should split into multiple chunks, got {}",
+            chunks.len()
+        );
+        let joined: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(
+            joined, content,
+            "all content must be preserved across chunks"
+        );
+    }
+
+    /// An L2 unit longer than the char budget must be split without loss.
+    #[test]
+    fn test_chunk_l2_splits_oversized_unit_without_loss() {
+        let config = KnowledgeConfig {
+            l2_max_tokens: 10, // small budget -> ~40 chars per chunk
+            ..Default::default()
+        };
+        let strategy = ChunkingStrategy::new(config); // TextSplit -> split_by_single_newline
+                                                      // A single line (no newline) far longer than the char budget.
+        let content = "0123456789".repeat(50); // 500 chars, one unit
+        let chunks = strategy.chunk("doc-1", &content, ChunkLevel::L2, &test_metadata());
+
+        assert!(
+            chunks.len() > 1,
+            "oversized unit should split into multiple chunks, got {}",
+            chunks.len()
+        );
+        let joined: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(
+            joined, content,
+            "all content must be preserved across chunks"
+        );
+    }
+
+    /// `split_into_pieces` preserves multi-byte (CJK) content without loss and
+    /// never splits inside a character.
+    #[test]
+    fn test_split_into_pieces_preserves_multibyte_content() {
+        // 30 CJK characters (3 bytes each), budget of 7 chars per piece.
+        let unit: String = std::iter::repeat_n('\u{4EE3}', 30).collect();
+        let pieces = split_into_pieces(&unit, 7);
+        assert!(pieces.len() > 1, "should split into multiple pieces");
+        let joined: String = pieces.concat();
+        assert_eq!(joined, unit, "no content lost across multi-byte pieces");
+        // Every piece is valid UTF-8 with whole characters only.
+        for piece in &pieces {
+            assert!(piece.chars().all(|c| c == '\u{4EE3}'));
+        }
     }
 
     // --- Sentence Boundary Chunker tests ---

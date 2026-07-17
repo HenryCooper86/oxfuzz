@@ -96,6 +96,41 @@ pub fn docker_cli_present() -> bool {
     which(docker_bin())
 }
 
+/// Resolve a tool executable by name, tolerating a stripped `PATH`.
+///
+/// A `.app` launched from Finder (macOS) does not inherit the shell `PATH`, so a
+/// bare tool name (e.g. `pandoc`, `xelatex`) is invisible even when installed.
+/// Probe the bare name first (honours an inherited PATH and user overrides),
+/// then the well-known Homebrew / system / TeX install locations. Falls back to
+/// the bare name so a PATH-equipped launch still works. Not cached: callers hold
+/// the result for one operation and the set of installed tools can change.
+#[must_use]
+pub fn resolve_bin(name: &str) -> String {
+    if which(name) {
+        return name.to_owned();
+    }
+    let dirs = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/Library/TeX/texbin",
+    ];
+    for dir in dirs {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.is_file() && which(&candidate.to_string_lossy()) {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let candidate = PathBuf::from(&home).join(".local/bin").join(name);
+        if candidate.is_file() && which(&candidate.to_string_lossy()) {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    name.to_owned()
+}
+
 /// Whether the Docker daemon is actually reachable. `docker info` only
 /// succeeds when a daemon is up, so this is a true readiness check (unlike
 /// `docker --version`, which only proves the CLI exists).

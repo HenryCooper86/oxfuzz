@@ -137,7 +137,13 @@ async fn smoke_policy_is_enforced_before_reservation_and_drives_runtime_and_pers
         assert!(command.iter().any(|arg| arg == "-max_total_time=60"));
         assert_eq!(limits.max_mem_mb, 3584);
         assert_eq!(limits.max_cpus, 4);
-        assert_eq!(limits.max_duration_secs, 60);
+        // The fuzzer's own budget is 60s; the sandbox wall-clock is granted
+        // headroom so a non-crashing harness that runs the full budget is not
+        // killed at the cap before its activity is measured.
+        assert_eq!(
+            limits.max_duration_secs,
+            60 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
+        );
     }
 
     let runs = store.list_runs(None).await.unwrap();

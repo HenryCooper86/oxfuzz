@@ -209,12 +209,52 @@ pub(crate) fn parse_location(crashline: &str) -> Option<(String, u32)> {
     Some((file.to_owned(), line))
 }
 
+/// Map an absolute host path to a SARIF `artifactLocation.uri`.
+///
+/// GitHub code scanning anchors alerts using repo-relative URIs, and an absolute
+/// build path (e.g. `/home/builder/src/parse.c`) both fails to anchor and leaks
+/// the operator's host layout into a shared dashboard. So a path under
+/// `project_root` is made project-relative, and any other absolute path is
+/// redacted. Relative paths (already repo-relative) pass through unchanged.
+fn sarif_uri(raw: &str, project_root: &std::path::Path) -> String {
+    let path = std::path::Path::new(raw);
+    if !path.is_absolute() {
+        return raw.to_owned();
+    }
+    match path.strip_prefix(project_root) {
+        Ok(relative) => relative.to_string_lossy().into_owned(),
+        Err(_) => "<redacted-host-path>".to_owned(),
+    }
+}
+
 /// Render triaged crashes as a SARIF 2.1.0 document.
+///
+/// `project_root` is used to make absolute source/crash paths repo-relative (and
+/// to redact absolute paths outside the project) so the export anchors in GitHub
+/// code scanning without disclosing host build paths.
 #[must_use]
-pub fn crashes_to_sarif(crashes: &[Crash], tool_version: &str) -> serde_json::Value {
+pub fn crashes_to_sarif(
+    crashes: &[Crash],
+    tool_version: &str,
+    project_root: &std::path::Path,
+) -> serde_json::Value {
     use serde_json::json;
 
-    // One rule per distinct CWE, with the security-severity of its findings.
+    // Rule-level `security-severity` must reflect the MOST severe finding for a
+    // CWE, not whichever crash was processed first: GitHub code scanning (and
+    // most SARIF dashboards) read the numeric severity from the rule, so an
+    // Exploitable crash sharing a CWE with an earlier NotExploitable one would
+    // otherwise be surfaced at the lower score. Compute the max per CWE up front.
+    let mut max_score: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    for crash in crashes {
+        let score = security_severity(crash);
+        max_score
+            .entry(cwe_for(crash).id)
+            .and_modify(|current| *current = current.max(score))
+            .or_insert(score);
+    }
+
+    // One rule per distinct CWE, carrying the max security-severity of its findings.
     let mut rules: Vec<serde_json::Value> = Vec::new();
     let mut rule_ids: Vec<&str> = Vec::new();
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -224,17 +264,25 @@ pub fn crashes_to_sarif(crashes: &[Crash], tool_version: &str) -> serde_json::Va
         let score = security_severity(crash);
         if !rule_ids.contains(&cwe.id) {
             rule_ids.push(cwe.id);
-            rules.push(json!({
+            let rule_score = max_score.get(cwe.id).copied().unwrap_or(score);
+            let mut rule = json!({
                 "id": cwe.id,
                 "name": cwe.name,
                 "shortDescription": { "text": cwe.name },
-                "helpUri": format!("https://cwe.mitre.org/data/definitions/{}.html",
-                    cwe.id.trim_start_matches("CWE-")),
                 "properties": {
                     "tags": ["security", "fuzzing", cwe.id],
-                    "security-severity": format!("{score:.1}"),
+                    "security-severity": format!("{rule_score:.1}"),
                 },
-            }));
+            });
+            // `CWE-noinfo` is a sentinel, not a real CWE entry: pointing helpUri
+            // at cwe.mitre.org/.../noinfo.html would 404, so omit it there.
+            if cwe.id != "CWE-noinfo" {
+                rule["helpUri"] = json!(format!(
+                    "https://cwe.mitre.org/data/definitions/{}.html",
+                    cwe.id.trim_start_matches("CWE-")
+                ));
+            }
+            rules.push(rule);
         }
 
         let message = if crash.summary.is_empty() {
@@ -263,9 +311,16 @@ pub fn crashes_to_sarif(crashes: &[Crash], tool_version: &str) -> serde_json::Va
             .as_ref()
             .and_then(|c| parse_location(&c.crashline));
         let phys = if let Some((uri, line)) = location {
-            json!({ "artifactLocation": { "uri": uri }, "region": { "startLine": line } })
+            json!({
+                "artifactLocation": { "uri": sarif_uri(&uri, project_root) },
+                "region": { "startLine": line }
+            })
         } else {
-            json!({ "artifactLocation": { "uri": crash.input_path.to_string_lossy() } })
+            json!({
+                "artifactLocation": {
+                    "uri": sarif_uri(&crash.input_path.to_string_lossy(), project_root)
+                }
+            })
         };
         result["locations"] = json!([{ "physicalLocation": phys }]);
         results.push(result);
