@@ -249,11 +249,12 @@ pub fn render_automotive_report(data: &AutomotiveReportData) -> String {
     let _ = writeln!(
         report,
         "This report synthesizes **{} retained automotive operation(s)**: **{} completed**, \
-         **{} failed**, **{} running**, and **{} cancelled**. The bounded snapshot contains \
-         **{} unique protocol-state digest(s)** and **{} promoted state-corpus artifact(s)** \
-         across **{} observed protocol(s)**.\n",
+         **{} partial**, **{} failed**, **{} running**, and **{} cancelled**. The bounded \
+         snapshot contains **{} unique protocol-state digest(s)** and **{} promoted \
+         state-corpus artifact(s)** across **{} observed protocol(s)**.\n",
         data.operations.len(),
         counts.done,
+        counts.partial,
         counts.failed,
         counts.running,
         counts.cancelled,
@@ -766,6 +767,7 @@ pub fn append_ai_interpretation(facts: &str, interpretation: &str, model: &str) 
 struct StatusCounts {
     running: usize,
     done: usize,
+    partial: usize,
     failed: usize,
     cancelled: usize,
 }
@@ -775,6 +777,13 @@ fn operation_status_counts(operations: &[AutomotiveReportOperation]) -> StatusCo
     for operation in operations {
         match operation.status {
             AutomotiveOperationStatus::Running => counts.running += 1,
+            // A `Done` operation that did not produce a complete result is
+            // counted as `partial`, not `done`, so the Executive Summary agrees
+            // with the Campaign Workflow table (which treats it as "Attention")
+            // and the Findings section (which lists it as "Partial result").
+            AutomotiveOperationStatus::Done if operation.result_complete == Some(false) => {
+                counts.partial += 1;
+            }
             AutomotiveOperationStatus::Done => counts.done += 1,
             AutomotiveOperationStatus::Failed => counts.failed += 1,
             AutomotiveOperationStatus::Cancelled => counts.cancelled += 1,
