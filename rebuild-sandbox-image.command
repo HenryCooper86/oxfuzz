@@ -20,5 +20,15 @@ if [ "${BUILD_RC}" -ne 0 ]; then
   echo "=== Build FAILED (exit ${BUILD_RC}). See errors above. ==="
 fi
 
+# Bring up the local DefectDojo the app integrates with, as part of preparing
+# the environment. Best-effort and idempotent (a fast no-op once running); does
+# not affect the sandbox build result. Skip with HF_SKIP_DEFECTDOJO=1.
+if [ "${HF_SKIP_DEFECTDOJO:-0}" != "1" ]; then
+  echo ""
+  echo "=== Setting up local DefectDojo (best-effort; set HF_SKIP_DEFECTDOJO=1 to skip) ==="
+  ./scripts/setup-defectdojo.sh \
+    || echo "DefectDojo setup did not complete (non-fatal); run ./setup-defectdojo.command later."
+fi
+
 echo ""
 echo "Done (exit ${BUILD_RC}). You can close this window."

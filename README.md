@@ -184,6 +184,20 @@ cargo build --release
 # DMG:  target/release/bundle/dmg/hobot_fuzz_0.1.0_aarch64.dmg
 ```
 
+### DefectDojo (optional findings dashboard)
+
+hobot_fuzz adopts a local DefectDojo rather than bundling one. `scripts/setup-defectdojo.sh`
+(double-click `setup-defectdojo.command`) installs it for you: it clones
+DefectDojo's upstream compose project, pulls the released images, starts the
+stack on `http://localhost:8080`, and writes `config/defectdojo.toml`. The
+environment-setup entry points (`rebuild-sandbox-image.command`,
+`scripts/build-app.sh`) run it best-effort and idempotently; set
+`HF_SKIP_DEFECTDOJO=1` to skip. Fuzzing never depends on it.
+
+```bash
+./scripts/setup-defectdojo.sh        # first run pulls several GB; idempotent thereafter
+```
+
 `scripts/health-check.sh` delegates to `hobot-fuzz doctor`, which probes the
 Docker daemon, sandbox image, and engine tools inside that image. Host engine
 binaries and optional integrations do not determine core readiness.
