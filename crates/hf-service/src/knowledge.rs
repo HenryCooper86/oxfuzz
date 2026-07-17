@@ -17,10 +17,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hf_core::error::ClassifiedError;
+use hf_core::target::TargetCandidate;
 use hf_knowledge::chunking::{ChunkLevel, ChunkMetadata, ChunkingStrategy};
 use hf_knowledge::config::KnowledgeConfig;
 use hf_knowledge::retrieval::{HybridRetriever, RetrievalConfig, RetrievalFilter, SearchStrategy};
 use hf_knowledge::tokenizer::AutoTokenizer;
+use hf_prompt::RelatedContext;
 use ignore::WalkBuilder;
 use serde::Serialize;
 
@@ -316,9 +318,126 @@ pub fn search_project(project: &Path, query: &str, limit: usize) -> Vec<Knowledg
         .collect()
 }
 
+/// Number of related knowledge chunks injected into a harness/triage prompt.
+/// Kept small (AGENTS.md 2.4): the prompt already carries the target details,
+/// so this is supporting usage context, not a code dump. The section renderer
+/// (`hf_prompt::render_related_context_section`) applies the hard char budget.
+const PROMPT_CONTEXT_TOP_K: usize = 4;
+
+/// Cap on the crash-summary text mixed into a triage retrieval query, so a
+/// verbose sanitizer summary cannot drown out the target symbol.
+const TRIAGE_QUERY_SUMMARY_CHARS: usize = 120;
+
+/// Retrieve the most relevant project chunks for a harness-generation prompt:
+/// the target's symbol plus its signature keywords as the query, excluding the
+/// chunk that defines the target itself (the prompt already identifies the
+/// target -- the value of this context is in call sites and related code).
+///
+/// Pure in-memory lookup over the cached index: returns an empty vec when the
+/// project has not been indexed, so prompt assembly degrades to the
+/// un-augmented prompt instead of failing harness generation.
+#[must_use]
+pub fn harness_related_context(project: &Path, target: &TargetCandidate) -> Vec<RelatedContext> {
+    let query = target.signature.as_deref().map_or_else(
+        || target.symbol.clone(),
+        |sig| format!("{} {sig}", target.symbol),
+    );
+    // `location.file` is relative to the project root, matching hit.file.
+    let self_file = target.location.file.to_string_lossy();
+    // Fetch one extra hit so dropping the target's own definition still
+    // leaves a full page of related chunks.
+    search_project(project, &query, PROMPT_CONTEXT_TOP_K + 1)
+        .into_iter()
+        .filter(|hit| !(hit.file == self_file && hit.snippet.contains(&target.symbol)))
+        .take(PROMPT_CONTEXT_TOP_K)
+        .map(|hit| RelatedContext {
+            file: hit.file,
+            snippet: hit.snippet,
+        })
+        .collect()
+}
+
+/// Retrieve related project chunks for a crash-triage prompt: the target
+/// symbol plus the leading crash-summary keywords as the query. Unlike the
+/// harness path there is no own-definition chunk to exclude -- the triage
+/// prompt carries the harness source, not the target body.
+///
+/// Same degradation contract as [`harness_related_context`].
+#[must_use]
+pub fn triage_related_context(
+    project: &Path,
+    target: &str,
+    crash_summary: &str,
+) -> Vec<RelatedContext> {
+    let summary: String = crash_summary
+        .chars()
+        .take(TRIAGE_QUERY_SUMMARY_CHARS)
+        .collect();
+    search_project(
+        project,
+        &format!("{target} {summary}"),
+        PROMPT_CONTEXT_TOP_K,
+    )
+    .into_iter()
+    .map(|hit| RelatedContext {
+        file: hit.file,
+        snippet: hit.snippet,
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_core::engine::EngineKind;
+    use hf_core::target::{
+        InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+
+    /// A C parser target defined in `parse.c`, matching the fixture project
+    /// built by [`index_fixture_project`].
+    fn fixture_target() -> TargetCandidate {
+        TargetCandidate {
+            id: uuid::Uuid::nil(),
+            project_root: PathBuf::from("/proj"),
+            language: TargetLanguage::C,
+            symbol: "parse_header".to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from("parse.c"),
+                line: 1,
+                col: 1,
+            },
+            signature: Some("int parse_header(const char *buf, unsigned long len)".to_owned()),
+            input_surface: InputSurface::Bytes,
+            complexity: 3,
+            fit_score: 0.5,
+            sanitizers: Vec::new(),
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 3,
+        }
+    }
+
+    /// A two-file project: the target's definition in `parse.c` and a call
+    /// site in `caller.c`, indexed with the production config.
+    fn index_fixture_project(dir: &Path) {
+        std::fs::write(
+            dir.join("parse.c"),
+            "int parse_header(const char *buf, unsigned long len) {\n\
+             \x20   return buf == 0 || len == 0;\n\
+             }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("caller.c"),
+            "void handle_request(const char *buf, unsigned long len) {\n\
+             \x20   if (parse_header(buf, len)) { accept(buf); }\n\
+             }",
+        )
+        .unwrap();
+        index_project(dir).unwrap();
+    }
 
     #[test]
     fn index_and_search_finds_code_symbol() {
@@ -442,5 +561,86 @@ mod tests {
         assert!(hits[0].file.starts_with("doc:"), "labelled as a document");
 
         let _ = std::fs::remove_dir_all(&docs);
+    }
+
+    #[test]
+    fn harness_related_context_surfaces_call_sites_and_excludes_own_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        index_fixture_project(dir.path());
+        let target = fixture_target();
+
+        let related = harness_related_context(dir.path(), &target);
+
+        assert!(!related.is_empty(), "expected related chunks: {related:?}");
+        assert!(
+            related.iter().any(|c| c.file == "caller.c"),
+            "the call site should be surfaced: {related:?}"
+        );
+        assert!(
+            related
+                .iter()
+                .all(|c| !(c.file == "parse.c" && c.snippet.contains("parse_header"))),
+            "the target's own definition chunk should be excluded: {related:?}"
+        );
+    }
+
+    #[test]
+    fn harness_related_context_empty_when_unindexed() {
+        // Never indexed: retrieval degrades to no context rather than failing.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(harness_related_context(dir.path(), &fixture_target()).is_empty());
+    }
+
+    #[test]
+    fn harness_prompt_unchanged_without_index() {
+        // Composition as container.rs performs it: without an index the
+        // assembled prompt is byte-identical to the base prompt.
+        let dir = tempfile::tempdir().unwrap();
+        let target = fixture_target();
+        let related = harness_related_context(dir.path(), &target);
+        let prompt =
+            hf_prompt::render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related);
+        assert_eq!(
+            prompt,
+            hf_prompt::render_harness_prompt(&target, EngineKind::LibFuzzer)
+        );
+    }
+
+    #[test]
+    fn harness_prompt_carries_related_context_when_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        index_fixture_project(dir.path());
+        let target = fixture_target();
+
+        let related = harness_related_context(dir.path(), &target);
+        let prompt =
+            hf_prompt::render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related);
+
+        assert!(prompt.contains("Related project context"), "{prompt}");
+        assert!(prompt.contains("caller.c"), "{prompt}");
+        assert!(prompt.contains("handle_request"), "{prompt}");
+    }
+
+    #[test]
+    fn triage_related_context_finds_target_references() {
+        let dir = tempfile::tempdir().unwrap();
+        index_fixture_project(dir.path());
+
+        let related = triage_related_context(
+            dir.path(),
+            "parse_header",
+            "heap-buffer-overflow in parse_header read of size 4",
+        );
+
+        assert!(
+            related.iter().any(|c| c.snippet.contains("parse_header")),
+            "triage context should reference the crashing target: {related:?}"
+        );
+    }
+
+    #[test]
+    fn triage_related_context_empty_when_unindexed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(triage_related_context(dir.path(), "parse_header", "asan").is_empty());
     }
 }

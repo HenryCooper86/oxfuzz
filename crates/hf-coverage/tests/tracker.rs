@@ -1,7 +1,8 @@
 //! Tests for coverage tracking and stagnation detection.
 
 use hf_core::coverage::CoverageReport;
-use hf_coverage::{propose_action, CoverageTracker, StagnationProposal};
+use hf_coverage::{propose_action, CoverageTracker, StagnationPolicy, StagnationProposal};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn report(edges: u64, run_id: uuid::Uuid) -> CoverageReport {
@@ -9,7 +10,36 @@ fn report(edges: u64, run_id: uuid::Uuid) -> CoverageReport {
         run_id,
         edges,
         blocks: 0,
+        delta_edges: 0,
+        stagnation_secs: 0,
+        new_edges_files: Vec::new(),
     }
+}
+
+/// The default-shaped escalation policy around a test-chosen threshold: the
+/// first full stagnation window proposes mutation improvements, the second a
+/// new harness, the fourth a stop.
+fn policy(threshold_secs: u64) -> StagnationPolicy {
+    StagnationPolicy {
+        threshold_secs,
+        new_harness_windows: 2,
+        stop_windows: 4,
+    }
+}
+
+/// A tracker whose coverage last progressed `flat_for_secs` ago: one backdated
+/// baseline report, then one flat pulse measured now.
+fn stagnant_tracker(flat_for_secs: u64) -> CoverageTracker {
+    let mut tracker = CoverageTracker::new();
+    let run_id = Uuid::new_v4();
+    tracker.update_at(
+        &report(100, run_id),
+        Instant::now()
+            .checked_sub(Duration::from_secs(flat_for_secs))
+            .unwrap(),
+    );
+    tracker.update(&report(100, run_id));
+    tracker
 }
 
 #[test]
@@ -93,7 +123,21 @@ fn is_stagnant_false_when_progressing() {
 }
 
 #[test]
-fn propose_action_returns_new_harness_when_stagnant() {
+fn update_at_backdates_the_last_progress() {
+    let mut tracker = stagnant_tracker(300);
+
+    assert!(
+        tracker.stagnation_secs() >= 300,
+        "stagnation must be measured from the backdated progress"
+    );
+    assert!(tracker.is_stagnant(120));
+
+    tracker.update(&report(100, tracker.run_id()));
+    assert!(tracker.stagnation_secs() >= 300);
+}
+
+#[test]
+fn propose_action_starts_with_custom_mutator_when_stagnant() {
     let mut tracker = CoverageTracker::new();
     let run_id = Uuid::new_v4();
 
@@ -101,11 +145,81 @@ fn propose_action_returns_new_harness_when_stagnant() {
     tracker.update(&report(100, run_id));
     tracker.update(&report(100, run_id));
 
-    let proposal = propose_action(&tracker, 0);
-    assert!(proposal.is_some(), "should propose action when stagnant");
-    assert!(
-        matches!(proposal.unwrap(), StagnationProposal::NewHarness),
-        "should propose NewHarness"
+    // Threshold 0: stagnation starts on the first flat pulse, but the policy
+    // still opens with the gentlest tier.
+    let proposal = propose_action(&tracker, &policy(0));
+    assert_eq!(
+        proposal,
+        Some(StagnationProposal::CustomMutator),
+        "the first stagnation tier proposes mutation improvements"
+    );
+}
+
+#[test]
+fn propose_action_escalates_through_the_tiers() {
+    let policy = policy(120);
+
+    assert_eq!(
+        propose_action(&stagnant_tracker(130), &policy),
+        Some(StagnationProposal::CustomMutator),
+        "one full stagnation window proposes mutation improvements"
+    );
+    assert_eq!(
+        propose_action(&stagnant_tracker(250), &policy),
+        Some(StagnationProposal::NewHarness),
+        "repeated stagnation escalates to a new harness"
+    );
+    assert_eq!(
+        propose_action(&stagnant_tracker(500), &policy),
+        Some(StagnationProposal::Stop),
+        "prolonged stagnation recommends stopping the target"
+    );
+}
+
+#[test]
+fn propose_action_tier_boundaries_are_exact() {
+    let policy = policy(120);
+
+    // Exactly at the stagnation threshold: one window, the gentlest tier.
+    assert_eq!(
+        propose_action(&stagnant_tracker(120), &policy),
+        Some(StagnationProposal::CustomMutator)
+    );
+    // Just below and exactly at the new-harness window.
+    assert_eq!(
+        propose_action(&stagnant_tracker(239), &policy),
+        Some(StagnationProposal::CustomMutator)
+    );
+    assert_eq!(
+        propose_action(&stagnant_tracker(240), &policy),
+        Some(StagnationProposal::NewHarness)
+    );
+    // Just below and exactly at the stop window.
+    assert_eq!(
+        propose_action(&stagnant_tracker(479), &policy),
+        Some(StagnationProposal::NewHarness)
+    );
+    assert_eq!(
+        propose_action(&stagnant_tracker(480), &policy),
+        Some(StagnationProposal::Stop)
+    );
+}
+
+#[test]
+fn propose_action_is_none_before_the_threshold() {
+    assert_eq!(propose_action(&stagnant_tracker(119), &policy(120)), None);
+}
+
+#[test]
+fn propose_action_resets_after_progress() {
+    let mut tracker = stagnant_tracker(500);
+
+    tracker.update(&report(200, tracker.run_id()));
+
+    assert_eq!(
+        propose_action(&tracker, &policy(120)),
+        None,
+        "progress must reset the escalation"
     );
 }
 
@@ -117,6 +231,6 @@ fn propose_action_returns_none_when_progressing() {
     tracker.update(&report(100, run_id));
     tracker.update(&report(200, run_id));
 
-    let proposal = propose_action(&tracker, 60);
+    let proposal = propose_action(&tracker, &policy(60));
     assert!(proposal.is_none(), "should not propose when progressing");
 }
