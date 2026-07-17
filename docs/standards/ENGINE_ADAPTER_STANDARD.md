@@ -70,14 +70,27 @@ target-wide output directory or infer final AFL++ counters from UI text.
 
 ## 5. Crash Output
 
-Each adapter must normalize crash artifacts into a directory layout:
+Crash ingestion (`hf-crash::ingest`) sees only **regular files** placed
+**directly** in the directories below; it never descends into per-crash
+subdirectories and never follows symlinks. An adapter MUST therefore emit
+each crashing input as a flat file in its engine's location:
 
-```
-<run_dir>/crashes/
-  <crash_id>/
-    input
-    log.txt
-```
+| Engine | Crash input location | Accepted names |
+| --- | --- | --- |
+| libFuzzer, ClusterFuzzLite | `<run_dir>/` | `crash-*`, `leak-*`, `timeout-*`, `oom-*` |
+| honggfuzz | `<run_dir>/` (pass `--crashdir <run_dir>`) | `SIG<signal>.PC.<...>` |
+| AFL++ | `<run_dir>/crashes/` and `<run_dir>/<instance>/crashes/` (e.g. `default/crashes/`) | any regular file except `README.txt` |
+
+A nested layout such as `<run_dir>/crashes/<crash_id>/{input,log.txt}` is NOT
+ingested: directories under the crash root are skipped (AFL++ instance
+directories are the one exception, and only their immediate `crashes/` child
+is scanned). An adapter that receives a per-crash directory layout from its
+engine MUST flatten the input files into the locations above.
+
+Sanitizer/engine logs are optional siblings of the input file, matched by
+name convention (`log-<stem>.txt`, a stem-named `report-*`/`sanitizer-*`
+file, or an unambiguous `report.txt`/`stderr.txt` when a directory holds a
+single crash). A crash without a matched log ingests as `CrashKind::Other`.
 
 ## 6. Registration
 

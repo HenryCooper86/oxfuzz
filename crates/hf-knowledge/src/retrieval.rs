@@ -254,6 +254,10 @@ impl<T: Tokenizer> HybridRetriever<T> {
     /// More efficient than calling [`Self::index_with_quality`] in a loop:
     /// pre-reserves capacity and uses bulk BM25 indexing to reduce
     /// allocator pressure and per-chunk overhead.
+    ///
+    /// Upsert semantics match [`Self::index`]: a chunk whose id was already
+    /// indexed (by any path) replaces the stale copy instead of duplicating
+    /// it in the chunks vec.
     pub fn index_batch_with_quality(&mut self, chunks: Vec<Chunk>, quality_score: f32) {
         self.chunks.reserve(chunks.len());
 
@@ -266,12 +270,17 @@ impl<T: Tokenizer> HybridRetriever<T> {
 
         // Store chunks and quality scores.
         for chunk in chunks {
+            self.remove_indexed_chunk(&chunk.id);
             self.quality_scores.insert(chunk.id.clone(), quality_score);
             self.chunks.push(chunk);
         }
     }
 
     /// Index multiple chunks with embeddings and quality scores in a single call.
+    ///
+    /// Upsert semantics match [`Self::index`]: a chunk whose id was already
+    /// indexed (by any path) replaces the stale copy, quality score, and
+    /// embedding instead of duplicating them.
     pub fn index_batch_with_embeddings(
         &mut self,
         chunks: Vec<Chunk>,
@@ -287,6 +296,7 @@ impl<T: Tokenizer> HybridRetriever<T> {
         self.bm25.add_bulk(&bm25_batch);
 
         for (chunk, embedding) in chunks.into_iter().zip(embeddings) {
+            self.remove_indexed_chunk(&chunk.id);
             self.embeddings.insert(chunk.id.clone(), embedding);
             self.quality_scores.insert(chunk.id.clone(), quality_score);
             self.chunks.push(chunk);
@@ -1431,6 +1441,79 @@ mod tests {
         assert!(
             !results[0].chunk.content.contains("alpha"),
             "search must not return stale content"
+        );
+    }
+
+    #[test]
+    fn batch_reindexing_same_chunk_id_replaces_stale_content() {
+        let config = RetrievalConfig {
+            min_similarity_threshold: 0.0,
+            enable_dedup: false,
+            ..Default::default()
+        };
+        let mut retriever = HybridRetriever::with_config(SimpleTokenizer::new(), config);
+
+        retriever.index_batch_with_quality(
+            vec![make_chunk("dup", "original rust content alpha", "rust")],
+            1.0,
+        );
+        // Re-index the same deterministic chunk_id through the batch path.
+        retriever.index_batch_with_quality(
+            vec![make_chunk("dup", "updated rust content beta", "rust")],
+            1.0,
+        );
+
+        // Only one chunk with this id should remain (no stale duplicate).
+        let count = retriever.chunks.iter().filter(|c| c.id == "dup").count();
+        assert_eq!(
+            count, 1,
+            "batch re-indexing must not leave a stale duplicate"
+        );
+
+        let filter = RetrievalFilter {
+            limit: 10,
+            ..Default::default()
+        };
+        let results = retriever.search("rust content", &filter);
+        assert_eq!(
+            results.len(),
+            1,
+            "search must return a single, current entry"
+        );
+        assert!(
+            results[0].chunk.content.contains("beta"),
+            "search must return the new content"
+        );
+        assert!(
+            !results[0].chunk.content.contains("alpha"),
+            "search must not return stale content"
+        );
+    }
+
+    #[test]
+    fn batch_embedding_reindexing_replaces_stale_chunk_and_vector() {
+        let mut retriever = HybridRetriever::new(SimpleTokenizer::new());
+
+        retriever.index_batch_with_embeddings(
+            vec![make_chunk("dup", "original rust content alpha", "rust")],
+            vec![vec![1.0, 0.0]],
+            1.0,
+        );
+        retriever.index_batch_with_embeddings(
+            vec![make_chunk("dup", "updated rust content beta", "rust")],
+            vec![vec![0.0, 1.0]],
+            1.0,
+        );
+
+        let count = retriever.chunks.iter().filter(|c| c.id == "dup").count();
+        assert_eq!(
+            count, 1,
+            "batch re-indexing must not leave a stale duplicate"
+        );
+        assert_eq!(
+            retriever.embeddings().get("dup"),
+            Some(&vec![0.0, 1.0]),
+            "the stale embedding must be replaced, not kept alongside"
         );
     }
 

@@ -190,11 +190,16 @@ impl WebSecurityConfig {
         else {
             return false;
         };
-        origin
-            .parse::<Uri>()
-            .ok()
-            .and_then(|uri| uri.authority().cloned())
-            .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
+        // Same-origin fallback for browser access to the served UI: an Origin
+        // whose authority matches the Host header. Restricted to loopback
+        // hosts so a DNS-rebinding page (Origin and Host both naming an
+        // attacker-controlled host) cannot pass.
+        host_authority_is_loopback(host)
+            && origin
+                .parse::<Uri>()
+                .ok()
+                .and_then(|uri| uri.authority().cloned())
+                .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
     }
 
     pub(crate) fn approve_project(&self, requested: &Path) -> Result<PathBuf, PathPolicyError> {
@@ -236,6 +241,18 @@ impl WebSecurityConfig {
         }
         Ok((project, document))
     }
+}
+
+/// Whether a `Host` header authority names a loopback host (any port).
+fn host_authority_is_loopback(host: &str) -> bool {
+    format!("http://{host}")
+        .parse::<Uri>()
+        .ok()
+        .and_then(|uri| uri.host().map(str::to_owned))
+        .is_some_and(|hostname| {
+            hostname.eq_ignore_ascii_case("localhost")
+                || matches!(hostname.as_str(), "127.0.0.1" | "::1" | "[::1]")
+        })
 }
 
 /// Validate a server socket before binding it.
@@ -481,7 +498,8 @@ fn looks_like_absolute_host_path(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_config_text, redact_public_json};
+    use super::{redact_config_text, redact_public_json, WebSecurityConfig};
+    use axum::http::HeaderValue;
 
     #[test]
     fn public_json_redacts_secrets_and_absolute_paths_but_keeps_relative_locations() {
@@ -516,5 +534,45 @@ mod tests {
         assert!(!redacted.contains("Bearer hidden"));
         assert!(redacted.contains("<redacted>"));
         assert!(redacted.contains("<redacted-path>"));
+    }
+
+    #[test]
+    fn origin_host_fallback_rejects_dns_rebinding_on_non_loopback_hosts() {
+        let config = WebSecurityConfig::new(None, true, Vec::new(), Vec::new())
+            .expect("valid test security config");
+        // A rebound page serves Origin and Host that agree but name an
+        // attacker-controlled host; this must not pass as "same-origin".
+        let origin = HeaderValue::from_static("http://attacker.com:8081");
+        let host = HeaderValue::from_static("attacker.com:8081");
+        assert!(!config.origin_allowed(Some(&origin), Some(&host)));
+    }
+
+    #[test]
+    fn origin_host_fallback_allows_same_origin_browser_access_on_loopback() {
+        let config = WebSecurityConfig::new(None, true, Vec::new(), Vec::new())
+            .expect("valid test security config");
+        for authority in ["localhost:8081", "127.0.0.1:8081", "[::1]:8081"] {
+            let origin =
+                HeaderValue::from_str(&format!("http://{authority}")).expect("valid origin header");
+            let host = HeaderValue::from_str(authority).expect("valid host header");
+            assert!(
+                config.origin_allowed(Some(&origin), Some(&host)),
+                "loopback authority {authority} must keep the same-origin fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlisted_origin_is_allowed_regardless_of_host_header() {
+        let config = WebSecurityConfig::new(
+            None,
+            true,
+            vec!["http://127.0.0.1:5173".to_owned()],
+            Vec::new(),
+        )
+        .expect("valid test security config");
+        let origin = HeaderValue::from_static("http://127.0.0.1:5173");
+        let host = HeaderValue::from_static("attacker.com:8081");
+        assert!(config.origin_allowed(Some(&origin), Some(&host)));
     }
 }

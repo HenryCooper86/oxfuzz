@@ -102,6 +102,7 @@ struct TestBackend {
     approve: bool,
     tool_result: Option<String>,
     usage: Mutex<Vec<hf_core::types::TokenUsage>>,
+    agents_dir: std::path::PathBuf,
 }
 
 impl TestBackend {
@@ -111,6 +112,7 @@ impl TestBackend {
             approve: true,
             tool_result: None,
             usage: Mutex::new(Vec::new()),
+            agents_dir: std::path::PathBuf::from("config/agents"),
         })
     }
 
@@ -120,6 +122,7 @@ impl TestBackend {
             approve: true,
             tool_result: Some(tool_result),
             usage: Mutex::new(Vec::new()),
+            agents_dir: std::path::PathBuf::from("config/agents"),
         })
     }
 
@@ -129,6 +132,17 @@ impl TestBackend {
             approve: false,
             tool_result: None,
             usage: Mutex::new(Vec::new()),
+            agents_dir: std::path::PathBuf::from("config/agents"),
+        })
+    }
+
+    fn with_agents_dir(pool: Arc<dyn ProviderPool>, agents_dir: std::path::PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            pool: Some(pool),
+            approve: true,
+            tool_result: None,
+            usage: Mutex::new(Vec::new()),
+            agents_dir,
         })
     }
 }
@@ -177,6 +191,10 @@ impl AgentBackend for TestBackend {
 
     fn skills_dir(&self) -> std::path::PathBuf {
         std::path::PathBuf::from("skills")
+    }
+
+    fn agents_dir(&self) -> std::path::PathBuf {
+        self.agents_dir.clone()
     }
 }
 
@@ -614,6 +632,41 @@ async fn orchestrator_delegates_to_specialist_and_uses_result() {
     assert!(events
         .iter()
         .any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "delegate")));
+}
+
+#[tokio::test]
+async fn orchestrator_delegates_to_user_defined_agent() {
+    // A user-authored agent in the backend's agents dir must resolve through
+    // the delegate tool exactly like a built-in specialist (the driving agent
+    // itself is resolved from the same dir by hf-service).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("custom-scout.toml"),
+        "id = \"custom-scout\"\n\
+         name = \"Custom Scout\"\n\
+         description = \"d\"\n\
+         role = \"discovery\"\n\
+         system_prompt = \"you are a custom scout\"\n",
+    )
+    .unwrap();
+    let pool: Arc<dyn ProviderPool> = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"delegate","args":{"agent":"custom-scout","task":"scout the target"}}"#,
+        r#"{"final":"custom scout picked parse_entry"}"#,
+        r#"{"final":"Reporting: parse_entry"}"#,
+    ]));
+    let agent = Agent::new(
+        TestBackend::with_agents_dir(pool, dir.path().to_path_buf()),
+        None,
+    );
+    let sink = CollectingSink::new();
+    let answer = agent
+        .run_turn(Vec::new(), "delegate to the custom scout", &sink)
+        .await
+        .unwrap();
+    assert!(
+        answer.contains("parse_entry"),
+        "user-defined agent result did not flow back: {answer}"
+    );
 }
 
 #[tokio::test]

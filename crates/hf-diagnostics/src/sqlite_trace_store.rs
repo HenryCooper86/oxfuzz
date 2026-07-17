@@ -128,10 +128,19 @@ struct TraceRow {
 }
 
 impl TraceRow {
-    fn into_trace(self) -> Option<Trace> {
-        let id = Uuid::parse_str(&self.id).ok()?;
+    /// Decode a persisted row. Malformed ids/timestamps are hard errors: a
+    /// corrupt row must fail the read, never be silently dropped from the
+    /// result set (`DATABASE_SCHEMA.md` §7).
+    fn into_trace(self) -> Result<Trace, TraceStoreError> {
+        let id = Uuid::parse_str(&self.id)
+            .map_err(|e| storage_err(format!("decode diag_traces.id {:?}: {e}", self.id)))?;
         let session_id = Uuid::parse_str(&self.session_id).unwrap_or_default();
-        let started_at: DateTime<Utc> = self.started_at.parse().ok()?;
+        let started_at: DateTime<Utc> = self.started_at.parse().map_err(|e| {
+            storage_err(format!(
+                "decode diag_traces.started_at {:?}: {e}",
+                self.started_at
+            ))
+        })?;
         let completed_at: Option<DateTime<Utc>> =
             self.completed_at.as_deref().and_then(|s| s.parse().ok());
         let metadata: serde_json::Value = self
@@ -149,7 +158,7 @@ impl TraceRow {
             .replay_context
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
-        Some(Trace {
+        Ok(Trace {
             id,
             session_id,
             name: self.name,
@@ -197,10 +206,24 @@ struct ObsRow {
 }
 
 impl ObsRow {
-    fn into_observation(self) -> Option<Observation> {
-        let id = Uuid::parse_str(&self.id).ok()?;
-        let trace_id = Uuid::parse_str(&self.trace_id).ok()?;
-        let started_at: DateTime<Utc> = self.started_at.parse().ok()?;
+    /// Decode a persisted row. Malformed ids/timestamps are hard errors: a
+    /// corrupt row must fail the read, never be silently dropped from the
+    /// result set (`DATABASE_SCHEMA.md` §7).
+    fn into_observation(self) -> Result<Observation, TraceStoreError> {
+        let id = Uuid::parse_str(&self.id)
+            .map_err(|e| storage_err(format!("decode diag_observations.id {:?}: {e}", self.id)))?;
+        let trace_id = Uuid::parse_str(&self.trace_id).map_err(|e| {
+            storage_err(format!(
+                "decode diag_observations.trace_id {:?}: {e}",
+                self.trace_id
+            ))
+        })?;
+        let started_at: DateTime<Utc> = self.started_at.parse().map_err(|e| {
+            storage_err(format!(
+                "decode diag_observations.started_at {:?}: {e}",
+                self.started_at
+            ))
+        })?;
         let completed_at: Option<DateTime<Utc>> =
             self.completed_at.as_deref().and_then(|s| s.parse().ok());
         let input: serde_json::Value = self
@@ -224,7 +247,7 @@ impl ObsRow {
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
             .map(|ids| ids.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect())
             .unwrap_or_default();
-        Some(Observation {
+        Ok(Observation {
             id,
             trace_id,
             parent_id: self
@@ -270,14 +293,28 @@ struct ScoreRow {
 }
 
 impl ScoreRow {
-    fn into_score(self) -> Option<Score> {
-        let id = Uuid::parse_str(&self.id).ok()?;
-        let trace_id = Uuid::parse_str(&self.trace_id).ok()?;
+    /// Decode a persisted row. Malformed ids/timestamps are hard errors: a
+    /// corrupt row must fail the read, never be silently dropped from the
+    /// result set (`DATABASE_SCHEMA.md` §7).
+    fn into_score(self) -> Result<Score, TraceStoreError> {
+        let id = Uuid::parse_str(&self.id)
+            .map_err(|e| storage_err(format!("decode diag_scores.id {:?}: {e}", self.id)))?;
+        let trace_id = Uuid::parse_str(&self.trace_id).map_err(|e| {
+            storage_err(format!(
+                "decode diag_scores.trace_id {:?}: {e}",
+                self.trace_id
+            ))
+        })?;
         let observation_id = self
             .observation_id
             .as_deref()
             .and_then(|s| Uuid::parse_str(s).ok());
-        let created_at: DateTime<Utc> = self.created_at.parse().ok()?;
+        let created_at: DateTime<Utc> = self.created_at.parse().map_err(|e| {
+            storage_err(format!(
+                "decode diag_scores.created_at {:?}: {e}",
+                self.created_at
+            ))
+        })?;
         let data_type = self.data_type.as_deref().unwrap_or("numeric");
         let value = match data_type {
             "boolean" => ScoreValue::Boolean(self.value.unwrap_or(0.0) != 0.0),
@@ -291,7 +328,7 @@ impl ScoreRow {
             Some("external") => ScoreSource::External,
             _ => ScoreSource::System,
         };
-        Some(Score {
+        Ok(Score {
             id,
             trace_id,
             observation_id,
@@ -385,8 +422,10 @@ impl TraceStore for SqliteTraceStore {
         .await
         .map_err(|e| storage_err(format!("get_trace: {e}")))?;
 
-        row.and_then(TraceRow::into_trace)
-            .ok_or(TraceStoreError::TraceNotFound { id })
+        match row {
+            Some(row) => row.into_trace(),
+            None => Err(TraceStoreError::TraceNotFound { id }),
+        }
     }
 
     async fn update_trace(&self, trace: Trace) -> Result<(), TraceStoreError> {
@@ -460,7 +499,7 @@ impl TraceStore for SqliteTraceStore {
         .await
         .map_err(|e| storage_err(format!("list_traces: {e}")))?;
 
-        Ok(rows.into_iter().filter_map(TraceRow::into_trace).collect())
+        rows.into_iter().map(TraceRow::into_trace).collect()
     }
 
     async fn insert_observation(&self, obs: Observation) -> Result<(), TraceStoreError> {
@@ -568,10 +607,7 @@ impl TraceStore for SqliteTraceStore {
         .await
         .map_err(|e| storage_err(format!("get_observations: {e}")))?;
 
-        Ok(rows
-            .into_iter()
-            .filter_map(ObsRow::into_observation)
-            .collect())
+        rows.into_iter().map(ObsRow::into_observation).collect()
     }
 
     async fn insert_score(&self, score: Score) -> Result<(), TraceStoreError> {
@@ -630,7 +666,7 @@ impl TraceStore for SqliteTraceStore {
         .await
         .map_err(|e| storage_err(format!("get_scores: {e}")))?;
 
-        Ok(rows.into_iter().filter_map(ScoreRow::into_score).collect())
+        rows.into_iter().map(ScoreRow::into_score).collect()
     }
 
     async fn delete_before(&self, before: DateTime<Utc>) -> Result<u64, TraceStoreError> {
@@ -725,7 +761,7 @@ impl TraceStore for SqliteTraceStore {
             "SELECT id, session_id, name, status, user_input, metadata, started_at, completed_at, \
              total_input_tokens, total_output_tokens, total_cost_usd, llm_duration_ms, tool_duration_ms, \
              tags, replay_context \
-             FROM diag_traces WHERE session_id = ?1 ORDER BY started_at ASC LIMIT ?2",
+             FROM diag_traces WHERE session_id = ?1 ORDER BY started_at DESC LIMIT ?2",
         )
         .bind(session_id)
         .bind(limit_i64)
@@ -733,7 +769,7 @@ impl TraceStore for SqliteTraceStore {
         .await
         .map_err(|e| storage_err(format!("list_traces_by_session: {e}")))?;
 
-        Ok(rows.into_iter().filter_map(TraceRow::into_trace).collect())
+        rows.into_iter().map(TraceRow::into_trace).collect()
     }
 
     async fn get_observations_by_trace_ids(
@@ -764,9 +800,181 @@ impl TraceStore for SqliteTraceStore {
             .await
             .map_err(|e| storage_err(format!("get_observations_by_trace_ids: {e}")))?;
 
-        Ok(rows
+        rows.into_iter().map(ObsRow::into_observation).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ScoreSource;
+
+    /// Build a `SqliteTraceStore` over a real (tempfile-backed) database with
+    /// the migrated `diag_*` schema. The `TempDir` must stay alive for the
+    /// duration of the test.
+    async fn test_store() -> (hf_storage::Store, SqliteTraceStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Store::connect runs the forward migrations (0003_diagnostics).
+        let store = hf_storage::Store::connect(dir.path().join("hf.db"))
+            .await
+            .expect("connect");
+        let traces = SqliteTraceStore::new(store.pool().clone());
+        (store, traces, dir)
+    }
+
+    #[tokio::test]
+    async fn list_traces_propagates_corrupt_row_decode_failure() {
+        let (store, traces, _dir) = test_store().await;
+        let session = Uuid::new_v4();
+        traces
+            .insert_trace(Trace::new(session, "good"))
+            .await
+            .expect("insert valid trace");
+        // A row written outside the encoder with an unparseable id must
+        // surface as an error, not be silently dropped (DATABASE_SCHEMA.md
+        // §7: a deserialization failure is never a successful empty/shrunk
+        // collection).
+        sqlx::query(
+            "INSERT INTO diag_traces (id, session_id, name, started_at) \
+             VALUES ('not-a-uuid', ?1, 'corrupt', '2024-01-01T00:00:00Z')",
+        )
+        .bind(session.to_string())
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt trace row");
+
+        let err = traces
+            .list_traces(None, None, 10)
+            .await
+            .expect_err("corrupt row must fail the read, not shrink it");
+        assert!(err.to_string().contains("decode diag_traces"), "{err}");
+
+        let err = traces
+            .list_traces_by_session(&session.to_string(), 10)
+            .await
+            .expect_err("corrupt row must fail the session listing");
+        assert!(err.to_string().contains("decode diag_traces"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_traces_propagates_unparseable_timestamp() {
+        let (store, traces, _dir) = test_store().await;
+        let session = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO diag_traces (id, session_id, name, started_at) \
+             VALUES (?1, ?2, 'corrupt-time', 'not-a-timestamp')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session.to_string())
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt trace row");
+
+        let err = traces
+            .list_traces(None, None, 10)
+            .await
+            .expect_err("unparseable started_at must fail the read");
+        assert!(err.to_string().contains("decode diag_traces"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn get_observations_propagates_corrupt_row_decode_failure() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "t");
+        let trace_id = trace.id;
+        traces.insert_trace(trace).await.expect("insert trace");
+        traces
+            .insert_observation(Observation::new(
+                trace_id,
+                ObservationType::Generation,
+                "good",
+            ))
+            .await
+            .expect("insert valid observation");
+        sqlx::query(
+            "INSERT INTO diag_observations (id, trace_id, obs_type, name, started_at) \
+             VALUES ('bad-id', ?1, 'generation', 'corrupt', '2024-01-01T00:00:00Z')",
+        )
+        .bind(trace_id.to_string())
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt observation row");
+
+        let err = traces
+            .get_observations(trace_id)
+            .await
+            .expect_err("corrupt row must fail the read, not shrink it");
+        assert!(
+            err.to_string().contains("decode diag_observations"),
+            "{err}"
+        );
+
+        let err = traces
+            .get_observations_by_trace_ids(&[trace_id])
+            .await
+            .expect_err("corrupt row must fail the batch read");
+        assert!(
+            err.to_string().contains("decode diag_observations"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_scores_propagates_corrupt_row_decode_failure() {
+        let (store, traces, _dir) = test_store().await;
+        let trace = Trace::new(Uuid::new_v4(), "t");
+        let trace_id = trace.id;
+        traces.insert_trace(trace).await.expect("insert trace");
+        traces
+            .insert_score(Score::numeric(
+                trace_id,
+                "quality",
+                1.0,
+                ScoreSource::System,
+            ))
+            .await
+            .expect("insert valid score");
+        sqlx::query(
+            "INSERT INTO diag_scores (id, trace_id, name, created_at) \
+             VALUES ('bad-id', ?1, 'corrupt', '2024-01-01T00:00:00Z')",
+        )
+        .bind(trace_id.to_string())
+        .execute(store.pool())
+        .await
+        .expect("insert corrupt score row");
+
+        let err = traces
+            .get_scores(trace_id)
+            .await
+            .expect_err("corrupt row must fail the read, not shrink it");
+        assert!(err.to_string().contains("decode diag_scores"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_traces_by_session_returns_newest_first() {
+        let (_store, traces, _dir) = test_store().await;
+        let session = Uuid::new_v4();
+        let mut old = Trace::new(session, "old");
+        old.started_at = Utc::now() - chrono::Duration::hours(2);
+        let mut mid = Trace::new(session, "mid");
+        mid.started_at = Utc::now() - chrono::Duration::hours(1);
+        let new = Trace::new(session, "new");
+        // Insert oldest-first so an ASC query would return them reversed.
+        traces.insert_trace(old).await.expect("insert old");
+        traces.insert_trace(mid).await.expect("insert mid");
+        traces.insert_trace(new).await.expect("insert new");
+
+        let names: Vec<String> = traces
+            .list_traces_by_session(&session.to_string(), 10)
+            .await
+            .expect("list traces")
             .into_iter()
-            .filter_map(ObsRow::into_observation)
-            .collect())
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["new", "mid", "old"]);
     }
 }

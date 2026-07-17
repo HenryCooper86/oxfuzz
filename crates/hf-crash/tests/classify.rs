@@ -53,6 +53,68 @@ fn classify_timeout_log() {
 }
 
 #[test]
+fn asan_report_mentioning_timeout_in_the_stack_stays_asan() {
+    // A heap-buffer-overflow whose path/symbols contain "timeout" must not be
+    // relabeled: the timeout token is stack content, not a fuzzer verdict.
+    let log = r"==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000034
+READ of size 1 at 0x602000000034 thread T0
+    #0 0x4f2a80 in handle_timeout net/timeout.c:14:20
+    #1 0x4f3c10 in parse_value src/json.c:58:12
+SUMMARY: AddressSanitizer: heap-buffer-overflow net/timeout.c:14:20 in handle_timeout
+";
+    let (kind, _sig, _summary) = classify(log);
+    assert_eq!(
+        kind,
+        CrashKind::Asan,
+        "an incidental 'timeout' in the stack must not relabel an ASan report"
+    );
+}
+
+#[test]
+fn libfuzzer_timeout_headline_classifies_as_timeout() {
+    // libFuzzer's own timeout verdict, on an ASan-instrumented binary (the
+    // stack mentions __asan), is a Timeout, not an ASan finding.
+    let log = r"==12345==ERROR: libFuzzer: timeout after 61 seconds
+    #0 0x5a1b2c in __asan_report_load4 (/work/fuzz_bin+0x5a1b2c)
+    #1 0x4f2a80 in parse_value src/json.c:150:5
+SUMMARY: libFuzzer: timeout
+";
+    let (kind, _sig, _summary) = classify(log);
+    assert_eq!(
+        kind,
+        CrashKind::Timeout,
+        "libFuzzer's 'timeout after N seconds' verdict must classify as Timeout"
+    );
+}
+
+#[test]
+fn unresolved_frame_addresses_do_not_leak_into_the_signature() {
+    // Two logs of the same crash from different processes: ASLR slides the
+    // raw addresses of unresolved ("<unknown module>") frames, but the
+    // signature must be identical or dedup sees two crashes.
+    let log_a = r"==1==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
+    #0 0x4f2a80 in parse_value src/json.c:150:5
+    #1 0x00007f8a1b2c  (<unknown module>)
+    #2 0x00007f8a9f10  (<unknown module>)
+";
+    let log_b = r"==1==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
+    #0 0x5b3c91 in parse_value src/json.c:150:5
+    #1 0x000055f0beef99  (<unknown module>)
+    #2 0x000055f0c01234  (<unknown module>)
+";
+    let (_, sig_a, _) = classify(log_a);
+    let (_, sig_b, _) = classify(log_b);
+    assert!(
+        !sig_a.is_empty(),
+        "frames are present, so a signature exists"
+    );
+    assert_eq!(
+        sig_a, sig_b,
+        "ASLR-slid addresses must not change the stack signature"
+    );
+}
+
+#[test]
 fn classify_empty_log_is_other() {
     let (kind, _sig, _summary) = classify("nothing interesting\n");
     assert_eq!(kind, CrashKind::Other);

@@ -148,19 +148,39 @@ pub fn classify_provider_error(error: &hf_core::provider::ProviderError) -> Stan
         ProviderError::AuthenticationFailed { .. } => StandardError::AuthenticationFailed,
         ProviderError::KeyInvalid { .. } => StandardError::KeyInvalid,
         ProviderError::ServerError { message, .. } => {
-            // Try to sub-classify server errors from the message.
-            if message.contains("context") && message.contains("length") {
-                StandardError::ContextWindowExceeded
-            } else {
-                StandardError::ServerError
-            }
+            classify_http_message(message).unwrap_or_else(|| {
+                // Fallback for messages without the `HTTP {status}:` prefix:
+                // sub-classify server errors from the body alone.
+                if message.contains("context") && message.contains("length") {
+                    StandardError::ContextWindowExceeded
+                } else {
+                    StandardError::ServerError
+                }
+            })
         }
         ProviderError::NetworkError { .. } => StandardError::NetworkError,
         ProviderError::NoProviderAvailable { .. }
         | ProviderError::Cancelled
         | ProviderError::ParseError { .. } => StandardError::Unknown,
-        ProviderError::Other { message } => classify_from_body(message),
+        ProviderError::Other { message } => {
+            classify_http_message(message).unwrap_or_else(|| classify_from_body(message))
+        }
     }
+}
+
+/// Recover a status-aware classification from a provider HTTP failure message
+/// of the form `HTTP {status}: {body}` (`{status}` may carry a canonical
+/// reason phrase, e.g. `400 Bad Request`).
+///
+/// Returns `None` when the message does not carry a parseable status, so the
+/// caller can fall back to body-only classification.
+fn classify_http_message(message: &str) -> Option<StandardError> {
+    let rest = message.strip_prefix("HTTP ")?;
+    let digit_len = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let status: u16 = rest[..digit_len].parse().ok()?;
+    Some(classify(status, rest))
 }
 
 /// Build a [`ProviderError`] for an authentication-class HTTP failure (401/403),
@@ -208,6 +228,54 @@ pub(crate) fn auth_failure_to_provider_error(
         _ => ProviderError::AuthenticationFailed {
             provider: provider_id.to_string(),
             message: body.to_string(),
+        },
+    }
+}
+
+/// Build a [`ProviderError`] for a generic HTTP failure (anything not already
+/// handled as rate-limit/auth/billing by the caller), routing the status code
+/// and response body through the status-aware [`classify`] so request-specific
+/// errors — most importantly a context-window 400 — do not masquerade as
+/// server errors and freeze the provider.
+///
+/// Sub-classifications with a dedicated [`ProviderError`] variant map onto it
+/// directly. The rest (`ContextWindowExceeded`, `ContentFiltered`,
+/// `ModelNotFound`, `ServerError`, `Unknown`) keep the
+/// `HTTP {status}: {body}` message shape so [`classify_provider_error`]
+/// recovers the same sub-classification when the pool decides whether to
+/// freeze.
+///
+/// [`ProviderError`]: hf_core::provider::ProviderError
+pub(crate) fn http_failure_to_provider_error(
+    provider_id: &str,
+    status: u16,
+    body: &str,
+) -> hf_core::provider::ProviderError {
+    use hf_core::provider::ProviderError;
+    let message = format!("HTTP {status}: {body}");
+    match classify(status, body) {
+        StandardError::RateLimited { retry_after } => ProviderError::RateLimited {
+            provider: provider_id.to_string(),
+            retry_after_secs: retry_after.map_or(60, |d| d.as_secs()),
+        },
+        StandardError::KeyInvalid => ProviderError::KeyInvalid {
+            provider: provider_id.to_string(),
+            message,
+        },
+        StandardError::QuotaExhausted | StandardError::InsufficientBalance => {
+            ProviderError::QuotaExhausted {
+                provider: provider_id.to_string(),
+                message,
+            }
+        }
+        StandardError::AuthenticationFailed => ProviderError::AuthenticationFailed {
+            provider: provider_id.to_string(),
+            message,
+        },
+        StandardError::NetworkError => ProviderError::NetworkError { message },
+        _ => ProviderError::ServerError {
+            provider: provider_id.to_string(),
+            message,
         },
     }
 }
@@ -474,6 +542,63 @@ mod tests {
             message: "connection reset".into(),
         };
         assert_eq!(classify_provider_error(&err), StandardError::NetworkError);
+    }
+
+    // -----------------------------------------------------------------------
+    // Generic HTTP-failure mapping (status-aware, non-freezing 4xx)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn anthropic_prompt_too_long_400_does_not_freeze() {
+        // Anthropic rejects an over-long prompt with HTTP 400 and a body that
+        // mentions neither "context" nor "length"; the request-specific error
+        // must not freeze the provider as a server error.
+        let err = http_failure_to_provider_error(
+            "anthropic",
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 199999 maximum"}}"#,
+        );
+        let std_err = classify_provider_error(&err);
+        assert_eq!(std_err, StandardError::ContextWindowExceeded);
+        assert!(!std_err.should_freeze());
+        assert_eq!(std_err.freeze_duration(), None);
+    }
+
+    #[test]
+    fn generic_500_still_freezes_as_server_error() {
+        use hf_core::provider::ProviderError;
+        let err = http_failure_to_provider_error("openai", 500, "internal server error");
+        assert!(matches!(err, ProviderError::ServerError { .. }));
+        let std_err = classify_provider_error(&err);
+        assert_eq!(std_err, StandardError::ServerError);
+        assert!(std_err.should_freeze());
+    }
+
+    #[test]
+    fn classify_provider_error_recovers_status_from_http_message() {
+        // Providers format generic HTTP failures as `HTTP {status}: {body}`
+        // (the status may carry a canonical reason phrase); the classifier must
+        // use the recovered status instead of body-only sniffing.
+        use hf_core::provider::ProviderError;
+        let err = ProviderError::ServerError {
+            provider: "anthropic".into(),
+            message: "HTTP 400 Bad Request: prompt is too long: 200001 tokens > 199999 maximum"
+                .into(),
+        };
+        assert_eq!(
+            classify_provider_error(&err),
+            StandardError::ContextWindowExceeded
+        );
+    }
+
+    #[test]
+    fn server_error_without_http_prefix_stays_server_error() {
+        use hf_core::provider::ProviderError;
+        let err = ProviderError::ServerError {
+            provider: "mock".into(),
+            message: "mock failure".into(),
+        };
+        assert_eq!(classify_provider_error(&err), StandardError::ServerError);
     }
 
     // -----------------------------------------------------------------------

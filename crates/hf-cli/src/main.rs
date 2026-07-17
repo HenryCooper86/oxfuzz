@@ -750,6 +750,15 @@ async fn cmd_harness(
 ) -> anyhow::Result<()> {
     let engine = parse_engine(engine)?;
     let lang = parse_lang(lang)?;
+    // --draft-only stops before compile/smoke/promotion, so flags that only
+    // take effect in those stages must not be silently ignored. (--refine is
+    // exempt: it honors --repair during its recompile.)
+    if draft_only && !refine && repair > 0 {
+        eprintln!("warning: --repair is ignored with --draft-only (the harness is not compiled)");
+    }
+    if draft_only && promote {
+        eprintln!("warning: --promote is ignored with --draft-only (no smoke qualification runs)");
+    }
     let container = ServiceContainer::bootstrap().await;
 
     // With --refine, reshape the existing harness toward uncovered reachable
