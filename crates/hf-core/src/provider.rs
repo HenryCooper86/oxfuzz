@@ -501,4 +501,30 @@ pub trait ProviderPool: Send + Sync {
 
     /// Manually thaw a frozen provider (triggers health check first).
     async fn thaw(&self, provider_id: &ProviderId) -> Result<(), ProviderError>;
+
+    /// Interval between periodic health checks of frozen providers.
+    ///
+    /// Pools built from configuration override this with the configured value;
+    /// the default keeps a sensible 60-second cadence so every pool
+    /// implementation gets a workable periodic-recovery loop for free.
+    fn health_check_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60)
+    }
+
+    /// Health-check every currently frozen provider and thaw the ones that
+    /// respond. Returns the number of providers thawed.
+    ///
+    /// The default implementation drives the existing
+    /// [`provider_statuses`](Self::provider_statuses)/[`thaw`](Self::thaw)
+    /// pair: only providers reported as frozen are probed (a thaw runs the
+    /// pool's health check first), so healthy providers never pay for a ping.
+    async fn thaw_frozen_providers(&self) -> usize {
+        let mut thawed = 0;
+        for status in self.provider_statuses().await {
+            if status.is_frozen && self.thaw(&status.id).await.is_ok() {
+                thawed += 1;
+            }
+        }
+        thawed
+    }
 }
