@@ -10,18 +10,6 @@ pub enum ProviderPoolError {
     #[error("provider pool configuration error: {message}")]
     Config { message: String },
 
-    #[error("provider '{id}' not found in pool")]
-    ProviderNotFound { id: String },
-
     #[error("duplicate provider id: {id}")]
     DuplicateProvider { id: String },
-
-    #[error("provider '{id}' is frozen: {reason}")]
-    ProviderFrozen { id: String, reason: String },
-
-    #[error("health check failed for '{id}': {message}")]
-    HealthCheckFailed { id: String, message: String },
-
-    #[error("{message}")]
-    Other { message: String },
 }

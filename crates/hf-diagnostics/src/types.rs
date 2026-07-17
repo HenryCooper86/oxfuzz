@@ -98,6 +98,25 @@ impl Trace {
             Some(u64::try_from((now - self.started_at).num_milliseconds().max(0)).unwrap_or(0));
     }
 
+    /// Fold a completed observation's usage into the trace totals.
+    ///
+    /// Token and cost totals accumulate from every observation; LLM wait
+    /// time accumulates from `Generation` observations only. Call as each
+    /// child observation completes so the persisted trace row carries real
+    /// totals instead of zeros.
+    pub fn record_usage(&mut self, obs: &Observation) {
+        self.total_input_tokens = self.total_input_tokens.saturating_add(obs.input_tokens);
+        self.total_output_tokens = self.total_output_tokens.saturating_add(obs.output_tokens);
+        self.total_cost_usd += obs.cost_usd;
+        if obs.obs_type == ObservationType::Generation {
+            let ms = obs
+                .duration_ms()
+                .and_then(|d| u64::try_from(d).ok())
+                .unwrap_or(0);
+            self.llm_duration_ms = self.llm_duration_ms.saturating_add(ms);
+        }
+    }
+
     /// Duration in milliseconds (if completed).
     pub fn duration_ms(&self) -> Option<i64> {
         self.completed_at
@@ -310,6 +329,35 @@ mod tests {
         assert_eq!(trace.status, TraceStatus::Completed);
         assert!(trace.completed_at.is_some());
         assert!(trace.duration_ms().unwrap() >= 0);
+    }
+
+    #[test]
+    fn test_trace_record_usage_accumulates_totals() {
+        let mut trace = Trace::new(Uuid::new_v4(), "t");
+
+        let mut gen = Observation::new(trace.id, ObservationType::Generation, "gen");
+        gen.input_tokens = 100;
+        gen.output_tokens = 50;
+        gen.cost_usd = 0.25;
+        gen.complete();
+        trace.record_usage(&gen);
+
+        let mut tool = Observation::new(trace.id, ObservationType::ToolCall, "tool");
+        tool.input_tokens = 10;
+        tool.output_tokens = 5;
+        tool.cost_usd = 0.05;
+        tool.complete();
+        trace.record_usage(&tool);
+
+        assert_eq!(trace.total_input_tokens, 110);
+        assert_eq!(trace.total_output_tokens, 55);
+        assert!((trace.total_cost_usd - 0.30).abs() < 1e-9);
+        // Only generations accumulate LLM wait time.
+        assert_eq!(
+            trace.llm_duration_ms,
+            u64::try_from(gen.duration_ms().unwrap()).unwrap()
+        );
+        assert_eq!(trace.tool_duration_ms, 0);
     }
 
     #[test]

@@ -112,6 +112,77 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [~] Tests: storage, service, guardrails, agent covered; expand crash/triage
   and end-to-end coverage.
 
+## Audit backlog (refreshed 2026-07-17)
+
+A second full-workspace audit (see `.claude/plans/2026-07-17-codebase-audit.md`)
+fixed the following; open design decisions are listed at the end.
+
+### Safety and security
+- [x] Web origin host-match fallback is restricted to loopback hosts, closing a
+  DNS-rebinding hole in open local-dev mode; exact allowlist semantics unchanged.
+- [x] Pinned image references reject leading-dash values and empty name
+  components in `hf-runtime` and the automotive sidecar validator, so a
+  validated reference can never be consumed as a `docker run` flag.
+- [x] Raw `/config/write` rejects `providers.toml`; the typed endpoint is the
+  only write path so the live provider pool always reloads.
+
+### Correctness
+- [x] Docker stdin EPIPE no longer discards captured container output; the real
+  exit and stderr surface instead of a misleading "write docker stdin" error.
+- [x] Status-aware error classification is wired into all five providers:
+  context-window 400s classify as request-specific `ContextWindowExceeded` and
+  no longer freeze the provider; 404/unknown-400 freeze durations corrected.
+- [x] `hf_corpus::minimize` fails closed on an empty survivor set instead of
+  deleting the live corpus and returning `Ok` (closes the rollback wipe path).
+- [x] ASan reports whose stacks merely mention "timeout" stay `Asan`; timeout
+  detection now requires a fuzzer verdict headline.
+- [x] Stack signatures strip unresolved-frame hex addresses, so dedup is
+  ASLR-stable across processes.
+- [x] Batch knowledge indexing upserts per chunk id like the single-item path.
+- [x] Engine capabilities no longer advertise honggfuzz/ClusterFuzzLite crash
+  minimization (the minimizer only supports AFL++/libFuzzer).
+- [x] Duplicate C symbols merge call-graph edges/complexity in the scanner
+  instead of silently overwriting; name-based persistence identity documented
+  as intentional (known limitation below).
+- [x] Internal smoke/prune/minimize budgets clamp to the operator duration
+  ceiling instead of erroring, so a low `max_duration_secs` cannot block
+  harness qualification; operator-requested campaigns still hard-fail.
+- [x] Web `parse_role` keeps `tool` transcript turns (parity with the GUI);
+  `knowledge_index` runs off the async runtime via `spawn_blocking`.
+- [x] Diagnostics trace rows persist real token/cost/duration totals; corrupt
+  rows propagate decode errors instead of silently shrinking reads, and
+  `list_traces_by_session` is newest-first on both backends.
+- [x] `SessionManagerError::NotFound` is reachable (was mapped to `Storage`).
+- [x] Agent delegation resolves sub-agents from the user registry
+  (`config/agents/`) like the driving agent, not only the built-in roster.
+- [x] hf-prompt's token estimator uses bytes/4 like hf-context/hf-core, so
+  multibyte budgets are enforced consistently.
+
+### Dead code removed
+- [x] `TOOL_CATALOG` (hf-agent), `stub.rs` orphan (hf-skills), the unused
+  `bollard` dependency, unconstructed `ProviderPoolError` variants, provider
+  metrics accessors + the prometheus renderer, `hf-engine`'s duplicate
+  `build_tmin_args`, and `RunResult.coverage` (minted a random run id, no
+  readers) with `parse_coverage`.
+
+### Docs
+- [x] `ENGINE_ADAPTER_STANDARD.md` section 5 documents the real flat crash
+  layout ingestion accepts; stale hf-scheduler doc references corrected.
+
+### Open design decisions (deliberately not changed by this audit)
+- [ ] Unwired-but-designed subsystems kept as roadmap surface: hf-context
+  working-memory/pruning pipeline, hf-knowledge injection middleware +
+  ingestion + vector indexer, hf-scheduler parameter resolution + event
+  triggers, guardrail authorization of discover/corpus/chat actions.
+- [ ] Provider `thaw` has no operator surface (a permanent freeze still needs a
+  process restart); `health_check_interval_secs` is parsed but unused.
+- [ ] Same-named C functions share one `(project, symbol)` persistence
+  identity; a file-scoped identity is a High-risk-tier schema change.
+- [ ] REST routes and Tauri commands with no frontend caller: keep as
+  supported public API or prune.
+- [ ] One `CoverageReport` construction in hf-service still uses a nil run id
+  and write-only delta fields.
+
 ## Audit backlog (refreshed 2026-07-15)
 
 A multi-crate audit fixed dozens of correctness, safety, dead-code, and

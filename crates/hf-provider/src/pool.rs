@@ -448,34 +448,6 @@ impl ProviderPoolImpl {
         effective_request.top_p = effective_request.top_p.or(entry.default_top_p);
         effective_request
     }
-
-    /// Get metrics for a specific provider.
-    pub fn provider_metrics(&self, provider_id: &ProviderId) -> Option<SharedMetrics> {
-        self.find_entry(provider_id).map(|e| Arc::clone(&e.metrics))
-    }
-
-    /// Return metadata for all registered providers.
-    ///
-    /// Used by the TUI to query context window sizes and model names.
-    pub fn list_metadata(&self) -> Vec<hf_core::provider::ProviderMetadata> {
-        self.providers
-            .iter()
-            .map(|e| e.provider.metadata().clone())
-            .collect()
-    }
-
-    /// Return a snapshot of metrics for all providers.
-    ///
-    /// Each entry pairs the provider ID with its current metrics snapshot.
-    /// Avoids N+1 lookups when building observability reports.
-    pub fn all_metrics(
-        &self,
-    ) -> Vec<(hf_core::types::ProviderId, crate::metrics::MetricsSnapshot)> {
-        self.providers
-            .iter()
-            .map(|e| (e.provider.metadata().id.clone(), e.metrics.snapshot()))
-            .collect()
-    }
 }
 
 #[async_trait]
@@ -925,21 +897,6 @@ mod tests {
             }],
             ..test_config()
         }
-    }
-
-    #[test]
-    fn configured_costs_reach_provider_metadata() {
-        let mut config = provider_config_with_temperature("priced", None);
-        config.providers[0].api_key = Some("test-key".to_owned());
-        config.providers[0].cost_per_1k_input = 0.125;
-        config.providers[0].cost_per_1k_output = 0.75;
-
-        let pool = ProviderPoolImpl::from_config(&config).expect("provider config should build");
-        let metadata = pool.list_metadata();
-
-        assert_eq!(metadata.len(), 1);
-        assert!((metadata[0].cost_per_1k_input - 0.125).abs() < f64::EPSILON);
-        assert!((metadata[0].cost_per_1k_output - 0.75).abs() < f64::EPSILON);
     }
 
     fn test_request() -> ChatRequest {

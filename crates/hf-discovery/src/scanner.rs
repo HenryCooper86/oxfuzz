@@ -88,6 +88,12 @@ const TARGET_ID_NAMESPACE: Uuid = Uuid::from_bytes([
 
 /// Derive a deterministic target id from the persistence identity
 /// `(project_root, symbol)`. Same identity always yields the same id.
+///
+/// Known limitation: identity is deliberately name-based (stable across
+/// scans), so two same-named functions in different files of one project
+/// share a single persistence identity. The scanner mitigates this for
+/// analysis by merging their call-graph edges and keeping the maximum
+/// complexity (see `extract_functions`), but they remain one persisted target.
 fn deterministic_target_id(project_root: &Path, symbol: &str) -> Uuid {
     let key = format!("{}::{}", project_root.display(), symbol);
     Uuid::new_v5(&TARGET_ID_NAMESPACE, key.as_bytes())
@@ -456,8 +462,18 @@ fn extract_functions(
         let complexity = compute_complexity(node);
         let fit_score = compute_fit_score(kind, input_surface, complexity, params);
         // Record the call graph for interprocedural reachability analysis.
-        complexity_map.insert(symbol.clone(), complexity);
-        calls.insert(symbol.clone(), extract_calls(node, src));
+        // Identity is name-keyed by design, so two same-named definitions in
+        // different files share one slot: merge rather than overwrite, or the
+        // second definition would silently drop the first's edges. The union
+        // is sorted + deduped for determinism; complexity keeps the max.
+        complexity_map
+            .entry(symbol.clone())
+            .and_modify(|existing| *existing = (*existing).max(complexity))
+            .or_insert(complexity);
+        let edges = calls.entry(symbol.clone()).or_default();
+        edges.extend(extract_calls(node, src));
+        edges.sort();
+        edges.dedup();
         // Capture only the function prototype (declarator), not the whole
         // definition body -- otherwise the signature spans many lines and
         // downstream consumers (e.g. harness generation) leak body code.

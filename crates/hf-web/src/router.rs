@@ -1600,6 +1600,7 @@ fn parse_role(role: &str) -> Role {
     match role.to_ascii_lowercase().as_str() {
         "assistant" => Role::Assistant,
         "system" => Role::System,
+        "tool" => Role::Tool,
         _ => Role::User,
     }
 }
@@ -1753,8 +1754,20 @@ async fn knowledge_index(
     Json(req): Json<ProjectRequest>,
 ) -> ApiResult<hf_service::knowledge::KnowledgeStats> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
-    let knowledge_stats =
-        hf_service::knowledge::index_project(&project).map_err(classified_api_error)?;
+    // The tree walk and chunking are blocking, so run them off the async
+    // runtime (same pattern as `knowledge_search`).
+    let knowledge_stats = tokio::task::spawn_blocking(move || {
+        hf_service::knowledge::index_project(&project)
+    })
+    .await
+    // A panic in the blocking index (JoinError) must surface as a 500, not a
+    // silent empty 200 that a client cannot distinguish from "no documents".
+    .map_err(|error| {
+        classified_api_error(ClassifiedError::Internal(format!(
+            "knowledge index task failed: {error}"
+        )))
+    })?
+    .map_err(classified_api_error)?;
     Ok(Json(knowledge_stats))
 }
 
@@ -2144,11 +2157,21 @@ async fn write_config(
     State(_): State<AppState>,
     Json(req): Json<WriteConfigRequest>,
 ) -> ApiResult<()> {
-    if matches!(req.name.as_str(), "defectdojo" | "issue_tracker") {
+    // Sections with a typed endpoint must go through it: the typed route also
+    // refreshes live state (e.g. `reload_providers`), which a raw write would
+    // silently skip, diverging the file from the running process.
+    let typed_endpoint_message = match req.name.as_str() {
+        "defectdojo" | "issue_tracker" => {
+            Some("integration settings require the typed config endpoint")
+        }
+        "providers" => Some("provider settings require the typed config endpoint"),
+        _ => None,
+    };
+    if let Some(message) = typed_endpoint_message {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "integration settings require the typed config endpoint".to_owned(),
+                error: message.to_owned(),
             }),
         ));
     }
@@ -2618,7 +2641,17 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
 mod request_tests {
     use axum::http::StatusCode;
 
-    use super::{classified_api_error, public_provider_value, SetProvidersRequest};
+    use super::{classified_api_error, parse_role, public_provider_value, SetProvidersRequest};
+
+    #[test]
+    fn transcript_roles_keep_tool_turns_instead_of_downgrading_to_user() {
+        assert_eq!(parse_role("tool"), hf_service::Role::Tool);
+        assert_eq!(parse_role("Tool"), hf_service::Role::Tool);
+        assert_eq!(parse_role("assistant"), hf_service::Role::Assistant);
+        assert_eq!(parse_role("system"), hf_service::Role::System);
+        assert_eq!(parse_role("user"), hf_service::Role::User);
+        assert_eq!(parse_role("anything-else"), hf_service::Role::User);
+    }
 
     #[test]
     fn provider_write_accepts_the_browser_transport_wrapper() {

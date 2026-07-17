@@ -27,7 +27,7 @@ use tokio::sync::OnceCell;
 pub use definition::{AgentDefinition, AgentRole, Autonomy, TrustTier};
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
 pub use registry::{AgentRegistry, RegistryError, DEFAULT_AGENT_ID};
-pub use tools::{catalog_for, TOOL_CATALOG, TOOL_SPECS};
+pub use tools::{catalog_for, TOOL_SPECS};
 
 /// Service capabilities consumed by the agent loop. `hf-service` implements
 /// this port and remains the sole owner of fuzzing orchestration, persistence,
@@ -61,6 +61,9 @@ pub trait AgentBackend: Send + Sync {
 
     /// Root containing user-editable skill definitions.
     fn skills_dir(&self) -> PathBuf;
+
+    /// Root containing user-editable agent definitions.
+    fn agents_dir(&self) -> PathBuf;
 }
 
 /// Default routing tags when an agent specifies none.
@@ -466,8 +469,10 @@ impl Agent {
         let Some(task) = args.get("task").and_then(Value::as_str) else {
             return agent_tools::error_json("delegate requires a string 'task'");
         };
-        // Resolve the specialist from the built-in roster.
-        let registry = AgentRegistry::builtin();
+        // Resolve the specialist from the same registry the driving agent came
+        // from: built-ins plus user agents/overrides in the backend's agents
+        // dir (mirroring how skills resolve through `SkillRegistry`).
+        let registry = AgentRegistry::with_user_dir(self.backend.agents_dir());
         let Some(definition) = registry.get(agent_id).cloned() else {
             return agent_tools::error_json(format!("unknown agent '{agent_id}' to delegate to"));
         };
