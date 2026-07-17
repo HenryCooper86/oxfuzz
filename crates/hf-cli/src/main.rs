@@ -255,6 +255,12 @@ enum Commands {
         #[command(subcommand)]
         op: SessionOp,
     },
+    /// Inspect and manage LLM providers. With no subcommand, list provider
+    /// ids with their frozen/healthy state.
+    Providers {
+        #[command(subcommand)]
+        op: Option<ProvidersOp>,
+    },
     /// Sandboxed automotive protocol analysis and replay preparation.
     #[cfg(feature = "automotive-scapy")]
     Automotive {
@@ -415,6 +421,15 @@ enum SessionOp {
     Rollback { id: String },
 }
 
+#[derive(Subcommand)]
+enum ProvidersOp {
+    /// Thaw a frozen provider after a verifying health check.
+    Thaw {
+        /// Provider id (see `hobot-fuzz providers`).
+        id: String,
+    },
+}
+
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
     let lang: TargetLanguage = s.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     match lang {
@@ -453,6 +468,25 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
             }
         ),
     ]
+}
+
+/// One line per provider: readiness state, id, cumulative request/error
+/// counts, and the freeze reason when frozen (mirrors `doctor_lines`).
+fn provider_status_lines(statuses: &[hf_service::ProviderStatus]) -> Vec<String> {
+    statuses
+        .iter()
+        .map(|s| {
+            let state = if s.is_frozen { "FROZEN" } else { "READY" };
+            let reason = s
+                .freeze_reason
+                .as_ref()
+                .map_or(String::new(), |r| format!("  (reason: {r})"));
+            format!(
+                "{state}  {}  requests={} errors={}{reason}",
+                s.id.0, s.total_requests, s.total_errors
+            )
+        })
+        .collect()
 }
 
 async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
@@ -716,6 +750,27 @@ async fn cmd_session(op: SessionOp) -> anyhow::Result<()> {
             let sid = SessionId(id);
             let n = container.chat_rollback_last(&sid).await?;
             println!("Rolled back {n} message(s).");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_providers(op: Option<ProvidersOp>) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match op {
+        None => {
+            let statuses = container.provider_statuses().await;
+            if statuses.is_empty() {
+                println!("No providers configured.");
+            } else {
+                for line in provider_status_lines(&statuses) {
+                    println!("{line}");
+                }
+            }
+        }
+        Some(ProvidersOp::Thaw { id }) => {
+            container.thaw_provider(&id).await?;
+            println!("Provider '{id}' passed the health check and was thawed.");
         }
     }
     Ok(())
@@ -1504,6 +1559,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Knowledge { op } => cmd_knowledge(op)?,
         Commands::Schedule { op } => cmd_schedule(op).await?,
         Commands::Session { op } => cmd_session(op).await?,
+        Commands::Providers { op } => cmd_providers(op).await?,
         #[cfg(feature = "automotive-scapy")]
         Commands::Automotive { op } => cmd_automotive(op).await?,
     }
@@ -1604,5 +1660,62 @@ mod doctor_tests {
         assert!(parse_lang("rust").is_ok());
         assert!(parse_lang("go").is_err());
         assert!(parse_lang("python").is_err());
+    }
+}
+
+#[cfg(test)]
+mod providers_tests {
+    use clap::Parser as _;
+    use hf_service::{ProviderId, ProviderStatus};
+
+    use super::{provider_status_lines, Cli, Commands, ProvidersOp};
+
+    #[test]
+    fn providers_command_parses_bare_list_and_thaw() {
+        let cli = Cli::try_parse_from(["hobot-fuzz", "providers"]).unwrap();
+        assert!(matches!(cli.command, Commands::Providers { op: None }));
+
+        let cli = Cli::try_parse_from(["hobot-fuzz", "providers", "thaw", "openai-main"]).unwrap();
+        let Commands::Providers {
+            op: Some(ProvidersOp::Thaw { id }),
+        } = cli.command
+        else {
+            panic!("expected providers thaw");
+        };
+        assert_eq!(id, "openai-main");
+    }
+
+    #[test]
+    fn provider_status_lines_distinguish_frozen_and_healthy() {
+        let statuses = vec![
+            ProviderStatus {
+                id: ProviderId::from_string("openai-main"),
+                is_frozen: false,
+                frozen_since: None,
+                thaw_at: None,
+                freeze_reason: None,
+                active_requests: 0,
+                total_requests: 12,
+                total_errors: 0,
+            },
+            ProviderStatus {
+                id: ProviderId::from_string("anthropic-main"),
+                is_frozen: true,
+                frozen_since: None,
+                thaw_at: None,
+                freeze_reason: Some("invalid api key".into()),
+                active_requests: 0,
+                total_requests: 3,
+                total_errors: 3,
+            },
+        ];
+
+        let lines = provider_status_lines(&statuses);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("READY") && lines[0].contains("openai-main"));
+        assert!(lines[0].contains("requests=12"));
+        assert!(lines[1].contains("FROZEN") && lines[1].contains("anthropic-main"));
+        assert!(lines[1].contains("invalid api key"));
     }
 }

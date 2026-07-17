@@ -170,6 +170,9 @@ fixed the following; open design decisions are listed at the end.
   layout ingestion accepts; stale hf-scheduler doc references corrected.
 
 ### Open design decisions (deliberately not changed by this audit)
+- [ ] Guardrail authorization decisions are only traced, never persisted; the
+  GUI "Policy Audit" view shows auto-revert events instead. Persisting
+  decisions (who/what/when/outcome) would close the audit-trail gap.
 - [ ] Unwired-but-designed subsystems kept as roadmap surface: hf-context
   working-memory/pruning pipeline, hf-knowledge injection middleware +
   ingestion + vector indexer, hf-scheduler parameter resolution + event

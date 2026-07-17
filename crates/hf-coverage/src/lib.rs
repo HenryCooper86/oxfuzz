@@ -5,6 +5,7 @@
 use std::time::Instant;
 
 use hf_core::coverage::CoverageReport;
+use uuid::Uuid;
 
 mod summary;
 pub use summary::{parse_llvm_cov_summary, CoverageSummary};
@@ -23,6 +24,9 @@ pub enum StagnationProposal {
 
 /// Tracks coverage deltas over time to detect stagnation.
 pub struct CoverageTracker {
+    /// The run the most recent report was measured for (`nil` before the
+    /// first update).
+    run_id: Uuid,
     last_edges: u64,
     last_delta: i64,
     last_progress: Instant,
@@ -33,6 +37,7 @@ impl CoverageTracker {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            run_id: Uuid::nil(),
             last_edges: 0,
             last_delta: 0,
             last_progress: Instant::now(),
@@ -43,12 +48,19 @@ impl CoverageTracker {
     /// Record a new coverage report and compute the delta.
     pub fn update(&mut self, report: &CoverageReport) {
         let new_edges = report.edges;
+        self.run_id = report.run_id;
         self.last_delta = new_edges.cast_signed() - self.last_edges.cast_signed();
         if self.last_delta > 0 {
             self.last_progress = Instant::now();
         }
         self.last_edges = new_edges;
         self.update_count += 1;
+    }
+
+    /// The run the most recent report was measured for.
+    #[must_use]
+    pub fn run_id(&self) -> Uuid {
+        self.run_id
     }
 
     /// Returns the last edge count.

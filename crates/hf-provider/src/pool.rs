@@ -30,6 +30,10 @@ pub struct ProviderPoolImpl {
     providers: Vec<ProviderEntry>,
     router: TagBasedRouter,
     health_checker: HealthChecker,
+    /// Cadence for the periodic health-check loop that recovers frozen
+    /// providers, taken from `ProviderPoolConfig::health_check_interval_secs`
+    /// (clamped to >= 1s so a zero config cannot spin the loop).
+    health_check_interval: Duration,
     /// Global concurrency semaphore (across all providers).
     global_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -172,7 +176,11 @@ impl ProviderPoolImpl {
         Self {
             providers: entries,
             router: TagBasedRouter::with_strategy(config.selection_strategy),
+            // The `HealthChecker` duration is the per-request ping timeout,
+            // NOT the check cadence; the cadence is `health_check_interval`
+            // below, driven by the configured `health_check_interval_secs`.
             health_checker: HealthChecker::new(Duration::from_secs(10)),
+            health_check_interval: Duration::from_secs(config.health_check_interval_secs.max(1)),
             global_semaphore,
         }
     }
@@ -714,6 +722,10 @@ impl ProviderPool for ProviderPoolImpl {
             .check_and_thaw(&entry.provider, &entry.freeze_manager)
             .await
     }
+
+    fn health_check_interval(&self) -> Duration {
+        self.health_check_interval
+    }
 }
 
 #[cfg(test)]
@@ -1160,6 +1172,98 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert!(!statuses[0].is_frozen);
         assert_eq!(statuses[0].total_requests, 0);
+    }
+
+    #[test]
+    fn pool_reports_the_configured_health_check_interval() {
+        let config = ProviderPoolConfig {
+            health_check_interval_secs: 5,
+            ..test_config()
+        };
+        let pool =
+            ProviderPoolImpl::from_providers(vec![MockProvider::ok("p1", vec!["gen"])], &config);
+
+        assert_eq!(pool.health_check_interval(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn health_check_interval_is_clamped_to_at_least_one_second() {
+        // A zero interval would spin the periodic health-check loop; clamp it.
+        let config = ProviderPoolConfig {
+            health_check_interval_secs: 0,
+            ..test_config()
+        };
+        let pool =
+            ProviderPoolImpl::from_providers(vec![MockProvider::ok("p1", vec!["gen"])], &config);
+
+        assert_eq!(pool.health_check_interval(), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn thaw_frozen_providers_recovers_a_healthy_frozen_provider() {
+        let pool = ProviderPoolImpl::from_providers(
+            vec![MockProvider::ok("p1", vec!["gen"])],
+            &test_config(),
+        );
+        let pid = ProviderId::from_string("p1");
+        pool.freeze(&pid, "test freeze".into()).await;
+        assert!(pool.provider_statuses().await[0].is_frozen);
+
+        let thawed = pool.thaw_frozen_providers().await;
+
+        assert_eq!(thawed, 1);
+        assert!(!pool.provider_statuses().await[0].is_frozen);
+    }
+
+    #[tokio::test]
+    async fn thaw_frozen_providers_recovers_a_permanently_frozen_provider() {
+        // The invalid-key/quota scenario: a permanent freeze has no auto-thaw,
+        // but a successful health check must still recover it.
+        let pool = ProviderPoolImpl::from_providers(
+            vec![MockProvider::ok("p1", vec!["gen"])],
+            &test_config(),
+        );
+        pool.providers[0]
+            .freeze_manager
+            .freeze_permanent("invalid api key".into());
+        assert!(pool.provider_statuses().await[0].is_frozen);
+
+        let thawed = pool.thaw_frozen_providers().await;
+
+        assert_eq!(thawed, 1);
+        assert!(!pool.provider_statuses().await[0].is_frozen);
+    }
+
+    #[tokio::test]
+    async fn thaw_frozen_providers_keeps_a_failing_provider_frozen() {
+        let pool = ProviderPoolImpl::from_providers(
+            vec![MockProvider::failing("p1", vec!["gen"])],
+            &test_config(),
+        );
+        let pid = ProviderId::from_string("p1");
+        pool.freeze(&pid, "test freeze".into()).await;
+
+        let thawed = pool.thaw_frozen_providers().await;
+
+        assert_eq!(thawed, 0);
+        assert!(pool.provider_statuses().await[0].is_frozen);
+    }
+
+    #[tokio::test]
+    async fn thaw_frozen_providers_never_pings_a_provider_that_is_not_frozen() {
+        let (provider, recorded_request) = MockProvider::ok_with_recorder("p1", vec!["gen"]);
+        let pool = ProviderPoolImpl::from_providers(vec![provider], &test_config());
+
+        let thawed = pool.thaw_frozen_providers().await;
+
+        assert_eq!(thawed, 0);
+        assert!(
+            recorded_request
+                .lock()
+                .expect("mock mutex poisoned")
+                .is_none(),
+            "a healthy provider must not pay for a health-check ping"
+        );
     }
 
     /// A provider whose `chat_completion` never returns, to exercise the

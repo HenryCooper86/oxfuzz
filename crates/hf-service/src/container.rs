@@ -2397,6 +2397,10 @@ pub struct ServiceContainer {
             std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
         >,
     >,
+    /// Keeps the periodic provider health-check task alive; when the last
+    /// clone of the container drops, the guard cancels and aborts the loop.
+    /// `None` for containers built via [`Self::new`] (tests, stubs).
+    _health_task: Option<Arc<ProviderHealthTask>>,
 }
 
 /// RAII guard that removes a run's cancellation token from the active-runs map
@@ -2406,6 +2410,67 @@ pub struct ServiceContainer {
 struct ActiveRunGuard {
     active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, CancellationToken>>>,
     run_id: Uuid,
+}
+
+/// Cadence used by the provider health-check loop while no provider pool is
+/// configured; matches the `ProviderPool` trait's default interval.
+const PROVIDER_HEALTH_CHECK_FALLBACK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// RAII guard for the periodic provider health-check task: dropping it cancels
+/// the loop and aborts the task, so the background worker never outlives the
+/// container that spawned it.
+struct ProviderHealthTask {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ProviderHealthTask {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.handle.abort();
+    }
+}
+
+/// Spawn the periodic provider health-check loop: every pool-configured
+/// interval, health-check each frozen provider and thaw the ones that respond
+/// ([`ProviderPool::thaw_frozen_providers`]). This is what recovers providers
+/// whose freeze has no auto-thaw (permanent freezes from invalid keys or
+/// exhausted quota) without a process restart.
+///
+/// The loop reads the pool from the shared cell on every tick, so a pool
+/// swapped in by [`ServiceContainer::reload_providers`] is picked up without
+/// respawning the task, and runs an initial check immediately so providers
+/// frozen before a restart recover without waiting a full interval.
+fn spawn_provider_health_checks(
+    pool_cell: Arc<std::sync::RwLock<Option<Arc<dyn ProviderPool>>>>,
+) -> ProviderHealthTask {
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            let pool = pool_cell.read().ok().and_then(|guard| guard.clone());
+            let interval = if let Some(pool) = pool {
+                let thawed = pool.thaw_frozen_providers().await;
+                if thawed > 0 {
+                    tracing::info!(
+                        thawed,
+                        "frozen providers recovered by periodic health check"
+                    );
+                }
+                pool.health_check_interval()
+            } else {
+                // No provider configured (yet); keep a modest cadence so a
+                // pool installed by a later reload starts getting checks.
+                PROVIDER_HEALTH_CHECK_FALLBACK_INTERVAL
+            };
+            tokio::select! {
+                () = token.cancelled() => break,
+                () = tokio::time::sleep(interval) => {}
+            }
+        }
+    });
+    ProviderHealthTask { cancel, handle }
 }
 
 fn ensure_run_journal_durable(
@@ -2570,6 +2635,7 @@ impl ServiceContainer {
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            _health_task: None,
         }
     }
 
@@ -3036,6 +3102,35 @@ impl ServiceContainer {
             Some(pool) => pool.provider_statuses().await,
             None => Vec::new(),
         }
+    }
+
+    /// Thaw a provider in the live pool after a verifying health check.
+    ///
+    /// This is the manual recovery path for providers whose freeze has no
+    /// auto-thaw (permanent freezes from invalid keys or exhausted quota):
+    /// the pool health-checks the provider and only re-enables it when it
+    /// responds, so a still-broken provider stays frozen.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError::Provider` when no pool is configured or the
+    /// health check fails, and `ClassifiedError::Validation` when no provider
+    /// with `provider_id` exists in the pool.
+    pub async fn thaw_provider(&self, provider_id: &str) -> Result<(), ClassifiedError> {
+        let pool = self
+            .provider_pool()
+            .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
+        let pid = hf_core::types::ProviderId::from_string(provider_id);
+        // Distinguish "no such provider" (a client error) from a failed health
+        // check (a provider error) instead of string-matching the pool's error.
+        let known = pool.provider_statuses().await.iter().any(|s| s.id == pid);
+        if !known {
+            return Err(ClassifiedError::Validation(format!(
+                "unknown provider id: {provider_id}"
+            )));
+        }
+        pool.thaw(&pid)
+            .await
+            .map_err(|e| ClassifiedError::Provider(format!("thaw {provider_id}: {e}")))
     }
 
     /// A live system snapshot for the Observability panel: per-provider health
@@ -4330,9 +4425,14 @@ impl ServiceContainer {
             ),
             None => crate::diagnostics::DiagnosticsRecorder::new(build_cost_map()),
         });
+        let provider_pool = Arc::new(std::sync::RwLock::new(provider_pool));
+        // Recover frozen providers (including permanent freezes, which have no
+        // auto-thaw) on the pool's configured health-check cadence. The guard
+        // is stored on the container so the task dies with it.
+        let health_task = Arc::new(spawn_provider_health_checks(Arc::clone(&provider_pool)));
         Self {
             runtime,
-            provider_pool: Arc::new(std::sync::RwLock::new(provider_pool)),
+            provider_pool,
             store,
             session_manager,
             guardrails: Guardrails::from_env(),
@@ -4342,6 +4442,7 @@ impl ServiceContainer {
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            _health_task: Some(health_task),
         }
     }
 
@@ -4582,6 +4683,7 @@ impl ServiceContainer {
         project: &Path,
         lang: TargetLanguage,
     ) -> Result<TargetInventory, ClassifiedError> {
+        self.guardrails.authorize(Action::Discover).await?;
         let inv = hf_discovery::discover(project, lang).await?;
         if let Some(store) = &self.store {
             store.save_inventory(&inv, Utc::now()).await?;
@@ -4628,6 +4730,7 @@ impl ServiceContainer {
         lang: TargetLanguage,
     ) -> Result<HarnessDraft, ClassifiedError> {
         require_fuzzing_harness_engine(engine, lang)?;
+        self.guardrails.authorize(Action::DraftHarness).await?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
             .candidates
@@ -6148,8 +6251,11 @@ impl ServiceContainer {
 
         let runner = hf_engine::runner::EngineRunner::new();
         // Watch edge readings for stagnation while forwarding every event.
-        let feedback =
-            CoverageFeedback::new(crate::config::coverage_stagnation_secs(), on_progress);
+        let feedback = CoverageFeedback::new(
+            run_id,
+            crate::config::coverage_stagnation_secs(),
+            on_progress,
+        );
         // Accumulate an intra-run coverage/throughput time series live, so the
         // run's coverage curve can be charted later. Each fuzzer stats line emits
         // an EdgesCovered then an ExecsPerSec event; pair them and stamp the
@@ -7794,6 +7900,7 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.guardrails.authorize(Action::CorpusOp).await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -7817,6 +7924,7 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.guardrails.authorize(Action::CorpusOp).await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -7842,6 +7950,7 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.guardrails.authorize(Action::CorpusOp).await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -7873,6 +7982,7 @@ impl ServiceContainer {
         let resolved =
             resolve_internal_run(EngineKind::AflPlusPlus, COVERAGE_PRUNE_OPERATION_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.guardrails.authorize(Action::CorpusOp).await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -8032,6 +8142,7 @@ impl ServiceContainer {
         run: Option<RunRecord>,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.guardrails.authorize(Action::CorpusOp).await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -8083,6 +8194,7 @@ impl ServiceContainer {
     ) -> Result<MinimizeOutcome, ClassifiedError> {
         let resolved = resolve_internal_run(EngineKind::LibFuzzer, CORPUS_MINIMIZE_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        self.guardrails.authorize(Action::CorpusOp).await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
@@ -8220,6 +8332,7 @@ impl ServiceContainer {
     pub async fn chat_send(&self, message: &str) -> Result<String, ClassifiedError> {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
+        self.guardrails.authorize(Action::Chat).await?;
         let pool = self
             .provider_pool()
             .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
@@ -9034,6 +9147,8 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
 /// rather than regenerating a harness autonomously, which would bypass the
 /// human-in-the-loop review that harness execution requires (AGENTS.md §2.12).
 struct CoverageFeedback<'a> {
+    /// The run the streamed edge readings are measured for.
+    run_id: Uuid,
     tracker: std::sync::Mutex<hf_coverage::CoverageTracker>,
     /// Latched proposal: `Some` once surfaced, so it is proposed at most once.
     proposal: std::sync::Mutex<Option<hf_coverage::StagnationProposal>>,
@@ -9042,8 +9157,13 @@ struct CoverageFeedback<'a> {
 }
 
 impl<'a> CoverageFeedback<'a> {
-    fn new(threshold_secs: u64, emit: &'a (dyn Fn(FuzzProgress) + Send + Sync)) -> Self {
+    fn new(
+        run_id: Uuid,
+        threshold_secs: u64,
+        emit: &'a (dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Self {
         Self {
+            run_id,
             tracker: std::sync::Mutex::new(hf_coverage::CoverageTracker::new()),
             proposal: std::sync::Mutex::new(None),
             threshold_secs,
@@ -9058,7 +9178,7 @@ impl<'a> CoverageFeedback<'a> {
             return;
         };
         tracker.update(&hf_core::coverage::CoverageReport {
-            run_id: Uuid::nil(),
+            run_id: self.run_id,
             edges,
             blocks: 0,
             delta_edges: 0,
@@ -9140,7 +9260,7 @@ mod coverage_feedback_tests {
         let emitted: Mutex<Vec<FuzzProgress>> = Mutex::new(Vec::new());
         let emit = |p: FuzzProgress| emitted.lock().unwrap().push(p);
         // threshold 0: the first flat pulse after the initial reading is stagnant.
-        let fb = CoverageFeedback::new(0, &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), 0, &emit);
         fb.on_edges(100); // first reading -- never stagnant (needs >1 update)
         assert_eq!(fb.proposal(), None);
         fb.on_edges(100); // flat -> stagnant -> propose
@@ -9159,7 +9279,7 @@ mod coverage_feedback_tests {
     #[test]
     fn no_proposal_on_a_single_reading() {
         let emit = |_p: FuzzProgress| {};
-        let fb = CoverageFeedback::new(0, &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), 0, &emit);
         fb.on_edges(100);
         assert_eq!(fb.proposal(), None);
     }
@@ -9169,10 +9289,21 @@ mod coverage_feedback_tests {
         let emit = |_p: FuzzProgress| {};
         // A high threshold is not reached in the test's wall-clock window, so a
         // flat plateau does not (yet) propose.
-        let fb = CoverageFeedback::new(3600, &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), 3600, &emit);
         fb.on_edges(100);
         fb.on_edges(100);
         assert_eq!(fb.proposal(), None);
+    }
+
+    #[test]
+    fn coverage_report_carries_the_run_id() {
+        // The report fed to the tracker must name the run the coverage was
+        // measured for, not the nil UUID.
+        let emit = |_p: FuzzProgress| {};
+        let run_id = uuid::Uuid::new_v4();
+        let fb = CoverageFeedback::new(run_id, 0, &emit);
+        fb.on_edges(100);
+        assert_eq!(fb.tracker.lock().unwrap().run_id(), run_id);
     }
 }
 
@@ -10192,5 +10323,77 @@ mod journal_boundary_tests {
         assert!(error
             .to_string()
             .contains("run recovery journal is degraded"));
+    }
+}
+
+#[cfg(test)]
+mod provider_health_task_tests {
+    use super::spawn_provider_health_checks;
+    use hf_core::provider::ProviderPool;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn mock_pool_with_interval(interval_secs: u64) -> Arc<dyn ProviderPool> {
+        let provider: Arc<dyn hf_core::provider::LlmProvider> =
+            Arc::new(hf_test_utils::mock_provider::MockProvider::fixed("ok"));
+        let config = hf_provider::ProviderPoolConfig {
+            health_check_interval_secs: interval_secs,
+            ..Default::default()
+        };
+        let pool: Arc<dyn ProviderPool> = Arc::new(hf_provider::ProviderPoolImpl::from_providers(
+            vec![provider],
+            &config,
+        ));
+        pool
+    }
+
+    async fn wait_until_thawed(pool: &Arc<dyn ProviderPool>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !pool.provider_statuses().await[0].is_frozen {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the health task should thaw the provider promptly");
+    }
+
+    #[tokio::test]
+    async fn health_task_recovers_a_frozen_provider_without_waiting_a_full_interval() {
+        let pool = mock_pool_with_interval(60);
+        let pid = hf_core::types::ProviderId::from_string("mock-provider");
+        pool.freeze(&pid, "test freeze".to_owned()).await;
+        assert!(pool.provider_statuses().await[0].is_frozen);
+
+        let cell = Arc::new(std::sync::RwLock::new(Some(Arc::clone(&pool))));
+        let task = spawn_provider_health_checks(cell);
+
+        // The loop runs an initial check immediately, so recovery must land
+        // well before the pool's 60s interval elapses.
+        wait_until_thawed(&pool).await;
+
+        // Dropping the guard cancels and aborts the loop: no leaked task.
+        drop(task);
+    }
+
+    #[tokio::test]
+    async fn health_task_follows_provider_pool_swaps() {
+        // Mirrors `reload_providers`: the loop reads the shared cell on every
+        // tick, so a pool swapped in later is health-checked without
+        // respawning the task.
+        let pool_a = mock_pool_with_interval(1);
+        let cell = Arc::new(std::sync::RwLock::new(Some(pool_a)));
+        let task = spawn_provider_health_checks(Arc::clone(&cell));
+
+        let pool_b = mock_pool_with_interval(1);
+        let pid = hf_core::types::ProviderId::from_string("mock-provider");
+        pool_b.freeze(&pid, "test freeze".to_owned()).await;
+        *cell.write().expect("pool cell poisoned") = Some(Arc::clone(&pool_b));
+
+        wait_until_thawed(&pool_b).await;
+
+        drop(task);
     }
 }
