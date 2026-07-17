@@ -18,9 +18,12 @@ use hf_core::harness::{Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
 use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
-use hf_guardrails::{Action, Guardrails};
+use hf_guardrails::{Action, Decision, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
-use hf_storage::{AutoRevertEvent, ProjectAutoRevert, RunKind, RunRecord, RunStatus, Store};
+use hf_storage::{
+    AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus,
+    Store,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -30,6 +33,12 @@ const SMOKE_FUZZ_SECS: u64 = 60;
 const COVERAGE_PRUNE_OPERATION_SECS: u64 = 600;
 const COVERAGE_PRUNE_COMMAND_SECS: u64 = 10;
 const CORPUS_MINIMIZE_SECS: u64 = 300;
+/// Bound on the stored policy reason; denial reasons embed action labels that
+/// can carry long parameters (e.g. a shell command).
+const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;
+/// Newest decisions retained in the audit trail; recording prunes beyond this
+/// window on write (mirrors schedule-execution history retention).
+const GUARDRAIL_DECISION_RETENTION: usize = 1000;
 const WORKSPACE_MANIFEST_FILE: &str = ".hobot-fuzz-workspace.json";
 const WORKSPACE_MANIFEST_VERSION: u32 = 1;
 
@@ -2473,6 +2482,11 @@ fn spawn_provider_health_checks(
     ProviderHealthTask { cancel, handle }
 }
 
+/// Truncate a policy reason to the audit column's bound, on a char boundary.
+fn bounded_guardrail_detail(reason: &str) -> String {
+    reason.chars().take(MAX_GUARDAIL_DETAIL_CHARS).collect()
+}
+
 fn ensure_run_journal_durable(
     journal: &crate::recovery::RunJournal,
 ) -> Result<(), ClassifiedError> {
@@ -3671,7 +3685,12 @@ impl ServiceContainer {
             )));
         }
 
-        self.guardrails.authorize(Action::CompileHarness).await?;
+        self.authorize_recorded(
+            Action::CompileHarness,
+            "revert_harness_from_run",
+            Some(&project),
+        )
+        .await?;
         let active_binary = workspace.join(harness_binary_name(&symbol));
         let backup = workspace.join(format!("harness.restore.{}.backup", Uuid::new_v4()));
         let had_active_binary = is_regular_file(&active_binary);
@@ -4050,6 +4069,84 @@ impl ServiceContainer {
         let key = project.map(|p| p.to_string_lossy().to_string());
         Ok(store
             .list_auto_revert_events(key.as_deref(), i64::try_from(limit).unwrap_or(200))
+            .await?)
+    }
+
+    // -- Guardrail decision audit --------------------------------------------
+
+    /// Authorize `action`, appending the decision to the durable policy audit
+    /// trail. Every authorizing service entry point goes through here so the
+    /// record is uniform: the policy outcome, and the approval-gate outcome
+    /// when the gate was consulted.
+    ///
+    /// Recording is best-effort (AGENTS.md 2.5): a storage failure is logged
+    /// and never changes the authorization outcome, which stays exactly what
+    /// [`Guardrails::authorize`] returns.
+    pub(crate) async fn authorize_recorded(
+        &self,
+        action: Action,
+        origin: &'static str,
+        project: Option<&Path>,
+    ) -> Result<(), hf_guardrails::GuardrailError> {
+        let action_kind = action.kind();
+        let risk_tier = action.risk();
+        let policy_decision = self.guardrails.policy().evaluate(&action);
+        let outcome = self.guardrails.authorize(action).await;
+        let (decision, detail) = match (&policy_decision, &outcome) {
+            (Decision::RequireApproval { reason, .. }, Ok(())) => {
+                ("approved", Some(reason.clone()))
+            }
+            (Decision::RequireApproval { .. }, Err(error)) => {
+                ("denied_by_operator", Some(error.to_string()))
+            }
+            (Decision::Deny { reason }, _) => ("denied", Some(reason.clone())),
+            (Decision::Allow, Ok(())) => ("allowed", None),
+            (Decision::Allow, Err(error)) => ("denied", Some(error.to_string())),
+        };
+        self.record_guardrail_decision(GuardrailDecisionRecord {
+            id: Uuid::new_v4().to_string(),
+            decided_at: Utc::now(),
+            action: action_kind.to_owned(),
+            risk_tier: risk_tier.as_str().to_owned(),
+            decision: decision.to_owned(),
+            origin: origin.to_owned(),
+            project: project.map(|path| path.to_string_lossy().into_owned()),
+            detail: detail.map(|detail| bounded_guardrail_detail(&detail)),
+        })
+        .await;
+        outcome
+    }
+
+    /// Persist one guardrail decision, then prune the trail to its retention
+    /// window. Failures are logged, never propagated: the audit write must not
+    /// change the operation's outcome.
+    async fn record_guardrail_decision(&self, record: GuardrailDecisionRecord) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        if let Err(error) = store.record_guardrail_decision(&record).await {
+            tracing::warn!(%error, "failed to record guardrail decision");
+            return;
+        }
+        if let Err(error) = store
+            .prune_guardrail_decisions(GUARDRAIL_DECISION_RETENTION)
+            .await
+        {
+            tracing::warn!(%error, "failed to prune guardrail decisions");
+        }
+    }
+
+    /// The guardrail decision audit trail (newest first), capped at `limit`
+    /// rows. Empty without a store.
+    pub async fn policy_decisions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GuardrailDecisionRecord>, ClassifiedError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        Ok(store
+            .list_guardrail_decisions(i64::try_from(limit).unwrap_or(200))
             .await?)
     }
 
@@ -4683,7 +4780,8 @@ impl ServiceContainer {
         project: &Path,
         lang: TargetLanguage,
     ) -> Result<TargetInventory, ClassifiedError> {
-        self.guardrails.authorize(Action::Discover).await?;
+        self.authorize_recorded(Action::Discover, "discover", Some(project))
+            .await?;
         let inv = hf_discovery::discover(project, lang).await?;
         if let Some(store) = &self.store {
             store.save_inventory(&inv, Utc::now()).await?;
@@ -4730,7 +4828,8 @@ impl ServiceContainer {
         lang: TargetLanguage,
     ) -> Result<HarnessDraft, ClassifiedError> {
         require_fuzzing_harness_engine(engine, lang)?;
-        self.guardrails.authorize(Action::DraftHarness).await?;
+        self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
+            .await?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
             .candidates
@@ -5077,7 +5176,8 @@ impl ServiceContainer {
     ) -> Result<CompileOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         require_fuzzing_harness_engine(engine, lang)?;
-        self.guardrails.authorize(Action::CompileHarness).await?;
+        self.authorize_recorded(Action::CompileHarness, "harness_compile", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         std::fs::create_dir_all(&workspace)
@@ -5171,7 +5271,8 @@ impl ServiceContainer {
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         require_fuzzing_harness_engine(engine, lang)?;
-        self.guardrails.authorize(Action::CompileHarness).await?;
+        self.authorize_recorded(Action::CompileHarness, "harness_generate", Some(project))
+            .await?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
             .candidates
@@ -5319,7 +5420,8 @@ impl ServiceContainer {
     ) -> Result<HarnessGenOutcome, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         require_fuzzing_harness_engine(engine, lang)?;
-        self.guardrails.authorize(Action::CompileHarness).await?;
+        self.authorize_recorded(Action::CompileHarness, "harness_refine", Some(project))
+            .await?;
         let inv = self.discover(project, lang).await?;
         let candidate = inv
             .candidates
@@ -5497,7 +5599,8 @@ impl ServiceContainer {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         let project_root = canonical_project_root(project)?;
         let project = project_root.as_path();
-        self.guardrails.authorize(Action::RunHarness).await?;
+        self.authorize_recorded(Action::RunHarness, "harness_smoke", Some(project))
+            .await?;
         let workspace = workspace_dir(project, target);
         let harness = self.active_harness(project, target, engine).await?;
         if harness.language != lang {
@@ -6137,12 +6240,15 @@ impl ServiceContainer {
         }
         self.verify_harness_qualification(project, target, &qualified)
             .await?;
-        self.guardrails
-            .authorize(Action::RunFuzzer {
+        self.authorize_recorded(
+            Action::RunFuzzer {
                 engine: format!("{engine:?}"),
                 duration_secs,
-            })
-            .await?;
+            },
+            "run_fuzzer",
+            Some(project),
+        )
+        .await?;
         ensure_run_journal_durable(&self.run_journal)?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
@@ -6478,12 +6584,15 @@ impl ServiceContainer {
         let resolved = resolve_fuzzing_run(EngineKind::Syzkaller, opts.duration_secs)?;
         let duration_secs = resolved.duration_secs;
 
-        self.guardrails
-            .authorize(Action::RunFuzzer {
+        self.authorize_recorded(
+            Action::RunFuzzer {
                 engine: "Syzkaller".to_owned(),
                 duration_secs,
-            })
-            .await?;
+            },
+            "run_syzkaller",
+            None,
+        )
+        .await?;
 
         let platform = opts
             .arch
@@ -6842,7 +6951,8 @@ impl ServiceContainer {
         const MAX_BUG_REPORT_DRAFTS: usize = 20;
         let _workspace_operation = self.acquire_workspace_operation().await?;
 
-        self.guardrails.authorize(Action::Triage).await?;
+        self.authorize_recorded(Action::Triage, "triage_run", Some(project))
+            .await?;
         let workspace = workspace_dir(project, target);
         let target_id = self.resolve_target_id_any_language(project, target).await?;
         let run_id = run.id;
@@ -7076,7 +7186,8 @@ impl ServiceContainer {
         let _workspace_operation = self.acquire_workspace_operation().await?;
         // Replaying crash inputs runs the (untrusted) harness in the sandbox --
         // gate it like triage.
-        self.guardrails.authorize(Action::Triage).await?;
+        self.authorize_recorded(Action::Triage, "verify_regressions", Some(project))
+            .await?;
         let workspace = workspace_dir(project, target);
         let binary_name = harness_binary_name(target);
         if !workspace.join(&binary_name).exists() {
@@ -7921,7 +8032,8 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.guardrails.authorize(Action::CorpusOp).await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_seed", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -7945,7 +8057,8 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.guardrails.authorize(Action::CorpusOp).await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_grow", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -7971,7 +8084,8 @@ impl ServiceContainer {
         target: &str,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.guardrails.authorize(Action::CorpusOp).await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_prune", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -8003,7 +8117,8 @@ impl ServiceContainer {
         let resolved =
             resolve_internal_run(EngineKind::AflPlusPlus, COVERAGE_PRUNE_OPERATION_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.guardrails.authorize(Action::CorpusOp).await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_prune_coverage", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -8031,12 +8146,15 @@ impl ServiceContainer {
         }
         self.verify_harness_qualification(project, target, &qualified)
             .await?;
-        self.guardrails
-            .authorize(Action::RunFuzzer {
+        self.authorize_recorded(
+            Action::RunFuzzer {
                 engine: "AFL++ showmap".to_owned(),
                 duration_secs: resolved.duration_secs,
-            })
-            .await?;
+            },
+            "corpus_prune_coverage",
+            Some(project),
+        )
+        .await?;
 
         let bin = harness_binary_name(target);
         let binary = workspace.join(&bin);
@@ -8163,7 +8281,8 @@ impl ServiceContainer {
         run: Option<RunRecord>,
     ) -> Result<usize, ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.guardrails.authorize(Action::CorpusOp).await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_absorb_crashes", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = workspace.join("corpus");
@@ -8215,7 +8334,8 @@ impl ServiceContainer {
     ) -> Result<MinimizeOutcome, ClassifiedError> {
         let resolved = resolve_internal_run(EngineKind::LibFuzzer, CORPUS_MINIMIZE_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.guardrails.authorize(Action::CorpusOp).await?;
+        self.authorize_recorded(Action::CorpusOp, "corpus_minimize", Some(project))
+            .await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
         let corpus_dir = ensure_workspace_directory(&workspace, Path::new("corpus"))?;
@@ -8237,12 +8357,15 @@ impl ServiceContainer {
         }
         self.verify_harness_qualification(project, target, &qualified)
             .await?;
-        self.guardrails
-            .authorize(Action::RunFuzzer {
+        self.authorize_recorded(
+            Action::RunFuzzer {
                 engine: "libFuzzer corpus minimization".to_owned(),
                 duration_secs: resolved.duration_secs,
-            })
-            .await?;
+            },
+            "corpus_minimize",
+            Some(project),
+        )
+        .await?;
 
         let binary = workspace.join(harness_binary_name(target));
         if !is_regular_file(&binary) {
@@ -8353,7 +8476,8 @@ impl ServiceContainer {
     pub async fn chat_send(&self, message: &str) -> Result<String, ClassifiedError> {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
-        self.guardrails.authorize(Action::Chat).await?;
+        self.authorize_recorded(Action::Chat, "chat_send", None)
+            .await?;
         let pool = self
             .provider_pool()
             .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
@@ -10493,5 +10617,208 @@ mod provider_health_task_tests {
         wait_until_thawed(&pool_b).await;
 
         drop(task);
+    }
+}
+
+#[cfg(test)]
+mod guardrail_decision_tests {
+    use std::sync::Arc;
+
+    use hf_guardrails::{Action, AutoApprove, DenyAll, GuardrailPolicy, Guardrails, RiskTier};
+    use hf_storage::Store;
+
+    use super::ServiceContainer;
+
+    async fn container_with_store(guardrails: Guardrails) -> (ServiceContainer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::connect(dir.path().join("decisions.db"))
+            .await
+            .unwrap();
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_guardrails(guardrails)
+            .with_store(Arc::new(store));
+        (container, dir)
+    }
+
+    fn strict_deny_guardrails() -> Guardrails {
+        Guardrails::new(
+            GuardrailPolicy {
+                auto_allow_max: RiskTier::Low,
+                deny_at: Some(RiskTier::Low),
+            },
+            Arc::new(DenyAll),
+        )
+    }
+
+    #[tokio::test]
+    async fn allowed_decisions_are_recorded_with_action_tier_origin_and_project() {
+        let (container, _dir) = container_with_store(Guardrails::new(
+            GuardrailPolicy::default(),
+            Arc::new(DenyAll),
+        ))
+        .await;
+
+        container
+            .authorize_recorded(
+                Action::Discover,
+                "unit_origin",
+                Some(std::path::Path::new("/proj")),
+            )
+            .await
+            .unwrap();
+
+        let rows = container.policy_decisions(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.action, "discover");
+        assert_eq!(row.risk_tier, "low");
+        assert_eq!(row.decision, "allowed");
+        assert_eq!(row.origin, "unit_origin");
+        assert_eq!(row.project.as_deref(), Some("/proj"));
+        assert_eq!(row.detail, None);
+    }
+
+    #[tokio::test]
+    async fn policy_denials_are_recorded_and_the_error_path_is_unchanged() {
+        let (container, _dir) = container_with_store(strict_deny_guardrails()).await;
+
+        let error = container
+            .authorize_recorded(Action::Discover, "unit_origin", None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("guardrail denied"),
+            "the denial surfaces through the existing error path: {error}"
+        );
+        let rows = container.policy_decisions(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].decision, "denied");
+        assert!(
+            rows[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("denied by policy")),
+            "the denial detail names the policy rule: {:?}",
+            rows[0].detail
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_gate_outcomes_are_recorded() {
+        let (approved_container, _dir) = container_with_store(Guardrails::new(
+            GuardrailPolicy::default(),
+            Arc::new(AutoApprove),
+        ))
+        .await;
+        approved_container
+            .authorize_recorded(Action::RunHarness, "harness_smoke", None)
+            .await
+            .unwrap();
+        let rows = approved_container.policy_decisions(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].decision, "approved");
+        assert_eq!(rows[0].risk_tier, "high");
+
+        let (declined_container, _dir) = container_with_store(Guardrails::new(
+            GuardrailPolicy::default(),
+            Arc::new(DenyAll),
+        ))
+        .await;
+        let error = declined_container
+            .authorize_recorded(Action::RunHarness, "harness_smoke", None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("approval declined"));
+        let rows = declined_container.policy_decisions(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].decision, "denied_by_operator");
+    }
+
+    #[tokio::test]
+    async fn recording_failure_never_changes_the_authorization_outcome() {
+        let (allowed, _dir) = container_with_store(Guardrails::new(
+            GuardrailPolicy::default(),
+            Arc::new(DenyAll),
+        ))
+        .await;
+        allowed.store().unwrap().pool().close().await;
+        assert!(
+            allowed
+                .authorize_recorded(Action::Discover, "unit_origin", None)
+                .await
+                .is_ok(),
+            "a broken decision store must not block an allowed action"
+        );
+
+        let (denied, _dir) = container_with_store(strict_deny_guardrails()).await;
+        denied.store().unwrap().pool().close().await;
+        assert!(
+            denied
+                .authorize_recorded(Action::Discover, "unit_origin", None)
+                .await
+                .is_err(),
+            "a broken decision store must not unblock a denied action"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_details_are_bounded() {
+        let (container, _dir) = container_with_store(strict_deny_guardrails()).await;
+        let long_command = "x".repeat(10_000);
+
+        let _ = container
+            .authorize_recorded(
+                Action::ShellExec {
+                    command: long_command,
+                },
+                "unit_origin",
+                None,
+            )
+            .await;
+
+        let rows = container.policy_decisions(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let detail = rows[0].detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.chars().count() <= 256,
+            "detail is bounded, got {} chars",
+            detail.chars().count()
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_decisions_are_newest_first_and_bounded() {
+        let (container, _dir) = container_with_store(Guardrails::new(
+            GuardrailPolicy::default(),
+            Arc::new(DenyAll),
+        ))
+        .await;
+        for origin in ["first", "second", "third"] {
+            container
+                .authorize_recorded(Action::Discover, origin, None)
+                .await
+                .unwrap();
+        }
+
+        let rows = container.policy_decisions(2).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let origins: Vec<&str> = rows.iter().map(|row| row.origin.as_str()).collect();
+        assert_eq!(origins, ["third", "second"], "newest first");
+    }
+
+    #[tokio::test]
+    async fn containers_without_a_store_record_nothing_and_read_empty() {
+        let container =
+            ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None).with_guardrails(
+                Guardrails::new(GuardrailPolicy::default(), Arc::new(DenyAll)),
+            );
+
+        container
+            .authorize_recorded(Action::Discover, "unit_origin", None)
+            .await
+            .unwrap();
+
+        assert!(container.policy_decisions(10).await.unwrap().is_empty());
     }
 }

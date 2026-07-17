@@ -667,9 +667,12 @@ impl ServiceContainer {
                 "automotive operations require durable evidence storage".to_owned(),
             )
         })?;
-        self.guardrails()
-            .authorize(action_for(&prepared, &settings))
-            .await?;
+        self.authorize_recorded(
+            action_for(&prepared, &settings),
+            "automotive_operation",
+            Some(&prepared.project_root),
+        )
+        .await?;
 
         let _workspace_lease = self.acquire_workspace_operation_at(workspace).await?;
         let workspace = initialize_workspace_root_at(workspace)?;
