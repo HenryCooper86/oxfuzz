@@ -72,6 +72,29 @@ pub enum Action {
 }
 
 impl Action {
+    /// The stable `snake_case` kind of this action, matching its serde tag.
+    /// Used for durable audit records where the human-readable [`Self::label`]
+    /// (which embeds parameters) would not group cleanly.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Action::Discover => "discover",
+            Action::DraftHarness => "draft_harness",
+            Action::CompileHarness => "compile_harness",
+            Action::RunHarness => "run_harness",
+            Action::RunFuzzer { .. } => "run_fuzzer",
+            Action::AutomotiveOffline { .. } => "automotive_offline",
+            Action::AutomotiveVirtualCan { .. } => "automotive_virtual_can",
+            Action::AutomotivePhysicalBench { .. } => "automotive_physical_bench",
+            Action::Triage => "triage",
+            Action::CorpusOp => "corpus_op",
+            Action::Chat => "chat",
+            Action::ShellExec { .. } => "shell_exec",
+            Action::WriteHostFile { .. } => "write_host_file",
+            Action::AgentTool { .. } => "agent_tool",
+        }
+    }
+
     /// A short, human-readable label for prompts and audit logs.
     #[must_use]
     pub fn label(&self) -> String {
@@ -141,4 +164,18 @@ pub enum RiskTier {
     High,
     /// Arbitrary command execution.
     Critical,
+}
+
+impl RiskTier {
+    /// The stable lowercase name of this tier, matching its serde form. Used
+    /// for durable audit records.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RiskTier::Low => "low",
+            RiskTier::Medium => "medium",
+            RiskTier::High => "high",
+            RiskTier::Critical => "critical",
+        }
+    }
 }

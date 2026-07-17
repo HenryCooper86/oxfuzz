@@ -117,6 +117,33 @@ pub struct AutoRevertEvent {
     pub reverted: bool,
 }
 
+/// One guardrail authorization decision, for the durable policy audit trail.
+///
+/// The service records one row per authorization: the policy outcome, and the
+/// human approval outcome where the approval gate was consulted. Recording is
+/// best-effort -- a storage failure is logged and never changes the
+/// authorization outcome.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuardrailDecisionRecord {
+    /// Unique decision id (UUID).
+    pub id: String,
+    /// When the decision was made.
+    pub decided_at: DateTime<Utc>,
+    /// The authorized action kind (`Action::kind`, e.g. `discover`,
+    /// `run_fuzzer`, `corpus_op`).
+    pub action: String,
+    /// The action's assessed risk tier (low/medium/high/critical).
+    pub risk_tier: String,
+    /// The outcome: `allowed`/`denied`/`approved`/`denied_by_operator`.
+    pub decision: String,
+    /// The service entry point that authorized (e.g. `discover`, `run_fuzzer`).
+    pub origin: String,
+    /// The project the operation targeted, when one exists.
+    pub project: Option<String>,
+    /// The policy reason (bounded length), when the policy produced one.
+    pub detail: Option<String>,
+}
+
 /// Lifecycle status of one sandboxed automotive protocol operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -937,6 +964,79 @@ impl Store {
                 reverted: r.get::<i64, _>("reverted") != 0,
             })
             .collect())
+    }
+
+    // -- guardrail decisions --------------------------------------------------
+
+    /// Append a guardrail authorization decision to the durable audit trail.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn record_guardrail_decision(
+        &self,
+        record: &GuardrailDecisionRecord,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO guardrail_decisions \
+                 (id, decided_at, action, risk_tier, decision, origin, project, detail) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(&record.id)
+        .bind(
+            record
+                .decided_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .bind(&record.action)
+        .bind(&record.risk_tier)
+        .bind(&record.decision)
+        .bind(&record.origin)
+        .bind(record.project.as_deref())
+        .bind(record.detail.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The guardrail decision audit trail, newest first. `limit` caps the rows
+    /// returned. `rowid` breaks timestamp ties so same-microsecond decisions
+    /// still list in insertion order.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or malformed stored data.
+    pub async fn list_guardrail_decisions(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<GuardrailDecisionRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, decided_at, action, risk_tier, decision, origin, project, detail \
+             FROM guardrail_decisions ORDER BY decided_at DESC, rowid DESC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(guardrail_decision_from_row).collect()
+    }
+
+    /// Retain only the newest `keep` decisions, returning how many were
+    /// removed. Recency is ordered by `decided_at`, with the rowid as the
+    /// insertion-order tie-breaker (mirrors schedule-execution retention).
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure.
+    pub async fn prune_guardrail_decisions(&self, keep: usize) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM guardrail_decisions
+             WHERE rowid NOT IN (
+                 SELECT rowid FROM guardrail_decisions
+                 ORDER BY decided_at DESC, rowid DESC
+                 LIMIT ?1
+             )",
+        )
+        .bind(i64::try_from(keep).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Update a run's status (and optionally its end time).
@@ -1925,6 +2025,22 @@ fn automotive_state_corpus_from_row(
         source_operation_id,
         artifact_path: row.try_get("artifact_path")?,
         created_at,
+    })
+}
+
+/// Reconstruct a [`GuardrailDecisionRecord`] from a row.
+fn guardrail_decision_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<GuardrailDecisionRecord, StorageError> {
+    Ok(GuardrailDecisionRecord {
+        id: row.try_get("id")?,
+        decided_at: ts(&row.try_get::<String, _>("decided_at")?)?,
+        action: row.try_get("action")?,
+        risk_tier: row.try_get("risk_tier")?,
+        decision: row.try_get("decision")?,
+        origin: row.try_get("origin")?,
+        project: row.try_get("project")?,
+        detail: row.try_get("detail")?,
     })
 }
 
