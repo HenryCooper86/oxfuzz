@@ -119,6 +119,28 @@ async fn authorize_routes_through_gate() {
 }
 
 #[tokio::test]
+async fn default_guardrails_are_safe_not_permissive() {
+    // The `Default` impl must be the safe env-gated policy: a Critical action
+    // (arbitrary shell execution) is denied outright, unlike a permissive engine
+    // which would allow it.
+    let g = Guardrails::default();
+    assert!(matches!(
+        g.policy().evaluate(&Action::ShellExec {
+            command: "id".to_owned(),
+        }),
+        Decision::Deny { .. }
+    ));
+    assert!(
+        g.authorize(Action::ShellExec {
+            command: "id".to_owned(),
+        })
+        .await
+        .is_err(),
+        "default guardrails must deny a critical shell-exec action"
+    );
+}
+
+#[tokio::test]
 async fn permissive_allows_everything() {
     let g = Guardrails::permissive();
     assert!(g.authorize(run_fuzzer()).await.is_ok());

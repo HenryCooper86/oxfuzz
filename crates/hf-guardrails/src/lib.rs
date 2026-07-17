@@ -204,8 +204,13 @@ impl Guardrails {
 }
 
 impl Default for Guardrails {
+    /// The safe default: env-gated, matching [`Guardrails::from_env`]'s baseline.
+    /// Critical actions (e.g. arbitrary shell execution) are denied and
+    /// high-risk actions require explicit consent. A permissive engine must be
+    /// requested explicitly via [`Guardrails::permissive`] so trust is never the
+    /// silent default.
     fn default() -> Self {
-        Self::permissive()
+        Self::env_gated()
     }
 }
 

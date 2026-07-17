@@ -96,6 +96,15 @@ impl StepRecord {
             args_signature: None,
         }
     }
+
+    /// The full identity of a step: the action key paired with its argument
+    /// signature. Repetition, oscillation, and drift all key on this pair so a
+    /// productive loop that reuses tool NAMES with fresh ARGS (e.g. the
+    /// `run_fuzzer -> triage(run=1) -> run_fuzzer -> triage(run=2)` cadence) is
+    /// not mistaken for a stuck cycle.
+    fn signature_key(&self) -> (&str, Option<&str>) {
+        (self.action.as_str(), self.args_signature.as_deref())
+    }
 }
 
 /// A detected loop, with the pattern and a human-readable reason.
@@ -166,18 +175,22 @@ impl LoopGuard {
         self.history.clear();
     }
 
-    /// Same `action` repeated `repetition_threshold` times at the tail.
+    /// Same `(action, args)` step repeated `repetition_threshold` times at the
+    /// tail. Keying on the full signature (not the bare action name) means a
+    /// tool re-invoked with genuinely different arguments each time counts as
+    /// forward progress, not repetition.
     fn check_repetition(&self) -> Option<LoopDetection> {
         let threshold = self.config.repetition_threshold;
         if threshold == 0 || self.history.len() < threshold {
             return None;
         }
         let last = self.history.back()?;
+        let key = last.signature_key();
         let consecutive = self
             .history
             .iter()
             .rev()
-            .take_while(|s| s.action == last.action)
+            .take_while(|s| s.signature_key() == key)
             .count();
         if consecutive >= threshold {
             Some(LoopDetection {
@@ -192,7 +205,11 @@ impl LoopGuard {
         }
     }
 
-    /// Tail alternates strictly between two distinct actions for N cycles.
+    /// Tail alternates strictly between two distinct `(action, args)` steps for
+    /// N cycles. Keying on the full signature (not the bare action name) means a
+    /// productive two-tool cadence whose arguments advance each turn (e.g.
+    /// `run_fuzzer(target=a) -> triage(run=1) -> run_fuzzer(target=a) ->
+    /// triage(run=2)`) is not mistaken for an oscillation.
     fn check_oscillation(&self) -> Option<LoopDetection> {
         let threshold = self.config.oscillation_threshold;
         let needed = threshold.checked_mul(2)?;
@@ -201,23 +218,26 @@ impl LoopGuard {
         }
         let tail: Vec<&StepRecord> = self.history.iter().rev().take(needed).collect();
         // tail[0] is the most recent; alternation means even/odd indices match
-        // two distinct action keys.
-        let a = &tail[0].action;
-        let b = &tail[1].action;
+        // two distinct step signatures.
+        let a = tail[0].signature_key();
+        let b = tail[1].signature_key();
         if a == b {
             return None;
         }
         let alternates = tail.iter().enumerate().all(|(i, step)| {
             if i % 2 == 0 {
-                &step.action == a
+                step.signature_key() == a
             } else {
-                &step.action == b
+                step.signature_key() == b
             }
         });
         if alternates {
             Some(LoopDetection {
                 pattern: LoopPattern::Oscillation,
-                reason: format!("oscillation between '{a}' and '{b}' for {threshold} cycles"),
+                reason: format!(
+                    "oscillation between '{}' and '{}' for {threshold} cycles",
+                    a.0, b.0
+                ),
             })
         } else {
             None
@@ -269,7 +289,7 @@ impl LoopGuard {
             .iter()
             .rev()
             .take(window)
-            .map(|s| (s.action.as_str(), s.args_signature.as_deref()))
+            .map(StepRecord::signature_key)
             .collect::<std::collections::HashSet<_>>()
             .len();
         // `distinct * 2 <= window` means each distinct step recurs at least
@@ -331,6 +351,74 @@ mod tests {
         ];
         let d = feed(&mut guard, &steps).expect("oscillation should fire");
         assert_eq!(d.pattern, LoopPattern::Oscillation);
+    }
+
+    #[test]
+    fn canonical_fuzz_loop_with_varying_args_does_not_oscillate() {
+        // The productive `run_fuzzer(target=a) -> triage(run=N)` cadence
+        // alternates two tool NAMES but the triage args advance every turn.
+        // Keying oscillation on (action, args) means this must NOT trip.
+        let mut guard = LoopGuard::new(LoopGuardConfig::default()); // 3 cycles
+        let mut steps = Vec::new();
+        for run in 1..=6 {
+            steps.push(StepRecord::tool("run_fuzzer", "target=a"));
+            steps.push(StepRecord::tool("triage", format!("run={run}")));
+        }
+        assert!(
+            feed(&mut guard, &steps).is_none(),
+            "alternation with genuinely varying args must not trip oscillation"
+        );
+    }
+
+    #[test]
+    fn same_tool_with_varying_args_does_not_repeat() {
+        // Four consecutive calls to one tool, each with different arguments.
+        // Repetition keys on (action, args), so distinct args are progress.
+        let mut guard = LoopGuard::new(LoopGuardConfig::default()); // threshold 4
+        let steps = [
+            StepRecord::tool("run_fuzzer", "target=a"),
+            StepRecord::tool("run_fuzzer", "target=b"),
+            StepRecord::tool("run_fuzzer", "target=c"),
+            StepRecord::tool("run_fuzzer", "target=d"),
+        ];
+        assert!(
+            feed(&mut guard, &steps).is_none(),
+            "same tool with four distinct args must not trip repetition"
+        );
+    }
+
+    #[test]
+    fn identical_signature_alternation_still_oscillates() {
+        // Guard against regression: a true A/B oscillation where BOTH steps'
+        // signatures repeat identically must still fire.
+        let mut guard = LoopGuard::new(LoopGuardConfig::default()); // 3 cycles
+        let steps = [
+            StepRecord::tool("run_fuzzer", "target=a"),
+            StepRecord::tool("triage", "run=1"),
+            StepRecord::tool("run_fuzzer", "target=a"),
+            StepRecord::tool("triage", "run=1"),
+            StepRecord::tool("run_fuzzer", "target=a"),
+            StepRecord::tool("triage", "run=1"),
+        ];
+        let d = feed(&mut guard, &steps).expect("identical-signature oscillation should fire");
+        assert_eq!(d.pattern, LoopPattern::Oscillation);
+    }
+
+    #[test]
+    fn identical_signature_repeats_still_trip_repetition() {
+        // Guard against regression: the same tool with IDENTICAL args repeated
+        // must still be caught as repetition. Raise the redundant threshold so
+        // the (earlier-checked) redundant-tool detector does not mask it.
+        let config = LoopGuardConfig {
+            redundant_threshold: 100,
+            ..LoopGuardConfig::default()
+        };
+        let mut guard = LoopGuard::new(config); // repetition threshold 4
+        let steps: Vec<_> = (0..4)
+            .map(|_| StepRecord::tool("run_fuzzer", "target=a"))
+            .collect();
+        let d = feed(&mut guard, &steps).expect("identical-signature repetition should fire");
+        assert_eq!(d.pattern, LoopPattern::Repetition);
     }
 
     #[test]

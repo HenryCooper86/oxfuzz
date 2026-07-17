@@ -629,7 +629,7 @@ pub async fn smoke_fuzz_in_paths_with_config(
     let limits = hf_core::runtime::ResourceLimits {
         max_mem_mb: config.max_mem_mb,
         max_cpus: config.max_cpus,
-        max_duration_secs: duration_secs,
+        max_duration_secs: smoke_sandbox_duration(duration_secs),
         env: config.env.iter().cloned().collect(),
         ptrace: false,
     };
@@ -686,6 +686,11 @@ pub async fn smoke_fuzz_in_paths_with_config(
             || lower.contains("exec/s")
             || lower.contains("exec speed")
             || lower.contains("cycles done")
+            // honggfuzz progress markers ("Iterations: N", "Speed: N/sec"): the
+            // AFL/libFuzzer literals above never appear in honggfuzz output, so
+            // without these a clean honggfuzz smoke run is rejected as inactive.
+            || lower.contains("iterations")
+            || lower.contains("speed")
     };
     if !ran {
         return Err(ClassifiedError::Harness(format!(
@@ -785,6 +790,19 @@ fn smoke_command(
     }
 }
 
+/// Wall-clock budget for the smoke sandbox: the fuzzer's own self-limit plus
+/// headroom for container startup, corpus loading, and sanitizer shutdown.
+///
+/// The fuzzer's `-max_total_time`/`-V`/`--run_time` clock starts only after the
+/// container has booted and loaded the corpus, whereas the sandbox wall-clock
+/// starts at container launch. Without headroom the sandbox always expires
+/// first, so a healthy non-crashing harness that runs its full budget is killed
+/// and reported as a wall-clock timeout before its activity is ever measured.
+/// Mirrors `hf_engine::runner`'s production-run behavior.
+fn smoke_sandbox_duration(duration_secs: u64) -> u64 {
+    duration_secs.saturating_add(hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS)
+}
+
 /// Default configuration retained for direct `hf-harness` callers. Production
 /// service paths pass their resolved policy snapshot explicitly.
 fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
@@ -820,9 +838,15 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             output: PathBuf::from(output_name),
         };
     }
+    // C++ harnesses/targets must be compiled and, crucially, LINKED with the
+    // C++ compiler driver so the C++ standard library is pulled in; the C
+    // drivers (`clang`/`afl-clang-fast`/`hfuzz-cc`) compile `.cc` but leave
+    // `operator new`/`std::__throw_*` undefined at link time, a failure no
+    // source-level harness repair can fix.
+    let is_cpp = lang == TargetLanguage::Cpp;
     match engine {
         EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => BuildCommand {
-            compiler: "clang".to_owned(),
+            compiler: if is_cpp { "clang++" } else { "clang" }.to_owned(),
             args: vec![
                 "-fsanitize=fuzzer".to_owned(),
                 "-fsanitize=address".to_owned(),
@@ -831,7 +855,12 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             output: PathBuf::from(output_name),
         },
         EngineKind::AflPlusPlus => BuildCommand {
-            compiler: "afl-clang-fast".to_owned(),
+            compiler: if is_cpp {
+                "afl-clang-fast++"
+            } else {
+                "afl-clang-fast"
+            }
+            .to_owned(),
             args: vec![
                 "-fsanitize=fuzzer".to_owned(),
                 "-fsanitize=address".to_owned(),
@@ -840,7 +869,7 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
             output: PathBuf::from(output_name),
         },
         EngineKind::Honggfuzz => BuildCommand {
-            compiler: "hfuzz-cc".to_owned(),
+            compiler: if is_cpp { "hfuzz-c++" } else { "hfuzz-cc" }.to_owned(),
             args: vec!["-fsanitize=address".to_owned(), "-g".to_owned()],
             output: PathBuf::from(output_name),
         },
@@ -885,6 +914,15 @@ fn parse_execs_per_sec(stdout: &str) -> f64 {
             let before = &line[..pos];
             let after = &line[pos + "execs".len()..];
             if let Some(n) = last_number(before).or_else(|| first_number(after)) {
+                max = max.max(n);
+            }
+        } else if let Some(pos) = lower.find("speed") {
+            // honggfuzz reports "Speed: 5000/sec"; AFL's UI prints
+            // "exec speed : 1234/sec". Neither contains "exec/s"/"execs", so
+            // without this branch their throughput is invisible and a clean
+            // non-crashing smoke run is wrongly rejected as inactive.
+            let after = &line[pos + "speed".len()..];
+            if let Some(n) = first_number(after) {
                 max = max.max(n);
             }
         }
@@ -1218,6 +1256,55 @@ mod tests {
         assert!((parse_execs_per_sec("ran at 5000 execs/sec total") - 5000.0).abs() < f64::EPSILON);
         assert!((parse_execs_per_sec("execs_per_sec : 500") - 500.0).abs() < f64::EPSILON);
         assert!(parse_execs_per_sec("no throughput here").abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_honggfuzz_and_afl_speed_lines() {
+        // honggfuzz reports throughput as "Speed: N/sec", AFL's UI as
+        // "exec speed : N/sec" -- neither contains "exec/s"/"execs".
+        assert!((parse_execs_per_sec("Speed: 5000/sec (avg: 4000)") - 5000.0).abs() < f64::EPSILON);
+        assert!(
+            (parse_execs_per_sec("    exec speed : 1234.5/sec") - 1234.5).abs() < f64::EPSILON,
+            "AFL exec-speed line must be parsed as throughput"
+        );
+    }
+
+    #[test]
+    fn smoke_sandbox_duration_adds_headroom() {
+        // The sandbox wall-clock must exceed the fuzzer's own time budget so a
+        // healthy non-crashing harness is not killed before its activity is
+        // measured.
+        assert_eq!(
+            smoke_sandbox_duration(30),
+            30 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
+        );
+        assert_eq!(smoke_sandbox_duration(u64::MAX), u64::MAX, "saturates");
+    }
+
+    #[test]
+    fn build_command_cpp_uses_cpp_compiler_driver() {
+        // C++ targets must link the C++ stdlib, which requires the ++ drivers.
+        assert_eq!(
+            build_command(EngineKind::LibFuzzer, TargetLanguage::Cpp, "fuzz_t").compiler,
+            "clang++"
+        );
+        assert_eq!(
+            build_command(EngineKind::AflPlusPlus, TargetLanguage::Cpp, "fuzz_t").compiler,
+            "afl-clang-fast++"
+        );
+        assert_eq!(
+            build_command(EngineKind::Honggfuzz, TargetLanguage::Cpp, "fuzz_t").compiler,
+            "hfuzz-c++"
+        );
+        // C targets keep the C drivers.
+        assert_eq!(
+            build_command(EngineKind::LibFuzzer, TargetLanguage::C, "fuzz_t").compiler,
+            "clang"
+        );
+        assert_eq!(
+            build_command(EngineKind::Honggfuzz, TargetLanguage::C, "fuzz_t").compiler,
+            "hfuzz-cc"
+        );
     }
 
     #[test]

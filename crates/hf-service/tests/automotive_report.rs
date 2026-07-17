@@ -123,6 +123,27 @@ fn deterministic_report_is_a_complete_traceable_campaign_record() {
 }
 
 #[test]
+fn a_done_but_incomplete_operation_is_reported_as_partial_not_completed() {
+    // A Done operation whose result was not complete must be counted as
+    // "partial" in the Executive Summary, matching the Campaign Workflow table
+    // (which treats it as "Attention") and the Findings section -- not double-
+    // counted as "completed".
+    let mut data = report_data();
+    if let Some(op) = data.operations.first_mut() {
+        op.result_complete = Some(false);
+    }
+    let report = render_automotive_report(&data);
+    assert!(
+        report.contains("0 completed"),
+        "an incomplete Done op must not be counted as completed"
+    );
+    assert!(
+        report.contains("1 partial"),
+        "an incomplete Done op must be counted as partial"
+    );
+}
+
+#[test]
 fn report_does_not_overstate_protocol_state_evidence() {
     let report = render_automotive_report(&report_data()).to_ascii_lowercase();
 
