@@ -677,6 +677,65 @@ async fn upsert_target_keeps_one_row_per_project_symbol() {
 }
 
 #[tokio::test]
+async fn consume_automotive_approval_is_single_use_and_atomic() {
+    let (store, _dir) = temp_store().await;
+    let op = Uuid::new_v4();
+    let scope = "aa".repeat(32);
+
+    // First claim of an approval id succeeds.
+    assert!(store
+        .consume_automotive_approval("approval-1", &scope, op, "/proj", Utc::now())
+        .await
+        .unwrap());
+    // A second claim of the SAME id is rejected -- single-use.
+    assert!(!store
+        .consume_automotive_approval("approval-1", &scope, Uuid::new_v4(), "/proj", Utc::now())
+        .await
+        .unwrap());
+    // A distinct approval id is independent and succeeds.
+    assert!(store
+        .consume_automotive_approval("approval-2", &scope, Uuid::new_v4(), "/proj", Utc::now())
+        .await
+        .unwrap());
+    // An empty id is rejected as invalid data, not silently consumed.
+    assert!(store
+        .consume_automotive_approval("", &scope, op, "/proj", Utc::now())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn delete_project_clears_consumed_approvals() {
+    let (store, _dir) = temp_store().await;
+    let project = "/projects/vehicle-approvals";
+    store
+        .consume_automotive_approval(
+            "approval-x",
+            &"bb".repeat(32),
+            Uuid::new_v4(),
+            project,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+    store.delete_project(project).await.unwrap();
+
+    // After deletion the ledger no longer holds the id, so it could be claimed
+    // again (safe: a real approval that old is long past its freshness window).
+    assert!(store
+        .consume_automotive_approval(
+            "approval-x",
+            &"bb".repeat(32),
+            Uuid::new_v4(),
+            project,
+            Utc::now()
+        )
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn delete_project_removes_automotive_evidence() {
     let (store, _dir) = temp_store().await;
     let project = "/projects/vehicle-evidence";

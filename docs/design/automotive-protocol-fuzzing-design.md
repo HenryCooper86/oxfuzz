@@ -159,7 +159,12 @@ enable the feature, choose an unlisted interface, manufacture approval evidence,
 relax limits, or authorize physical execution. Offline analysis is non-live but
 still sandboxed through the sidecar. Virtual execution is supervised.
 Every physical-bench operation requires a fresh service-verified human approval
-after the exact plan and budgets are known.
+after the exact plan and budgets are known. Approvals are single-use: the
+service records each consumed approval id in a durable ledger
+(`automotive_consumed_approvals`) and claims it with an atomic, uniqueness-backed
+insert before any bus access, so one approval authorizes exactly one physical
+transmission even within its freshness window and even under concurrent
+execution. A reused approval is rejected before the sidecar runs.
 
 ## 7. Campaign Synthesis, Reporting, and AI Assistance
 
