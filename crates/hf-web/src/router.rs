@@ -382,6 +382,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/clear", post(clear_all_runs))
         .route("/projects/export", post(export_project_data))
         .route("/providers/status", get(provider_statuses))
+        .route("/providers/{id}/thaw", post(provider_thaw))
         .route("/diagnostics/cost", get(diagnostics_cost_summary))
         .route("/system/snapshot", get(system_snapshot))
         .route("/system/status", get(system_status))
@@ -1411,6 +1412,18 @@ async fn provider_statuses(State(state): State<AppState>) -> ApiResult<serde_jso
         })
         .collect();
     Ok(Json(serde_json::Value::Array(arr)))
+}
+
+async fn provider_thaw(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .container
+        .thaw_provider(&id)
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(serde_json::json!({ "id": id, "thawed": true })))
 }
 
 async fn clear_knowledge(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

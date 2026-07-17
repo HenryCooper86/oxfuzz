@@ -504,13 +504,6 @@ pub async fn ensure_docker(
     Ok(ensure_docker_ready(&app, arch).await)
 }
 
-#[tauri::command]
-pub fn show_window(app: tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        win.show().ok();
-    }
-}
-
 /// The host's native sandbox platform, e.g. "linux/arm64".
 #[tauri::command]
 #[must_use]
@@ -521,22 +514,6 @@ pub fn host_arch() -> String {
 // ---------------------------------------------------------------------------
 // Chat (LLM-backed)
 // ---------------------------------------------------------------------------
-
-/// Send a single-turn chat message to the LLM provider pool (no tools).
-///
-/// Uses the shared container's live provider pool, which `set_providers` swaps
-/// in whenever Settings are saved -- so provider edits apply without a restart.
-#[tauri::command]
-pub async fn chat_send(
-    state: tauri::State<'_, crate::state::AppState>,
-    message: String,
-) -> Result<String, String> {
-    state
-        .container
-        .chat_send(&message)
-        .await
-        .map_err(|e| e.to_string())
-}
 
 /// A prior chat message passed from the frontend as agent history.
 #[derive(Debug, Deserialize, Serialize)]
@@ -683,37 +660,6 @@ pub async fn knowledge_summary(
     })
 }
 
-/// Per-provider health for the Observability panel.
-#[derive(Debug, Serialize)]
-pub struct ProviderStatusDto {
-    id: String,
-    frozen: bool,
-    freeze_reason: Option<String>,
-    active_requests: usize,
-    total_requests: u64,
-    total_errors: u64,
-}
-
-/// Live provider health/usage (freeze state, in-flight + total requests,
-/// errors). Empty when no provider pool is configured.
-#[tauri::command]
-pub async fn provider_statuses(
-    state: tauri::State<'_, crate::state::AppState>,
-) -> Result<Vec<ProviderStatusDto>, String> {
-    let statuses = state.container.provider_statuses().await;
-    Ok(statuses
-        .into_iter()
-        .map(|s| ProviderStatusDto {
-            id: s.id.0,
-            frozen: s.is_frozen,
-            freeze_reason: s.freeze_reason,
-            active_requests: s.active_requests,
-            total_requests: s.total_requests,
-            total_errors: s.total_errors,
-        })
-        .collect())
-}
-
 /// Live service-owned system snapshot for the Observability panel.
 #[tauri::command]
 pub async fn system_snapshot(
@@ -777,14 +723,6 @@ pub async fn issue_export(
         .issue_export(std::path::Path::new(&project), &crash_id)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// Whether a usable issue-tracker integration is configured (provider + repo).
-#[tauri::command]
-pub async fn issue_tracker_configured(
-    state: tauri::State<'_, crate::state::AppState>,
-) -> Result<bool, String> {
-    Ok(state.container.issue_tracker_configured())
 }
 
 /// File a triaged crash as an issue via the configured provider's API; returns
@@ -1161,14 +1099,6 @@ pub async fn schedule_create(
         .map_err(|error| error.to_string())
 }
 
-/// The global concurrent-campaign cap.
-#[tauri::command]
-pub async fn schedule_concurrency_get(
-    state: tauri::State<'_, crate::state::AppState>,
-) -> Result<usize, String> {
-    Ok(state.scheduler.max_concurrent())
-}
-
 /// Both scheduler concurrency caps and their effective fuzz-run ceiling.
 #[tauri::command]
 pub async fn schedule_concurrency_limits(
@@ -1341,16 +1271,6 @@ pub fn list_agents(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Vec<hf_service::AgentDefinition> {
     state.container.list_agent_definitions()
-}
-
-/// Fetch a single agent definition by id.
-#[tauri::command]
-#[must_use]
-pub fn get_agent(
-    state: tauri::State<'_, crate::state::AppState>,
-    id: String,
-) -> Option<hf_service::AgentDefinition> {
-    state.container.get_agent_definition(&id)
 }
 
 /// The runtime tool roster an agent may be granted, for the editor checklist.
@@ -1796,41 +1716,6 @@ pub async fn generate_report(
         .generate_report(std::path::Path::new(&project), &target)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// Generate the campaign report and save it to a user-chosen `.md` file via a
-/// native save dialog. Returns the saved path, or `None` if the user cancelled.
-#[tauri::command]
-pub async fn save_report(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, crate::state::AppState>,
-    project: String,
-    target: String,
-) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-
-    let markdown = state
-        .container
-        .generate_report(std::path::Path::new(&project), &target)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let default_name = format!("hobot_fuzz_report_{}.md", sanitize_filename(&target));
-    let Some(path) = app
-        .dialog()
-        .file()
-        .set_title("Save fuzzing report")
-        .set_file_name(&default_name)
-        .add_filter("Markdown", &["md"])
-        .blocking_save_file()
-    else {
-        return Ok(None);
-    };
-    let path = path
-        .into_path()
-        .map_err(|e| format!("invalid save path: {e}"))?;
-    std::fs::write(&path, markdown).map_err(|e| format!("write report: {e}"))?;
-    Ok(Some(path.to_string_lossy().to_string()))
 }
 
 /// Reveal a file or directory in the OS file manager (Finder / Explorer).
@@ -2364,7 +2249,7 @@ pub async fn run_syzkaller(
 // the single source of truth shared with the CLI and web API (AGENTS.md 2.9).
 // The serde shapes are re-exported unchanged so the frontend JSON is identical.
 
-pub use hf_service::config::{AppPaths, ConfigSection, ModelInfo, ProviderConfig};
+pub use hf_service::config::{AppPaths, ModelInfo, ProviderConfig};
 
 #[tauri::command]
 #[must_use]
@@ -2713,13 +2598,6 @@ pub fn set_providers(
 #[tauri::command]
 pub async fn provider_test(provider: ProviderConfig) -> Result<String, String> {
     hf_service::config::test_provider(provider).await
-}
-
-/// List the editable config sections and whether each has a live file.
-#[tauri::command]
-#[must_use]
-pub fn list_configs() -> Vec<ConfigSection> {
-    hf_service::config::list_configs()
 }
 
 /// Read a config section's raw TOML.

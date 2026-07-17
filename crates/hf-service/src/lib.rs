@@ -39,9 +39,10 @@ pub use hf_agent::{
 };
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
+pub use hf_core::provider::ProviderStatus;
 pub use hf_core::runtime::CommandTermination;
 pub use hf_core::target::{TargetInventory, TargetLanguage};
-pub use hf_core::types::{Message, Role, SessionId};
+pub use hf_core::types::{Message, ProviderId, Role, SessionId};
 pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};
 pub use hf_runtime::{
     can_run_platform, docker_cli_present, docker_daemon_ready, host_platform, norm_platform,
