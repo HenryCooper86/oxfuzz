@@ -304,13 +304,16 @@ impl EngineRunner {
             CommandTermination::Completed => {}
         }
 
-        // libFuzzer exit codes: 0 = clean exit, 77 = crash/leak found,
-        // 76 = OOM, 1 = error. 0, 77 and 76 are all valid fuzzing outcomes -- an
-        // OOM is a finding to triage, not an engine failure, so it must not be
-        // turned into an error (which would discard the run's coverage).
+        // libFuzzer exit codes: 0 = clean exit, 77 = crash/leak/OOM found
+        // (the default -error_exitcode), 70 = timeout (the default
+        // -timeout_exitcode). All three are valid fuzzing outcomes -- a crash,
+        // OOM, or timeout is a finding to triage, not an engine failure, so they
+        // must not be turned into an error (which would discard the run's
+        // coverage). `saw_completion` stays as a fallback for engines that exit
+        // with some other code but printed a completion/summary line.
         let is_valid_outcome = result.exit_code == 0
+            || result.exit_code == 70
             || result.exit_code == 77
-            || result.exit_code == 76
             || saw_completion.load(std::sync::atomic::Ordering::Relaxed);
         if !is_valid_outcome {
             return Err(ClassifiedError::Engine(format!(

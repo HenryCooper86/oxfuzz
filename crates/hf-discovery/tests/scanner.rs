@@ -235,6 +235,69 @@ async fn discover_rust_finds_public_parameterized_functions() {
 }
 
 #[tokio::test]
+async fn discover_skips_void_prototype_functions() {
+    // tree-sitter-c parses `int f(void)` as a parameter_list holding one
+    // parameter_declaration (a `void` primitive_type). Counting that as one
+    // parameter would make a genuinely argument-less function a fuzz candidate.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("mod.c"),
+        "int startup(void) { return 42; }\n\
+         int parse_thing(const unsigned char *data, unsigned long n) { return n && data[0]; }\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(dir.path(), TargetLanguage::C)
+        .await
+        .expect("discover should succeed");
+    let names: Vec<&str> = inv.candidates.iter().map(|c| c.symbol.as_str()).collect();
+
+    assert!(
+        !names.contains(&"startup"),
+        "a `(void)` function has no argument to fuzz and must not be a candidate; got {names:?}"
+    );
+    // A real argument-bearing function is still discovered (control).
+    assert!(
+        names.contains(&"parse_thing"),
+        "the argument-bearing parser must remain a candidate; got {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn discover_rust_parses_args_past_a_generic_bound() {
+    use hf_core::target::InputSurface;
+
+    // `<F: Fn(u8) -> bool>` contains its own parentheses and a `->` arrow. The
+    // argument list is the `(...)` *after* the generic section, not the bound's
+    // `(u8)`. Reading the bound would mis-count the parameters and infer the
+    // wrong input surface (or drop the candidate entirely).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn scan_bytes<F: Fn(u8) -> bool>(pred: F, data: &[u8]) -> usize {\n\
+         \x20   data.iter().filter(|b| pred(**b)).count()\n\
+         }\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(dir.path(), TargetLanguage::Rust)
+        .await
+        .expect("rust discovery should succeed");
+    let scan = inv
+        .candidates
+        .iter()
+        .find(|c| c.symbol == "scan_bytes")
+        .expect("scan_bytes should be discovered past its generic bound");
+    // The real argument list carries a byte slice, so the surface is Bytes;
+    // mis-parsing the `Fn(u8)` bound would yield Structured instead.
+    assert_eq!(
+        scan.input_surface,
+        InputSurface::Bytes,
+        "the `&[u8]` argument must be parsed past the generic bound"
+    );
+}
+
+#[tokio::test]
 async fn discover_rust_scans_crlf_identically_to_lf() {
     // CRLF sources must scan identically to LF ones. A byte offset that only
     // accounts for '\n' drifts one byte per preceding line on CRLF files, so the
