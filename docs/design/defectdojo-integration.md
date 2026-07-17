@@ -41,6 +41,22 @@ project the operator already installed, in `hf-service/src/defectdojo_lifecycle.
 `system_status()` gains a `defectdojo` flag from the same probe, so the Health
 panel, the REST `/system/status`, and the CLI agree on one answer.
 
+### Provisioning the local instance
+
+Adopting an install still requires the operator to *have* one. `scripts/setup-defectdojo.sh`
+(double-click `setup-defectdojo.command`) performs that upstream install so the
+adoption path has something to adopt: it clones **DefectDojo's own** compose
+project, `docker compose pull`s the released images, and brings the stack up
+under the project name and `DD_PORT` the lifecycle adopter expects, then writes
+`config/defectdojo.toml`. This does not change the "ship no compose file" stance
+-- the script uses upstream's compose, cloned outside the repo
+(`$HOME/.hobot_fuzz/defectdojo` by default) -- it only automates the manual
+`docker compose up` the operator would otherwise run. It is idempotent (a fast
+no-op once the project is running) and is invoked best-effort, skippable
+(`HF_SKIP_DEFECTDOJO=1`), from the environment-setup entry points
+(`rebuild-sandbox-image.command`, `scripts/build-app.sh`). Fuzzing never depends
+on it.
+
 ## Layering (AGENTS.md 2.9 -- all logic in hf-service)
 
 | Layer | Location | Responsibility |
