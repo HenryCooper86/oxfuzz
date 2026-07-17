@@ -206,6 +206,34 @@ async fn runner_afl_parses_progress() {
 }
 
 #[tokio::test]
+async fn runner_accepts_libfuzzer_timeout_exit_without_a_summary_line() {
+    // libFuzzer's default -timeout_exitcode is 70. A timed-out unit is a
+    // finding to triage, not an engine failure, and the process may exit 70
+    // without printing a "summary" line, so exit 70 must be a valid outcome on
+    // its own (not only rescued by the fragile summary-substring fallback).
+    let rt = MockRuntime {
+        exit_code: 70,
+        // Output carries progress but none of done/summary/finished, so the
+        // saw_completion fallback is not what rescues this run.
+        stdout: "#4096 cov: 120 ft: 300 exec/s: 900 rss: 90Mb\n".to_owned(),
+        termination: CommandTermination::Completed,
+    };
+    let result = EngineRunner::new()
+        .run(
+            EngineKind::LibFuzzer,
+            &run_config(EngineKind::LibFuzzer, 60),
+            "/work/fuzz_bin",
+            "/work/corpus",
+            "/work/out",
+            &rt,
+            &PathBuf::from("/work"),
+        )
+        .await
+        .expect("a libFuzzer timeout (exit 70) is a valid outcome, not an engine error");
+    assert_eq!(result.coverage.edges, 120, "coverage must be preserved");
+}
+
+#[tokio::test]
 async fn runner_returns_error_on_nonzero_exit() {
     let rt = MockRuntime {
         exit_code: 1,

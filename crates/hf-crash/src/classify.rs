@@ -20,6 +20,13 @@ pub fn classify(log: &str) -> (CrashKind, String, String) {
         String::new()
     } else {
         let mut hasher = Sha256::new();
+        // Fold the crash kind into the hash so two distinct bugs that happen to
+        // share the same top-3 frames (e.g. a heap-overflow and a UBSan integer
+        // overflow reported at the same call site) do not collapse to one
+        // signature. Frameless logs still yield an empty signature above, so the
+        // dedup "no signature -> keep all" path is preserved.
+        hasher.update(format!("{kind:?}").as_bytes());
+        hasher.update(b"\n");
         for frame in &frames {
             hasher.update(frame.as_bytes());
             hasher.update(b"\n");
@@ -51,10 +58,14 @@ pub fn looks_like_crash(log: &str) -> bool {
 
 fn detect_kind(log: &str) -> CrashKind {
     let lower = log.to_ascii_lowercase();
+    // A genuine timeout is reported as an error class ("libFuzzer: timeout",
+    // a "SUMMARY: ... timeout"), so key on that rather than any "timeout"/
+    // "alarm" substring -- a frame like `connect_timeout` or an incidental
+    // "alarm" elsewhere in the log must not reclassify an ASan/SEGV crash.
+    if reports_timeout(&lower) {
+        return CrashKind::Timeout;
+    }
     if lower.contains("addresssanitizer") || lower.contains("asan") {
-        if lower.contains("timeout") || lower.contains("alarm") {
-            return CrashKind::Timeout;
-        }
         CrashKind::Asan
     } else if lower.contains("undefinedbehaviorsanitizer") || lower.contains("ubsan") {
         CrashKind::Ubsan
@@ -62,11 +73,26 @@ fn detect_kind(log: &str) -> CrashKind {
         CrashKind::Segv
     } else if lower.contains("sigabrt") || lower.contains("abort") {
         CrashKind::Abort
-    } else if lower.contains("timeout") || lower.contains("alarm") {
-        CrashKind::Timeout
     } else {
         CrashKind::Other
     }
+}
+
+/// Whether the log reports a *timeout* as its error class, as opposed to merely
+/// containing the substring "timeout"/"alarm" somewhere (a frame name, a symbol
+/// like `connect_timeout`, a `Timeouts : 0` status counter). Conservative on
+/// purpose: a "timeout"/"alarm" report is either the leading label of a line
+/// (libFuzzer's "ALARM: ..." and "timeout: N" lines) or appears on the engine's
+/// own reported error/summary line ("ERROR: libFuzzer: timeout after 60s",
+/// "SUMMARY: ... timeout").
+fn reports_timeout(lower: &str) -> bool {
+    lower.lines().any(|raw| {
+        let line = raw.trim_start();
+        line.starts_with("alarm:")
+            || line.starts_with("timeout:")
+            || ((line.contains("summary:") || line.contains("error:"))
+                && (line.contains("timeout") || line.contains("alarm")))
+    })
 }
 
 fn extract_top_frames(log: &str, n: usize) -> Vec<String> {
@@ -80,7 +106,11 @@ fn extract_top_frames(log: &str, n: usize) -> Vec<String> {
                 let rest = &trimmed[pos + 4..];
                 frames.push(rest.to_owned());
             } else {
-                frames.push(trimmed.to_owned());
+                // Unsymbolized frame ("#0 0xADDR (module+0xOFFSET)"). Strip the
+                // leading ASLR runtime address so the same crash hashes
+                // identically across runs; keep the module+offset (or any)
+                // tail, mirroring the " in " path which also drops the address.
+                frames.push(strip_leading_frame_address(trimmed));
             }
         }
         if frames.len() >= n {
@@ -88,6 +118,27 @@ fn extract_top_frames(log: &str, n: usize) -> Vec<String> {
         }
     }
     frames
+}
+
+/// Strip the leading frame marker (`#N`) and the ASLR runtime address that
+/// follows it from an unsymbolized frame, returning the remaining tail (e.g.
+/// `(module+0xOFFSET)`). Only the first `0x...` token -- the runtime address --
+/// is removed; a module-relative offset in the tail is preserved. Falls back to
+/// the trimmed frame when the expected shape is absent.
+fn strip_leading_frame_address(frame: &str) -> String {
+    let mut tokens = frame.split_whitespace();
+    let _marker = tokens.next(); // "#N"
+    let rest: Vec<&str> = tokens.collect();
+    let tail = if rest.first().is_some_and(|t| t.starts_with("0x")) {
+        &rest[1..]
+    } else {
+        &rest[..]
+    };
+    if tail.is_empty() {
+        frame.trim().to_owned()
+    } else {
+        tail.join(" ")
+    }
 }
 
 fn extract_summary(log: &str, kind: CrashKind) -> String {
@@ -102,12 +153,72 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_crash;
+    use super::{classify, detect_kind, looks_like_crash};
+    use hf_core::crash::CrashKind;
+
+    #[test]
+    fn unsymbolized_frames_ignore_the_aslr_address() {
+        // Two runs of the same crash: identical unsymbolized frames, only the
+        // leading ASLR runtime addresses differ. The stack signature must match,
+        // otherwise every run of one bug looks like a new distinct crash.
+        let run_a = "==1==ERROR: AddressSanitizer: SEGV on unknown address\n\
+                     #0 0x000055f0deadbeef (/lib/libz.so+0x1234)\n\
+                     #1 0x000055f0cafebabe (/lib/libz.so+0x5678)\n\
+                     #2 0x000055f0feedface (/bin/app+0x9abc)\n";
+        let run_b = "==1==ERROR: AddressSanitizer: SEGV on unknown address\n\
+                     #0 0x00007fabc0000111 (/lib/libz.so+0x1234)\n\
+                     #1 0x00007fabc0000222 (/lib/libz.so+0x5678)\n\
+                     #2 0x00007fabc0000333 (/bin/app+0x9abc)\n";
+        let (_, sig_a, _) = classify(run_a);
+        let (_, sig_b, _) = classify(run_b);
+        assert!(
+            !sig_a.is_empty(),
+            "a frame-bearing log must have a signature"
+        );
+        assert_eq!(
+            sig_a, sig_b,
+            "identical crashes must hash the same regardless of ASLR address"
+        );
+    }
+
+    #[test]
+    fn same_frames_different_kinds_do_not_collapse() {
+        // Two distinct bugs reported at the same top-3 frames but with different
+        // crash kinds must not share a signature.
+        let frames = "#0 0xaaa in foo /a.c:1:1\n\
+                      #1 0xbbb in bar /b.c:2:2\n\
+                      #2 0xccc in baz /c.c:3:3\n";
+        let asan = format!("==1==ERROR: AddressSanitizer: heap-buffer-overflow\n{frames}");
+        let ubsan = format!("==1==ERROR: UndefinedBehaviorSanitizer: signed overflow\n{frames}");
+        let (kind_a, sig_a, _) = classify(&asan);
+        let (kind_u, sig_u, _) = classify(&ubsan);
+        assert_eq!(kind_a, CrashKind::Asan);
+        assert_eq!(kind_u, CrashKind::Ubsan);
+        assert_ne!(
+            sig_a, sig_u,
+            "distinct crash kinds sharing frames must not collapse to one signature"
+        );
+    }
+
+    #[test]
+    fn timeout_is_only_the_reported_error_class() {
+        // An ASan crash whose stack merely mentions a `connect_timeout` frame is
+        // an ASan finding, not a timeout.
+        let asan_with_timeout_frame = "==1==ERROR: AddressSanitizer: SEGV on unknown address\n\
+                                       #0 0xdead in connect_timeout /net.c:10:5\n\
+                                       SUMMARY: AddressSanitizer: SEGV /net.c:10:5\n";
+        assert_eq!(detect_kind(asan_with_timeout_frame), CrashKind::Asan);
+
+        // A genuine libFuzzer timeout is classified as a timeout.
+        let real_timeout = "==1== ERROR: libFuzzer: timeout after 60 seconds\n\
+                            SUMMARY: libFuzzer: timeout\n";
+        assert_eq!(detect_kind(real_timeout), CrashKind::Timeout);
+    }
 
     #[test]
     fn frameless_classified_crashes_are_not_deduped() {
         use crate::dedup::dedup;
-        use hf_core::crash::{Crash, CrashKind};
+        use hf_core::crash::Crash;
         use std::path::PathBuf;
         use uuid::Uuid;
 
