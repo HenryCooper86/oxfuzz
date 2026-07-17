@@ -269,6 +269,37 @@ pub struct ProxySpec {
     pub auth: Option<(String, String)>,
 }
 
+impl ProxySpec {
+    /// Return the proxy URL with any resolved `auth_env` credentials embedded as
+    /// userinfo (`scheme://user:pass@host:port`), percent-encoding the
+    /// credentials via [`reqwest::Url`].
+    ///
+    /// This is how proxy credentials reach the HTTP client: `reqwest::Proxy`
+    /// extracts embedded userinfo and applies it as proxy basic auth (the same
+    /// mechanism as [`reqwest::Proxy::basic_auth`]), so credentials flow through
+    /// the existing `Option<String>` proxy-URL channel without widening the
+    /// provider constructor signatures. When there are no credentials — or the
+    /// URL cannot carry userinfo — the bare URL is returned unchanged.
+    #[must_use]
+    pub fn to_proxy_url(&self) -> String {
+        let Some((user, pass)) = self.auth.as_ref() else {
+            return self.url.clone();
+        };
+        match reqwest::Url::parse(&self.url) {
+            Ok(mut url) => {
+                if url.set_username(user).is_ok() && url.set_password(Some(pass)).is_ok() {
+                    url.to_string()
+                } else {
+                    // Non-hierarchical URL that cannot carry userinfo: keep the
+                    // proxy rather than dropping it silently.
+                    self.url.clone()
+                }
+            }
+            Err(_) => self.url.clone(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1261,6 +1292,46 @@ mod tests {
             assert_eq!(spec.url, "socks5://proxy.company.com:1080");
             assert_eq!(spec.auth, Some(("user1".into(), "secret123".into())));
         });
+    }
+
+    #[test]
+    fn proxy_spec_to_proxy_url_embeds_credentials() {
+        // No credentials: the URL is returned unchanged.
+        let spec = ProxySpec {
+            url: "http://proxy.local:8080".into(),
+            auth: None,
+        };
+        assert_eq!(spec.to_proxy_url(), "http://proxy.local:8080");
+
+        // Credentials are embedded as userinfo and accepted by reqwest, which
+        // applies them as proxy basic auth.
+        let spec = ProxySpec {
+            url: "http://proxy.local:8080".into(),
+            auth: Some(("user1".into(), "secret123".into())),
+        };
+        let url = spec.to_proxy_url();
+        assert!(
+            url.contains("user1:secret123@"),
+            "creds not embedded: {url}"
+        );
+        assert!(url.contains("proxy.local:8080"), "host lost: {url}");
+        assert!(
+            reqwest::Proxy::all(&url).is_ok(),
+            "reqwest rejected proxy url: {url}"
+        );
+
+        // Special characters in credentials are percent-encoded so the URL stays
+        // parseable (and reqwest decodes them back when applying basic auth).
+        let spec = ProxySpec {
+            url: "http://proxy.local:8080".into(),
+            auth: Some(("user".into(), "p@ss:word".into())),
+        };
+        let url = spec.to_proxy_url();
+        assert!(!url.contains("p@ss:word"), "password not encoded: {url}");
+        assert!(
+            reqwest::Proxy::all(&url).is_ok(),
+            "reqwest rejected encoded proxy url: {url}"
+        );
     }
 
     #[test]

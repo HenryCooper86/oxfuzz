@@ -459,6 +459,13 @@ pub async fn file_issue(
     let title = issue_title(&crash, target);
     let description = issue_description(&crash, target);
 
+    // Best-effort dedup: if this crash was already filed (same stack signature),
+    // return the existing issue instead of opening a duplicate on a re-file or a
+    // retried request. A search failure falls through to creating.
+    if let Some(existing) = client.find_existing_issue(&crash.stack_signature).await {
+        return Ok(existing);
+    }
+
     client.create_issue(&title, &description, &cfg.labels).await
 }
 
@@ -879,6 +886,16 @@ fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String 
         body.push_str("\n## CASR Stack\n\n```text\n");
         body.push_str(&casr.stack.join("\n"));
         body.push_str("\n```\n");
+    }
+    // Hidden dedup marker (HTML comment, invisible in rendered markdown) so a
+    // later filing of the same crash can find this issue instead of opening a
+    // duplicate. Keyed on the deterministic stack signature.
+    if !crash.stack_signature.is_empty() {
+        let _ = writeln!(
+            body,
+            "\n<!-- {} -->",
+            crate::issue_tracker::dedup_marker(&crash.stack_signature)
+        );
     }
     body
 }

@@ -770,7 +770,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mode_overlay_applied() {
-        // Explore mode excludes security, includes exploration.
+        // Explore mode includes exploration and, like every mode, retains the
+        // security contract (it must never be dropped -- explore runs against
+        // untrusted target source).
         let explore_ctx = PromptContext {
             agent_mode: "explore".into(),
             active_skills: vec![],
@@ -786,7 +788,7 @@ mod tests {
         provider.provide(&mut ctx).await.unwrap();
 
         let content = &ctx.items[0].content;
-        assert!(!content.contains("Security rules"));
+        assert!(content.contains("Security rules"));
         assert!(content.contains("exploration mode"));
     }
 

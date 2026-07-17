@@ -1803,7 +1803,13 @@ async fn knowledge_search(
         hf_service::knowledge::search_project_ensured(&project, &req.query, req.limit.unwrap_or(10))
     })
     .await
-    .unwrap_or_default();
+    // A panic in the blocking search (JoinError) must surface as a 500, not a
+    // silent empty 200 that a client cannot distinguish from "no matches".
+    .map_err(|error| {
+        classified_api_error(ClassifiedError::Internal(format!(
+            "knowledge search task failed: {error}"
+        )))
+    })?;
     Ok(Json(public_value(hits)))
 }
 

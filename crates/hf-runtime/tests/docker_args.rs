@@ -52,6 +52,11 @@ fn build_exec_args_uses_per_call_memory_and_cpu_over_defaults() {
         joined.contains("--memory=1024m"),
         "per-call memory not applied: {joined}"
     );
+    // Swap is pinned to the memory ceiling so Docker cannot default it to 2x.
+    assert!(
+        joined.contains("--memory-swap=1024m"),
+        "swap not pinned to the memory ceiling: {joined}"
+    );
     assert!(
         joined.contains("--cpus=1"),
         "per-call cpu not applied: {joined}"
@@ -289,6 +294,10 @@ fn build_exec_args_applies_hardening_baseline() {
         "missing no-new-privileges"
     );
     assert!(joined.contains("--pids-limit=512"), "missing pids-limit");
+    assert!(
+        joined.contains("--memory-swap=2048m"),
+        "swap must be pinned to memory to forbid swap-backed overcommit: {joined}"
+    );
     assert!(
         !joined.contains("seccomp=unconfined"),
         "seccomp weakened on a normal run"

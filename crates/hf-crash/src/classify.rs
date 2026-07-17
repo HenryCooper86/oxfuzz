@@ -6,17 +6,26 @@ use sha2::{Digest, Sha256};
 /// Classify a crash log.
 ///
 /// Returns `(CrashKind, stack_signature, summary)` where `stack_signature`
-/// is a sha256 hex digest of the top-3 stack frames.
+/// is a sha256 hex digest of the top-3 stack frames, or an empty string when
+/// the log carries no stack frames. An empty signature is deliberate: hashing
+/// zero frames would yield the constant empty-input digest, which `dedup`
+/// would then treat as a real key and collapse every distinct frameless crash
+/// into one. Emitting an empty signature routes such crashes through dedup's
+/// "no signature -> keep all" path instead.
 #[must_use]
 pub fn classify(log: &str) -> (CrashKind, String, String) {
     let kind = detect_kind(log);
     let frames = extract_top_frames(log, 3);
-    let mut hasher = Sha256::new();
-    for frame in &frames {
-        hasher.update(frame.as_bytes());
-        hasher.update(b"\n");
-    }
-    let sig = hex::encode(hasher.finalize());
+    let sig = if frames.is_empty() {
+        String::new()
+    } else {
+        let mut hasher = Sha256::new();
+        for frame in &frames {
+            hasher.update(frame.as_bytes());
+            hasher.update(b"\n");
+        }
+        hex::encode(hasher.finalize())
+    };
     let summary = extract_summary(log, kind);
     (kind, sig, summary)
 }
@@ -94,6 +103,52 @@ fn extract_summary(log: &str, kind: CrashKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::looks_like_crash;
+
+    #[test]
+    fn frameless_classified_crashes_are_not_deduped() {
+        use crate::dedup::dedup;
+        use hf_core::crash::{Crash, CrashKind};
+        use std::path::PathBuf;
+        use uuid::Uuid;
+
+        // Two distinct classified logs that carry no "#"-prefixed stack frames.
+        let ubsan = "src/parse.c:12: runtime error: signed integer overflow";
+        let honggfuzz = "STACK: <0x000055f0deadbeef>";
+
+        let (_, sig_a, _) = super::classify(ubsan);
+        let (_, sig_b, _) = super::classify(honggfuzz);
+
+        // A frameless log must not collapse to the constant empty-input digest;
+        // it yields an empty signature so dedup keeps each such crash.
+        assert!(
+            sig_a.is_empty(),
+            "frameless log must have an empty signature, got {sig_a}"
+        );
+        assert!(
+            sig_b.is_empty(),
+            "frameless log must have an empty signature, got {sig_b}"
+        );
+
+        let make = |sig: String| Crash {
+            id: Uuid::new_v4(),
+            run_id: Uuid::nil(),
+            target_id: Uuid::nil(),
+            input_path: PathBuf::from("in"),
+            stack_signature: sig,
+            kind: CrashKind::Other,
+            summary: String::new(),
+            minimized: false,
+            bug_report: None,
+            casr: None,
+        };
+
+        let kept = dedup(vec![make(sig_a), make(sig_b)]);
+        assert_eq!(
+            kept.len(),
+            2,
+            "distinct frameless crashes must not be collapsed by dedup"
+        );
+    }
 
     #[test]
     fn detects_a_still_firing_crash() {
