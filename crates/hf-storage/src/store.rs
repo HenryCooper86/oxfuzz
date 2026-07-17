@@ -642,6 +642,50 @@ impl Store {
         rows.iter().map(automotive_state_corpus_from_row).collect()
     }
 
+    /// Atomically claim a physical-bench approval for single use.
+    ///
+    /// A physical automotive replay authorizes real transmissions on a vehicle
+    /// bench, so each human approval must authorize at most one operation. This
+    /// inserts the approval id into the single-use ledger and reports whether the
+    /// claim succeeded: `true` when this call was the first to consume it,
+    /// `false` when it was already consumed. The `PRIMARY KEY` on `approval_id`
+    /// makes the second claim fail atomically -- the race-free primitive a
+    /// read-then-write check cannot provide, so two concurrent executions cannot
+    /// both proceed on one approval.
+    ///
+    /// # Errors
+    /// Returns an error on a SQL failure or when `approval_id` is empty.
+    pub async fn consume_automotive_approval(
+        &self,
+        approval_id: &str,
+        scope_sha256: &str,
+        operation_id: Uuid,
+        project_root: &str,
+        consumed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        if approval_id.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "automotive approval id must not be empty".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "INSERT INTO automotive_consumed_approvals
+                (approval_id, scope_sha256, operation_id, project_root, consumed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(approval_id) DO NOTHING",
+        )
+        .bind(approval_id)
+        .bind(scope_sha256)
+        .bind(operation_id.to_string())
+        .bind(project_root)
+        .bind(consumed_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        // SQLite reports zero changed rows when the conflicting insert is
+        // ignored, i.e. the approval was already consumed.
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Record a finished run's peak coverage (edges), throughput (execs/sec),
     /// and raw crash count.
     ///
@@ -1044,6 +1088,7 @@ impl Store {
             "auto_revert_events",
             "automotive_state_corpus",
             "automotive_operations",
+            "automotive_consumed_approvals",
         ] {
             sqlx::query(&format!("DELETE FROM {table}"))
                 .execute(&mut *tx)
@@ -1117,6 +1162,10 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM automotive_operations WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM automotive_consumed_approvals WHERE project_root = ?1")
             .bind(project_root)
             .execute(&mut *tx)
             .await?;

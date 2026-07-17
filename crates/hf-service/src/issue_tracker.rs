@@ -647,14 +647,14 @@ mod tests {
         assert!(gh.contains("hobot-fuzz-signature"));
 
         // A GitHub search response whose item body carries the marker matches.
-        let gh_json = serde_json::json!({
+        let github_json = serde_json::json!({
             "items": [
                 { "html_url": "https://github.com/acme/app/issues/1", "number": 1, "body": "unrelated" },
                 { "html_url": "https://github.com/acme/app/issues/7", "number": 7,
                   "body": format!("crash\n<!-- {marker} -->") }
             ]
         });
-        let found = parse_search_match(Provider::GitHub, &gh_json, &marker).unwrap();
+        let found = parse_search_match(Provider::GitHub, &github_json, &marker).unwrap();
         assert_eq!(found.number, Some(7));
 
         // No body actually containing the marker => no false-positive match.
@@ -663,11 +663,11 @@ mod tests {
         assert!(parse_search_match(Provider::GitHub, &none, &marker).is_none());
 
         // GitLab returns a bare array with `description`/`web_url`/`iid`.
-        let gl_json = serde_json::json!([
+        let gitlab_json = serde_json::json!([
             { "web_url": "https://gitlab.com/g/p/-/issues/3", "iid": 3,
               "description": format!("d <!-- {marker} -->") }
         ]);
-        let gl = parse_search_match(Provider::GitLab, &gl_json, &marker).unwrap();
+        let gl = parse_search_match(Provider::GitLab, &gitlab_json, &marker).unwrap();
         assert_eq!(gl.number, Some(3));
     }
 

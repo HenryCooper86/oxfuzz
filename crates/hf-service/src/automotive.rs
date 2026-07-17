@@ -674,6 +674,36 @@ impl ServiceContainer {
         let _workspace_lease = self.acquire_workspace_operation_at(workspace).await?;
         let workspace = initialize_workspace_root_at(workspace)?;
         let operation_id = Uuid::new_v4();
+
+        // Single-use physical-bench approval: a human approval authorizes at most
+        // one real transmission. Atomically claim it before any workspace setup
+        // or bus access, so a repeated or concurrent execution reusing the same
+        // approval within its freshness window is rejected here rather than
+        // firing a second time on the vehicle. Claiming before the operation
+        // record is inserted means a rejected duplicate leaves no spurious row;
+        // fail-closed -- a claimed approval whose operation later errors requires
+        // a fresh approval (no auto-retry against real hardware).
+        if prepared.mode == AutomotiveMode::PhysicalBench {
+            if let Some(approval) = &prepared.approval {
+                let claimed = store
+                    .consume_automotive_approval(
+                        &approval.approval_id,
+                        &approval.scope_sha256,
+                        operation_id,
+                        &prepared.project_root.display().to_string(),
+                        Utc::now(),
+                    )
+                    .await?;
+                if !claimed {
+                    return Err(ClassifiedError::Validation(
+                        "physical automotive bench approval has already been used; each \
+                         physical transmission requires a fresh human approval"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+
         let project_dir = project_workspace_dir_at(&workspace, &prepared.project_root);
         let project_relative = project_dir.strip_prefix(&workspace).map_err(|_| {
             ClassifiedError::Internal("automotive project workspace escaped its root".to_owned())
@@ -3132,6 +3162,82 @@ mod tests {
         assert!(execution.contains(r#""mode":"physical_bench""#));
         assert!(execution.contains(r#""physical_enabled":true"#));
         assert!(execution.contains("approval-exact-scope"));
+    }
+
+    #[tokio::test]
+    async fn physical_approval_is_single_use_and_cannot_authorize_a_second_transmission() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, _) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        let transcript = Sha256Digest::parse("ef".repeat(32)).unwrap();
+        let response = ResponseEnvelope::success(
+            "request-placeholder",
+            AutomotiveResult::Replay(ReplayResult {
+                protocol: AutomotiveProtocol::Uds,
+                mode: AutomotiveMode::PhysicalBench,
+                planned_events: 1,
+                executed_events: 1,
+                transcript_hash: transcript.clone(),
+                state_signatures: Vec::new(),
+                completed: true,
+            }),
+            Some(transcript),
+        );
+        let runtime = Arc::new(RecordingRuntime::with_response(&response));
+        let (service, _) = service(Arc::clone(&runtime), temp.path()).await;
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
+        let limits = operation_limits(&settings).unwrap();
+        let approval_id = "approval-single-use".to_owned();
+        // A helper to build a fresh request carrying the SAME approval evidence:
+        // the operator scripts a second execution with the one approval.
+        let make_request = || {
+            let approval = AutomotiveApprovalEvidence {
+                approval_id: approval_id.clone(),
+                approved_by: "desktop-operator".to_owned(),
+                approved_at: chrono::Utc::now(),
+                scope_sha256: approval_scope_hash("can0", &plan, &settings.physical_bench, &limits)
+                    .unwrap(),
+            };
+            AutomotiveOperationRequest {
+                project_root: project.clone(),
+                command: AutomotiveCommand::ExecuteReplay {
+                    mode: ModeConfig::PhysicalBench {
+                        interface: "can0".to_owned(),
+                        approval_id: approval_id.clone(),
+                    },
+                    plan: plan.clone(),
+                },
+                approval: Some(approval),
+            }
+        };
+
+        // First execution consumes the approval and runs the sidecar.
+        service
+            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .await
+            .expect("first physical replay is authorized");
+        assert_eq!(runtime.calls().len(), 1, "the first transmission fired");
+
+        // A second execution reusing the same approval is rejected before any
+        // further bus access -- the approval is single-use.
+        let err = service
+            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .await
+            .expect_err("the reused approval must be rejected");
+        assert!(
+            err.to_string().contains("already been used"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            runtime.calls().len(),
+            1,
+            "no second transmission fired on the reused approval"
+        );
     }
 
     #[tokio::test]

@@ -87,6 +87,25 @@ Foreign key: `source_operation_id -> automotive_operations(id)`.
 Indexes: `idx_automotive_state_corpus_project(project_root, created_at DESC)`,
 `idx_automotive_state_corpus_state(protocol, state_digest)`.
 
+### `automotive_consumed_approvals`
+
+Single-use ledger for physical-bench approvals. The service claims an approval
+by inserting its id here before running the sidecar; the primary key makes a
+second claim of the same id fail atomically, so one human approval authorizes at
+most one physical transmission even within its freshness window.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `approval_id` | `TEXT PRIMARY KEY` | operator-issued approval id (single-use) |
+| `scope_sha256` | `TEXT NOT NULL` | plan/budget scope hash the approval covered |
+| `operation_id` | `TEXT NOT NULL` | automotive operation UUID that claimed it |
+| `project_root` | `TEXT NOT NULL` | project the operation ran under (retention) |
+| `consumed_at` | `TEXT NOT NULL` | RFC 3339 claim timestamp |
+
+Primary key: `approval_id`.
+Index: `idx_automotive_consumed_approvals_project(project_root)`.
+Cleared for a project by `delete_project` and globally by `clear_knowledge`.
+
 ### `targets`
 
 | column | SQLite declaration |
@@ -361,6 +380,8 @@ Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 | `0013_run_evidence.sql` | adds binary, evidence, run-kind, and context fields |
 | `0014_automotive_operations.sql` | creates durable automotive operation evidence |
 | `0015_automotive_state_corpus.sql` | creates protocol-state corpus promotion evidence |
+| `0016_targets_unique.sql` | collapses duplicate targets and adds `UNIQUE(project_root, symbol)` |
+| `0017_automotive_consumed_approvals.sql` | creates the single-use physical-bench approval ledger |
 
 ## 7. Read failure contract
 
