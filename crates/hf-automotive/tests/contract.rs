@@ -317,6 +317,41 @@ fn replay_request_enforces_aggregate_payload_and_schedule_limits() {
 }
 
 #[test]
+fn replay_request_bounds_peak_rate_not_just_the_average() {
+    // A front-loaded burst passes the average check (4 steps over 2s at rate 2 =>
+    // 4 <= 2*2) yet fires 3 frames in the first instant. The peak-rate guard must
+    // reject it so a burst cannot flood the bus regardless of total duration.
+    let mut plan = replay_plan(AutomotiveProtocol::Uds);
+    for sequence in 1..4 {
+        plan.steps.push(ReplayStep {
+            sequence,
+            delay_micros: 0,
+            action: ReplayAction::Send,
+            message: message(AutomotiveProtocol::Uds, "221234"),
+        });
+    }
+    // Pad the tail so the average check passes.
+    plan.steps[3].delay_micros = 2_000_000;
+    let request = ReplayRequest {
+        mode: ModeConfig::VirtualCan {
+            interface: "vcan0".to_owned(),
+        },
+        plan,
+        limits: OperationLimits {
+            max_rate_per_second: 2,
+            ..limits()
+        },
+    };
+    assert!(matches!(
+        request.validate(),
+        Err(ContractError::LimitExceeded {
+            field: "replay.peak_rate",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn replay_plan_generation_has_typed_request_and_result_variants() {
     let request = AutomotiveRequest::BuildReplayPlan(ReplayPlanRequest {
         protocol: AutomotiveProtocol::BmwHsfz,
