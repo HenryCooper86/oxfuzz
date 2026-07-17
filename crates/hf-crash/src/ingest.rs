@@ -379,6 +379,7 @@ fn find_sanitizer_log_bounded(
     let stem = crash_name
         .split_once('-')
         .map_or(crash_name, |(_, stem)| stem);
+    let stem_lower = stem.to_ascii_lowercase();
     let mut dirs = Vec::with_capacity(2);
     if let Some(parent) = crash_path.parent() {
         dirs.push(parent.to_path_buf());
@@ -400,7 +401,7 @@ fn find_sanitizer_log_bounded(
             let name = path
                 .file_name()
                 .map(|value| value.to_string_lossy().to_ascii_lowercase());
-            if name.is_some_and(|name| name.contains(&stem.to_ascii_lowercase())) {
+            if name.is_some_and(|name| name_contains_stem(&name, &stem_lower)) {
                 if let Some(report) = reports.read_sanitizer_report(path) {
                     return Some(report);
                 }
@@ -424,6 +425,31 @@ fn find_sanitizer_log_bounded(
         }
     }
     None
+}
+
+/// Whether `stem` appears in `name` as a delimiter-bounded token rather than an
+/// incidental substring. A short crash stem (`abc`) must not claim a longer
+/// unrelated report (`log-abcdef.txt`), so every match must sit against a
+/// boundary character (`-`, `.`, `_`) or the start/end of the name. Both
+/// arguments are expected pre-lowercased by the caller.
+fn name_contains_stem(name: &str, stem: &str) -> bool {
+    if stem.is_empty() {
+        return false;
+    }
+    let is_boundary = |c: char| matches!(c, '-' | '.' | '_');
+    let mut search_start = 0;
+    while let Some(offset) = name[search_start..].find(stem) {
+        let start = search_start + offset;
+        let end = start + stem.len();
+        let before_ok = start == 0 || name[..start].chars().next_back().is_some_and(is_boundary);
+        let after_ok = end == name.len() || name[end..].chars().next().is_some_and(is_boundary);
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance past this occurrence's first byte to find any later match.
+        search_start = start + 1;
+    }
+    false
 }
 
 fn is_report_filename(name: &str) -> bool {
@@ -542,6 +568,27 @@ mod tests {
         // one, so it stays unclassified from a sibling log.
         let other = find_sanitizer_log(&dir.join("crash-bbb"), &dir, "crash-bbb");
         assert!(other.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn short_stem_does_not_claim_a_longer_stems_report() {
+        let dir = tmp();
+        std::fs::write(dir.join("crash-abc"), b"x").unwrap();
+        std::fs::write(dir.join("crash-abcdef"), b"y").unwrap();
+        // A report named for crash-abcdef's stem only.
+        std::fs::write(dir.join("log-abcdef.txt"), ASAN).unwrap();
+
+        // crash-abcdef claims its own report...
+        let owner = find_sanitizer_log(&dir.join("crash-abcdef"), &dir, "crash-abcdef");
+        assert!(owner.is_some(), "crash-abcdef must claim its own report");
+        // ...but crash-abc must not, because "abc" is only an incidental prefix
+        // of "abcdef", not a delimiter-bounded token in the report name.
+        let intruder = find_sanitizer_log(&dir.join("crash-abc"), &dir, "crash-abc");
+        assert!(
+            intruder.is_none(),
+            "short stem must not claim a longer stem's report"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

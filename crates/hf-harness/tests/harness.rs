@@ -378,7 +378,13 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
     let limits = rt.limits.lock().unwrap().clone().unwrap();
     assert_eq!(limits.max_mem_mb, 3072);
     assert_eq!(limits.max_cpus, 3);
-    assert_eq!(limits.max_duration_secs, 17);
+    // The fuzzer's own budget is 17s (-max_total_time=17), but the sandbox
+    // wall-clock is granted headroom so a non-crashing harness that runs the
+    // full budget is not killed at the cap before its activity is measured.
+    assert_eq!(
+        limits.max_duration_secs,
+        17 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
+    );
     assert_eq!(smoked.smoke_run.unwrap().duration_secs, 17);
 }
 

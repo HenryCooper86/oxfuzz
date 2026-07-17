@@ -284,6 +284,65 @@ fn api_user_endpoint(provider: Provider, web_base: &str) -> String {
     }
 }
 
+/// A stable, hidden marker embedded in a filed issue's body so a later filing of
+/// the same crash can find it and avoid opening a duplicate. Keyed on the crash
+/// stack signature, which is deterministic per distinct crash.
+#[must_use]
+pub fn dedup_marker(stack_signature: &str) -> String {
+    format!("hobot-fuzz-signature:{stack_signature}")
+}
+
+/// The endpoint that searches open issues for an existing filing of a crash,
+/// keyed on its [`dedup_marker`]. Best-effort: the caller treats any failure as
+/// "not found" and proceeds to create.
+fn api_search_endpoint(provider: Provider, web_base: &str, repo: &str, marker: &str) -> String {
+    match provider {
+        // GitHub issue search: restrict to this repo, open issues, body match.
+        Provider::GitHub => format!(
+            "{}/search/issues?q={}",
+            github_api_base(web_base),
+            percent_encode(&format!(
+                "repo:{} in:body state:open {marker}",
+                repo.trim_matches('/')
+            ))
+        ),
+        // GitLab issue search over the project, description scope, opened state.
+        Provider::GitLab => format!(
+            "{}/api/v4/projects/{}/issues?state=opened&in=description&search={}",
+            web_base.trim_end_matches('/'),
+            percent_encode(repo.trim_matches('/')),
+            percent_encode(marker)
+        ),
+    }
+}
+
+/// Extract the first issue from a search response whose body/description
+/// actually contains `marker` (search ranking is fuzzy, so confirm the match).
+fn parse_search_match(
+    provider: Provider,
+    json: &serde_json::Value,
+    marker: &str,
+) -> Option<CreatedIssue> {
+    let (items, url_key, num_key, body_key) = match provider {
+        Provider::GitHub => (json.get("items")?.as_array()?, "html_url", "number", "body"),
+        Provider::GitLab => (json.as_array()?, "web_url", "iid", "description"),
+    };
+    items.iter().find_map(|item| {
+        let body = item.get(body_key).and_then(|v| v.as_str()).unwrap_or("");
+        if !body.contains(marker) {
+            return None;
+        }
+        Some(CreatedIssue {
+            url: item
+                .get(url_key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            number: item.get(num_key).and_then(serde_json::Value::as_u64),
+        })
+    })
+}
+
 /// The JSON body for creating an issue, in the provider's shape.
 #[must_use]
 pub fn create_body(
@@ -408,6 +467,26 @@ impl IssueTrackerClient {
             .await
             .map_err(|e| ClassifiedError::Provider(format!("issue tracker bad response: {e}")))?;
         Ok(parse_created(self.provider, &json))
+    }
+
+    /// Best-effort search for an already-filed issue for this crash, keyed on
+    /// its [`dedup_marker`]. Returns the existing issue when found so the caller
+    /// can avoid opening a duplicate on a re-file or a retried request.
+    ///
+    /// Never errors: search is an optimization, so any transport/auth/parse
+    /// failure yields `None` and the caller proceeds to create.
+    pub async fn find_existing_issue(&self, stack_signature: &str) -> Option<CreatedIssue> {
+        if stack_signature.trim().is_empty() {
+            return None;
+        }
+        let marker = dedup_marker(stack_signature);
+        let endpoint = api_search_endpoint(self.provider, &self.web_base, &self.repo, &marker);
+        let resp = self.auth(self.http.get(&endpoint)).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        parse_search_match(self.provider, &json, &marker)
     }
 
     /// Verify the host + token by fetching the authenticated user.
@@ -555,6 +634,41 @@ mod tests {
             api_create_endpoint(Provider::GitLab, "https://gitlab.com", "42"),
             "https://gitlab.com/api/v4/projects/42/issues"
         );
+    }
+
+    #[test]
+    fn search_endpoint_and_match_dedup_by_signature() {
+        let marker = dedup_marker("sig-abc");
+        assert_eq!(marker, "hobot-fuzz-signature:sig-abc");
+
+        // GitHub search restricts to the repo/open/body and encodes the marker.
+        let gh = api_search_endpoint(Provider::GitHub, "https://github.com", "acme/app", &marker);
+        assert!(gh.starts_with("https://api.github.com/search/issues?q="));
+        assert!(gh.contains("hobot-fuzz-signature"));
+
+        // A GitHub search response whose item body carries the marker matches.
+        let gh_json = serde_json::json!({
+            "items": [
+                { "html_url": "https://github.com/acme/app/issues/1", "number": 1, "body": "unrelated" },
+                { "html_url": "https://github.com/acme/app/issues/7", "number": 7,
+                  "body": format!("crash\n<!-- {marker} -->") }
+            ]
+        });
+        let found = parse_search_match(Provider::GitHub, &gh_json, &marker).unwrap();
+        assert_eq!(found.number, Some(7));
+
+        // No body actually containing the marker => no false-positive match.
+        let none =
+            serde_json::json!({ "items": [ { "html_url": "x", "number": 1, "body": "nope" } ] });
+        assert!(parse_search_match(Provider::GitHub, &none, &marker).is_none());
+
+        // GitLab returns a bare array with `description`/`web_url`/`iid`.
+        let gl_json = serde_json::json!([
+            { "web_url": "https://gitlab.com/g/p/-/issues/3", "iid": 3,
+              "description": format!("d <!-- {marker} -->") }
+        ]);
+        let gl = parse_search_match(Provider::GitLab, &gl_json, &marker).unwrap();
+        assert_eq!(gl.number, Some(3));
     }
 
     #[test]

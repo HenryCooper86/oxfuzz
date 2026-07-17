@@ -190,7 +190,12 @@ impl FreezeManager {
                 return false;
             }
         }
-        true
+        // Report the current frozen state rather than an unconditional `true`:
+        // a provider that was concurrently thawed (via `thaw()`) between the
+        // `is_frozen` read-lock release and this write lock has `frozen == false`
+        // and `thaw_at == None`, and must be reported as thawed, not frozen for
+        // one more selection.
+        state.frozen
     }
 }
 
@@ -375,6 +380,26 @@ mod tests {
 
         let status = fm.status();
         assert_eq!(status.consecutive_freezes, 2);
+    }
+
+    #[test]
+    fn try_auto_thaw_reports_concurrently_thawed_provider_as_unfrozen() {
+        let fm = FreezeManager::new(30, 3600);
+        // Freeze with a future thaw time (non-permanent).
+        fm.freeze("transient".into(), Some(Duration::from_secs(3600)));
+        assert!(fm.is_frozen());
+
+        // Simulate a concurrent manual thaw landing before try_auto_thaw runs:
+        // state.frozen == false and thaw_at == None.
+        fm.thaw();
+
+        // The fallback must follow the actual frozen flag, not return an
+        // unconditional `true`, so the thawed provider is immediately selectable.
+        assert!(
+            !fm.try_auto_thaw(),
+            "concurrently-thawed provider must not report frozen"
+        );
+        assert!(!fm.is_frozen());
     }
 
     #[test]

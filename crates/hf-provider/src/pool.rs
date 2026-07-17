@@ -223,7 +223,13 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
             continue;
         };
 
-        let proxy_url = config.resolve_proxy_url(&cfg.id, &cfg.tags);
+        // Resolve the full proxy spec (URL + optional auth_env credentials) and
+        // embed any credentials into the URL. reqwest applies embedded userinfo
+        // as proxy basic auth, so credentials configured via `auth_env` are now
+        // honored instead of silently dropped.
+        let proxy_url = config
+            .resolve_proxy_spec(&cfg.id, &cfg.tags)
+            .map(|spec| spec.to_proxy_url());
         let tool_calling_mode = cfg.resolve_tool_calling_mode();
         let capabilities = cfg.resolve_capabilities();
 
@@ -416,23 +422,21 @@ impl ProviderPoolImpl {
                 classification = ?std_error,
                 "provider permanently frozen"
             );
-        } else if let Some(duration) = std_error.freeze_duration() {
-            freeze_manager.freeze(format!("{error}"), Some(duration));
-            tracing::info!(
-                provider_id = %provider_id,
-                error = %error,
-                classification = ?std_error,
-                freeze_secs = duration.as_secs(),
-                "provider frozen with error-type-specific duration"
-            );
         } else {
-            // Fallback: adaptive freeze.
-            freeze_manager.freeze(format!("{error}"), None);
+            // Every transient, freezable error carries a concrete freeze
+            // duration (see `StandardError::freeze_duration`, which is `Some`
+            // for all non-permanent freezable variants). Passing the `Option`
+            // straight to `freeze` keeps behavior identical while removing the
+            // previously-unreachable adaptive fallback branch: a hypothetical
+            // future `None` still degrades safely to adaptive backoff.
+            let duration = std_error.freeze_duration();
+            freeze_manager.freeze(format!("{error}"), duration);
             tracing::info!(
                 provider_id = %provider_id,
                 error = %error,
                 classification = ?std_error,
-                "provider frozen (adaptive duration)"
+                freeze_secs = duration.map(|d| d.as_secs()),
+                "provider frozen with error-type-specific duration"
             );
         }
     }
@@ -471,55 +475,6 @@ impl ProviderPoolImpl {
             .iter()
             .map(|e| (e.provider.metadata().id.clone(), e.metrics.snapshot()))
             .collect()
-    }
-
-    /// Attach a metrics event sender to every provider's metrics tracker.
-    ///
-    /// Each provider fires [`MetricsEvent`](crate::metrics::MetricsEvent)
-    /// values through the returned receiver. The sender tags events with the
-    /// provider ID + model so the consumer can persist them without needing
-    /// a back-reference to the pool.
-    ///
-    /// Returns a list of `(provider_id, model, receiver)` tuples.
-    pub fn attach_event_senders(
-        &self,
-    ) -> Vec<(
-        String,
-        String,
-        tokio::sync::mpsc::UnboundedReceiver<crate::metrics::MetricsEvent>,
-    )> {
-        self.providers
-            .iter()
-            .map(|entry| {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                entry.metrics.set_event_sender(tx);
-                let meta = entry.provider.metadata();
-                (meta.id.to_string(), meta.model.clone(), rx)
-            })
-            .collect()
-    }
-
-    /// Record token usage for a completed streaming request.
-    ///
-    /// Called by the service layer after a streaming response has been fully
-    /// consumed and the final token counts are available. The request itself
-    /// was already counted at stream start; this only adds token counts and
-    /// cost.
-    pub fn record_stream_completion(
-        &self,
-        provider_id: &ProviderId,
-        input_tokens: u32,
-        output_tokens: u32,
-    ) {
-        if let Some(entry) = self.find_entry(provider_id) {
-            let meta = entry.provider.metadata();
-            entry.metrics.record_stream_completion(
-                input_tokens,
-                output_tokens,
-                meta.cost_per_1k_input,
-                meta.cost_per_1k_output,
-            );
-        }
     }
 }
 

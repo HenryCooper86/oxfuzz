@@ -319,8 +319,6 @@ impl<T: Tokenizer> InjectKnowledge<T> {
 
             // Format content based on available metadata.
             let content = if let Some(meta) = metadata {
-                // Mark this document as having a structured summary.
-                docs_with_structured_summary.insert(doc_id.clone());
                 Self::format_structured(result, meta)
             } else if self.config.context_window > 0 {
                 let neighbors = self
@@ -386,6 +384,15 @@ impl<T: Tokenizer> InjectKnowledge<T> {
             }
 
             remaining_budget = remaining_budget.saturating_sub(tokens);
+
+            // Only now that the structured summary actually fit within budget,
+            // mark the document as covered so its later raw L2 chunks are
+            // suppressed. Marking before the budget check would suppress a
+            // document's still-fitting chunks even when its structured summary
+            // never made it into the context.
+            if metadata.is_some() {
+                docs_with_structured_summary.insert(doc_id.clone());
+            }
 
             let (summary, section_titles) = if let Some(meta) = metadata {
                 (meta.summary.clone(), meta.section_titles.clone())
@@ -818,6 +825,84 @@ mod tests {
         // Meta fields should be empty.
         assert!(item.summary.is_none());
         assert!(item.section_titles.is_empty());
+    }
+
+    #[test]
+    fn oversized_structured_summary_does_not_suppress_a_later_fitting_chunk() {
+        // Two chunks from the same document render via `format_structured`
+        // (metadata is registered). The higher-relevance chunk carries a very
+        // long title, so its structured render exceeds the budget; the second
+        // chunk has a tiny title and its render fits. The oversized first
+        // chunk must not flag the document and thereby suppress the second.
+        let retrieval_config = RetrievalConfig {
+            min_similarity_threshold: 0.0,
+            enable_dedup: false,
+            ..Default::default()
+        };
+        let mut retriever = HybridRetriever::with_config(SimpleTokenizer::new(), retrieval_config);
+        retriever.index(Chunk {
+            id: "big".to_string(),
+            document_id: "doc-1".to_string(),
+            level: ChunkLevel::L2,
+            // More query-term hits -> ranked first.
+            content: "rust error handling result option match".to_string(),
+            token_estimate: 20,
+            metadata: ChunkMetadata {
+                source: "test".to_string(),
+                domain: "rust".to_string(),
+                title: "T".repeat(400), // huge title -> oversized structured render
+                section_index: 0,
+                ..Default::default()
+            },
+        });
+        retriever.index(Chunk {
+            id: "small".to_string(),
+            document_id: "doc-1".to_string(),
+            level: ChunkLevel::L2,
+            content: "rust".to_string(), // fewer hits -> ranked second
+            token_estimate: 4,
+            metadata: ChunkMetadata {
+                source: "test".to_string(),
+                domain: "rust".to_string(),
+                title: "S".to_string(), // tiny title -> small structured render
+                section_index: 1,
+                ..Default::default()
+            },
+        });
+
+        let config = InjectKnowledgeConfig {
+            token_budget: 50, // fits the small render, not the huge-title render
+            max_chunks: 10,
+            min_relevance: 0.0,
+            context_window: 0,
+            ..Default::default()
+        };
+        let mut mw = InjectKnowledge::with_config(retriever, config);
+        mw.register_entry_metadata(
+            "doc-1",
+            EntryMetadata {
+                title: "Doc One".to_string(),
+                summary: Some("Short shared summary.".to_string()),
+                section_titles: vec![],
+                section_summaries: vec![],
+                tags: vec![],
+                document_type: None,
+                industry: None,
+                subcategory: None,
+            },
+        );
+
+        let items = mw.retrieve_for_context("rust error handling result", None, None);
+
+        assert!(
+            items.iter().any(|i| i.chunk_id == "small"),
+            "a later fitting chunk must not be suppressed by an oversized structured summary \
+             that never fit; got {:?}",
+            items
+                .iter()
+                .map(|i| i.chunk_id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

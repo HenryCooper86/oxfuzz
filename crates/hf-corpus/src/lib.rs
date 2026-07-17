@@ -491,7 +491,12 @@ pub fn prune(mut corpus: Corpus) -> Result<Corpus, ClassifiedError> {
         if seen.insert(key) {
             keep.push(entry);
         } else if is_direct_regular_entry(&corpus_root, &entry.path) {
-            let _ = std::fs::remove_file(&entry.path);
+            std::fs::remove_file(&entry.path).map_err(|error| {
+                ClassifiedError::Internal(format!(
+                    "remove redundant corpus input {}: {error}",
+                    entry.path.display()
+                ))
+            })?;
         }
     }
     corpus.entries = keep;

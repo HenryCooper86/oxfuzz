@@ -79,6 +79,37 @@ fn sandbox_mounts_reject_symlink_escape_from_the_workspace() {
     assert!(runtime.validate_sandbox_options(&options).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn sandbox_mounts_reject_a_symlink_resolving_to_a_comma_bearing_path() {
+    use std::os::unix::fs::symlink;
+
+    // A benign-looking mount source (`link`, no comma) that canonicalizes to a
+    // directory whose name embeds a comma. Because the RESOLVED path is emitted
+    // verbatim into the comma-delimited `--mount type=bind,source=...` value,
+    // failing to re-check it after symlink resolution would let the source
+    // inject arbitrary mount options (e.g. `bind-propagation=rshared`).
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    let malicious = workspace.join("x,bind-propagation=rshared");
+    std::fs::create_dir_all(&malicious).unwrap();
+    symlink(&malicious, workspace.join("link")).unwrap();
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+    let options = SandboxOptions {
+        extra_mounts: vec![SandboxMount::writable(
+            workspace.join("link"),
+            "/work/corpus",
+        )],
+        ..SandboxOptions::default()
+    };
+
+    let result = runtime.validate_sandbox_options(&options);
+    assert!(
+        result.is_err(),
+        "a mount resolving to a comma-bearing path must be rejected, got {result:?}"
+    );
+}
+
 #[test]
 fn sandbox_mounts_are_canonicalized_inside_the_workspace() {
     let temp = tempfile::tempdir().expect("temp root");

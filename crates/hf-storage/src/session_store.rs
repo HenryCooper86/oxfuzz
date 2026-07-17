@@ -83,7 +83,7 @@ impl SessionStore for SqliteSessionStore {
     async fn get(&self, id: &SessionId) -> Result<SessionNode, SessionError> {
         let row: Option<SessionRow> = sqlx::query_as(
             r"SELECT id, parent_id, root_id, depth, path, session_type, state,
-                     agent_id, title, manual_title, token_count, message_count, created_at, updated_at
+                     agent_id, title, manual_title, channel, label, last_compaction, compaction_count, token_count, message_count, created_at, updated_at
               FROM session_metadata WHERE id = ?1",
         )
         .bind(id.as_str())
@@ -103,7 +103,7 @@ impl SessionStore for SqliteSessionStore {
     async fn list(&self, filter: &SessionFilter) -> Result<Vec<SessionNode>, SessionError> {
         let mut sql = String::from(
             r"SELECT id, parent_id, root_id, depth, path, session_type, state,
-                     agent_id, title, manual_title, token_count, message_count, created_at, updated_at
+                     agent_id, title, manual_title, channel, label, last_compaction, compaction_count, token_count, message_count, created_at, updated_at
               FROM session_metadata WHERE 1=1",
         );
         let mut binds: Vec<String> = Vec::new();
@@ -208,7 +208,7 @@ impl SessionStore for SqliteSessionStore {
     async fn children(&self, id: &SessionId) -> Result<Vec<SessionNode>, SessionError> {
         let rows: Vec<SessionRow> = sqlx::query_as(
             r"SELECT id, parent_id, root_id, depth, path, session_type, state,
-                     agent_id, title, manual_title, token_count, message_count, created_at, updated_at
+                     agent_id, title, manual_title, channel, label, last_compaction, compaction_count, token_count, message_count, created_at, updated_at
               FROM session_metadata WHERE parent_id = ?1 ORDER BY created_at ASC",
         )
         .bind(id.as_str())
@@ -235,7 +235,7 @@ impl SessionStore for SqliteSessionStore {
         let placeholders: Vec<String> = (1..=node.path.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             r"SELECT id, parent_id, root_id, depth, path, session_type, state,
-                     agent_id, title, manual_title, token_count, message_count, created_at, updated_at
+                     agent_id, title, manual_title, channel, label, last_compaction, compaction_count, token_count, message_count, created_at, updated_at
               FROM session_metadata WHERE id IN ({})",
             placeholders.join(", ")
         );
@@ -444,6 +444,10 @@ struct SessionRow {
     agent_id: Option<String>,
     title: Option<String>,
     manual_title: Option<String>,
+    channel: Option<String>,
+    label: Option<String>,
+    last_compaction: Option<String>,
+    compaction_count: i64,
     token_count: i64,
     message_count: i64,
     created_at: String,
@@ -478,12 +482,16 @@ impl SessionRow {
             agent_id: self.agent_id.map(AgentId::from_string),
             title: self.title,
             manual_title: self.manual_title,
-            channel: None,
-            label: None,
+            channel: self.channel,
+            label: self.label,
             token_count: u32::try_from(self.token_count).unwrap_or(0),
             message_count: u32::try_from(self.message_count).unwrap_or(0),
-            last_compaction: None,
-            compaction_count: 0,
+            last_compaction: self.last_compaction.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            }),
+            compaction_count: u32::try_from(self.compaction_count).unwrap_or(0),
             created_at,
             updated_at,
         })

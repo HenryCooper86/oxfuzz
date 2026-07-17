@@ -636,6 +636,85 @@ async fn list_all_crashes_is_newest_first_by_insertion_order() {
         listed.iter().map(|item| item.id).collect::<Vec<_>>(),
         [newest.id, middle.id, oldest.id]
     );
+
+    // Re-triaging an existing crash must NOT reorder it: the upsert updates in
+    // place (ON CONFLICT DO UPDATE) rather than delete+reinsert, so the oldest
+    // crash does not jump to the top just because it was re-processed.
+    store
+        .upsert_crash(&Crash {
+            summary: "oldest-retriaged".to_owned(),
+            ..oldest.clone()
+        })
+        .await
+        .unwrap();
+    let relisted = store.list_all_crashes().await.unwrap();
+    assert_eq!(
+        relisted.iter().map(|item| item.id).collect::<Vec<_>>(),
+        [newest.id, middle.id, oldest.id],
+        "re-triage must preserve first-seen ordering"
+    );
+}
+
+#[tokio::test]
+async fn upsert_target_keeps_one_row_per_project_symbol() {
+    let (store, _dir) = temp_store().await;
+    let project = "/home/user/proj-unique";
+
+    // Two discoveries of the same symbol under the same project arrive with
+    // different scanner UUIDs. Identity is (project, symbol), so exactly one
+    // row must survive, and it must keep the first stable id.
+    let first = sample_target(project);
+    let mut second = sample_target(project);
+    second.id = Uuid::new_v4();
+    assert_ne!(first.id, second.id);
+
+    store.upsert_target(&first, Utc::now()).await.unwrap();
+    store.upsert_target(&second, Utc::now()).await.unwrap();
+
+    let targets = store.list_targets(project).await.unwrap();
+    assert_eq!(targets.len(), 1, "one row per (project, symbol)");
+    assert_eq!(targets[0].id, first.id, "stable id is preserved");
+}
+
+#[tokio::test]
+async fn delete_project_removes_automotive_evidence() {
+    let (store, _dir) = temp_store().await;
+    let project = "/projects/vehicle-evidence";
+    let op = AutomotiveOperationRecord {
+        id: Uuid::new_v4(),
+        project_root: project.to_owned(),
+        operation: "analyze_pcap".to_owned(),
+        mode: "offline_pcap".to_owned(),
+        protocol: Some("uds".to_owned()),
+        status: AutomotiveOperationStatus::Running,
+        started_at: Utc::now(),
+        ended_at: None,
+        request_hash: "req".to_owned(),
+        transcript_hash: None,
+        artifact_dir: "automotive/op".to_owned(),
+        approval_json: None,
+        result_json: None,
+        error: None,
+    };
+    store.insert_automotive_operation(&op).await.unwrap();
+    assert_eq!(
+        store
+            .automotive_operations(project, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store.delete_project(project).await.unwrap();
+    assert!(
+        store
+            .automotive_operations(project, 100)
+            .await
+            .unwrap()
+            .is_empty(),
+        "deleting a project must not leave stale automotive evidence"
+    );
 }
 
 #[tokio::test]

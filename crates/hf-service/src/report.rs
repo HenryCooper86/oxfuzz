@@ -374,6 +374,19 @@ fn render_corpus(md: &mut String, data: &ReportData) {
     let _ = writeln!(md);
 }
 
+/// Escape a value for safe inclusion in a Markdown table cell or heading.
+///
+/// LLM- and CASR-derived text (summaries, titles, crashlines, signatures) can
+/// contain `|` (which breaks a table's column count), backticks (which break a
+/// code span), or newlines (which split a row/heading). Mirrors the automotive
+/// report's `escape_inline`.
+fn escape_inline(value: &str) -> String {
+    value
+        .replace(['\n', '\r'], " ")
+        .replace('`', "'")
+        .replace('|', "\\|")
+}
+
 fn render_findings(md: &mut String, data: &ReportData) {
     let _ = writeln!(md, "## Findings");
     let _ = writeln!(md);
@@ -402,9 +415,9 @@ fn render_findings(md: &mut String, data: &ReportData) {
             "| {} | {:?} | {} | `{}` | `{}` |",
             i + 1,
             c.kind,
-            severity,
-            location,
-            truncate(&c.stack_signature, 60)
+            escape_inline(&severity),
+            escape_inline(&location),
+            escape_inline(&truncate(&c.stack_signature, 60))
         );
     }
     let _ = writeln!(md);
@@ -422,7 +435,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
         .map(|b| b.title.clone())
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| c.summary.clone());
-    let _ = writeln!(md, "### Finding {n}: {title}");
+    let _ = writeln!(md, "### Finding {n}: {}", escape_inline(&title));
     let _ = writeln!(md);
     let _ = writeln!(md, "- Kind: `{:?}`", c.kind);
     let _ = writeln!(md, "- Stack signature: `{}`", c.stack_signature);

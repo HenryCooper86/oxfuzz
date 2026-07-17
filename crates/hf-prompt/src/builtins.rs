@@ -359,7 +359,13 @@ pub fn default_template() -> PromptTemplate {
     mode_overlays.insert(
         "explore".into(),
         ModeOverlay {
-            exclude: vec!["core.security".into()],
+            // The security contract is an invariant across every mode (see
+            // agent-prompt-security-design.md): explore mode runs against
+            // untrusted target source, so the safety rules must never be
+            // dropped. Only the live `build_agent_system_prompt` is wired today,
+            // and it always keeps security; this template path is kept in sync
+            // so it cannot regress if it is ever connected.
+            exclude: vec![],
             include: vec!["core.exploration".into()],
             token_budget_override: Some(2000),
             ..Default::default()
@@ -547,7 +553,9 @@ mod tests {
         let template = default_template();
         let sections = template.effective_sections("explore");
         let ids: Vec<&str> = sections.iter().map(|s| s.section_id.as_str()).collect();
-        assert!(!ids.contains(&"core.security"));
+        // The security contract is an invariant and must be retained in every
+        // mode, including explore.
+        assert!(ids.contains(&"core.security"));
         assert!(ids.contains(&"core.exploration"));
         assert_eq!(template.effective_budget("explore"), 2000);
     }

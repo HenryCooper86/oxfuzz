@@ -112,6 +112,7 @@ const COMPACTION_RETAIN: usize = 6;
 /// "summarized", preserving earlier context across the turn.
 struct PoolCompactionLlm {
     pool: Arc<dyn hf_core::provider::ProviderPool>,
+    backend: Arc<dyn AgentBackend>,
 }
 
 #[async_trait::async_trait]
@@ -123,6 +124,11 @@ impl hf_context::CompactionLlm for PoolCompactionLlm {
             .chat_completion(&req, &RouteRequest::with_tags(ROUTE_TAGS))
             .await
             .map_err(|e| e.to_string())?;
+        // Record the summarization spend so long-session compaction shows up in
+        // the cost summary instead of silently understating agent usage.
+        self.backend
+            .record_usage("agent_compaction", &resp.model, &resp.usage)
+            .await;
         Ok(resp.text().trim().to_owned())
     }
 }
@@ -296,12 +302,40 @@ impl Agent {
             }
 
             let Some(tool) = step.tool else {
-                // No tool and no final: accept the raw content as the answer.
-                sink.emit(AgentEvent::Complete {
-                    content: content.clone(),
-                })
-                .await;
-                return Ok(content);
+                // A parsed step with neither a `tool` call nor a `final` answer
+                // is an incomplete protocol emission -- e.g. the model narrated a
+                // thought without acting. Returning `content` here would leak the
+                // raw protocol JSON to the user AND end the turn prematurely
+                // (the agent giving up mid-task). Instead, feed a corrective
+                // observation and continue so the model emits a proper next step.
+                // The thought, if any, was already surfaced as a `Thinking` event
+                // above. A loop-guard record ensures a model stuck emitting
+                // incomplete steps still aborts cleanly instead of spinning to
+                // the iteration cap.
+                if let Some(detection) = loop_guard.record(StepRecord::tool(
+                    "<incomplete-step>".to_owned(),
+                    String::new(),
+                )) {
+                    let message = format!(
+                        "Stopping: detected a runaway {} loop -- {}.",
+                        detection.pattern.as_str(),
+                        detection.reason
+                    );
+                    sink.emit(AgentEvent::Error {
+                        message: message.clone(),
+                    })
+                    .await;
+                    return Ok(message);
+                }
+                messages.push(Message::new(Role::Assistant, content));
+                messages.push(Message::new(
+                    Role::User,
+                    "Your previous step had neither a `tool` call nor a `final` \
+                     answer. Respond with a valid step: call a `tool` to make \
+                     progress, or provide a `final` answer to finish."
+                        .to_owned(),
+                ));
+                continue;
             };
 
             let args = step.args.unwrap_or(Value::Null);
@@ -484,7 +518,10 @@ impl Agent {
 
         let engine = hf_context::CompactionEngine::with_llm(
             hf_context::CompactionConfig::default(),
-            Box::new(PoolCompactionLlm { pool }),
+            Box::new(PoolCompactionLlm {
+                pool,
+                backend: Arc::clone(&self.backend),
+            }),
         );
         // Summarize everything in `middle` (retain 0 -- the tail is kept below).
         let result = engine.compact_async_with_retain(&middle, 0).await;

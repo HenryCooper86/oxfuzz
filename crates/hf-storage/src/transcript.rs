@@ -83,10 +83,13 @@ impl TranscriptStore for JsonlTranscriptStore {
                 message: format!("write to transcript: {e}"),
             })?;
 
-        file.flush()
+        // `flush` only pushes bytes to the OS page cache; `sync_all` forces them
+        // to stable storage so a power loss after the call cannot lose or tear
+        // an already-acknowledged transcript line.
+        file.sync_all()
             .await
             .map_err(|e| SessionError::TranscriptError {
-                message: format!("flush transcript: {e}"),
+                message: format!("sync transcript: {e}"),
             })?;
 
         Ok(())
@@ -185,17 +188,44 @@ impl TranscriptStore for JsonlTranscriptStore {
             content.push('\n');
         }
 
-        tokio::fs::write(&tmp_path, content.as_bytes())
+        // Durable atomic rewrite: write the temp file and fsync its contents
+        // before the rename, so the rename (which is itself durable) cannot
+        // publish a temp file whose data blocks were never written back.
+        let mut tmp_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)
             .await
             .map_err(|e| SessionError::TranscriptError {
-                message: format!("write temp transcript: {e}"),
+                message: format!("open temp transcript: {e}"),
             })?;
+        tmp_file.write_all(content.as_bytes()).await.map_err(|e| {
+            SessionError::TranscriptError {
+                message: format!("write temp transcript: {e}"),
+            }
+        })?;
+        tmp_file
+            .sync_all()
+            .await
+            .map_err(|e| SessionError::TranscriptError {
+                message: format!("sync temp transcript: {e}"),
+            })?;
+        drop(tmp_file);
 
         tokio::fs::rename(&tmp_path, &path)
             .await
             .map_err(|e| SessionError::TranscriptError {
                 message: format!("rename temp transcript: {e}"),
             })?;
+
+        // Best-effort fsync of the containing directory so the rename itself is
+        // durable across a crash; a failure here is not fatal to the operation.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = tokio::fs::File::open(parent).await {
+                let _ = dir.sync_all().await;
+            }
+        }
 
         Ok(removed)
     }

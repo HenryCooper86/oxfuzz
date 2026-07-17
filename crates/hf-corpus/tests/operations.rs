@@ -272,6 +272,44 @@ async fn prune_never_deletes_a_path_outside_the_corpus_root() {
     assert_eq!(fs::read(outside).unwrap(), b"must survive");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn prune_propagates_a_failed_removal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::write(corpus_root.join("a"), b"aaa").unwrap();
+    fs::write(corpus_root.join("b"), b"bbb").unwrap();
+    let mut corpus = list(&corpus_root).unwrap();
+    // a and b share a coverage hash: prune keeps one and must delete the other.
+    corpus.entries[0].coverage_hash = Some("dup".to_owned());
+    corpus.entries[1].coverage_hash = Some("dup".to_owned());
+
+    let original = fs::metadata(&corpus_root).unwrap().permissions();
+    // A read-only directory blocks removal of the redundant entry inside it.
+    fs::set_permissions(&corpus_root, fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Skip where directory permissions are not enforced (e.g. running as root):
+    // the deletion would succeed and there would be nothing to propagate.
+    let enforced = fs::write(corpus_root.join(".probe"), b"x").is_err();
+    if !enforced {
+        fs::remove_file(corpus_root.join(".probe")).ok();
+        fs::set_permissions(&corpus_root, original).unwrap();
+        return;
+    }
+
+    let result = prune(corpus);
+    // Restore write permission so the TempDir can be cleaned up.
+    fs::set_permissions(&corpus_root, original).unwrap();
+
+    assert!(
+        result.is_err(),
+        "prune must return an error when a redundant entry cannot be removed"
+    );
+}
+
 #[tokio::test]
 async fn merge_combines_without_duplicates() {
     let dir = TempDir::new().unwrap();

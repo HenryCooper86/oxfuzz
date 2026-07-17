@@ -28,13 +28,25 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 /// Anthropic Messages API provider.
-#[derive(Debug)]
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
     base_url: String,
     custom_headers: reqwest::header::HeaderMap,
     metadata: ProviderMetadata,
+}
+
+impl std::fmt::Debug for AnthropicProvider {
+    // Hand-written so the plaintext `api_key` is never printed via `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("custom_headers", &self.custom_headers)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl AnthropicProvider {
@@ -427,12 +439,12 @@ impl LlmProvider for AnthropicProvider {
             });
         }
 
-        if status == reqwest::StatusCode::UNAUTHORIZED {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthenticationFailed {
-                provider: self.metadata.id.to_string(),
-                message: error_body,
-            });
+            return Err(crate::error_classifier::auth_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                &error_body,
+            ));
         }
 
         // 402 Payment Required / billing error.
@@ -582,18 +594,30 @@ impl LlmProvider for AnthropicProvider {
 
         let status = response.status();
         if !status.is_success() {
+            // Parse Retry-After from the response headers before consuming the
+            // body: `text()` moves the response, so the header must be read first.
+            // The non-stream path already honors this header; the streaming path
+            // previously hardcoded 60s and ignored it.
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60u64);
             let error_body = response.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(ProviderError::RateLimited {
                     provider: self.metadata.id.to_string(),
-                    retry_after_secs: 60,
+                    retry_after_secs: retry_after,
                 });
             }
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(ProviderError::AuthenticationFailed {
-                    provider: self.metadata.id.to_string(),
-                    message: error_body,
-                });
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(crate::error_classifier::auth_failure_to_provider_error(
+                    &self.metadata.id.to_string(),
+                    &error_body,
+                ));
             }
             if status == reqwest::StatusCode::PAYMENT_REQUIRED {
                 return Err(ProviderError::QuotaExhausted {
@@ -1169,6 +1193,32 @@ struct AnthropicUsage {
 mod tests {
     use super::*;
     use hf_core::provider::ToolCallingMode;
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let provider = AnthropicProvider::new(
+            "anthropic-main",
+            "claude-3-5-sonnet-20241022",
+            "sk-ant-super-secret-value".into(),
+            None,
+            None,
+            vec![],
+            vec![],
+            3,
+            200_000,
+            ToolCallingMode::default(),
+        );
+
+        let dbg = format!("{provider:?}");
+        assert!(
+            !dbg.contains("sk-ant-super-secret-value"),
+            "api key leaked: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker: {dbg}"
+        );
+    }
 
     #[test]
     fn test_anthropic_provider_metadata() {

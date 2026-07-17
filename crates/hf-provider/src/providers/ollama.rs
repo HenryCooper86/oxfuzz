@@ -357,9 +357,10 @@ impl LlmProvider for OllamaProvider {
             (
                 crate::sse::SseStreamState::new(Box::pin(byte_stream)),
                 VecDeque::<InterStreamEvent>::new(),
+                0_usize, // monotonic tool-call index for stable ids across chunks
             ),
             move |mut composite| async move {
-                let (ref mut state, ref mut pending) = composite;
+                let (ref mut state, ref mut pending, ref mut tool_index) = composite;
 
                 if let Some(event) = pending.pop_front() {
                     return Some((Ok(event), composite));
@@ -378,6 +379,29 @@ impl LlmProvider for OllamaProvider {
 
                         match serde_json::from_str::<OllamaStreamChunk>(trimmed) {
                             Ok(chunk) => {
+                                // Emit any tool calls carried by this chunk. Ollama
+                                // sends fully-formed tool calls (not deltas), often
+                                // in the terminal `done: true` chunk, so this must
+                                // run before the done/content handling below. Ids
+                                // use a monotonic index so calls spanning chunks
+                                // stay unique.
+                                for tc in chunk.message.tool_calls.unwrap_or_default() {
+                                    pending.push_back(InterStreamEvent::ToolCall(
+                                        ToolCallRequest {
+                                            id: format!("call_{tool_index}"),
+                                            name: tc.function.name,
+                                            arguments: tc.function.arguments,
+                                        },
+                                    ));
+                                    *tool_index += 1;
+                                }
+
+                                if !chunk.message.content.is_empty() {
+                                    pending.push_back(InterStreamEvent::TextDelta(
+                                        chunk.message.content,
+                                    ));
+                                }
+
                                 if chunk.done {
                                     state.done = true;
                                     let usage = TokenUsage {
@@ -387,16 +411,19 @@ impl LlmProvider for OllamaProvider {
                                         cache_write_tokens: None,
                                         ..Default::default()
                                     };
-                                    pending
-                                        .push_back(InterStreamEvent::Finished(FinishReason::Stop));
-                                    return Some((Ok(InterStreamEvent::Usage(usage)), composite));
+                                    // If any tool call was emitted, report ToolUse
+                                    // (mirrors the non-stream path); otherwise Stop.
+                                    let finish_reason = if *tool_index > 0 {
+                                        FinishReason::ToolUse
+                                    } else {
+                                        FinishReason::Stop
+                                    };
+                                    pending.push_back(InterStreamEvent::Usage(usage));
+                                    pending.push_back(InterStreamEvent::Finished(finish_reason));
                                 }
 
-                                if !chunk.message.content.is_empty() {
-                                    return Some((
-                                        Ok(InterStreamEvent::TextDelta(chunk.message.content)),
-                                        composite,
-                                    ));
+                                if let Some(event) = pending.pop_front() {
+                                    return Some((Ok(event), composite));
                                 }
                                 continue;
                             }
@@ -521,7 +548,12 @@ struct OllamaStreamChunk {
 struct OllamaStreamMessage {
     #[allow(dead_code)]
     role: Option<String>,
+    #[serde(default)]
     content: String,
+    /// Tool calls carried by a streamed chunk. Ollama sends fully-formed tool
+    /// calls (not incremental deltas), matching the non-stream [`OllamaMessage`].
+    #[serde(default)]
+    tool_calls: Option<Vec<OllamaToolCall>>,
 }
 
 #[cfg(test)]
@@ -703,6 +735,37 @@ mod tests {
         let tool_calls = response.message.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
+    }
+
+    /// A streamed chunk carrying tool calls must deserialize into
+    /// `OllamaStreamChunk`. Regression test for `OllamaStreamMessage` lacking a
+    /// `tool_calls` field, which silently dropped streamed Ollama tool calls.
+    #[test]
+    fn test_ollama_stream_chunk_with_tool_calls() {
+        // Ollama typically delivers tool calls in the terminal done=true chunk.
+        let json = serde_json::json!({
+            "model": "llama3.1:8b",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": {"location": "Tokyo"}
+                    }
+                }]
+            },
+            "done": true,
+            "prompt_eval_count": 20,
+            "eval_count": 15
+        });
+
+        let chunk: OllamaStreamChunk = serde_json::from_value(json).expect("deserialize");
+        assert!(chunk.done);
+        assert_eq!(chunk.message.content, "");
+        let tool_calls = chunk.message.tool_calls.expect("tool_calls present");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments["location"], "Tokyo");
     }
 
     #[test]

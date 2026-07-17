@@ -44,7 +44,6 @@ enum AzureEndpointMode {
 ///
 /// Supports three endpoint modes (full-endpoint legacy, deployment-based, v1)
 /// and two authentication modes (API key, Bearer token).
-#[derive(Debug)]
 pub struct AzureOpenAiProvider {
     client: Client,
     api_key: String,
@@ -56,6 +55,24 @@ pub struct AzureOpenAiProvider {
     metadata: ProviderMetadata,
     include_usage: bool,
     use_max_completion_tokens: bool,
+}
+
+impl std::fmt::Debug for AzureOpenAiProvider {
+    // Hand-written so the plaintext `api_key` is never printed via `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureOpenAiProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .field("endpoint_mode", &self.endpoint_mode)
+            .field("endpoint_prefix", &self.endpoint_prefix)
+            .field("api_version", &self.api_version)
+            .field("auth_mode", &self.auth_mode)
+            .field("custom_headers", &self.custom_headers)
+            .field("metadata", &self.metadata)
+            .field("include_usage", &self.include_usage)
+            .field("use_max_completion_tokens", &self.use_max_completion_tokens)
+            .finish()
+    }
 }
 
 impl AzureOpenAiProvider {
@@ -343,10 +360,10 @@ impl AzureOpenAiProvider {
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthenticationFailed {
-                provider: self.metadata.id.to_string(),
-                message: error_body,
-            });
+            return Err(crate::error_classifier::auth_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                &error_body,
+            ));
         }
 
         if !status.is_success() {
@@ -455,20 +472,61 @@ impl AzureOpenAiProvider {
     }
 
     /// Build Azure/OpenAI message list from a `ChatRequest`.
+    ///
+    /// Mirrors [`OpenAiProvider::build_messages`](super::openai): an assistant
+    /// message that carries tool calls must serialize them in the `tool_calls`
+    /// array (with `content: null` when it is a pure tool call), otherwise a
+    /// following `role: "tool"` message has no preceding `tool_calls` and Azure
+    /// rejects the multi-turn request with HTTP 400.
     fn build_messages(request: &ChatRequest) -> Vec<AzureMessage> {
         request
             .messages
             .iter()
-            .map(|m| AzureMessage {
-                role: match m.role {
+            .map(|m| {
+                let role = match m.role {
                     hf_core::types::Role::User => "user".to_string(),
                     hf_core::types::Role::Assistant => "assistant".to_string(),
                     hf_core::types::Role::System => "system".to_string(),
                     hf_core::types::Role::Tool => "tool".to_string(),
-                },
-                content: Some(m.content.clone()),
-                tool_call_id: m.tool_call_id.clone(),
-                tool_calls: None,
+                };
+
+                // For assistant messages with tool calls, populate the
+                // `tool_calls` array and drop the content when it is empty
+                // (Azure/OpenAI wire contract for a pure tool call).
+                let (content, tool_calls) =
+                    if m.role == hf_core::types::Role::Assistant && !m.tool_calls.is_empty() {
+                        let tcs: Vec<AzureToolCall> = m
+                            .tool_calls
+                            .iter()
+                            .map(|tc| AzureToolCall {
+                                id: tc.id.clone(),
+                                r#type: "function".to_string(),
+                                function: AzureToolCallFunction {
+                                    name: tc.name.clone(),
+                                    arguments: match &tc.arguments {
+                                        serde_json::Value::String(s) => s.clone(),
+                                        other => serde_json::to_string(other)
+                                            .unwrap_or_else(|_| "{}".to_string()),
+                                    },
+                                },
+                            })
+                            .collect();
+                        let content = if m.content.is_empty() {
+                            None
+                        } else {
+                            Some(m.content.clone())
+                        };
+                        (content, Some(tcs))
+                    } else {
+                        (Some(m.content.clone()), None)
+                    };
+
+                AzureMessage {
+                    role,
+                    content,
+                    tool_call_id: m.tool_call_id.clone(),
+                    tool_calls,
+                }
             })
             .collect()
     }
@@ -572,10 +630,10 @@ impl LlmProvider for AzureOpenAiProvider {
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::AuthenticationFailed {
-                provider: self.metadata.id.to_string(),
-                message: error_body,
-            });
+            return Err(crate::error_classifier::auth_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                &error_body,
+            ));
         }
 
         if !status.is_success() {
@@ -704,10 +762,10 @@ impl LlmProvider for AzureOpenAiProvider {
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                return Err(ProviderError::AuthenticationFailed {
-                    provider: self.metadata.id.to_string(),
-                    message: error_body,
-                });
+                return Err(crate::error_classifier::auth_failure_to_provider_error(
+                    &self.metadata.id.to_string(),
+                    &error_body,
+                ));
             }
             return Err(ProviderError::ServerError {
                 provider: self.metadata.id.to_string(),
@@ -942,7 +1000,13 @@ struct AzureMessage {
 #[derive(Debug, Serialize, Deserialize)]
 struct AzureToolCall {
     id: String,
+    #[serde(default = "default_azure_tool_call_type")]
+    r#type: String,
     function: AzureToolCallFunction,
+}
+
+fn default_azure_tool_call_type() -> String {
+    "function".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1052,6 +1116,32 @@ mod tests {
     use super::*;
     use crate::sse::extract_sse_data;
     use hf_core::provider::ToolCallingMode;
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let provider = AzureOpenAiProvider::new(
+            "azure-gpt4o",
+            "gpt-4o",
+            "azure-super-secret-value".into(),
+            Some("https://myresource.openai.azure.com/openai/deployments/gpt-4o".into()),
+            None,
+            vec![],
+            vec![],
+            5,
+            128_000,
+            ToolCallingMode::default(),
+        );
+
+        let dbg = format!("{provider:?}");
+        assert!(
+            !dbg.contains("azure-super-secret-value"),
+            "api key leaked: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker: {dbg}"
+        );
+    }
 
     #[test]
     fn test_azure_provider_metadata() {
@@ -1274,6 +1364,75 @@ mod tests {
         .unwrap();
         assert_eq!(json["max_completion_tokens"], 256);
         assert!(json.get("max_tokens").is_none(), "{json}");
+    }
+
+    /// An assistant message carrying tool calls must serialize them (with
+    /// `content: null` for a pure tool call) so a following `role: "tool"`
+    /// message has a preceding `tool_calls`. Regression test for the Azure
+    /// multi-turn tool loop dropping `tool_calls` and triggering HTTP 400.
+    #[test]
+    fn build_messages_round_trips_assistant_tool_calls() {
+        let request = ChatRequest {
+            messages: vec![
+                hf_core::types::Message {
+                    message_id: "a1".into(),
+                    role: hf_core::types::Role::Assistant,
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![ToolCallRequest {
+                        id: "call_abc".into(),
+                        name: "get_weather".into(),
+                        arguments: serde_json::json!({"city": "Paris"}),
+                    }],
+                    timestamp: hf_core::types::now(),
+                    metadata: serde_json::json!({}),
+                },
+                hf_core::types::Message {
+                    message_id: "t1".into(),
+                    role: hf_core::types::Role::Tool,
+                    content: "sunny".into(),
+                    tool_call_id: Some("call_abc".into()),
+                    tool_calls: vec![],
+                    timestamp: hf_core::types::now(),
+                    metadata: serde_json::json!({}),
+                },
+            ],
+            model: None,
+            request_mode: RequestMode::TextChat,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            tools: vec![],
+            tool_calling_mode: ToolCallingMode::Native,
+            stop: vec![],
+            extra: serde_json::Value::Null,
+            thinking: None,
+            response_format: None,
+            image_generation_options: None,
+        };
+
+        let messages = AzureOpenAiProvider::build_messages(&request);
+        let json = serde_json::to_value(&messages).unwrap();
+
+        // Assistant message: tool_calls present, content omitted (pure tool call).
+        assert_eq!(json[0]["role"], "assistant");
+        assert!(
+            json[0].get("content").is_none(),
+            "content must be null: {json}"
+        );
+        assert_eq!(json[0]["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(json[0]["tool_calls"][0]["type"], "function");
+        assert_eq!(json[0]["tool_calls"][0]["function"]["name"], "get_weather");
+        // Arguments are serialized as a JSON string per the OpenAI wire contract.
+        assert_eq!(
+            json[0]["tool_calls"][0]["function"]["arguments"],
+            "{\"city\":\"Paris\"}"
+        );
+
+        // Tool result message: carries its tool_call_id, no tool_calls array.
+        assert_eq!(json[1]["role"], "tool");
+        assert_eq!(json[1]["tool_call_id"], "call_abc");
+        assert!(json[1].get("tool_calls").is_none());
     }
 
     // -------------------------------------------------------------------

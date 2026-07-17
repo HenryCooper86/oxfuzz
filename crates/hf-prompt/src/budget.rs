@@ -2,9 +2,9 @@
 
 /// Maximum character length for tool results sent to the LLM.
 ///
-/// Results exceeding this are truncated with a marker suffix. 10K chars is
-/// approximately 2.5K tokens (at 4 chars/token), a reasonable cap for any
-/// single tool result that preserves LLM context for reasoning.
+/// Results exceeding this are truncated with a marker suffix. 20K chars is
+/// approximately 5K tokens (at 4 chars/token), a reasonable cap for any single
+/// tool result that preserves LLM context for reasoning.
 pub const MAX_TOOL_RESULT_CHARS: usize = 20_000;
 
 /// Estimate the number of tokens in a text string.
