@@ -172,11 +172,14 @@ pub fn is_configured() -> bool {
         .is_some_and(|c| !is_placeholder_url(&c.url))
 }
 
+/// RFC 2606 reserved example domains that mark an unconfigured placeholder URL.
+const EXAMPLE_DOMAINS: [&str; 3] = ["example.com", "example.net", "example.org"];
+
 /// The bundled example ships a placeholder URL; treat it as "not configured".
 ///
-/// Matches the RFC 2606 reserved example domains on a host-label boundary rather
-/// than by bare substring, so a real instance such as
-/// `https://dojo.example.com.corp.internal` is NOT misread as the placeholder.
+/// Matches the [`EXAMPLE_DOMAINS`] on a host-label boundary rather than by bare
+/// substring, so a real instance such as `https://dojo.example.com.corp.internal`
+/// is NOT misread as the placeholder.
 fn is_placeholder_url(url: &str) -> bool {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -190,7 +193,6 @@ fn is_placeholder_url(url: &str) -> bool {
         .next()
         .unwrap_or(after_scheme)
         .to_ascii_lowercase();
-    const EXAMPLE_DOMAINS: [&str; 3] = ["example.com", "example.net", "example.org"];
     EXAMPLE_DOMAINS
         .iter()
         .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
