@@ -77,11 +77,13 @@ impl EngineKind {
                     supports_coverage: false,
                 },
                 artifacts: EngineArtifacts {
-                    supports_crash_minimization: true,
+                    // honggfuzz has no inline minimizer; `hf_crash::
+                    // build_minimize_args` returns `None` for it.
+                    supports_crash_minimization: false,
                     requires_corpus_directory: true,
                 },
             },
-            Self::LibFuzzer | Self::ClusterFuzzLite => EngineCapabilities {
+            Self::LibFuzzer => EngineCapabilities {
                 telemetry: EngineTelemetry {
                     supports_live_stats: true,
                     supports_coverage: true,
@@ -91,12 +93,17 @@ impl EngineKind {
                     requires_corpus_directory: false,
                 },
             },
-            Self::Syzkaller => EngineCapabilities {
+            Self::ClusterFuzzLite | Self::Syzkaller => EngineCapabilities {
                 telemetry: EngineTelemetry {
                     supports_live_stats: true,
                     supports_coverage: true,
                 },
                 artifacts: EngineArtifacts {
+                    // ClusterFuzzLite is driven through `infra/helper.py`, not a
+                    // raw libFuzzer binary, so `-minimize_crash=1` does not
+                    // apply; syzkaller minimizes via `syz-repro`, driven
+                    // separately. `hf_crash::build_minimize_args` returns
+                    // `None` for both.
                     supports_crash_minimization: false,
                     requires_corpus_directory: false,
                 },
@@ -226,11 +233,17 @@ mod tests {
                 .artifacts
                 .supports_crash_minimization
         );
-        assert!(
-            !EngineKind::Syzkaller
-                .capabilities()
-                .artifacts
-                .supports_crash_minimization
-        );
+        // Engines without a built-in minimizer must not advertise one; the
+        // minimizer itself (`hf_crash::build_minimize_args`) rejects them.
+        for engine in [
+            EngineKind::Honggfuzz,
+            EngineKind::ClusterFuzzLite,
+            EngineKind::Syzkaller,
+        ] {
+            assert!(
+                !engine.capabilities().artifacts.supports_crash_minimization,
+                "{engine:?} has no built-in crash minimizer"
+            );
+        }
     }
 }

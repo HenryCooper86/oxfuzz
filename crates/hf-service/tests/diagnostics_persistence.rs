@@ -49,6 +49,21 @@ async fn session_summary_excludes_calls_from_older_recorder_instances() {
         .await
         .expect("count retained traces");
     assert_eq!(persisted_trace_count, 3, "history remains available");
+
+    // The persisted trace row carries the generation's usage totals, not 0.
+    let (total_in, total_out, total_cost): (i64, i64, f64) = sqlx::query_as(
+        "SELECT total_input_tokens, total_output_tokens, total_cost_usd \
+         FROM diag_traces WHERE name = 'harness_draft'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read persisted trace totals");
+    assert_eq!(total_in, 1000);
+    assert_eq!(total_out, 500);
+    assert!(
+        (total_cost - 2.0).abs() < 1e-9,
+        "trace cost was {total_cost}"
+    );
     let summary = rec2.summary().await.expect("current session summary");
 
     assert_eq!(summary.calls, 1, "older sessions must be excluded");

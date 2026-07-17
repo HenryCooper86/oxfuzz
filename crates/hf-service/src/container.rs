@@ -80,6 +80,17 @@ fn resolve_fuzzing_run(
         .map_err(|error| fuzzing_policy_error(&error))
 }
 
+/// Internal pipeline steps (smoke qualification, coverage pruning, corpus
+/// minimization) run fixed implementation budgets, not operator-requested
+/// campaigns, so they clamp to the configured ceiling instead of failing.
+fn resolve_internal_run(
+    engine: EngineKind,
+    internal_budget_secs: u64,
+) -> Result<crate::config::ResolvedFuzzingRun, ClassifiedError> {
+    crate::config::resolve_internal_fuzzing_run(engine, internal_budget_secs)
+        .map_err(|error| fuzzing_policy_error(&error))
+}
+
 /// Runs that reached a terminal state may own crash artifacts. Failed and
 /// cancelled campaigns can produce valid partial evidence before stopping.
 fn run_has_crash_evidence(status: RunStatus) -> bool {
@@ -5349,8 +5360,9 @@ impl ServiceContainer {
         })
     }
 
-    /// Run a 60-second smoke fuzz on the active, persisted harness revision and
-    /// durably record its qualification evidence.
+    /// Run a short smoke fuzz (60 seconds, clamped to the configured campaign
+    /// ceiling) on the active, persisted harness revision and durably record
+    /// its qualification evidence.
     ///
     /// # Errors
     /// Returns `ClassifiedError` if the binary is missing or the smoke run
@@ -5362,7 +5374,7 @@ impl ServiceContainer {
         engine: EngineKind,
         lang: TargetLanguage,
     ) -> Result<SmokeRunSummary, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(engine, SMOKE_FUZZ_SECS)?;
+        let resolved = resolve_internal_run(engine, SMOKE_FUZZ_SECS)?;
         if !engine.supports_language(lang) {
             return Err(ClassifiedError::Validation(format!(
                 "fuzzing engine '{}' does not support {lang:?} harnesses",
@@ -7858,7 +7870,8 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<MinimizeOutcome, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(EngineKind::AflPlusPlus, COVERAGE_PRUNE_OPERATION_SECS)?;
+        let resolved =
+            resolve_internal_run(EngineKind::AflPlusPlus, COVERAGE_PRUNE_OPERATION_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);
@@ -8068,7 +8081,7 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Result<MinimizeOutcome, ClassifiedError> {
-        let resolved = resolve_fuzzing_run(EngineKind::LibFuzzer, CORPUS_MINIMIZE_SECS)?;
+        let resolved = resolve_internal_run(EngineKind::LibFuzzer, CORPUS_MINIMIZE_SECS)?;
         let _workspace_operation = self.acquire_workspace_operation().await?;
         prepare_configured_workspace_root()?;
         let workspace = workspace_dir(project, target);

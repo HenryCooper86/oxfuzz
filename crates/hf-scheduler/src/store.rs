@@ -157,7 +157,10 @@ impl Schedule {
 
 /// In-memory schedule store.
 ///
-/// In production, backed by `SQLite` with WAL mode (see `SqliteScheduleStore`).
+/// In production, `hf-service` persists the registered schedules as an
+/// atomically rewritten JSON file (its internal `ScheduleFileStore`) and
+/// reloads them into this store on startup; there is no SQLite-backed
+/// schedule store.
 pub struct ScheduleStore {
     schedules: Vec<Schedule>,
 }

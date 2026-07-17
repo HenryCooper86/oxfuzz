@@ -407,6 +407,24 @@ async fn minimize_rejects_oversized_output_before_deleting_the_live_corpus() {
     );
 }
 
+#[test]
+fn minimize_rejects_an_empty_survivor_set_without_touching_the_live_corpus() {
+    let dir = TempDir::new().unwrap();
+    let corpus_root = dir.path().join("corpus");
+    let minimized = dir.path().join("corpus_min");
+    fs::create_dir_all(&corpus_root).unwrap();
+    fs::create_dir_all(&minimized).unwrap();
+    fs::write(corpus_root.join("a"), b"aaa").unwrap();
+    fs::write(corpus_root.join("b"), b"bbb").unwrap();
+    // A failed/empty out-of-band merge yields zero survivors. Adopting it must
+    // fail closed rather than deleting every live input.
+    let result = minimize(&corpus_root, &minimized);
+
+    assert!(result.is_err(), "an empty survivor set must fail closed");
+    assert_eq!(fs::read(corpus_root.join("a")).unwrap(), b"aaa");
+    assert_eq!(fs::read(corpus_root.join("b")).unwrap(), b"bbb");
+}
+
 #[tokio::test]
 async fn absorb_adds_unique_crash_inputs_and_skips_dups() {
     let dir = TempDir::new().unwrap();

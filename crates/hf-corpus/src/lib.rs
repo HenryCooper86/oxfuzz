@@ -587,11 +587,20 @@ pub fn absorb(
 /// place; only redundant ones are dropped.
 ///
 /// # Errors
-/// Returns `ClassifiedError` if the directories cannot be read or written.
+/// Returns `ClassifiedError` if the directories cannot be read or written, or
+/// if `minimized_dir` yields no survivors: an empty minimized set is rejected
+/// before anything is written or deleted, so a failed out-of-band merge can
+/// never wipe the live corpus.
 pub fn minimize(corpus_root: &Path, minimized_dir: &Path) -> Result<Corpus, ClassifiedError> {
     let limits = DEFAULT_CORPUS_LIMITS;
     ensure_regular_directory(corpus_root)?;
     let kept = prepare_flat_directory(minimized_dir, limits)?;
+    if kept.is_empty() {
+        return Err(ClassifiedError::Validation(format!(
+            "refusing to adopt an empty minimized set for corpus {}",
+            corpus_root.display()
+        )));
+    }
     let live = list_with_limits(corpus_root, limits)?.entries;
     let mut live_by_hash: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut reserved_names: HashSet<OsString> = HashSet::new();

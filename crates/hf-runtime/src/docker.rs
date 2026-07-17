@@ -25,18 +25,24 @@ const CONTAINER_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 fn valid_pinned_image_reference(image: &str) -> bool {
     if image.is_empty()
         || image.len() > 256
+        // The reference is emitted verbatim into the `docker run` argv; a
+        // leading `-` would be parsed as a docker CLI flag instead of an
+        // image, voiding the pinned-image guarantee.
+        || image.starts_with('-')
         || !image.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'.' | b'-' | b'_' | b'@')
         })
     {
         return false;
     }
-    if let Some((_, digest)) = image.rsplit_once("@sha256:") {
-        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if let Some((name, digest)) = image.rsplit_once("@sha256:") {
+        return !name.is_empty()
+            && digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
     }
-    image
-        .rsplit_once(':')
-        .is_some_and(|(_, tag)| !tag.is_empty() && tag != "latest" && !tag.contains('/'))
+    image.rsplit_once(':').is_some_and(|(name, tag)| {
+        !name.is_empty() && !tag.is_empty() && tag != "latest" && !tag.contains('/')
+    })
 }
 
 /// Best-effort cleanup when an in-flight runtime future is dropped or aborted.
@@ -703,6 +709,15 @@ impl DockerRuntime {
                 () = &mut deadline => break Stop::TimedOut,
                 written = &mut stdin_writer, if !stdin_done => match written {
                     Ok(()) => stdin_done = true,
+                    // EPIPE means the container exited (crash, bad image)
+                    // before consuming stdin. That is not a pipe failure: the
+                    // container's exit closes stdout/stderr, so the real error
+                    // output (e.g. "pull access denied") and the exit code
+                    // surface through the normal Completed path. Failing here
+                    // would discard the captured output that explains why.
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                        stdin_done = true;
+                    }
                     Err(error) => break Stop::Failed(format!("write docker stdin: {error}")),
                 },
                 read = stdout.read(&mut out_chunk), if !out_done => match read {
@@ -986,5 +1001,35 @@ mod line_read_tests {
         assert!(lines[0].starts_with("abcdefgh"));
         assert!(lines[0].contains("truncated"));
         assert_eq!(lines[1], "next");
+    }
+}
+
+#[cfg(test)]
+mod pinned_image_tests {
+    use super::valid_pinned_image_reference;
+
+    #[test]
+    fn pinned_image_reference_rejects_flag_injection() {
+        // The reference is later emitted verbatim into the `docker run` argv,
+        // so a leading `-` would be parsed as a docker CLI flag, voiding the
+        // pinned-image guarantee.
+        assert!(!valid_pinned_image_reference("-w/tmp:x"));
+        assert!(!valid_pinned_image_reference("-evil"));
+        // A tag or digest without a name component is not a usable reference.
+        assert!(!valid_pinned_image_reference(":1.2.3"));
+        assert!(!valid_pinned_image_reference(
+            "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+    }
+
+    #[test]
+    fn pinned_image_reference_accepts_pinned_tags_and_digests() {
+        assert!(valid_pinned_image_reference("repo/name:1.2.3"));
+        assert!(valid_pinned_image_reference("name:2.7.0"));
+        assert!(valid_pinned_image_reference(
+            "repo/name@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!valid_pinned_image_reference("repo/name:latest"));
+        assert!(!valid_pinned_image_reference("repo/name"));
     }
 }

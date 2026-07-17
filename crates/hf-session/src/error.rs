@@ -24,8 +24,32 @@ pub enum SessionManagerError {
 
 impl From<hf_core::session::SessionError> for SessionManagerError {
     fn from(err: hf_core::session::SessionError) -> Self {
-        Self::Storage {
-            message: err.to_string(),
+        match err {
+            hf_core::session::SessionError::NotFound { id } => Self::NotFound { id },
+            other => Self::Storage {
+                message: other.to_string(),
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_not_found_maps_to_manager_not_found() {
+        let err = SessionManagerError::from(hf_core::session::SessionError::NotFound {
+            id: "abc".into(),
+        });
+        assert!(matches!(err, SessionManagerError::NotFound { id } if id == "abc"));
+    }
+
+    #[test]
+    fn other_session_errors_map_to_storage() {
+        let err = SessionManagerError::from(hf_core::session::SessionError::StorageError {
+            message: "db locked".into(),
+        });
+        assert!(matches!(err, SessionManagerError::Storage { .. }));
     }
 }

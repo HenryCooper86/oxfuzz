@@ -9,11 +9,13 @@ pub const MAX_TOOL_RESULT_CHARS: usize = 20_000;
 
 /// Estimate the number of tokens in a text string.
 ///
-/// Uses the heuristic: 1 token per 4 characters.
-/// This is configurable but the default provides a reasonable estimate
+/// Uses the heuristic: 1 token per 4 bytes of UTF-8 text, matching the
+/// estimators in `hf-context` and `hf-core` so budgets are enforced
+/// consistently across crates (a chars/4 count would under-estimate
+/// multibyte text ~3x). The default provides a reasonable estimate
 /// that is within 10% for English text.
 pub fn estimate_tokens(text: &str) -> u32 {
-    let tokens = text.chars().count().div_ceil(4);
+    let tokens = text.len().div_ceil(4);
     u32::try_from(tokens).unwrap_or(u32::MAX)
 }
 
@@ -28,27 +30,25 @@ pub fn truncate_to_budget(text: &str, max_tokens: u32) -> (String, bool) {
     }
 
     let marker = "\n[truncated]";
-    let char_limit = usize::try_from(max_tokens)
+    let byte_limit = usize::try_from(max_tokens)
         .unwrap_or(usize::MAX)
         .saturating_mul(4);
-    let marker_chars = marker.chars().count();
+    let marker_bytes = marker.len();
 
-    if char_limit == 0 || char_limit < marker_chars {
+    if byte_limit == 0 || byte_limit < marker_bytes {
         return (String::new(), true);
     }
 
-    let effective_limit = char_limit.saturating_sub(marker_chars);
+    let effective_limit = byte_limit.saturating_sub(marker_bytes);
 
-    // Truncate at a char boundary.
-    let text_chars = text.chars().count();
-    let truncated = if effective_limit >= text_chars {
+    // Truncate at a char boundary so multibyte text stays valid UTF-8.
+    let truncated = if effective_limit >= text.len() {
         text.to_string()
     } else {
-        // Convert the retained character count back into a UTF-8 byte boundary.
-        let boundary = text
-            .char_indices()
-            .nth(effective_limit)
-            .map_or(text.len(), |(i, _)| i);
+        let mut boundary = effective_limit;
+        while boundary > 0 && !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
         format!("{}{marker}", &text[..boundary])
     };
 
@@ -99,9 +99,21 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_tokens_counts_multibyte_as_characters() {
-        assert_eq!(estimate_tokens("你好你好"), 1); // 4 chars, not 12 UTF-8 bytes
-        assert_eq!(estimate_tokens("你好你好你"), 2); // 5 chars
+    fn test_estimate_tokens_counts_multibyte_as_bytes() {
+        // Byte-length/4 heuristic, matching the hf-context and hf-core
+        // estimators: multibyte text must not be under-estimated (chars/4
+        // would report ~3x fewer tokens for CJK text).
+        let text = "你好你好"; // 4 chars, 12 UTF-8 bytes
+        assert_eq!(estimate_tokens(text), 3);
+        assert_eq!(
+            estimate_tokens(text),
+            u32::try_from(text.len() / 4).unwrap()
+        );
+        let heavy = "你好世界".repeat(25); // 300 bytes
+        assert_eq!(
+            estimate_tokens(&heavy),
+            u32::try_from(heavy.len() / 4).unwrap()
+        );
     }
 
     #[test]
