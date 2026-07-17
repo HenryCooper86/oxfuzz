@@ -674,3 +674,35 @@ async fn schedule_mutations_report_missing_ids() {
         .unwrap();
     assert_eq!(enabled.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn provider_thaw_maps_service_errors_to_http() {
+    allow_open_dev_mode();
+    // The stub container has no provider pool, so a thaw attempt must surface
+    // the service's "no LLM provider configured" error as 502 Bad Gateway
+    // (the stable ClassifiedError::Provider mapping), not a 404 or 500.
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/providers/openai-main/thaw")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no LLM provider configured"),
+        "unexpected error body: {json}"
+    );
+}
