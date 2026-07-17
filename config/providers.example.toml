@@ -5,6 +5,10 @@
 # Freeze duration before retrying a failed provider (seconds).
 default_freeze_duration_secs = 60
 max_freeze_duration_secs = 3600
+# Interval between periodic health checks of frozen providers (seconds).
+# On every tick each frozen provider is probed and thawed when it responds --
+# including permanently frozen providers (invalid key, exhausted quota), which
+# have no automatic thaw. Values below 1 are clamped to 1.
 health_check_interval_secs = 30
 
 # ==============================================================================

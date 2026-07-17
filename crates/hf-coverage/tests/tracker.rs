@@ -9,9 +9,6 @@ fn report(edges: u64, run_id: uuid::Uuid) -> CoverageReport {
         run_id,
         edges,
         blocks: 0,
-        delta_edges: 0,
-        stagnation_secs: 0,
-        new_edges_files: Vec::new(),
     }
 }
 
@@ -27,6 +24,7 @@ fn tracker_computes_delta_on_update() {
         100,
         "first update delta should be total edges"
     );
+    assert_eq!(tracker.run_id(), run_id, "the report's run must be tracked");
 
     tracker.update(&report(150, run_id));
     assert_eq!(tracker.last_edges(), 150);
