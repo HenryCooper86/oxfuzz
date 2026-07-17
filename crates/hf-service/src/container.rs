@@ -6418,6 +6418,10 @@ impl ServiceContainer {
             ssh_key: ssh_key.map(PathBuf::from),
             vm_count: opts.vm_count,
             use_kvm,
+            // Size the VM fan-out to the same budget the container is given so
+            // the swap-less cgroup cannot OOM-kill qemu.
+            container_mem_mb: resolved.max_mem_mb,
+            max_cpus: resolved.max_cpus,
         };
         // Rootfs images can be several GiB. Keep the copy off the async runtime
         // while retaining a guard that removes staging on completion or abort.
@@ -6446,12 +6450,25 @@ impl ServiceContainer {
             log("Note: qemu runs under TCG emulation inside Docker (no KVM on this host) -- expect low exec rates.");
         }
 
+        // A graceful multi-VM syz-manager teardown scales with the VM count, so
+        // the outer Docker deadline reuses the engine sandbox headroom per VM
+        // rather than a flat 30s -- a slow shutdown that tripped the old margin
+        // was classified as TimedOut and discarded the whole campaign summary.
+        // The inner `timeout --kill-after` force-kills syz-manager well before
+        // this backstop, so reaching it is genuinely exceptional.
+        let vm_estimate = opts
+            .vm_count
+            .unwrap_or(2)
+            .clamp(1, crate::syzkaller::MAX_VM_COUNT);
+        let teardown_grace_secs =
+            hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS.saturating_mul(u64::from(vm_estimate));
+        let inner_kill_after_secs = (teardown_grace_secs / 2).max(1);
         let limits = hf_core::runtime::ResourceLimits {
             max_mem_mb: resolved.max_mem_mb,
             max_cpus: resolved.max_cpus,
             // The inner `timeout` governs the campaign; give the sandbox deadline
-            // a grace margin so it is only a backstop.
-            max_duration_secs: duration_secs.saturating_add(30),
+            // a VM-scaled grace margin so it is only a teardown backstop.
+            max_duration_secs: duration_secs.saturating_add(teardown_grace_secs),
             env: std::collections::HashMap::new(),
             ptrace: false,
         };
@@ -6507,8 +6524,11 @@ impl ServiceContainer {
             active_runs: Arc::clone(&self.active_runs),
             run_id,
         };
-        let cmd =
-            syzkaller_manager_command(crate::syzkaller::CONTAINER_MANAGER_CONFIG, duration_secs);
+        let cmd = syzkaller_manager_command(
+            crate::syzkaller::CONTAINER_MANAGER_CONFIG,
+            duration_secs,
+            inner_kill_after_secs,
+        );
         let writable_monitor =
             crate::syzkaller::WritableBudgetMonitor::start(&stage, cancel.clone());
         let run_result = self
@@ -6530,25 +6550,63 @@ impl ServiceContainer {
 
         // GNU `timeout` uses 124 when the requested campaign budget expires;
         // that is the normal bounded completion path. Any other non-zero exit
-        // means the manager or its container setup failed and must not be
-        // presented as a successful campaign.
-        if result.termination == hf_core::runtime::CommandTermination::TimedOut {
-            return Err(ClassifiedError::Sandbox(
-                "syzkaller exceeded the sandbox wall-clock headroom".to_owned(),
-            ));
-        }
-        if result.termination == hf_core::runtime::CommandTermination::Completed
-            && result.exit_code != 0
-            && result.exit_code != 124
-        {
-            let detail = result.stderr.lines().last().unwrap_or("no error output");
-            return Err(ClassifiedError::Sandbox(format!(
-                "syz-manager exited with {}: {detail}",
-                result.exit_code
-            )));
+        // for a genuinely Completed process means the manager or its container
+        // setup failed and must not be presented as a successful campaign.
+        match result.termination {
+            hf_core::runtime::CommandTermination::Completed
+                if result.exit_code != 0 && result.exit_code != 124 =>
+            {
+                let detail = result.stderr.lines().last().unwrap_or("no error output");
+                return Err(ClassifiedError::Sandbox(format!(
+                    "syz-manager exited with {}: {detail}",
+                    result.exit_code
+                )));
+            }
+            hf_core::runtime::CommandTermination::TimedOut => {
+                // The inner `timeout --kill-after` already bounds the campaign;
+                // reaching the outer deadline means a slow multi-VM teardown, not
+                // a failure. Streaming already captured the coverage/crash
+                // metrics, so treat it as a bounded completion instead of
+                // discarding the summary.
+                log("syz-manager reached the sandbox teardown backstop; treating the streamed campaign as complete.");
+            }
+            _ => {}
         }
 
-        if result.termination == hf_core::runtime::CommandTermination::Completed {
+        // Lift crash reproducers and the corpus database out of the disposable
+        // staging workdir before the stage guard drops (and deletes) it, so
+        // found crashes reach retained evidence and the corpus can be reused.
+        // Best-effort: a copy hiccup is logged, never a reason to discard a
+        // valid campaign summary.
+        if let Some(evidence_dir) = workspace
+            .parent()
+            .map(|parent| parent.join("evidence").join(run_id.to_string()))
+        {
+            let stage_root = workspace.clone();
+            let evidence = tokio::task::spawn_blocking(move || {
+                crate::syzkaller::retain_campaign_evidence(&stage_root, &evidence_dir)
+            })
+            .await
+            .map_err(|error| {
+                ClassifiedError::Internal(format!("join syzkaller evidence task: {error}"))
+            })?;
+            match evidence {
+                Ok(Some(path)) => log(&format!(
+                    "Retained syzkaller crash reproducers and corpus under {}.",
+                    path.display()
+                )),
+                Ok(None) => {}
+                Err(error) => log(&format!(
+                    "Warning: could not retain syzkaller campaign evidence: {error}"
+                )),
+            }
+        }
+
+        if matches!(
+            result.termination,
+            hf_core::runtime::CommandTermination::Completed
+                | hf_core::runtime::CommandTermination::TimedOut
+        ) {
             on_progress(FuzzProgress::Done);
         }
         Ok(SyzkallerSummary {
@@ -8706,11 +8764,18 @@ pub struct SyzkallerSummary {
 ///
 /// Keeping the staged config path as one argv element makes its bytes data
 /// rather than executable syntax. The inner timeout ends the campaign at its
-/// requested budget; the runtime deadline remains a teardown backstop.
-fn syzkaller_manager_command(manager_cfg: &str, duration_secs: u64) -> Vec<String> {
+/// requested budget with a graceful `TERM`, then `--kill-after` force-kills a
+/// syz-manager that ignores it -- both before the sandbox teardown backstop, so
+/// a hung manager cannot trip the outer Docker deadline and discard the summary.
+fn syzkaller_manager_command(
+    manager_cfg: &str,
+    duration_secs: u64,
+    kill_after_secs: u64,
+) -> Vec<String> {
     vec![
         "timeout".to_owned(),
         "--signal=TERM".to_owned(),
+        format!("--kill-after={kill_after_secs}"),
         duration_secs.to_string(),
         "syz-manager".to_owned(),
         format!("-config={manager_cfg}"),
@@ -9860,13 +9925,14 @@ mod syzkaller_command_tests {
     #[test]
     fn manager_config_path_is_a_literal_argument_not_shell_source() {
         let path = "/tmp/manager;touch /work/pwn.cfg";
-        let command = syzkaller_manager_command(path, 90);
+        let command = syzkaller_manager_command(path, 90, 30);
 
         assert_eq!(
             command,
             vec![
                 "timeout",
                 "--signal=TERM",
+                "--kill-after=30",
                 "90",
                 "syz-manager",
                 "-config=/tmp/manager;touch /work/pwn.cfg",
