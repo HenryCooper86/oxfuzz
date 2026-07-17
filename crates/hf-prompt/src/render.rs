@@ -103,6 +103,68 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
     )
 }
 
+/// A chunk of related project source retrieved from the knowledge index and
+/// injected into a prompt as usage context (call sites, related parsers,
+/// format docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedContext {
+    /// Source file, relative to the project root.
+    pub file: String,
+    /// The matched chunk text (already length-capped by the retriever).
+    pub snippet: String,
+}
+
+/// Hard character budget for the related-context section injected into a
+/// prompt. AGENTS.md 2.4 requires injected knowledge to stay token-bounded;
+/// 2000 chars is roughly 500 tokens.
+pub const MAX_RELATED_CONTEXT_CHARS: usize = 2000;
+
+/// Render the optional "related project context" section listing retrieved
+/// chunks, capped at [`MAX_RELATED_CONTEXT_CHARS`] of body text: chunks are
+/// added whole while they fit, the next is truncated into the remaining
+/// budget, and the rest are dropped.
+///
+/// Returns an empty string when there are no chunks, so callers can append
+/// the result unconditionally.
+#[must_use]
+pub fn render_related_context_section(related: &[RelatedContext]) -> String {
+    if related.is_empty() {
+        return String::new();
+    }
+    let mut body = String::new();
+    let mut used = 0usize;
+    for ctx in related {
+        let block = format!("--- {} ---\n{}\n", ctx.file, ctx.snippet);
+        let block_len = block.chars().count();
+        if used + block_len > MAX_RELATED_CONTEXT_CHARS {
+            body.extend(block.chars().take(MAX_RELATED_CONTEXT_CHARS - used));
+            break;
+        }
+        body.push_str(&block);
+        used += block_len;
+    }
+    format!(
+        "Related project context (retrieved from the project knowledge index; \
+         shows how the target is used):\n{body}"
+    )
+}
+
+/// Render the harness generation prompt, augmented with related project
+/// context retrieved from the knowledge index. An empty slice renders the
+/// base prompt unchanged, so a missing/failed retrieval degrades gracefully.
+#[must_use]
+pub fn render_harness_prompt_with_context(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    related: &[RelatedContext],
+) -> String {
+    let base = render_harness_prompt(target, engine);
+    if related.is_empty() {
+        return base;
+    }
+    format!("{base}\n\n{}", render_related_context_section(related))
+}
+
 /// Render a harness *repair* prompt: the original generation instructions plus
 /// the source that failed and the compiler/smoke diagnostics, asking the LLM to
 /// return a corrected harness.
@@ -314,5 +376,71 @@ mod tests {
         assert!(prompt.contains("JSON array"));
         assert!(prompt.to_ascii_lowercase().contains("hex"));
         assert!(prompt.contains("up to 8"));
+    }
+
+    #[test]
+    fn harness_prompt_with_context_includes_related_section() {
+        let target = sample_target();
+        let related = vec![RelatedContext {
+            file: "src/caller.c".to_owned(),
+            snippet: "void handle(void) { parse_header(buf, len); }".to_owned(),
+        }];
+        let prompt = render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &related);
+        // The related-context section carries the retrieved chunk.
+        assert!(prompt.contains("Related project context"));
+        assert!(prompt.contains("src/caller.c"));
+        assert!(prompt.contains("parse_header(buf, len);"));
+        // The base prompt content is preserved.
+        assert!(prompt.contains("symbol: parse_header"));
+        assert!(prompt.contains("LLVMFuzzerTestOneInput"));
+    }
+
+    #[test]
+    fn harness_prompt_with_empty_context_is_byte_identical_to_base() {
+        let target = sample_target();
+        assert_eq!(
+            render_harness_prompt_with_context(&target, EngineKind::LibFuzzer, &[]),
+            render_harness_prompt(&target, EngineKind::LibFuzzer),
+            "no retrieved chunks must render the un-augmented prompt"
+        );
+    }
+
+    #[test]
+    fn related_context_section_is_blank_without_chunks() {
+        assert!(render_related_context_section(&[]).is_empty());
+    }
+
+    #[test]
+    fn related_context_section_enforces_char_budget() {
+        let related = vec![
+            RelatedContext {
+                file: "a.c".to_owned(),
+                snippet: "a".repeat(1500),
+            },
+            RelatedContext {
+                file: "b.c".to_owned(),
+                snippet: "b".repeat(1500),
+            },
+            RelatedContext {
+                file: "c.c".to_owned(),
+                snippet: "ccc".to_owned(),
+            },
+        ];
+        let section = render_related_context_section(&related);
+        // The first chunk fits whole; the second fills the remaining budget;
+        // the third is dropped entirely.
+        assert!(section.contains("a.c"));
+        assert!(
+            !section.contains("ccc"),
+            "chunks past the budget are dropped"
+        );
+        let body = section
+            .split_once('\n')
+            .expect("section has a header line")
+            .1;
+        assert!(
+            body.chars().count() <= MAX_RELATED_CONTEXT_CHARS,
+            "section body exceeds the {MAX_RELATED_CONTEXT_CHARS} char budget"
+        );
     }
 }

@@ -685,6 +685,8 @@ impl FuzzingSettings {
 #[serde(default, deny_unknown_fields)]
 struct HobotFuzzRuntimeConfig {
     coverage_stagnation_secs: u64,
+    coverage_stagnation_new_harness_windows: u64,
+    coverage_stagnation_stop_windows: u64,
     auto_revert_enabled: bool,
     auto_revert_threshold_pct: f64,
     auto_revert_notify_only: bool,
@@ -699,6 +701,8 @@ impl Default for HobotFuzzRuntimeConfig {
     fn default() -> Self {
         Self {
             coverage_stagnation_secs: DEFAULT_STAGNATION_THRESHOLD_SECS,
+            coverage_stagnation_new_harness_windows: DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS,
+            coverage_stagnation_stop_windows: DEFAULT_STAGNATION_STOP_WINDOWS,
             auto_revert_enabled: false,
             auto_revert_threshold_pct: DEFAULT_AUTO_REVERT_THRESHOLD_PCT,
             auto_revert_notify_only: false,
@@ -715,6 +719,15 @@ impl HobotFuzzRuntimeConfig {
     fn validate(&self) -> Result<(), String> {
         if !valid_auto_revert_threshold(self.auto_revert_threshold_pct) {
             return Err("auto_revert_threshold_pct must be within (0, 100]".to_owned());
+        }
+        if !valid_stagnation_windows(
+            self.coverage_stagnation_new_harness_windows,
+            self.coverage_stagnation_stop_windows,
+        ) {
+            return Err(
+                "coverage_stagnation windows must satisfy 1 <= new_harness_windows < stop_windows"
+                    .to_owned(),
+            );
         }
         self.fuzzing.validate()?;
         self.automotive.validate()?;
@@ -1722,6 +1735,15 @@ pub fn data_dir() -> PathBuf {
 /// Default seconds of flat coverage before a run surfaces a stagnation proposal.
 pub const DEFAULT_STAGNATION_THRESHOLD_SECS: u64 = 120;
 
+/// Default stagnation windows (each `coverage_stagnation_secs` long) before a
+/// run's proposal escalates from improving the mutation inputs to
+/// regenerating the harness.
+pub const DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS: u64 = 2;
+
+/// Default stagnation windows before a run's proposal escalates to
+/// recommending a stop.
+pub const DEFAULT_STAGNATION_STOP_WINDOWS: u64 = 4;
+
 /// Default coverage-drop threshold (percent) at which the auto-revert policy
 /// restores the previous harness revision.
 pub const DEFAULT_AUTO_REVERT_THRESHOLD_PCT: f64 = 20.0;
@@ -1846,6 +1868,86 @@ fn resolve_stagnation_secs(env: Option<&str>, hobot_toml: Option<&str>) -> u64 {
         .and_then(|raw| toml::from_str::<HobotConfig>(raw).ok())
         .and_then(|c| c.coverage_stagnation_secs)
         .unwrap_or(DEFAULT_STAGNATION_THRESHOLD_SECS)
+}
+
+/// The resolved stagnation-escalation policy for `run_fuzzer`.
+///
+/// Resolution order per knob: the `HF_COVERAGE_STAGNATION_SECS` /
+/// `HF_COVERAGE_STAGNATION_NEW_HARNESS_WINDOWS` /
+/// `HF_COVERAGE_STAGNATION_STOP_WINDOWS` env overrides, then
+/// `coverage_stagnation_secs` / `coverage_stagnation_new_harness_windows` /
+/// `coverage_stagnation_stop_windows` in `hobot-fuzz.toml`, then the defaults.
+/// Window counts that violate `1 <= new_harness_windows < stop_windows` (they
+/// would make the harness tier unreachable) fall back to the default windows.
+#[must_use]
+pub fn coverage_stagnation_policy() -> hf_coverage::StagnationPolicy {
+    resolve_stagnation_policy(
+        std::env::var("HF_COVERAGE_STAGNATION_SECS").ok().as_deref(),
+        std::env::var("HF_COVERAGE_STAGNATION_NEW_HARNESS_WINDOWS")
+            .ok()
+            .as_deref(),
+        std::env::var("HF_COVERAGE_STAGNATION_STOP_WINDOWS")
+            .ok()
+            .as_deref(),
+        read_config("hobot-fuzz").ok().as_deref(),
+    )
+}
+
+/// Pure resolver for [`coverage_stagnation_policy`], split out so the
+/// precedence (env over TOML over default) and the window validation are
+/// unit-testable without touching the environment or filesystem.
+fn resolve_stagnation_policy(
+    env_secs: Option<&str>,
+    env_new_harness: Option<&str>,
+    env_stop: Option<&str>,
+    hobot_toml: Option<&str>,
+) -> hf_coverage::StagnationPolicy {
+    #[derive(Deserialize)]
+    struct HobotConfig {
+        coverage_stagnation_new_harness_windows: Option<u64>,
+        coverage_stagnation_stop_windows: Option<u64>,
+    }
+    let parsed = hobot_toml.and_then(|raw| toml::from_str::<HobotConfig>(raw).ok());
+    let parse_windows = |env: Option<&str>, toml: Option<u64>, default: u64| {
+        env.map(str::trim)
+            .and_then(|s| s.parse::<u64>().ok())
+            .or(toml)
+            .unwrap_or(default)
+    };
+    let new_harness_windows = parse_windows(
+        env_new_harness,
+        parsed
+            .as_ref()
+            .and_then(|c| c.coverage_stagnation_new_harness_windows),
+        DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS,
+    );
+    let stop_windows = parse_windows(
+        env_stop,
+        parsed
+            .as_ref()
+            .and_then(|c| c.coverage_stagnation_stop_windows),
+        DEFAULT_STAGNATION_STOP_WINDOWS,
+    );
+    let (new_harness_windows, stop_windows) =
+        if valid_stagnation_windows(new_harness_windows, stop_windows) {
+            (new_harness_windows, stop_windows)
+        } else {
+            (
+                DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS,
+                DEFAULT_STAGNATION_STOP_WINDOWS,
+            )
+        };
+    hf_coverage::StagnationPolicy {
+        threshold_secs: resolve_stagnation_secs(env_secs, hobot_toml),
+        new_harness_windows,
+        stop_windows,
+    }
+}
+
+/// The escalation windows keep every tier reachable: at least one window
+/// before the harness proposal, and the stop proposal strictly after it.
+fn valid_stagnation_windows(new_harness_windows: u64, stop_windows: u64) -> bool {
+    new_harness_windows >= 1 && stop_windows > new_harness_windows
 }
 
 /// Resolved config/data locations.
@@ -2389,6 +2491,104 @@ mod tests {
             resolve_stagnation_secs(Some("not-a-number"), None),
             DEFAULT_STAGNATION_THRESHOLD_SECS
         );
+    }
+
+    #[test]
+    fn stagnation_policy_precedence_env_then_toml_then_default() {
+        // Env wins over everything, per knob.
+        let policy = resolve_stagnation_policy(
+            Some("45"),
+            Some("3"),
+            Some("9"),
+            Some(
+                "coverage_stagnation_secs = 200\n\
+                 coverage_stagnation_new_harness_windows = 5\n\
+                 coverage_stagnation_stop_windows = 12\n",
+            ),
+        );
+        assert_eq!(policy.threshold_secs, 45);
+        assert_eq!(policy.new_harness_windows, 3);
+        assert_eq!(policy.stop_windows, 9);
+
+        // No env -> the TOML values.
+        let policy = resolve_stagnation_policy(
+            None,
+            None,
+            None,
+            Some(
+                "coverage_stagnation_secs = 200\n\
+                 coverage_stagnation_new_harness_windows = 5\n\
+                 coverage_stagnation_stop_windows = 12\n",
+            ),
+        );
+        assert_eq!(policy.threshold_secs, 200);
+        assert_eq!(policy.new_harness_windows, 5);
+        assert_eq!(policy.stop_windows, 12);
+
+        // Nothing configured -> the defaults (which keep the historical 120s
+        // threshold and surface the gentlest tier first).
+        let policy = resolve_stagnation_policy(None, None, None, None);
+        assert_eq!(policy.threshold_secs, DEFAULT_STAGNATION_THRESHOLD_SECS);
+        assert_eq!(
+            policy.new_harness_windows,
+            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
+        );
+        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+    }
+
+    #[test]
+    fn stagnation_policy_rejects_inverted_or_zero_windows() {
+        // stop <= new_harness makes the harness tier unreachable: both window
+        // knobs fall back to the defaults.
+        let policy = resolve_stagnation_policy(None, Some("4"), Some("4"), None);
+        assert_eq!(
+            policy.new_harness_windows,
+            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
+        );
+        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+
+        let policy = resolve_stagnation_policy(None, Some("5"), Some("4"), None);
+        assert_eq!(
+            policy.new_harness_windows,
+            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
+        );
+        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+
+        // A zero window count is rejected the same way.
+        let policy = resolve_stagnation_policy(None, Some("0"), Some("9"), None);
+        assert_eq!(
+            policy.new_harness_windows,
+            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
+        );
+        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+
+        // An invalid TOML pair falls back the same way, while the threshold
+        // knob still resolves independently.
+        let policy = resolve_stagnation_policy(
+            None,
+            None,
+            None,
+            Some(
+                "coverage_stagnation_secs = 90\n\
+                 coverage_stagnation_new_harness_windows = 6\n\
+                 coverage_stagnation_stop_windows = 6\n",
+            ),
+        );
+        assert_eq!(policy.threshold_secs, 90);
+        assert_eq!(
+            policy.new_harness_windows,
+            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
+        );
+        assert_eq!(policy.stop_windows, DEFAULT_STAGNATION_STOP_WINDOWS);
+
+        // A non-numeric env value falls through to the TOML value.
+        let policy = resolve_stagnation_policy(
+            None,
+            Some("not-a-number"),
+            None,
+            Some("coverage_stagnation_new_harness_windows = 3\n"),
+        );
+        assert_eq!(policy.new_harness_windows, 3);
     }
 
     #[test]
@@ -3001,6 +3201,30 @@ product_name = "old-product"
     }
 
     #[test]
+    fn stagnation_windows_parse_and_default_in_the_typed_config() {
+        // Absent knobs keep the documented defaults.
+        let config = parse_hobot_fuzz_runtime_config("coverage_stagnation_secs = 90\n")
+            .expect("runtime config should parse");
+        assert_eq!(config.coverage_stagnation_secs, 90);
+        assert_eq!(
+            config.coverage_stagnation_new_harness_windows,
+            DEFAULT_STAGNATION_NEW_HARNESS_WINDOWS
+        );
+        assert_eq!(
+            config.coverage_stagnation_stop_windows,
+            DEFAULT_STAGNATION_STOP_WINDOWS
+        );
+
+        // Present knobs are honored.
+        let config = parse_hobot_fuzz_runtime_config(
+            "coverage_stagnation_new_harness_windows = 3\ncoverage_stagnation_stop_windows = 8\n",
+        )
+        .expect("runtime config should parse");
+        assert_eq!(config.coverage_stagnation_new_harness_windows, 3);
+        assert_eq!(config.coverage_stagnation_stop_windows, 8);
+    }
+
+    #[test]
     fn automotive_defaults_are_disabled_and_exclude_physical_access() {
         let settings = AutomotiveSettings::default();
 
@@ -3175,6 +3399,9 @@ default_duration_secs = 22
             "[knowledge]\nvector_weight = nan\n",
             "[scheduler]\nmax_concurrent_executions = 0\n",
             "[session]\nmax_depth = 0\n",
+            "coverage_stagnation_new_harness_windows = 0\n",
+            "coverage_stagnation_new_harness_windows = 4\ncoverage_stagnation_stop_windows = 4\n",
+            "coverage_stagnation_new_harness_windows = 5\ncoverage_stagnation_stop_windows = 4\n",
         ] {
             assert!(
                 parse_hobot_fuzz_runtime_config(raw).is_err(),
@@ -3325,7 +3552,9 @@ default_duration_secs = 22
             "auto_revert_notify_only",
             "auto_revert_threshold_pct",
             "automotive",
+            "coverage_stagnation_new_harness_windows",
             "coverage_stagnation_secs",
+            "coverage_stagnation_stop_windows",
             "fuzzing",
             "knowledge",
             "scheduler",
