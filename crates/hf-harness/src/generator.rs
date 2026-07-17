@@ -10,8 +10,8 @@ use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_core::types::Message;
 use hf_prompt::{
-    render_harness_prompt, render_harness_refine_prompt, render_harness_repair_prompt,
-    render_seed_prompt,
+    render_harness_prompt_with_context, render_harness_refine_prompt, render_harness_repair_prompt,
+    render_seed_prompt, RelatedContext,
 };
 
 /// Draft a harness for a target using the LLM.
@@ -24,7 +24,24 @@ pub async fn draft(
     engine: EngineKind,
     llm: Box<dyn LlmProvider>,
 ) -> Result<HarnessDraft, ClassifiedError> {
-    let prompt = render_harness_prompt(target, engine);
+    draft_with_context(target, engine, &[], llm).await
+}
+
+/// Draft a harness for a target using the LLM, augmenting the prompt with
+/// related project context retrieved from the knowledge index (call sites,
+/// related parsers). An empty slice renders the base prompt unchanged, so a
+/// missing index or failed retrieval degrades to [`draft`].
+///
+/// # Errors
+/// Returns `ClassifiedError` if the LLM call fails or the response contains
+/// no fenced code block.
+pub async fn draft_with_context(
+    target: &TargetCandidate,
+    engine: EngineKind,
+    related: &[RelatedContext],
+    llm: Box<dyn LlmProvider>,
+) -> Result<HarnessDraft, ClassifiedError> {
+    let prompt = render_harness_prompt_with_context(target, engine, related);
     let messages = vec![Message::user(prompt)];
     let req = ChatRequest::from_messages(messages);
     let resp = llm.chat_completion(&req).await?;
@@ -1042,8 +1059,13 @@ fn sh_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_core::provider::{
+        ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderMetadata,
+    };
     use hf_core::target::{InputSurface, SourceLocation, TargetKind};
+    use hf_core::types::TokenUsage;
     use hf_test_utils::mock_provider::MockProvider;
+    use std::sync::{Arc, Mutex};
 
     fn sample_target() -> TargetCandidate {
         TargetCandidate {
@@ -1103,6 +1125,111 @@ mod tests {
         )
         .await;
         assert!(err.is_err());
+    }
+
+    /// A provider that records the last prompt it received, so tests can
+    /// assert what context actually reached the model.
+    struct CaptureProvider {
+        seen: Arc<Mutex<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CaptureProvider {
+        async fn chat_completion(
+            &self,
+            request: &ChatRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            *self.seen.lock().expect("capture lock") = request
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            Ok(ChatResponse {
+                id: "capture".to_owned(),
+                model: "capture".to_owned(),
+                content: Some(
+                    "```c\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t n){return 0;}\n```"
+                        .to_owned(),
+                ),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+                finish_reason: FinishReason::Stop,
+                raw_request: None,
+                raw_response: None,
+                provider_id: None,
+                generated_images: Vec::new(),
+            })
+        }
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "no stream".to_owned(),
+            })
+        }
+        fn metadata(&self) -> &ProviderMetadata {
+            use hf_core::provider::{ProviderCapability, ProviderType, ToolCallingMode};
+            static M: std::sync::OnceLock<ProviderMetadata> = std::sync::OnceLock::new();
+            M.get_or_init(|| ProviderMetadata {
+                id: hf_core::types::ProviderId::from_string("capture"),
+                provider_type: ProviderType::Custom,
+                model: "capture".to_owned(),
+                tags: Vec::new(),
+                capabilities: vec![ProviderCapability::Text],
+                max_concurrency: 1,
+                context_window: 128_000,
+                cost_per_1k_input: 0.0,
+                cost_per_1k_output: 0.0,
+                tool_calling_mode: ToolCallingMode::Native,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn draft_with_context_injects_related_context_into_prompt() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let related = vec![hf_prompt::RelatedContext {
+            file: "src/caller.c".to_owned(),
+            snippet: "void handle(void) { parse_header(buf, len); }".to_owned(),
+        }];
+        let draft = draft_with_context(
+            &target,
+            EngineKind::LibFuzzer,
+            &related,
+            Box::new(CaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        assert!(draft.source.contains("LLVMFuzzerTestOneInput"));
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(prompt.contains("Related project context"), "{prompt}");
+        assert!(prompt.contains("parse_header(buf, len);"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn draft_without_context_sends_base_prompt() {
+        let target = sample_target();
+        let seen = Arc::new(Mutex::new(String::new()));
+        draft(
+            &target,
+            EngineKind::LibFuzzer,
+            Box::new(CaptureProvider {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(!prompt.contains("Related project context"), "{prompt}");
+        assert_eq!(
+            prompt,
+            hf_prompt::render_harness_prompt(&target, EngineKind::LibFuzzer)
+        );
     }
 
     /// A runtime whose compile command returns a fixed exit code + output, so

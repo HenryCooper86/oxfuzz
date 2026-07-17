@@ -16,10 +16,40 @@ pub use summary::{parse_llvm_cov_summary, CoverageSummary};
 pub enum StagnationProposal {
     /// Generate a new harness variant for the target.
     NewHarness,
-    /// Suggest a custom mutator or dictionary.
+    /// Improve the mutation inputs: add seeds, a dictionary, or a custom
+    /// mutator.
     CustomMutator,
     /// Stop fuzzing this target.
     Stop,
+}
+
+/// Escalation policy for stagnation proposals.
+///
+/// While a run's coverage stays flat, [`propose_action`] escalates through the
+/// [`StagnationProposal`] tiers by counting whole stagnation windows -- each
+/// `threshold_secs` long -- since coverage last progressed:
+///
+/// - below `new_harness_windows` windows: improve the mutation inputs
+///   ([`StagnationProposal::CustomMutator`]);
+/// - at least `new_harness_windows` windows: regenerate the harness
+///   ([`StagnationProposal::NewHarness`]);
+/// - at least `stop_windows` windows: recommend stopping the target
+///   ([`StagnationProposal::Stop`]).
+///
+/// Callers must keep `1 <= new_harness_windows < stop_windows`; otherwise the
+/// harness tier is unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagnationPolicy {
+    /// Seconds without a positive edge delta before coverage counts as
+    /// stagnant. This is also the length of one escalation window; `0`
+    /// proposes immediately and measures windows in whole seconds.
+    pub threshold_secs: u64,
+    /// Stagnation windows at which the proposal escalates from improving the
+    /// mutation inputs to regenerating the harness.
+    pub new_harness_windows: u64,
+    /// Stagnation windows at which the proposal escalates to recommending a
+    /// stop.
+    pub stop_windows: u64,
 }
 
 /// Tracks coverage deltas over time to detect stagnation.
@@ -47,11 +77,20 @@ impl CoverageTracker {
 
     /// Record a new coverage report and compute the delta.
     pub fn update(&mut self, report: &CoverageReport) {
+        self.update_at(report, Instant::now());
+    }
+
+    /// Record a coverage report as measured at `at`, rather than now.
+    ///
+    /// Stagnation is measured from the last positive delta, so backdating a
+    /// progressing report backdates the stagnation clock as well. Used for
+    /// replayed/imported readings and for deterministic escalation tests.
+    pub fn update_at(&mut self, report: &CoverageReport, at: Instant) {
         let new_edges = report.edges;
         self.run_id = report.run_id;
         self.last_delta = new_edges.cast_signed() - self.last_edges.cast_signed();
         if self.last_delta > 0 {
-            self.last_progress = Instant::now();
+            self.last_progress = at;
         }
         self.last_edges = new_edges;
         self.update_count += 1;
@@ -101,17 +140,27 @@ impl Default for CoverageTracker {
     }
 }
 
-/// Propose an action when coverage stagnates.
+/// Propose an action when coverage stagnates, escalating per `policy`.
 ///
-/// Returns `None` if coverage is still progressing.
+/// Returns `None` if coverage is still progressing (or has not been flat for
+/// `policy.threshold_secs` yet). See [`StagnationPolicy`] for the tier ladder.
 #[must_use]
 pub fn propose_action(
     tracker: &CoverageTracker,
-    threshold_secs: u64,
+    policy: &StagnationPolicy,
 ) -> Option<StagnationProposal> {
-    if tracker.is_stagnant(threshold_secs) {
+    if !tracker.is_stagnant(policy.threshold_secs) {
+        return None;
+    }
+    // Whole stagnation windows elapsed since coverage last progressed. The
+    // window length is the threshold, floored at one second so a zero
+    // threshold (propose immediately) still has a defined escalation pace.
+    let windows = tracker.stagnation_secs() / policy.threshold_secs.max(1);
+    if windows >= policy.stop_windows {
+        Some(StagnationProposal::Stop)
+    } else if windows >= policy.new_harness_windows {
         Some(StagnationProposal::NewHarness)
     } else {
-        None
+        Some(StagnationProposal::CustomMutator)
     }
 }

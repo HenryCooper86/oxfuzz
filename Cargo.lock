@@ -2614,6 +2614,7 @@ dependencies = [
  "hf-guardrails",
  "hf-harness",
  "hf-knowledge",
+ "hf-prompt",
  "hf-provider",
  "hf-runtime",
  "hf-scheduler",

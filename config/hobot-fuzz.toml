@@ -7,6 +7,17 @@
 # to effectively silence the proposal. Override with HF_COVERAGE_STAGNATION_SECS.
 coverage_stagnation_secs = 120
 
+# Stagnation escalation, counted in whole windows of `coverage_stagnation_secs`
+# since coverage last progressed. The first window proposes improving the
+# mutation inputs (seeds / dictionary / custom mutator); at
+# `coverage_stagnation_new_harness_windows` the proposal escalates to
+# regenerating the harness, and at `coverage_stagnation_stop_windows` it
+# recommends stopping the target. Must satisfy
+# 1 <= new_harness_windows < stop_windows. Overrides:
+# HF_COVERAGE_STAGNATION_NEW_HARNESS_WINDOWS / HF_COVERAGE_STAGNATION_STOP_WINDOWS.
+coverage_stagnation_new_harness_windows = 2
+coverage_stagnation_stop_windows = 4
+
 # Auto-revert policy: when a run's harness revision changed AND its edge
 # coverage dropped by at least `auto_revert_threshold_pct` percent versus the
 # latest comparable run for the same target, automatically restore that
