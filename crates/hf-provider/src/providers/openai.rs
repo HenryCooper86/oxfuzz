@@ -291,10 +291,11 @@ impl OpenAiProvider {
 
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::ServerError {
-                provider: self.metadata.id.to_string(),
-                message: format!("HTTP {status}: {error_body}"),
-            });
+            return Err(crate::error_classifier::http_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                status.as_u16(),
+                &error_body,
+            ));
         }
 
         let response_text = response.text().await.map_err(|e| ProviderError::Other {
@@ -630,10 +631,11 @@ impl LlmProvider for OpenAiProvider {
 
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::ServerError {
-                provider: self.metadata.id.to_string(),
-                message: format!("HTTP {status}: {error_body}"),
-            });
+            return Err(crate::error_classifier::http_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                status.as_u16(),
+                &error_body,
+            ));
         }
 
         let response_text = response.text().await.map_err(|e| ProviderError::Other {
@@ -766,10 +768,11 @@ impl LlmProvider for OpenAiProvider {
                     &error_body,
                 )
             } else {
-                ProviderError::ServerError {
-                    provider: self.metadata.id.to_string(),
-                    message: format!("HTTP {status}: {error_body}"),
-                }
+                crate::error_classifier::http_failure_to_provider_error(
+                    &self.metadata.id.to_string(),
+                    status.as_u16(),
+                    &error_body,
+                )
             });
         }
 

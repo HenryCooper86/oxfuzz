@@ -244,6 +244,10 @@ mod tests {
         fn skills_dir(&self) -> std::path::PathBuf {
             std::path::PathBuf::from("skills")
         }
+
+        fn agents_dir(&self) -> std::path::PathBuf {
+            std::path::PathBuf::from("config/agents")
+        }
     }
 
     fn test_backend() -> Arc<dyn crate::AgentBackend> {

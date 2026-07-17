@@ -56,3 +56,40 @@ int parse_entry(const unsigned char *data, size_t len) {
     // Leaf functions with only library calls have no edges.
     assert!(!inv.call_graph.contains_key("decode"));
 }
+
+#[tokio::test]
+async fn duplicate_symbol_definitions_merge_call_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two translation units each define `parse_opts` (name-keyed identity is
+    // deliberate). The merged call graph must carry BOTH definitions' edges;
+    // the second definition must not overwrite the first.
+    std::fs::write(
+        dir.path().join("a.c"),
+        r"
+int helper_a(const char *p) { return p[0]; }
+int parse_opts(const char *p) { return helper_a(p); }
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.c"),
+        r"
+int helper_b(const char *p) { return p[1]; }
+int parse_opts(const char *p) { return helper_b(p); }
+",
+    )
+    .unwrap();
+
+    let inv = discover(dir.path(), TargetLanguage::C)
+        .await
+        .expect("discover");
+    let edges = inv.call_graph.get("parse_opts").expect("parse_opts edges");
+    assert!(
+        edges.contains(&"helper_a".to_owned()),
+        "first definition's callee must survive: {edges:?}"
+    );
+    assert!(
+        edges.contains(&"helper_b".to_owned()),
+        "second definition's callee must be merged in: {edges:?}"
+    );
+}

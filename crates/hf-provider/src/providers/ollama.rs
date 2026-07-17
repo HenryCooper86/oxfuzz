@@ -242,10 +242,11 @@ impl LlmProvider for OllamaProvider {
 
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::ServerError {
-                provider: self.metadata.id.to_string(),
-                message: format!("HTTP {status}: {error_body}"),
-            });
+            return Err(crate::error_classifier::http_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                status.as_u16(),
+                &error_body,
+            ));
         }
 
         let response_text = response.text().await.map_err(|e| ProviderError::Other {
@@ -346,10 +347,11 @@ impl LlmProvider for OllamaProvider {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::ServerError {
-                provider: self.metadata.id.to_string(),
-                message: format!("HTTP {status}: {error_body}"),
-            });
+            return Err(crate::error_classifier::http_failure_to_provider_error(
+                &self.metadata.id.to_string(),
+                status.as_u16(),
+                &error_body,
+            ));
         }
 
         let byte_stream = response.bytes_stream();

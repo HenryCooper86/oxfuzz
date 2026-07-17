@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 
 use hf_service::{
-    Action, ApprovalGate, CommandTermination, EngineKind, FuzzProgress, GuardrailPolicy,
-    Guardrails, Message, Role, SessionId, SkillDefinition, TargetLanguage,
+    Action, ApprovalGate, EngineKind, FuzzProgress, GuardrailPolicy, Guardrails, Message, Role,
+    SessionId, SkillDefinition, TargetLanguage,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -1760,7 +1760,10 @@ pub async fn run_fuzzer(
             // otherwise. Lets the UI surface the automatic action.
             "auto_revert": summary.auto_revert,
             "termination": summary.termination,
-            "exit_code": (summary.termination == CommandTermination::Completed).then_some(0),
+            // RunSummary records the termination kind but not the process exit
+            // code, so report null (unknown) exactly like the HTTP transport
+            // instead of fabricating 0 for every uninterrupted run.
+            "exit_code": serde_json::Value::Null,
         })),
         Err(e) => Err(e.to_string()),
     }
