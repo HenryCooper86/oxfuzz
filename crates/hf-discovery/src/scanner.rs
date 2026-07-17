@@ -151,8 +151,10 @@ fn extract_rust_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>
         if name.is_empty() || name == "main" || name.starts_with("test_") {
             continue;
         }
-        // Parameters: balance parens starting at the first '(' on/after the line.
-        let Some(params) = extract_paren_group(&src[line_start..]) else {
+        // Parameters: the argument list is the first balanced `(...)` that
+        // follows the identifier and any generic section, so a generic bound
+        // such as `Fn(u8)` is not mistaken for the parameter list.
+        let Some(params) = extract_rust_param_list(&src[line_start..]) else {
             continue;
         };
         let param_count = if params.trim().is_empty() {
@@ -227,6 +229,52 @@ fn read_ident(s: &str) -> String {
     s.chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect()
+}
+
+/// Return the Rust parameter list of the first `fn` in `s` (a slice beginning
+/// at the function's line), skipping a leading generic parameter section so a
+/// generic bound like `Fn(u8)` or `Fn() -> bool` is not mistaken for the
+/// argument list. Returns `None` if no `fn`/argument list is found.
+fn extract_rust_param_list(s: &str) -> Option<String> {
+    let fn_at = s.find("fn ")?;
+    // Skip whitespace after `fn`, then the function identifier.
+    let after_fn = s[fn_at + 3..].trim_start();
+    let ident_len: usize = after_fn
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .map(char::len_utf8)
+        .sum();
+    let mut rest = after_fn[ident_len..].trim_start();
+    // Skip an optional generic section `<...>`, which may itself contain
+    // parentheses (`Fn(u8)`) and return arrows (`-> bool`).
+    if rest.starts_with('<') {
+        rest = &rest[skip_generics(rest)..];
+    }
+    // The next balanced `(...)` is the real argument list.
+    extract_paren_group(rest)
+}
+
+/// Given `s` starting at a `<`, return the byte index just past the matching
+/// `>`, balancing nested angle brackets. A `>` immediately preceded by `-`
+/// (the `->` return arrow inside a bound) does not close a generic.
+fn skip_generics(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' => depth += 1,
+            b'>' if i == 0 || bytes[i - 1] != b'-' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    s.len()
 }
 
 /// Return the contents of the first balanced `(...)` group in `s`, or `None`.
@@ -398,7 +446,7 @@ fn extract_functions(
         };
         let symbol = name_node.utf8_text(src.as_bytes()).unwrap_or("").to_owned();
 
-        let params = count_parameters(&declarator);
+        let params = count_parameters(&declarator, src);
         if params == 0 {
             return;
         }
@@ -521,7 +569,7 @@ fn find_identifier<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node
     None
 }
 
-fn count_parameters(declarator: &tree_sitter::Node<'_>) -> usize {
+fn count_parameters(declarator: &tree_sitter::Node<'_>, src: &str) -> usize {
     let mut cursor = declarator.walk();
     if cursor.goto_first_child() {
         loop {
@@ -531,7 +579,15 @@ fn count_parameters(declarator: &tree_sitter::Node<'_>) -> usize {
                 let mut pc = child.walk();
                 if pc.goto_first_child() {
                     loop {
-                        if pc.node().kind() == "parameter_declaration" {
+                        // A prototype `(void)` parses as a single
+                        // parameter_declaration whose type is the primitive
+                        // `void` with no declarator. It carries no argument, so
+                        // it must count as zero -- otherwise the `params == 0`
+                        // filter never fires and `(void)` functions become
+                        // bogus fuzz candidates.
+                        if pc.node().kind() == "parameter_declaration"
+                            && !is_void_placeholder(&pc.node(), src)
+                        {
                             count += 1;
                         }
                         if !pc.goto_next_sibling() {
@@ -542,7 +598,7 @@ fn count_parameters(declarator: &tree_sitter::Node<'_>) -> usize {
                 return count;
             }
             // Recurse (function_declarator may wrap another declarator).
-            let nested = count_parameters(&child);
+            let nested = count_parameters(&child, src);
             if nested > 0 {
                 return nested;
             }
@@ -552,6 +608,19 @@ fn count_parameters(declarator: &tree_sitter::Node<'_>) -> usize {
         }
     }
     0
+}
+
+/// Whether a `parameter_declaration` is the `void` placeholder of a `(void)`
+/// prototype: its type is the primitive `void` and it has no declarator (so
+/// `void *p`, which has a pointer declarator, is a real parameter and not a
+/// placeholder).
+fn is_void_placeholder(param: &tree_sitter::Node<'_>, src: &str) -> bool {
+    if param.child_by_field_name("declarator").is_some() {
+        return false;
+    }
+    param
+        .child_by_field_name("type")
+        .is_some_and(|t| t.kind() == "primitive_type" && t.utf8_text(src.as_bytes()) == Ok("void"))
 }
 
 fn classify(symbol: &str) -> TargetKind {
