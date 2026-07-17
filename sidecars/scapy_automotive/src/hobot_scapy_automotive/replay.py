@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from .constants import PROTOCOLS, SCHEMA_VERSION
 from .errors import SidecarError, validation_error
 from .hashing import canonical_sha256, rust_transcript_sha256
-from .validation import validate_operation_config
+from .validation import DANGEROUS_UDS_SERVICES, validate_operation_config
 
 _REQUEST_KEYS = frozenset({"protocol", "mode", "deterministic_seed", "events"})
 _EVENT_KEYS = frozenset(
@@ -269,6 +269,24 @@ def _validated_plan(plan_value: Any) -> dict[str, Any]:
     return normalized
 
 
+def _wire_uds_service(payload_hex: str) -> int | None:
+    """The service a transmitted frame puts on the wire, ISO-TP-framing aware.
+
+    Byte 0 of an ISO-TP single frame is the PCI (0x0L, length 1..7); the service
+    follows it. For any other first byte the service is byte 0. Derived from the
+    wire bytes, never a metadata field, and independent of the protocol label, so
+    the allowlist/denylist cannot be evaded by mislabelling the protocol or by
+    hiding the service behind the PCI byte. Mirrors Rust `wire_uds_service`.
+    """
+    data = bytes.fromhex(payload_hex)
+    if not data:
+        return None
+    first = data[0]
+    if first & 0xF0 == 0x00 and 1 <= (first & 0x0F) <= 7:
+        return data[1] if len(data) > 1 else None
+    return first
+
+
 def _validate_message_allowlists(
     config: dict[str, Any], message: dict[str, Any], *, validate_request_service: bool
 ) -> None:
@@ -283,12 +301,28 @@ def _validate_message_allowlists(
             "replay arbitration ID is absent from the allowlist",
             field="plan.steps.message.metadata.arbitration_id",
         )
-    if config["protocol"] == "uds" and validate_request_service:
-        service = bytes.fromhex(message["payload_hex"])[0]
+    # Enforce the service allowlist and dangerous-service denylist on every
+    # transmitted frame regardless of protocol label (defense in depth alongside
+    # the Rust preflight), using the framing-aware wire service.
+    if validate_request_service:
+        service = _wire_uds_service(message["payload_hex"])
+        if service is None:
+            raise SidecarError(
+                "service_not_allowed",
+                "transmitted frame has no decodable service byte",
+                field="plan.steps.message.payload_hex",
+            )
         if service not in config["service_allowlist"]:
             raise SidecarError(
                 "service_not_allowed",
-                "transmit UDS service is absent from the allowlist",
+                "transmit service is absent from the allowlist",
+                field="plan.steps.message.payload_hex",
+                details={"service": service},
+            )
+        if service in DANGEROUS_UDS_SERVICES and not config["allow_dangerous_services"]:
+            raise SidecarError(
+                "dangerous_service_denied",
+                "transmit service is denied by the dangerous-service policy",
                 field="plan.steps.message.payload_hex",
                 details={"service": service},
             )
@@ -335,6 +369,27 @@ def execute_replay_plan(
             "replay plan exceeds max_rate_per_second",
             field="limits.max_rate_per_second",
         )
+    # Peak-rate guard (mirrors Rust `ReplayRequest::validate`): the average check
+    # above does not bound a burst -- a plan can front-load zero-delay steps and
+    # pad the tail. No 1-second sliding window over cumulative fire time may hold
+    # more than max_rate_per_second steps.
+    fire_times: list[int] = []
+    fire = 0
+    for step in plan["steps"]:
+        fire += step["delay_micros"]
+        fire_times.append(fire)
+    window_start = 0
+    for index, now in enumerate(fire_times):
+        if now >= 1_000_000:
+            lower = now - 1_000_000
+            while fire_times[window_start] <= lower:
+                window_start += 1
+        if index - window_start + 1 > limits["max_rate_per_second"]:
+            raise SidecarError(
+                "limit_exceeded",
+                "replay plan exceeds the peak rate window",
+                field="limits.max_rate_per_second",
+            )
     for step in plan["steps"]:
         delay_seconds = step["delay_micros"] / 1_000_000
         if delay_seconds > _MAX_REPLAY_DELAY_SECONDS:
