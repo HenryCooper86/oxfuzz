@@ -38,12 +38,31 @@ pub async fn draft_report(
     source: Option<&str>,
     llm: Box<dyn LlmProvider>,
 ) -> Result<BugReport, ClassifiedError> {
+    draft_report_with_context(crash, log, source, None, llm).await
+}
+
+/// Draft a bug report for a crash using an LLM, optionally augmented with
+/// related project context retrieved from the knowledge index (rendered by
+/// the caller). `None` renders the [`draft_report`] prompt unchanged, so a
+/// missing index or failed retrieval degrades gracefully.
+///
+/// # Errors
+/// Returns `ClassifiedError` if the LLM call fails. Invalid JSON is tolerated:
+/// a minimal report is returned.
+pub async fn draft_report_with_context(
+    crash: &Crash,
+    log: &str,
+    source: Option<&str>,
+    related_context: Option<&str>,
+    llm: Box<dyn LlmProvider>,
+) -> Result<BugReport, ClassifiedError> {
     let source_block = source.map_or_else(String::new, |s| {
         format!(
             "\nTarget source (for root-cause analysis):\n```\n{}\n```\n",
             &s[..char_floor(s, MAX_SOURCE_CONTEXT_CHARS)]
         )
     });
+    let related_block = related_context.map_or_else(String::new, |r| format!("\n{r}\n"));
     let prompt = format!(
         "You are the triage-agent for hobot_fuzz.\n\
          Your job: classify this crash, draft a bug report, and -- when source is \
@@ -60,7 +79,7 @@ pub async fn draft_report(
          Crash kind: {:?}\n\
          Summary: {}\n\
          Stack signature: {}\n\
-         {source_block}\n\
+         {source_block}{related_block}\n\
          Log:\n\
          {}",
         crash.kind, crash.summary, crash.stack_signature, log,
@@ -135,6 +154,121 @@ struct BugReportUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_core::provider::{
+        ChatResponse, ChatStreamResponse, FinishReason, ProviderError, ProviderMetadata,
+    };
+    use hf_core::types::TokenUsage;
+    use std::sync::{Arc, Mutex};
+
+    /// A provider that records the last prompt it received, so tests can
+    /// assert what context actually reached the model.
+    struct CaptureLlm {
+        seen: Arc<Mutex<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CaptureLlm {
+        async fn chat_completion(
+            &self,
+            request: &ChatRequest,
+        ) -> Result<ChatResponse, ProviderError> {
+            *self.seen.lock().expect("capture lock") = request
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            Ok(ChatResponse {
+                id: "capture".to_owned(),
+                model: "capture".to_owned(),
+                content: Some("not json".to_owned()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+                finish_reason: FinishReason::Stop,
+                raw_request: None,
+                raw_response: None,
+                provider_id: None,
+                generated_images: Vec::new(),
+            })
+        }
+        async fn chat_completion_stream(
+            &self,
+            _request: &ChatRequest,
+        ) -> Result<ChatStreamResponse, ProviderError> {
+            Err(ProviderError::Other {
+                message: "no stream".to_owned(),
+            })
+        }
+        fn metadata(&self) -> &ProviderMetadata {
+            use hf_core::provider::{ProviderCapability, ProviderType, ToolCallingMode};
+            static M: std::sync::OnceLock<ProviderMetadata> = std::sync::OnceLock::new();
+            M.get_or_init(|| ProviderMetadata {
+                id: hf_core::types::ProviderId::from_string("capture"),
+                provider_type: ProviderType::Custom,
+                model: "capture".to_owned(),
+                tags: Vec::new(),
+                capabilities: vec![ProviderCapability::Text],
+                max_concurrency: 1,
+                context_window: 128_000,
+                cost_per_1k_input: 0.0,
+                cost_per_1k_output: 0.0,
+                tool_calling_mode: ToolCallingMode::Native,
+            })
+        }
+    }
+
+    fn crash() -> Crash {
+        Crash {
+            id: uuid::Uuid::new_v4(),
+            run_id: uuid::Uuid::new_v4(),
+            target_id: uuid::Uuid::new_v4(),
+            input_path: std::path::PathBuf::from("/work/crash-1"),
+            stack_signature: "parse_header+0x12".to_owned(),
+            kind: hf_core::crash::CrashKind::Asan,
+            summary: "heap-buffer-overflow in parse_header".to_owned(),
+            minimized: false,
+            bug_report: None,
+            casr: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn draft_report_with_context_includes_related_block() {
+        let seen = Arc::new(Mutex::new(String::new()));
+        let report = draft_report_with_context(
+            &crash(),
+            "asan log",
+            None,
+            Some("Related project context:\n--- caller.c ---\nparse_header(buf, len);"),
+            Box::new(CaptureLlm {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should tolerate non-json");
+        // Invalid JSON still yields a minimal report (generation proceeds).
+        assert_eq!(report.severity_guess, "uncertain");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(prompt.contains("Related project context"), "{prompt}");
+        assert!(prompt.contains("parse_header(buf, len);"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn draft_report_without_context_sends_base_prompt() {
+        let seen = Arc::new(Mutex::new(String::new()));
+        draft_report(
+            &crash(),
+            "asan log",
+            None,
+            Box::new(CaptureLlm {
+                seen: Arc::clone(&seen),
+            }),
+        )
+        .await
+        .expect("draft should succeed");
+        let prompt = seen.lock().expect("capture lock").clone();
+        assert!(!prompt.contains("Related project context"), "{prompt}");
+    }
 
     #[test]
     fn parses_root_cause_and_fix_from_json() {

@@ -103,7 +103,10 @@ pub struct CoverageReport {
 ```
 
 When `stagnation_secs` exceeds a threshold, `hf-service` may propose a new
-harness variant or a custom mutator to the user.
+harness variant or a custom mutator to the user. The proposal escalates as the
+plateau drags on, counted in whole windows of the threshold: improving the
+mutation inputs (seeds / dictionary / custom mutator) first, then regenerating
+the harness, and finally recommending to stop spending on the target.
 
 ## 5. Tests
 
