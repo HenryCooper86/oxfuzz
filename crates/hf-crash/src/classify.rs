@@ -80,18 +80,20 @@ fn detect_kind(log: &str) -> CrashKind {
 
 /// Whether the log reports a *timeout* as its error class, as opposed to merely
 /// containing the substring "timeout"/"alarm" somewhere (a frame name, a symbol
-/// like `connect_timeout`, a `Timeouts : 0` status counter). Conservative on
-/// purpose: a "timeout"/"alarm" report is either the leading label of a line
-/// (libFuzzer's "ALARM: ..." and "timeout: N" lines) or appears on the engine's
-/// own reported error/summary line ("ERROR: libFuzzer: timeout after 60s",
-/// "SUMMARY: ... timeout").
+/// like `connect_timeout`, a `Timeouts : 0` status counter, a `net/timeout.c`
+/// path). Conservative on purpose: a timeout report is either the leading label
+/// of a line (libFuzzer's "ALARM: ..." and "timeout: N" lines) or the engine's
+/// own verdict on a diagnostic line ("libFuzzer: timeout after 60s"). A plain
+/// "timeout" substring on a `SUMMARY`/`ERROR` line is NOT enough -- an `ASan` summary
+/// can name a timeout-flavored source path there.
 fn reports_timeout(lower: &str) -> bool {
     lower.lines().any(|raw| {
         let line = raw.trim_start();
         line.starts_with("alarm:")
             || line.starts_with("timeout:")
+            || line.contains("libfuzzer: timeout")
             || ((line.contains("summary:") || line.contains("error:"))
-                && (line.contains("timeout") || line.contains("alarm")))
+                && line.contains("timeout after"))
     })
 }
 

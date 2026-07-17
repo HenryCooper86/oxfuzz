@@ -72,6 +72,9 @@ pub trait TraceStore: Send + Sync {
     async fn delete_all_traces(&self) -> Result<u64, TraceStoreError>;
 
     /// List traces belonging to a specific session.
+    ///
+    /// Traces are returned newest-first (`started_at` descending), matching
+    /// [`list_traces`](Self::list_traces); `limit` keeps the newest rows.
     async fn list_traces_by_session(
         &self,
         session_id: &str,
@@ -529,6 +532,30 @@ mod tests {
             store.get_observations(other_trace.id).await.unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_traces_by_session_newest_first() {
+        let store = InMemoryTraceStore::new();
+        let session = Uuid::new_v4();
+
+        let mut old = Trace::new(session, "old");
+        old.started_at = Utc::now() - chrono::Duration::hours(2);
+        let mut mid = Trace::new(session, "mid");
+        mid.started_at = Utc::now() - chrono::Duration::hours(1);
+        let new = Trace::new(session, "new");
+        store.insert_trace(old).await.unwrap();
+        store.insert_trace(mid).await.unwrap();
+        store.insert_trace(new).await.unwrap();
+
+        let names: Vec<String> = store
+            .list_traces_by_session(&session.to_string(), 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["new", "mid", "old"]);
     }
 
     #[tokio::test]

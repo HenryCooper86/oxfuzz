@@ -71,10 +71,13 @@ max_duration_secs = {max_duration_secs}
 }
 
 #[tokio::test]
-async fn smoke_policy_is_enforced_before_reservation_and_drives_runtime_and_persistence() {
+async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_persistence() {
     let root = tempfile::tempdir().unwrap();
     std::env::set_var("HF_CONFIG_DIR", root.path().join("config"));
     std::env::set_var("HF_WORKSPACE_DIR", root.path().join("workspace"));
+    // The operator ceiling caps requested campaign durations; the fixed
+    // internal smoke budget clamps down to it instead of failing the
+    // mandatory qualification step outright.
     write_policy(30, 1024, 1);
 
     let project = root.path().join("project");
@@ -102,7 +105,7 @@ async fn smoke_policy_is_enforced_before_reservation_and_drives_runtime_and_pers
         .await
         .unwrap();
 
-    let rejected = container
+    let clamped = container
         .harness_smoke(
             &project,
             "parse_policy",
@@ -110,11 +113,24 @@ async fn smoke_policy_is_enforced_before_reservation_and_drives_runtime_and_pers
             TargetLanguage::C,
         )
         .await
-        .expect_err("the fixed 60-second smoke request must respect the policy ceiling");
-    assert!(rejected.to_string().contains("60s"));
-    assert!(rejected.to_string().contains("30s"));
-    assert!(store.list_runs(None).await.unwrap().is_empty());
-    assert_eq!(runtime.calls.lock().unwrap().len(), 1, "only compile ran");
+        .expect("the fixed 60-second smoke budget clamps to the 30-second policy ceiling");
+    assert_eq!(clamped.duration_secs, 30);
+
+    {
+        let calls = runtime.calls.lock().unwrap();
+        let (command, limits) = calls
+            .iter()
+            .find(|(command, _)| command.iter().any(|arg| arg == "-max_total_time=30"))
+            .expect("smoke command uses the clamped duration");
+        assert!(command.iter().any(|arg| arg == "-max_total_time=30"));
+        assert_eq!(limits.max_mem_mb, 1024);
+        assert_eq!(limits.max_cpus, 1);
+        // The sandbox wall-clock keeps its headroom above the clamped budget.
+        assert_eq!(
+            limits.max_duration_secs,
+            30 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
+        );
+    }
 
     write_policy(120, 3584, 4);
     let summary = container
@@ -147,9 +163,21 @@ async fn smoke_policy_is_enforced_before_reservation_and_drives_runtime_and_pers
     }
 
     let runs = store.list_runs(None).await.unwrap();
-    assert_eq!(runs.len(), 1);
-    let config = runs[0].config.as_ref().unwrap();
-    assert_eq!(config.duration, Some(std::time::Duration::from_mins(1)));
-    assert_eq!(config.max_mem_mb, 3584);
-    assert_eq!(config.max_cpus, 4);
+    assert_eq!(runs.len(), 2);
+    // list_runs is ordered by started_at DESC; match on the persisted budget
+    // instead of position so same-second timestamps cannot flip the order.
+    let clamped_config = runs
+        .iter()
+        .map(|run| run.config.as_ref().unwrap())
+        .find(|config| config.duration == Some(std::time::Duration::from_secs(30)))
+        .expect("the clamped smoke run is persisted with its 30-second budget");
+    assert_eq!(clamped_config.max_mem_mb, 1024);
+    assert_eq!(clamped_config.max_cpus, 1);
+    let full_config = runs
+        .iter()
+        .map(|run| run.config.as_ref().unwrap())
+        .find(|config| config.duration == Some(std::time::Duration::from_mins(1)))
+        .expect("the unclamped smoke run is persisted with its 60-second budget");
+    assert_eq!(full_config.max_mem_mb, 3584);
+    assert_eq!(full_config.max_cpus, 4);
 }

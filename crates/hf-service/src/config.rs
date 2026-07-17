@@ -319,6 +319,10 @@ impl AutomotiveSettings {
     fn validate_pinned_image(image: &str) -> bool {
         if image.is_empty()
             || image.len() > 256
+            // The image is later emitted verbatim into the `docker run` argv;
+            // a leading `-` would be parsed as a docker CLI flag instead of
+            // an image, voiding the pinned-image guarantee.
+            || image.starts_with('-')
             || image.chars().any(char::is_whitespace)
             || image
                 .chars()
@@ -326,12 +330,14 @@ impl AutomotiveSettings {
         {
             return false;
         }
-        if let Some((_, digest)) = image.rsplit_once("@sha256:") {
-            return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if let Some((name, digest)) = image.rsplit_once("@sha256:") {
+            return !name.is_empty()
+                && digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
         }
-        image
-            .rsplit_once(':')
-            .is_some_and(|(_, tag)| !tag.is_empty() && tag != "latest" && !tag.contains('/'))
+        image.rsplit_once(':').is_some_and(|(name, tag)| {
+            !name.is_empty() && !tag.is_empty() && tag != "latest" && !tag.contains('/')
+        })
     }
 
     /// Validate the persisted operator policy without widening unsafe values.
@@ -605,6 +611,25 @@ impl FuzzingSettings {
         })
     }
 
+    /// Resolve a fixed internal maintenance budget against this policy.
+    ///
+    /// Internal pipeline steps (smoke qualification, coverage-guided pruning,
+    /// corpus minimization) run implementation-defined budgets, not
+    /// operator-requested campaigns, so an over-ceiling budget clamps to the
+    /// ceiling instead of failing: a low `sandbox.max_duration_secs` must not
+    /// block mandatory operations like harness smoke qualification.
+    ///
+    /// # Errors
+    /// Returns an error when the policy is invalid or the engine is disabled.
+    pub fn resolve_internal(
+        &self,
+        engine: EngineKind,
+        internal_budget_secs: u64,
+    ) -> Result<ResolvedFuzzingRun, String> {
+        let clamped = internal_budget_secs.min(self.sandbox.max_duration_secs);
+        self.resolve(Some(engine), Some(clamped))
+    }
+
     /// Check that an engine is enabled without resolving run-specific values.
     ///
     /// # Errors
@@ -772,6 +797,18 @@ pub fn resolve_fuzzing_run(
     duration_secs: Option<u64>,
 ) -> Result<ResolvedFuzzingRun, String> {
     effective_fuzzing_settings()?.resolve(engine, duration_secs)
+}
+
+/// Resolve a fixed internal maintenance budget from the current persisted
+/// operator policy, clamping it to the configured campaign ceiling.
+///
+/// # Errors
+/// Returns an error for an invalid policy or a disabled engine.
+pub fn resolve_internal_fuzzing_run(
+    engine: EngineKind,
+    internal_budget_secs: u64,
+) -> Result<ResolvedFuzzingRun, String> {
+    effective_fuzzing_settings()?.resolve_internal(engine, internal_budget_secs)
 }
 
 /// Resolve an enabled user-space harness engine for the target language.
@@ -3037,6 +3074,34 @@ product_name = "old-product"
     }
 
     #[test]
+    fn automotive_policy_rejects_flag_like_and_nameless_sidecar_images() {
+        // The image is later emitted verbatim into the `docker run` argv, so
+        // a leading `-` would be parsed as a docker CLI flag, voiding the
+        // pinned-image guarantee.
+        let mut settings = AutomotiveSettings {
+            sidecar_image: "-w/tmp:x".to_owned(),
+            ..AutomotiveSettings::default()
+        };
+        assert!(settings.validate().unwrap_err().contains("pinned"));
+
+        settings.sidecar_image = "-evil".to_owned();
+        assert!(settings.validate().unwrap_err().contains("pinned"));
+
+        // A tag or digest without a name component is not a usable reference.
+        settings.sidecar_image = ":2.7.0".to_owned();
+        assert!(settings.validate().unwrap_err().contains("pinned"));
+
+        settings.sidecar_image = format!("@sha256:{}", "a".repeat(64));
+        assert!(settings.validate().unwrap_err().contains("pinned"));
+
+        settings.sidecar_image = "hobot/scapy-automotive:2.7.0".to_owned();
+        settings.validate().expect("pinned tag");
+
+        settings.sidecar_image = format!("hobot/scapy-automotive@sha256:{}", "a".repeat(64));
+        settings.validate().expect("pinned digest");
+    }
+
+    #[test]
     fn automotive_config_store_updates_only_the_typed_policy() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hobot-fuzz.toml");
@@ -3147,6 +3212,39 @@ default_duration_secs = 22
             .resolve(Some(hf_core::engine::EngineKind::Honggfuzz), Some(61))
             .unwrap_err()
             .contains("maximum"));
+    }
+
+    #[test]
+    fn internal_budgets_clamp_to_the_operator_ceiling() {
+        // An operator who lowers the campaign ceiling must still be able to
+        // smoke-qualify and promote harnesses: internal pipeline budgets clamp
+        // to the ceiling instead of failing the resolution.
+        let settings = FuzzingSettings {
+            default_duration_secs: 30,
+            sandbox: FuzzingSandboxSettings {
+                max_duration_secs: 30,
+                ..FuzzingSandboxSettings::default()
+            },
+            ..FuzzingSettings::default()
+        };
+
+        // The operator-requested path still rejects over-ceiling durations.
+        assert!(settings
+            .resolve(Some(hf_core::engine::EngineKind::LibFuzzer), Some(60))
+            .unwrap_err()
+            .contains("maximum"));
+
+        // The internal path clamps the same budget to the ceiling.
+        let resolved = settings
+            .resolve_internal(hf_core::engine::EngineKind::LibFuzzer, 60)
+            .expect("internal budget should clamp to the operator ceiling");
+        assert_eq!(resolved.duration_secs, 30);
+
+        // A budget already under the ceiling resolves unchanged.
+        let under = settings
+            .resolve_internal(hf_core::engine::EngineKind::LibFuzzer, 10)
+            .expect("under-ceiling internal budget should resolve unchanged");
+        assert_eq!(under.duration_secs, 10);
     }
 
     #[test]

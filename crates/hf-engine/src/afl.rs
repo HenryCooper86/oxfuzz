@@ -48,22 +48,6 @@ pub fn build_reproduction_args(binary: &str, input: &str) -> Vec<String> {
     build_target_args(binary, AflInput::ConcreteFile(input))
 }
 
-/// Build an `afl-tmin` command using the same file-input target contract as a
-/// fuzz run.
-#[must_use]
-pub fn build_tmin_args(binary: &str, crash_input: &str, output: &str) -> Vec<String> {
-    let mut args = vec![
-        "afl-tmin".to_owned(),
-        "-i".to_owned(),
-        crash_input.to_owned(),
-        "-o".to_owned(),
-        output.to_owned(),
-        "--".to_owned(),
-    ];
-    args.extend(build_target_args(binary, AflInput::FuzzerFile));
-    args
-}
-
 /// Construct the `afl-fuzz` argument list for a fuzz run.
 ///
 /// Returns the full command tail: `["afl-fuzz", "-i", corpus, "-o", out, ...]`.

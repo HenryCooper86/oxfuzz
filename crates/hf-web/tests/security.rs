@@ -477,7 +477,9 @@ async fn generic_browser_config_write_rejects_integration_sections() {
         open_local_security(root.path()),
     );
 
-    for name in ["defectdojo", "issue_tracker"] {
+    // A raw write of `providers` would bypass the live-pool reload that the
+    // typed endpoint performs, so it is rejected like the integrations.
+    for name in ["defectdojo", "issue_tracker", "providers"] {
         let response = app
             .clone()
             .oneshot(
@@ -495,6 +497,49 @@ async fn generic_browser_config_write_rejects_integration_sections() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+}
+
+#[tokio::test]
+async fn origin_host_fallback_allows_loopback_but_rejects_dns_rebinding() {
+    let root = tempfile::tempdir().unwrap();
+    let app = build_with_state_and_security(
+        AppState::new(hf_service::ServiceContainer::stubbed()),
+        open_local_security(root.path()),
+    );
+
+    // A rebound page serves an Origin whose authority matches the Host
+    // header, but both name an attacker-controlled host.
+    let rebound = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/config/toml_to_value")
+                .header(header::ORIGIN, "http://attacker.com:8081")
+                .header(header::HOST, "attacker.com:8081")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content":"enabled = true"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rebound.status(), StatusCode::FORBIDDEN);
+
+    // Genuine same-origin browser access to the served UI stays allowed.
+    let same_origin = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/config/toml_to_value")
+                .header(header::ORIGIN, "http://localhost:8081")
+                .header(header::HOST, "localhost:8081")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content":"enabled = true"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(same_origin.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -42,6 +42,13 @@ pub struct TargetCandidate {
 6. **Emit** -- `TargetInventory` persisted to `hf-storage`; surfaced to user
    for HITL selection.
 
+**Known limitation:** persistence identity is `(project_root, symbol)`
+(`deterministic_target_id` in `hf-discovery::scanner`) -- name-based by
+design, so ids stay stable across scans. Two same-named functions in
+different files of one project therefore share one persistence identity; the
+scanner unions their call edges and keeps the maximum complexity rather than
+letting the later definition overwrite the earlier one.
+
 ## 4. Fit Score Heuristics
 
 - Untrusted input entry point: +0.3
