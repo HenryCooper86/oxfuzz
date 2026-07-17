@@ -1,11 +1,12 @@
 import copy
 import unittest
 
-from test_validation import virtual_config
+from test_validation import limits, virtual_config
 
 from hobot_scapy_automotive.errors import SidecarError
 from hobot_scapy_automotive.replay import (
     UnavailableTransport,
+    _wire_uds_service,
     build_replay_plan,
     execute_replay_plan,
 )
@@ -115,6 +116,78 @@ class ResponseStateReplayTests(unittest.TestCase):
         self.assertEqual(result["executed_events"], 3)
         self.assertTrue(result["completed"])
         self.assertEqual(len(result["transcript_sha256"]), 64)
+
+    @staticmethod
+    def _single_send_plan(payload_hex: str, *, protocol: str = "uds") -> dict:
+        return build_replay_plan(
+            {
+                "protocol": protocol,
+                "mode": "virtual_can",
+                "deterministic_seed": 1,
+                "events": [
+                    {
+                        "sequence": 0,
+                        "protocol": protocol,
+                        "direction": "transmit",
+                        "offset_micros": 0,
+                        "payload_hex": payload_hex,
+                        "metadata": {"arbitration_id": 0x7E0},
+                    }
+                ],
+            }
+        )
+
+    def test_wire_service_is_iso_tp_framing_aware(self) -> None:
+        self.assertEqual(_wire_uds_service("0211"), 0x11)
+        self.assertEqual(_wire_uds_service("221234"), 0x22)
+        self.assertEqual(_wire_uds_service("11"), 0x11)
+        self.assertIsNone(_wire_uds_service("03"))
+
+    def test_single_frame_service_is_read_after_the_pci_byte(self) -> None:
+        # PCI 0x02 + service 0x10 (allowlisted): the PCI byte must NOT be treated
+        # as the service, so this transmits.
+        allowed = self._single_send_plan("0210")
+        transport = FakeTransport()
+        result = execute_replay_plan(virtual_config(), allowed, transport, sleeper=lambda _s: None)
+        self.assertEqual(result["executed_events"], 1)
+        # PCI 0x02 + service 0x11 (ECU reset, not allowlisted): rejected on the
+        # framed service, not the PCI byte.
+        denied = self._single_send_plan("0211")
+        with self.assertRaises(SidecarError) as ctx:
+            execute_replay_plan(virtual_config(), denied, FakeTransport(), sleeper=lambda _s: None)
+        self.assertEqual(ctx.exception.code, "service_not_allowed")
+
+    def test_service_check_applies_regardless_of_protocol_label(self) -> None:
+        # A can-labelled transmit is still service-checked (no protocol==uds bypass):
+        # payload 0211 frames service 0x11 (not allowlisted) -> rejected.
+        config = virtual_config()
+        config["protocol"] = "can"
+        plan = self._single_send_plan("0211", protocol="can")
+        with self.assertRaises(SidecarError) as ctx:
+            execute_replay_plan(config, plan, FakeTransport(), sleeper=lambda _s: None)
+        self.assertEqual(ctx.exception.code, "service_not_allowed")
+
+    def test_peak_rate_burst_is_rejected(self) -> None:
+        # Front-loaded burst passes the average check but must fail the peak check.
+        events = [
+            {
+                "sequence": index,
+                "protocol": "uds",
+                "direction": "transmit",
+                "offset_micros": 2_000_000 if index == 3 else 0,
+                "payload_hex": "2210",
+                "metadata": {"arbitration_id": 0x7E0},
+            }
+            for index in range(4)
+        ]
+        plan = build_replay_plan(
+            {"protocol": "uds", "mode": "virtual_can", "deterministic_seed": 1, "events": events}
+        )
+        config = virtual_config()
+        config["limits"] = limits(max_rate_per_second=2)
+        with self.assertRaises(SidecarError) as ctx:
+            execute_replay_plan(config, plan, FakeTransport(), sleeper=lambda _s: None)
+        self.assertEqual(ctx.exception.code, "limit_exceeded")
 
     def test_replay_never_has_an_implicit_live_transport(self) -> None:
         plan = build_replay_plan(
