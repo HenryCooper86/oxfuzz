@@ -53,6 +53,17 @@ if [[ "$OS" == "Darwin" ]]; then
   done <<< "$(find "$BUNDLE/dmg" -maxdepth 1 -name '*.dmg' -type f -print 2>/dev/null || true)"
 fi
 
+# Optional companion service: bring up the local DefectDojo the app integrates
+# with, as part of preparing the tool's environment. Best-effort and idempotent
+# (a fast no-op once it is running); never fails the build. Skip with
+# HF_SKIP_DEFECTDOJO=1.
+if [[ "${HF_SKIP_DEFECTDOJO:-0}" != "1" ]]; then
+  echo ""
+  echo "=== Setting up local DefectDojo (best-effort; set HF_SKIP_DEFECTDOJO=1 to skip) ==="
+  ./scripts/setup-defectdojo.sh \
+    || echo "DefectDojo setup did not complete (non-fatal); run ./scripts/setup-defectdojo.sh later."
+fi
+
 echo ""
 echo "=== Build complete ==="
 echo "Artifacts:"
