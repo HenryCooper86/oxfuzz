@@ -91,17 +91,20 @@ impl DiagnosticsRecorder {
         let cost = self.cost_of(model, usage);
         let mut trace = Trace::new(self.session_id, op);
         let trace_id = trace.id;
-        trace.complete();
-        if let Err(e) = self.store.insert_trace(trace).await {
-            tracing::warn!("diagnostics insert_trace failed: {e}");
-            return;
-        }
         let mut obs = Observation::new(trace_id, ObservationType::Generation, op);
         obs.model = Some(model.to_owned());
         obs.input_tokens = u64::from(usage.input_tokens);
         obs.output_tokens = u64::from(usage.output_tokens);
         obs.cost_usd = cost;
         obs.complete();
+        // Fold the generation's usage into the trace so the persisted trace
+        // row carries real token/cost/duration totals, not zeros.
+        trace.record_usage(&obs);
+        trace.complete();
+        if let Err(e) = self.store.insert_trace(trace).await {
+            tracing::warn!("diagnostics insert_trace failed: {e}");
+            return;
+        }
         if let Err(e) = self.store.insert_observation(obs).await {
             tracing::warn!("diagnostics insert_observation failed: {e}");
         }
@@ -179,6 +182,31 @@ mod tests {
         assert!((s.cost_usd - 6.0).abs() < 1e-9, "cost was {}", s.cost_usd);
         assert_eq!(s.by_model.len(), 2);
         assert_eq!(s.by_model[0].model, "gpt"); // sorted by cost desc
+    }
+
+    #[tokio::test]
+    async fn recorded_trace_carries_usage_totals() {
+        let store = Arc::new(InMemoryTraceStore::new());
+        let mut costs = HashMap::new();
+        costs.insert("gpt".to_owned(), (1.0, 2.0)); // $1/1k in, $2/1k out
+        let rec = DiagnosticsRecorder::with_store(costs, store.clone());
+
+        rec.record("harness_draft", "gpt", &usage(1000, 500)).await;
+
+        let traces = store.list_traces(None, None, 10).await.expect("list");
+        assert_eq!(traces.len(), 1);
+        let trace = &traces[0];
+        // The persisted trace row must carry the generation's totals, not 0.
+        assert_eq!(trace.total_input_tokens, 1000);
+        assert_eq!(trace.total_output_tokens, 500);
+        assert!(
+            (trace.total_cost_usd - 2.0).abs() < 1e-9,
+            "cost was {}",
+            trace.total_cost_usd
+        );
+        // LLM wait time is folded in from the generation observation and can
+        // never exceed the trace's total wall-clock duration.
+        assert!(trace.llm_duration_ms <= trace.total_duration_ms.unwrap());
     }
 
     #[tokio::test]

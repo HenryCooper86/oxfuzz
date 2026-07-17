@@ -10,8 +10,9 @@
 //! - [`ScheduleExecutor`] — trigger-to-workflow execution translation
 //! - [`SchedulerManager`] — top-level async service that runs the trigger loop
 //!
-//! Scheduled tasks execute as standard orchestrated workflows,
-//! supporting parameterized scheduling via `ParameterSchema`.
+//! Scheduled tasks execute as standard orchestrated workflows, with parameter
+//! resolution chaining schema defaults, static schedule overrides, and
+//! trigger-time expressions (see [`params`]).
 
 pub mod config;
 pub mod cron;

@@ -405,6 +405,10 @@ impl AgentBackend for ServiceContainer {
     fn skills_dir(&self) -> PathBuf {
         skill_definitions_dir()
     }
+
+    fn agents_dir(&self) -> PathBuf {
+        agent_definitions_dir()
+    }
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ClassifiedError> {

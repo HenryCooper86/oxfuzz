@@ -41,14 +41,6 @@ const TOOL_USAGE: &[(&str, &str)] = &[
     ),
 ];
 
-/// The full tool catalog (all tools), for the default/orchestrator agent.
-pub const TOOL_CATALOG: &str = r#"Available tools (call one per step):
-- discover {"lang": "c|cpp|rust|go|python"} -> ranked fuzzing targets in the project
-- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|clusterfuzzlite", "lang": "c"} -> draft, compile, and smoke-test a harness; a human must promote it
-- run {"target": "<symbol>", "engine": "libfuzzer", "duration_secs": 60} -> run a fuzz campaign (requires a promoted harness)
-- triage {"target": "<symbol>"} -> ingest and deduplicate crash artifacts
-- corpus {"target": "<symbol>", "op": "seed|grow|prune|list"} -> manage the corpus"#;
-
 /// Build a tool catalog limited to `allowed` tools, for an agent that may only
 /// call a subset. Unknown names are ignored; an empty result means no tools.
 #[must_use]
