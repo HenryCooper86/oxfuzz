@@ -735,6 +735,60 @@ impl hf_core::provider::ProviderPool for MockPool {
     }
 }
 
+/// Build a one-provider pool backed by the shared mock provider (the
+/// `hf-test-utils` mock always carries the id "mock-provider").
+fn mock_pool() -> Arc<dyn hf_core::provider::ProviderPool> {
+    let provider: Arc<dyn hf_core::provider::LlmProvider> =
+        Arc::new(hf_test_utils::mock_provider::MockProvider::fixed("ok"));
+    Arc::new(hf_provider::ProviderPoolImpl::from_providers(
+        vec![provider],
+        &hf_provider::ProviderPoolConfig::default(),
+    ))
+}
+
+#[tokio::test]
+async fn thaw_provider_requires_a_configured_pool() {
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    let err = container.thaw_provider("mock-provider").await.unwrap_err();
+
+    assert!(
+        matches!(err, hf_service::ClassifiedError::Provider(_)),
+        "expected a provider error when no pool is configured, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn thaw_provider_rejects_an_unknown_provider_id() {
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(mock_pool()));
+
+    let err = container
+        .thaw_provider("no-such-provider")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, hf_service::ClassifiedError::Validation(_)),
+        "an unknown id is a client error, not a provider failure: got {err}"
+    );
+    assert!(err.to_string().contains("no-such-provider"));
+}
+
+#[tokio::test]
+async fn thaw_provider_recovers_a_frozen_provider() {
+    let pool = mock_pool();
+    let pid = hf_core::types::ProviderId::from_string("mock-provider");
+    pool.freeze(&pid, "test freeze".to_owned()).await;
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(pool));
+
+    assert!(container.provider_statuses().await[0].is_frozen);
+    container.thaw_provider("mock-provider").await.unwrap();
+    assert!(
+        !container.provider_statuses().await[0].is_frozen,
+        "a provider passing the health check must be thawed"
+    );
+}
+
 #[tokio::test]
 async fn session_turn_lock_is_shared_per_session_across_clones() {
     use hf_core::types::SessionId;

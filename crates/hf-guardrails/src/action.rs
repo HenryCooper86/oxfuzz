@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 /// A privileged operation the agent or service may attempt. Guardrails assess
 /// each action's risk before it executes (AGENTS.md 2.5 / 2.12).
+///
+/// `ShellExec` is a deliberate deny sentinel and `WriteHostFile` is reserved
+/// for a future host-write tool: neither is wired to a service entry point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
