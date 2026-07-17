@@ -23,37 +23,74 @@ pub fn build_showmap_args(binary: &str, input: &str) -> Vec<String> {
 }
 
 /// Compute a coverage fingerprint from `afl-showmap` output: the deterministic
-/// hash of the sorted, de-duplicated set of edge ids. Returns `None` when the
-/// output contains no edges (e.g. the binary failed to run), so the caller can
-/// fall back to content hashing rather than collapsing distinct inputs under an
-/// empty-coverage key.
+/// hash of the sorted, de-duplicated set of `(edge_id, hit-count bucket)` tuples.
+/// Returns `None` when the output contains no edges (e.g. the binary failed to
+/// run), so the caller can fall back to content hashing rather than collapsing
+/// distinct inputs under an empty-coverage key.
+///
+/// The hit count is folded in via AFL's own bucketing (`classify_count`) rather
+/// than dropped: AFL treats `(edge, bucket)` as the coverage tuple, so two inputs
+/// exercising the same edges a different number of times are genuinely distinct.
+/// Keying only on the edge set would let `corpus prune` collapse them and drop an
+/// input AFL considers uniquely covering.
 #[must_use]
 pub fn coverage_hash(showmap_stdout: &str) -> Option<String> {
-    let mut edges: Vec<u64> = showmap_stdout.lines().filter_map(parse_edge_id).collect();
-    if edges.is_empty() {
+    let mut tuples: Vec<(u64, u8)> = showmap_stdout.lines().filter_map(parse_edge).collect();
+    if tuples.is_empty() {
         return None;
     }
-    edges.sort_unstable();
-    edges.dedup();
-    // FNV-1a over the sorted edge ids: deterministic and dependency-free (the
-    // key only needs to be equal for equal coverage sets, not cryptographic).
+    tuples.sort_unstable();
+    tuples.dedup();
+    // FNV-1a over the sorted (edge, bucket) tuples: deterministic and
+    // dependency-free (the key only needs to be equal for equal coverage, not
+    // cryptographic).
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for edge in edges {
+    let mut fold = |byte: u8| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for (edge, bucket) in tuples {
         for byte in edge.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            fold(byte);
         }
+        fold(bucket);
     }
     Some(format!("cov:{hash:016x}"))
 }
 
-/// Parse the edge id from an `afl-showmap` line of the form `edge_id:hit_count`.
-fn parse_edge_id(line: &str) -> Option<u64> {
-    let key = line.split(':').next()?.trim();
-    if key.is_empty() {
+/// Parse `(edge_id, hit-count bucket)` from an `afl-showmap` line of the form
+/// `edge_id:hit_count`. A missing/unparsable count is treated as a single hit.
+fn parse_edge(line: &str) -> Option<(u64, u8)> {
+    let mut parts = line.splitn(2, ':');
+    let edge = parts.next()?.trim();
+    if edge.is_empty() {
         return None;
     }
-    key.parse::<u64>().ok()
+    let edge = edge.parse::<u64>().ok()?;
+    let count = parts
+        .next()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(1);
+    Some((edge, classify_count(count)))
+}
+
+/// Map a raw hit count to AFL++'s coverage bucket. Mirrors AFL's
+/// `count_class_lookup`: a monotonic set of power-of-two buckets so small
+/// differences in how often an edge is hit do not explode the tuple space, while
+/// meaningful jumps (1 vs 2 vs many) stay distinct.
+#[must_use]
+fn classify_count(count: u64) -> u8 {
+    match count {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        4..=7 => 8,
+        8..=15 => 16,
+        16..=31 => 32,
+        32..=127 => 64,
+        _ => 128,
+    }
 }
 
 #[cfg(test)]
@@ -71,11 +108,23 @@ mod tests {
     }
 
     #[test]
-    fn identical_edge_sets_hash_equally_regardless_of_order_or_counts() {
-        let a = "000001:1\n000002:3\n000003:1\n";
-        // Same edges, different order and hit counts.
-        let b = "000003:9\n000001:2\n000002:1\n";
+    fn identical_tuples_hash_equally_regardless_of_order() {
+        let a = "000001:1\n000002:2\n000003:1\n";
+        // Same (edge, count) tuples, different line order.
+        let b = "000003:1\n000001:1\n000002:2\n";
         assert_eq!(coverage_hash(a), coverage_hash(b));
+    }
+
+    #[test]
+    fn counts_in_the_same_afl_bucket_hash_equally() {
+        // Counts 4 and 7 both fall in AFL bucket 8, so they are equivalent.
+        assert_eq!(coverage_hash("1:4\n"), coverage_hash("1:7\n"));
+    }
+
+    #[test]
+    fn same_edges_different_buckets_hash_differently() {
+        // Same edge, hit once vs twice -> different AFL tuples, so distinct keys.
+        assert_ne!(coverage_hash("1:1\n"), coverage_hash("1:2\n"));
     }
 
     #[test]
