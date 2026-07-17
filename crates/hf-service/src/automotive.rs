@@ -684,23 +684,31 @@ impl ServiceContainer {
         // fail-closed -- a claimed approval whose operation later errors requires
         // a fresh approval (no auto-retry against real hardware).
         if prepared.mode == AutomotiveMode::PhysicalBench {
-            if let Some(approval) = &prepared.approval {
-                let claimed = store
-                    .consume_automotive_approval(
-                        &approval.approval_id,
-                        &approval.scope_sha256,
-                        operation_id,
-                        &prepared.project_root.display().to_string(),
-                        Utc::now(),
-                    )
-                    .await?;
-                if !claimed {
-                    return Err(ClassifiedError::Validation(
-                        "physical automotive bench approval has already been used; each \
-                         physical transmission requires a fresh human approval"
-                            .to_owned(),
-                    ));
-                }
+            // Fail closed: a physical-bench operation must never reach execution
+            // without approval evidence to claim. preflight guarantees this, but the
+            // single-use gate does not depend on that invariant holding.
+            let approval = prepared.approval.as_ref().ok_or_else(|| {
+                ClassifiedError::Validation(
+                    "physical automotive bench operation reached execution without approval \
+                     evidence"
+                        .to_owned(),
+                )
+            })?;
+            let claimed = store
+                .consume_automotive_approval(
+                    &approval.approval_id,
+                    &approval.scope_sha256,
+                    operation_id,
+                    &prepared.project_root.display().to_string(),
+                    Utc::now(),
+                )
+                .await?;
+            if !claimed {
+                return Err(ClassifiedError::Validation(
+                    "physical automotive bench approval has already been used; each \
+                     physical transmission requires a fresh human approval"
+                        .to_owned(),
+                ));
             }
         }
 
@@ -870,7 +878,13 @@ fn operation_summary(
         ended_at: record.ended_at,
         transcript_sha256: record.transcript_hash,
         artifact_dir: record.artifact_dir,
-        error: record.error,
+        // Redact absolute host/workspace paths: this summary is a "redacted history
+        // item" returned over the REST API, and execution-phase failures can embed
+        // absolute artifact paths.
+        error: record
+            .error
+            .as_deref()
+            .map(crate::automotive_report::shareable_error),
         state_signatures,
     })
 }
@@ -2264,6 +2278,33 @@ fn validate_physical_policy(
     Ok(())
 }
 
+/// The byte at `index` of a lowercase-hex payload, if present.
+fn payload_byte(payload_hex: &str, index: usize) -> Option<u8> {
+    let start = index * 2;
+    payload_hex
+        .get(start..start + 2)
+        .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+}
+
+/// The UDS service a physical send actually puts on the wire, derived from the
+/// payload bytes -- never the spoofable `service` metadata field -- and aware of
+/// ISO-TP single-frame framing, where byte 0 is the PCI (`0x0L`, length 1..=7)
+/// and the service is byte 1. For any other first byte the service is byte 0.
+///
+/// This is deliberately protocol-label-independent: a dangerous UDS request must
+/// not evade the denylist by being labelled `can`/`iso_tp`/etc., and the service
+/// byte must not be confused with the ISO-TP PCI. Returns `None` only for an
+/// undecodable/too-short payload.
+fn wire_uds_service(payload_hex: &str) -> Option<u8> {
+    let first = payload_byte(payload_hex, 0)?;
+    if first & 0xf0 == 0x00 && (1..=7).contains(&(first & 0x0f)) {
+        // ISO-TP single frame: the service follows the PCI byte.
+        payload_byte(payload_hex, 1)
+    } else {
+        Some(first)
+    }
+}
+
 fn replay_allowlists(plan: &ReplayPlan) -> Result<(BTreeSet<u32>, BTreeSet<u8>), ClassifiedError> {
     let mut arbitration_ids = BTreeSet::new();
     let mut services = BTreeSet::new();
@@ -2287,26 +2328,16 @@ fn replay_allowlists(plan: &ReplayPlan) -> Result<(BTreeSet<u32>, BTreeSet<u8>),
             ));
         }
         arbitration_ids.insert(arbitration);
-        if plan.protocol == AutomotiveProtocol::Uds {
-            let service = step
-                .message
-                .fields
-                .get("service")
-                .and_then(|value| parse_integer(value))
-                .and_then(|value| u8::try_from(value).ok())
-                .or_else(|| {
-                    step.message
-                        .payload_hex
-                        .get(..2)
-                        .and_then(|value| u8::from_str_radix(value, 16).ok())
-                })
-                .ok_or_else(|| {
-                    ClassifiedError::Validation(
-                        "every transmitted UDS message needs a service id".to_owned(),
-                    )
-                })?;
-            services.insert(service);
-        }
+        // Derive the service for EVERY transmitted frame regardless of protocol
+        // label, from the wire bytes (framing-aware), so the service allowlist and
+        // dangerous-service denylist cannot be evaded by relabelling the protocol
+        // or by hiding the service behind the ISO-TP PCI byte.
+        let service = wire_uds_service(&step.message.payload_hex).ok_or_else(|| {
+            ClassifiedError::Validation(
+                "every transmitted automotive frame needs a decodable service byte".to_owned(),
+            )
+        })?;
+        services.insert(service);
     }
     Ok((arbitration_ids, services))
 }
@@ -2320,7 +2351,8 @@ fn build_execution_config(
     let AutomotiveCommand::ExecuteReplay { mode, plan } = command else {
         return Ok(None);
     };
-    let (arbitration_ids, services) = replay_allowlists(plan)?;
+    // Validate the plan (arbitration/service extraction, ranges) as a side effect.
+    let (plan_arbitration_ids, plan_services) = replay_allowlists(plan)?;
     let (physical_enabled, interface, interface_allowlist) = match mode {
         ModeConfig::OfflinePcap => (false, None, Vec::new()),
         ModeConfig::VirtualCan { interface } => (
@@ -2334,13 +2366,35 @@ fn build_execution_config(
             settings.physical_bench.interfaces.clone(),
         ),
     };
+    // For physical bench, the config allowlists are the FULL approved policy, not the
+    // plan's own ids/services. The sidecar both validates each frame against these and
+    // recomputes the approval scope hash from them (`physical_replay_scope_sha256`), so
+    // they must match `approval_scope_hash` (which hashes the policy) -- otherwise the
+    // single-use approval is consumed and the sidecar then rejects on a scope mismatch,
+    // and the sidecar is not an independent policy check. Other modes carry the
+    // plan-derived sets (there is no physical policy allowlist for them).
+    let (arbitration_id_allowlist, service_allowlist): (Vec<u32>, Vec<u8>) = match mode {
+        ModeConfig::PhysicalBench { .. } => {
+            let mut arbitration = settings.physical_bench.arbitration_ids.clone();
+            arbitration.sort_unstable();
+            arbitration.dedup();
+            let mut uds = settings.physical_bench.uds_services.clone();
+            uds.sort_unstable();
+            uds.dedup();
+            (arbitration, uds)
+        }
+        _ => (
+            plan_arbitration_ids.iter().copied().collect(),
+            plan_services.iter().copied().collect(),
+        ),
+    };
     let mut value = serde_json::json!({
         "mode": mode_id(mode.mode()),
         "protocol": protocol_id(plan.protocol),
         "physical_enabled": physical_enabled,
         "interface_allowlist": interface_allowlist,
-        "arbitration_id_allowlist": arbitration_ids,
-        "service_allowlist": services,
+        "arbitration_id_allowlist": arbitration_id_allowlist,
+        "service_allowlist": service_allowlist,
         "allow_dangerous_services": settings.physical_bench.allow_dangerous_services,
         "limits": limits,
     });
@@ -2458,7 +2512,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        approval_scope_hash, operation_limits, sha256_bytes, verify_result_artifacts,
+        approval_scope_hash, build_execution_config, operation_limits, sha256_bytes,
+        validate_physical_policy, verify_result_artifacts, wire_uds_service,
         AutomotiveApprovalEvidence, AutomotiveCommand, AutomotiveOperationRequest,
         AutomotiveStateArtifactSource, AutomotiveStatePromotionRequest, REQUEST_EVIDENCE_FILE,
     };
@@ -3238,6 +3293,87 @@ mod tests {
             1,
             "no second transmission fired on the reused approval"
         );
+    }
+
+    #[test]
+    fn wire_service_is_framing_aware_and_protocol_independent() {
+        // ISO-TP single frame: byte 0 is the PCI (0x02 = length 2), the service is
+        // byte 1 (0x11 = ECU reset), NOT the PCI byte.
+        assert_eq!(wire_uds_service("0211"), Some(0x11));
+        // A non-single-frame first byte is itself the service.
+        assert_eq!(wire_uds_service("221234"), Some(0x22));
+        assert_eq!(wire_uds_service("11"), Some(0x11));
+        // Looks like a single-frame PCI but no service byte follows.
+        assert_eq!(wire_uds_service("03"), None);
+    }
+
+    #[test]
+    fn dangerous_service_is_denied_even_when_the_plan_is_labelled_non_uds() {
+        // A CAN-labelled plan that frames a dangerous UDS service (ECU reset) must be
+        // rejected: the denylist is protocol-label independent and ISO-TP framing aware,
+        // so it cannot be evaded by mislabelling the protocol or hiding the service
+        // behind the PCI byte.
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        settings.physical_bench.uds_services = vec![0x11]; // allowlisted, but...
+        settings.physical_bench.allow_dangerous_services = false; // ...denylist wins
+        let plan = ReplayPlan {
+            protocol: AutomotiveProtocol::Can,
+            mode: AutomotiveMode::PhysicalBench,
+            deterministic_seed: 1,
+            steps: vec![ReplayStep {
+                sequence: 0,
+                delay_micros: 0,
+                action: ReplayAction::Send,
+                message: ProtocolMessage {
+                    protocol: AutomotiveProtocol::Can,
+                    payload_hex: "0211".to_owned(),
+                    fields: BTreeMap::from([("arbitration_id".to_owned(), "0x7e0".to_owned())]),
+                },
+            }],
+        };
+        let limits = operation_limits(&settings).unwrap();
+        let err =
+            validate_physical_policy("can0", "id", &plan, None, &settings.physical_bench, &limits)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("dangerous"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn physical_execution_config_carries_the_full_policy_allowlists() {
+        // The config the sidecar validates against and scope-hashes must be the full
+        // approved policy (matching approval_scope_hash), not just the plan's own ids,
+        // so a plan narrower than the policy does not diverge the two scope hashes.
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        settings.physical_bench.arbitration_ids = vec![0x7e8, 0x7e0]; // broader than the plan
+        settings.physical_bench.uds_services = vec![0x3e, 0x22];
+        let command = AutomotiveCommand::ExecuteReplay {
+            mode: ModeConfig::PhysicalBench {
+                interface: "can0".to_owned(),
+                approval_id: "id".to_owned(),
+            },
+            plan: uds_replay_plan(AutomotiveMode::PhysicalBench), // uses only 0x7e0 / 0x22
+        };
+        let limits = operation_limits(&settings).unwrap();
+        let cfg_json = build_execution_config(&command, None, &settings, &limits)
+            .unwrap()
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&cfg_json).unwrap();
+        assert_eq!(
+            cfg["arbitration_id_allowlist"],
+            serde_json::json!([0x7e0, 0x7e8])
+        );
+        assert_eq!(cfg["service_allowlist"], serde_json::json!([0x22, 0x3e]));
     }
 
     #[tokio::test]

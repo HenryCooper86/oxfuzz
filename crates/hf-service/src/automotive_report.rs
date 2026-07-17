@@ -881,7 +881,7 @@ fn escape_inline(value: &str) -> String {
         .replace('|', "\\|")
 }
 
-fn shareable_error(value: &str) -> String {
+pub(crate) fn shareable_error(value: &str) -> String {
     value
         .split_whitespace()
         .map(|token| {
