@@ -261,6 +261,11 @@ enum Commands {
         #[command(subcommand)]
         op: Option<ProvidersOp>,
     },
+    /// Guardrail policy audit trail.
+    Policy {
+        #[command(subcommand)]
+        op: PolicyOp,
+    },
     /// Sandboxed automotive protocol analysis and replay preparation.
     #[cfg(feature = "automotive-scapy")]
     Automotive {
@@ -427,6 +432,15 @@ enum ProvidersOp {
     Thaw {
         /// Provider id (see `hobot-fuzz providers`).
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyOp {
+    /// List recorded guardrail authorization decisions, newest first.
+    Decisions {
+        #[arg(long, default_value = "50")]
+        limit: usize,
     },
 }
 
@@ -771,6 +785,30 @@ async fn cmd_providers(op: Option<ProvidersOp>) -> anyhow::Result<()> {
         Some(ProvidersOp::Thaw { id }) => {
             container.thaw_provider(&id).await?;
             println!("Provider '{id}' passed the health check and was thawed.");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_policy(op: PolicyOp) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    match op {
+        PolicyOp::Decisions { limit } => {
+            let decisions = container.policy_decisions(limit).await?;
+            if decisions.is_empty() {
+                println!("No guardrail decisions recorded.");
+            }
+            for d in decisions {
+                let detail = d.detail.map(|s| format!("  ({s})")).unwrap_or_default();
+                println!(
+                    "{}  {}  {}  {}  {}{detail}",
+                    d.decided_at.to_rfc3339(),
+                    d.decision,
+                    d.risk_tier,
+                    d.action,
+                    d.origin,
+                );
+            }
         }
     }
     Ok(())
@@ -1560,6 +1598,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Schedule { op } => cmd_schedule(op).await?,
         Commands::Session { op } => cmd_session(op).await?,
         Commands::Providers { op } => cmd_providers(op).await?,
+        Commands::Policy { op } => cmd_policy(op).await?,
         #[cfg(feature = "automotive-scapy")]
         Commands::Automotive { op } => cmd_automotive(op).await?,
     }
@@ -1717,5 +1756,34 @@ mod providers_tests {
         assert!(lines[0].contains("requests=12"));
         assert!(lines[1].contains("FROZEN") && lines[1].contains("anthropic-main"));
         assert!(lines[1].contains("invalid api key"));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands, PolicyOp};
+
+    #[test]
+    fn policy_decisions_parses_with_a_bounded_limit() {
+        let cli = Cli::try_parse_from(["hobot-fuzz", "policy", "decisions"]).unwrap();
+        let Commands::Policy {
+            op: PolicyOp::Decisions { limit },
+        } = cli.command
+        else {
+            panic!("expected policy decisions");
+        };
+        assert_eq!(limit, 50);
+
+        let cli =
+            Cli::try_parse_from(["hobot-fuzz", "policy", "decisions", "--limit", "5"]).unwrap();
+        let Commands::Policy {
+            op: PolicyOp::Decisions { limit },
+        } = cli.command
+        else {
+            panic!("expected policy decisions");
+        };
+        assert_eq!(limit, 5);
     }
 }

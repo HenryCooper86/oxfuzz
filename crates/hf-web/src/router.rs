@@ -364,6 +364,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
             post(effective_auto_revert_policy),
         )
         .route("/audit/auto-revert", post(auto_revert_events))
+        .route("/policy/decisions", get(policy_decisions))
         .route(
             "/projects/auto-revert/set",
             post(set_project_auto_revert_override),
@@ -966,6 +967,24 @@ async fn auto_revert_events(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(events)))
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyDecisionsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn policy_decisions(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PolicyDecisionsQuery>,
+) -> ApiResult<serde_json::Value> {
+    let decisions = state
+        .container
+        .policy_decisions(q.limit.unwrap_or(200))
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(decisions)))
 }
 
 async fn effective_auto_revert_policy(
