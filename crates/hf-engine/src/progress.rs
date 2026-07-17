@@ -11,19 +11,11 @@ use uuid::Uuid;
 pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
     let lower = line.to_ascii_lowercase();
     // Check coverage first (libFuzzer lines contain both "cov:" and "exec/s").
-    if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
-        if let Some(edges) =
-            parse_number_near(line, "cov").or_else(|| parse_number_near(line, "edges"))
-        {
-            return Some(FuzzProgress::EdgesCovered(edges));
-        }
+    if let Some(edges) = edges_from_line(line) {
+        return Some(FuzzProgress::EdgesCovered(edges));
     }
-    if lower.contains("execs/sec") || lower.contains("exec/s") || lower.contains("execs:") {
-        if let Some(eps) =
-            parse_number_near(line, "execs").or_else(|| parse_number_near(line, "exec"))
-        {
-            return Some(FuzzProgress::ExecsPerSec(eps as f64));
-        }
+    if let Some(eps) = execs_from_line(line) {
+        return Some(FuzzProgress::ExecsPerSec(eps as f64));
     }
     if is_finding_signal(&lower) {
         return Some(FuzzProgress::CrashesFound(1));
@@ -43,13 +35,13 @@ pub fn parse_progress_line(line: &str) -> Option<FuzzProgress> {
 /// as a crash event -- it reports the absolute crash count instead.
 #[must_use]
 pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
-    let lower = line.to_ascii_lowercase();
-    if !(lower.contains("executed") && lower.contains("cover")) {
-        return None;
-    }
-    let cover = parse_number_near(line, "cover")?;
-    let executed = parse_number_near(line, "executed")?;
-    let crashes = parse_number_near(line, "crashes").unwrap_or(0);
+    // Require the real status shape: an `executed N` counter and a `cover N`
+    // counter, each matched at a word boundary. A bare `contains("cover")`
+    // would fire on `discovered`/`recovered` (both contain "cover") and read a
+    // wrong number into peak coverage.
+    let cover = number_after_word(line, "cover")?;
+    let executed = number_after_word(line, "executed")?;
+    let crashes = number_after_word(line, "crashes").unwrap_or(0);
     Some((cover, executed, crashes))
 }
 
@@ -62,17 +54,11 @@ pub fn parse_syzkaller_status(line: &str) -> Option<(u64, u64, u64)> {
 pub fn parse_progress_events(line: &str) -> Vec<FuzzProgress> {
     let lower = line.to_ascii_lowercase();
     let mut events = Vec::new();
-    if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
-        if let Some(edges) =
-            parse_number_near(line, "cov").or_else(|| parse_number_near(line, "edges"))
-        {
-            events.push(FuzzProgress::EdgesCovered(edges));
-        }
+    if let Some(edges) = edges_from_line(line) {
+        events.push(FuzzProgress::EdgesCovered(edges));
     }
-    if lower.contains("exec/s") || lower.contains("execs/sec") || lower.contains("execs:") {
-        if let Some(eps) = parse_number_near(line, "exec") {
-            events.push(FuzzProgress::ExecsPerSec(eps as f64));
-        }
+    if let Some(eps) = execs_from_line(line) {
+        events.push(FuzzProgress::ExecsPerSec(eps as f64));
     }
     if is_finding_signal(&lower) {
         events.push(FuzzProgress::CrashesFound(1));
@@ -172,8 +158,7 @@ pub fn parse_coverage(stdout: &str, run_id: Uuid) -> CoverageReport {
     let mut edges = 0u64;
     let mut first_edges: Option<u64> = None;
     for line in stdout.lines() {
-        if let Some(n) = parse_number_near(line, "edges").or_else(|| parse_number_near(line, "cov"))
-        {
+        if let Some(n) = edges_from_line(line) {
             first_edges.get_or_insert(n);
             edges = edges.max(n);
         }
@@ -189,6 +174,68 @@ pub fn parse_coverage(stdout: &str, run_id: Uuid) -> CoverageReport {
         stagnation_secs: 0,
         new_edges_files: Vec::new(),
     }
+}
+
+/// Extract an edge/coverage count from a single stdout line, if it reports one.
+///
+/// Recognizes libFuzzer `cov: N`, honggfuzz `Coverage : edge: N`, and generic
+/// `edges: N`. Deliberately rejects honggfuzz's `Cov Update : 0 days ... ago`
+/// staleness line, which carries an elapsed duration (frequently 0) rather than
+/// a coverage count -- reading it would latch the first observed coverage at 0
+/// and inflate the per-run delta.
+fn edges_from_line(line: &str) -> Option<u64> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("cov update") {
+        return None;
+    }
+    if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
+        return parse_number_near(line, "cov").or_else(|| parse_number_near(line, "edges"));
+    }
+    None
+}
+
+/// Extract an execs/sec throughput from a single stdout line, if present.
+///
+/// Recognizes libFuzzer `exec/s: N` and `execs/sec`/`execs:`, honggfuzz
+/// `Speed : N/sec`, and AFL's `exec speed : N/sec`. Mirrors
+/// `hf-harness`'s `parse_execs_per_sec` so honggfuzz/AFL production runs report
+/// their real throughput instead of zero.
+fn execs_from_line(line: &str) -> Option<u64> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("exec/s") {
+        parse_number_near(line, "exec/s")
+    } else if lower.contains("execs") {
+        parse_number_near(line, "execs")
+    } else if lower.contains("speed") {
+        // honggfuzz "Speed : N/sec" and AFL "exec speed : N/sec" carry neither
+        // "exec/s" nor "execs", so without this branch their rate is invisible.
+        parse_number_near(line, "speed")
+    } else {
+        None
+    }
+}
+
+/// Find the `u64` that follows `word` used as a whole token: the character
+/// before it must not be alphanumeric and the character right after it must not
+/// be a letter. This prevents `cover` from matching inside `discovered`/
+/// `recovered` and reading a bogus number.
+fn number_after_word(line: &str, word: &str) -> Option<u64> {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(word) {
+        let start = from + rel;
+        let end = start + word.len();
+        let before_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_boundary = end >= bytes.len() || !bytes[end].is_ascii_alphabetic();
+        if before_boundary && after_boundary {
+            if let Some(n) = first_number(&lower[end..]) {
+                return Some(n);
+            }
+        }
+        from = end;
+    }
+    None
 }
 
 fn parse_number_near(line: &str, keyword: &str) -> Option<u64> {
@@ -289,6 +336,80 @@ mod tests {
         assert!(finding(
             "==1==ERROR: AddressSanitizer: heap-buffer-overflow"
         ));
+    }
+
+    #[test]
+    fn honggfuzz_and_afl_throughput_lines_yield_execs() {
+        // honggfuzz reports "Speed : N/sec"; AFL's UI prints "exec speed :
+        // N/sec". Neither contains "exec/s"/"execs", so without dedicated
+        // handling their throughput is lost and the run reports execs=0.
+        let honggfuzz = parse_progress_events("Speed : 246/sec [avg: 246]");
+        assert!(
+            honggfuzz.iter().any(
+                |e| matches!(e, FuzzProgress::ExecsPerSec(v) if (*v - 246.0).abs() < f64::EPSILON)
+            ),
+            "honggfuzz Speed line must yield execs/sec, got {honggfuzz:?}"
+        );
+        let afl = parse_progress_events("    exec speed : 1234/sec");
+        assert!(
+            afl.iter().any(
+                |e| matches!(e, FuzzProgress::ExecsPerSec(v) if (*v - 1234.0).abs() < f64::EPSILON)
+            ),
+            "AFL exec speed line must yield execs/sec, got {afl:?}"
+        );
+    }
+
+    #[test]
+    fn honggfuzz_cov_update_line_is_not_an_edge_sample() {
+        // "Cov Update : 0 days 00 hrs 00 mins 05 secs ago" is a staleness timer,
+        // not a coverage count: it must not emit EdgesCovered(0).
+        let stale = parse_progress_events("Cov Update : 0 days 00 hrs 00 mins 05 secs ago");
+        assert!(
+            !stale
+                .iter()
+                .any(|e| matches!(e, FuzzProgress::EdgesCovered(_))),
+            "Cov Update staleness line must not be read as coverage, got {stale:?}"
+        );
+        // The real honggfuzz coverage line still parses.
+        let cov = parse_progress_events("Coverage : edge: 123/4567 [2%] pc: 0 cmp: 0");
+        assert!(
+            cov.iter()
+                .any(|e| matches!(e, FuzzProgress::EdgesCovered(123))),
+            "the real Coverage line must still yield edges, got {cov:?}"
+        );
+    }
+
+    #[test]
+    fn cov_update_line_does_not_latch_first_edges_at_zero() {
+        use super::parse_coverage;
+        // The staleness line precedes the real coverage lines. Reading 0 from it
+        // would latch first_edges=0 and inflate delta_edges to the full peak.
+        let log = "Cov Update : 0 days 00 hrs 00 mins 05 secs ago\n\
+                   Coverage : edge: 100/4567 [2%]\n\
+                   Coverage : edge: 150/4567 [3%]\n";
+        let report = parse_coverage(log, uuid::Uuid::nil());
+        assert_eq!(
+            report.edges, 150,
+            "peak edges should be the max Coverage line"
+        );
+        assert_eq!(
+            report.delta_edges, 50,
+            "delta must be peak-minus-first-real-sample (150-100), not the full peak"
+        );
+    }
+
+    #[test]
+    fn discovered_line_is_not_a_syzkaller_status() {
+        // "discovered"/"recovered" both contain the substring "cover"; a bare
+        // substring gate misreads such a line as a status and pulls a wrong
+        // number into peak coverage. The word-boundary match must reject it.
+        assert_eq!(
+            parse_syzkaller_status(
+                "2025/01/02 03:04:05 discovered 42 new signals, executed 1000 programs"
+            ),
+            None,
+            "a `discovered` line must not parse as a syz-manager status line"
+        );
     }
 
     #[test]
