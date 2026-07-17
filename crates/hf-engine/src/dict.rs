@@ -18,8 +18,16 @@ use hf_core::engine::EngineKind;
 const MAX_TOKEN_LEN: usize = 128;
 
 /// Extract candidate dictionary tokens from C/C++ source: the decoded contents
-/// of double-quoted string literals (as raw bytes). Duplicates, empty strings,
-/// and implausibly long literals are dropped. Order is stable (first-seen).
+/// of double-quoted string literals, plus multi-byte hexadecimal integer
+/// constants (magic numbers). Duplicates, empty strings, and implausibly long
+/// literals are dropped. Order is stable (first-seen).
+///
+/// Hex constants like `0xCAFEBABE` are exactly the values targets compare against
+/// at numeric gates (`if (magic == 0xCAFEBABE)`); a dictionary token that carries
+/// those bytes lets the fuzzer splice past the gate. Because the compared type's
+/// endianness is unknown, each constant is emitted in both little- and big-endian
+/// byte order at its natural width (2/4/8 bytes). One-byte constants (`<= 0xff`)
+/// are skipped as noise -- the fuzzer reaches those trivially.
 ///
 /// This is a deliberately simple lexical scan, not a full parse: it tolerates
 /// the messy, possibly-invalid source of a target under test and never fails.
@@ -55,10 +63,80 @@ pub fn extract_tokens(source: &str) -> Vec<Vec<u8>> {
                     tokens.push(literal);
                 }
             }
+            // Hex integer literal `0x..`/`0X..`, but only when it starts a token
+            // (not embedded in an identifier like `var0x1`).
+            b'0' if matches!(bytes.get(i + 1), Some(b'x' | b'X'))
+                && (i == 0 || !is_ident_byte(bytes[i - 1])) =>
+            {
+                let (value, next) = scan_hex_literal(bytes, i);
+                i = next;
+                if let Some(value) = value.filter(|value| *value > 0xff) {
+                    for token in int_tokens(value) {
+                        if seen.insert(token.clone()) {
+                            tokens.push(token);
+                        }
+                    }
+                }
+            }
             _ => i += 1,
         }
     }
     tokens
+}
+
+/// Whether `b` can appear inside a C identifier (so `0x` after it is not a
+/// numeric literal).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Scan a `0x..`/`0X..` hex integer literal at `bytes[start]`, returning its
+/// value and the index past the digits (and any `u`/`l` suffix). `None` when it
+/// has no hex digits or overflows `u64`.
+fn scan_hex_literal(bytes: &[u8], start: usize) -> (Option<u64>, usize) {
+    let mut i = start + 2;
+    let mut value: u64 = 0;
+    let mut digits = 0usize;
+    let mut overflow = false;
+    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+        if digits >= 16 {
+            overflow = true;
+        }
+        value = value
+            .wrapping_mul(16)
+            .wrapping_add(u64::from(hex_val(bytes[i])));
+        digits += 1;
+        i += 1;
+    }
+    // Consume an integer suffix (uUlL) so it is not re-scanned as an identifier.
+    while i < bytes.len() && matches!(bytes[i], b'u' | b'U' | b'l' | b'L') {
+        i += 1;
+    }
+    if digits == 0 || overflow {
+        (None, i)
+    } else {
+        (Some(value), i)
+    }
+}
+
+/// Encode a magic constant as dictionary tokens: its bytes at the natural width
+/// (2/4/8) in both little- and big-endian order (the compared type's endianness
+/// is unknown). A palindromic encoding is emitted once.
+fn int_tokens(value: u64) -> Vec<Vec<u8>> {
+    let width = if value <= 0xffff {
+        2
+    } else if value <= 0xffff_ffff {
+        4
+    } else {
+        8
+    };
+    let little = value.to_le_bytes()[..width].to_vec();
+    let big = value.to_be_bytes()[8 - width..].to_vec();
+    if little == big {
+        vec![little]
+    } else {
+        vec![little, big]
+    }
 }
 
 /// Scan a C string literal starting at the opening quote `bytes[start] == '"'`,
@@ -219,6 +297,36 @@ mod tests {
         let tokens = extract_tokens(src);
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0], vec![0x89, b'P', b'N', b'G', b'\n']);
+    }
+
+    #[test]
+    fn extracts_hex_magic_constants_in_both_endiannesses() {
+        let tokens = extract_tokens("if (magic == 0xCAFEBABE) {}");
+        // 4-byte magic, little- and big-endian.
+        assert!(tokens.contains(&vec![0xbe, 0xba, 0xfe, 0xca]));
+        assert!(tokens.contains(&vec![0xca, 0xfe, 0xba, 0xbe]));
+    }
+
+    #[test]
+    fn hex_constant_width_follows_magnitude() {
+        // 2-byte value.
+        let tokens = extract_tokens("x = 0x8950;");
+        assert!(tokens.contains(&vec![0x50, 0x89]));
+        assert!(tokens.contains(&vec![0x89, 0x50]));
+        assert!(tokens.iter().all(|t| t.len() == 2));
+    }
+
+    #[test]
+    fn skips_trivial_and_embedded_hex() {
+        // <= 0xff is noise; an identifier-embedded 0x is not a literal.
+        assert!(extract_tokens("y = 0x05; z = var0x1234;").is_empty());
+    }
+
+    #[test]
+    fn hex_suffix_is_consumed_and_value_parsed() {
+        let tokens = extract_tokens("u32 v = 0xDEADu;");
+        assert!(tokens.contains(&vec![0xde, 0xad]));
+        assert!(tokens.contains(&vec![0xad, 0xde]));
     }
 
     #[test]
