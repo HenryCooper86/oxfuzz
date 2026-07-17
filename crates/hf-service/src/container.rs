@@ -4742,7 +4742,13 @@ impl ServiceContainer {
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
-            match hf_harness::draft(&candidate, engine, Box::new(provider)).await {
+            // Augment the prompt with related project context when this
+            // project has been indexed; empty on any failure, which renders
+            // the un-augmented prompt.
+            let related = crate::knowledge::harness_related_context(project, &candidate);
+            match hf_harness::draft_with_context(&candidate, engine, &related, Box::new(provider))
+                .await
+            {
                 Ok(draft) => Ok(draft),
                 // The LLM is configured but the call failed (provider down, auth,
                 // bad model, network). Degrade to the heuristic draft so the
@@ -5121,13 +5127,17 @@ impl ServiceContainer {
     /// degrades to the heuristic draft so generation can proceed.
     async fn draft_harness_source(
         &self,
+        project: &Path,
         candidate: &TargetCandidate,
         engine: EngineKind,
     ) -> String {
         if let Some(pool) = self.provider_pool() {
             let provider = LlmProviderBridge::new(pool)
                 .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
-            match hf_harness::draft(candidate, engine, Box::new(provider)).await {
+            let related = crate::knowledge::harness_related_context(project, candidate);
+            match hf_harness::draft_with_context(candidate, engine, &related, Box::new(provider))
+                .await
+            {
                 Ok(draft) => return draft.source,
                 Err(e) => tracing::warn!(
                     "LLM harness draft for '{}' failed ({e}); using heuristic draft",
@@ -5176,7 +5186,7 @@ impl ServiceContainer {
             .map_err(|e| ClassifiedError::Internal(format!("mkdir: {e}")))?;
         copy_project_sources(project, &workspace);
 
-        let source = self.draft_harness_source(&candidate, engine).await;
+        let source = self.draft_harness_source(project, &candidate, engine).await;
         self.compile_source_with_repair(&candidate, engine, lang, &workspace, source, max_repairs)
             .await
     }
@@ -6253,7 +6263,7 @@ impl ServiceContainer {
         // Watch edge readings for stagnation while forwarding every event.
         let feedback = CoverageFeedback::new(
             run_id,
-            crate::config::coverage_stagnation_secs(),
+            crate::config::coverage_stagnation_policy(),
             on_progress,
         );
         // Accumulate an intra-run coverage/throughput time series live, so the
@@ -6914,10 +6924,21 @@ impl ServiceContainer {
                     .filter(|l| !l.trim().is_empty())
                     .cloned()
                     .unwrap_or_else(|| crash.summary.clone());
-                match hf_crash::draft_report(
+                // Augment the report prompt with related project context when
+                // this project has been indexed; empty on any failure, which
+                // renders the un-augmented prompt.
+                let related =
+                    crate::knowledge::triage_related_context(project, target, &crash.summary);
+                let related_section = hf_prompt::render_related_context_section(&related);
+                match hf_crash::draft_report_with_context(
                     crash,
                     &log,
                     source_context.as_deref(),
+                    if related_section.is_empty() {
+                        None
+                    } else {
+                        Some(related_section.as_str())
+                    },
                     Box::new(bridge),
                 )
                 .await
@@ -8800,9 +8821,10 @@ pub struct RunSummary {
     pub crashes: u64,
     /// Authoritative reason the sandboxed engine stopped.
     pub termination: hf_core::runtime::CommandTermination,
-    /// A coverage-stagnation proposal surfaced during the run (e.g. regenerate
-    /// the harness), or `None` if coverage kept progressing. Lets a presentation
-    /// layer offer an iterate-next affordance.
+    /// The highest coverage-stagnation proposal tier surfaced during the run
+    /// (improve mutation inputs / regenerate the harness / stop the target),
+    /// or `None` if coverage kept progressing. Lets a presentation layer offer
+    /// an iterate-next affordance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stagnation: Option<hf_coverage::StagnationProposal>,
     /// Set when the auto-revert policy fired: this run's harness regressed
@@ -9138,41 +9160,45 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
 
 /// Coverage-guided feedback for a live fuzz run.
 ///
-/// Feeds each streamed edge reading into a [`hf_coverage::CoverageTracker`] and,
-/// the first time coverage has been flat for longer than `threshold_secs`,
-/// surfaces a [`StagnationProposal`](hf_coverage::StagnationProposal) to the user
-/// (a live log line now, and on the final [`RunSummary`]). This realizes the
-/// coverage feedback loop from `docs/design/corpus-coverage-design.md` §4: we
-/// detect stagnation and *propose* iterating (a new harness / dictionary / seed)
-/// rather than regenerating a harness autonomously, which would bypass the
-/// human-in-the-loop review that harness execution requires (AGENTS.md §2.12).
+/// Feeds each streamed edge reading into a [`hf_coverage::CoverageTracker`]
+/// and, while coverage stays flat, surfaces an escalating
+/// [`StagnationProposal`](hf_coverage::StagnationProposal) to the user: a live
+/// log line each time the proposal escalates a tier (improve the mutation
+/// inputs -> regenerate the harness -> stop the target), and the highest
+/// tier reached on the final [`RunSummary`]. This realizes the coverage
+/// feedback loop from `docs/design/corpus-coverage-design.md` §4: we detect
+/// stagnation and *propose* iterating rather than regenerating a harness
+/// autonomously, which would bypass the human-in-the-loop review that harness
+/// execution requires (AGENTS.md §2.12).
 struct CoverageFeedback<'a> {
     /// The run the streamed edge readings are measured for.
     run_id: Uuid,
     tracker: std::sync::Mutex<hf_coverage::CoverageTracker>,
-    /// Latched proposal: `Some` once surfaced, so it is proposed at most once.
+    /// Latched proposal: the highest tier surfaced so far, so each tier is
+    /// proposed at most once.
     proposal: std::sync::Mutex<Option<hf_coverage::StagnationProposal>>,
-    threshold_secs: u64,
+    policy: hf_coverage::StagnationPolicy,
     emit: &'a (dyn Fn(FuzzProgress) + Send + Sync),
 }
 
 impl<'a> CoverageFeedback<'a> {
     fn new(
         run_id: Uuid,
-        threshold_secs: u64,
+        policy: hf_coverage::StagnationPolicy,
         emit: &'a (dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Self {
         Self {
             run_id,
             tracker: std::sync::Mutex::new(hf_coverage::CoverageTracker::new()),
             proposal: std::sync::Mutex::new(None),
-            threshold_secs,
+            policy,
             emit,
         }
     }
 
-    /// Record a cumulative edge count from a stat pulse and, on the first
-    /// stagnation, emit and latch a proposal.
+    /// Record a cumulative edge count from a stat pulse and, whenever the
+    /// stagnation proposal escalates to a tier not yet surfaced, emit and
+    /// latch it.
     fn on_edges(&self, edges: u64) {
         let Ok(mut tracker) = self.tracker.lock() else {
             return;
@@ -9185,23 +9211,25 @@ impl<'a> CoverageFeedback<'a> {
             stagnation_secs: 0,
             new_edges_files: Vec::new(),
         });
-        // Only the first stagnation is surfaced.
-        if self.proposal.lock().is_ok_and(|p| p.is_some()) {
+        let Some(proposal) = hf_coverage::propose_action(&tracker, &self.policy) else {
+            return;
+        };
+        let Ok(mut slot) = self.proposal.lock() else {
+            return;
+        };
+        // Only a tier not yet surfaced is announced.
+        if slot.as_ref() == Some(&proposal) {
             return;
         }
-        if let Some(proposal) = hf_coverage::propose_action(&tracker, self.threshold_secs) {
-            (self.emit)(FuzzProgress::LogLine(format!(
-                "[coverage] no new edges for {}s -- {}",
-                tracker.stagnation_secs(),
-                describe_proposal(&proposal),
-            )));
-            if let Ok(mut slot) = self.proposal.lock() {
-                *slot = Some(proposal);
-            }
-        }
+        (self.emit)(FuzzProgress::LogLine(format!(
+            "[coverage] no new edges for {}s -- {}",
+            tracker.stagnation_secs(),
+            describe_proposal(&proposal),
+        )));
+        *slot = Some(proposal);
     }
 
-    /// The proposal surfaced during the run, if any.
+    /// The highest proposal tier surfaced during the run, if any.
     fn proposal(&self) -> Option<hf_coverage::StagnationProposal> {
         self.proposal.lock().ok().and_then(|p| p.clone())
     }
@@ -9214,7 +9242,7 @@ fn describe_proposal(proposal: &hf_coverage::StagnationProposal) -> &'static str
             "consider regenerating the harness to reach new code paths"
         }
         hf_coverage::StagnationProposal::CustomMutator => {
-            "consider adding a dictionary or custom mutator"
+            "consider adding seeds, a dictionary, or a custom mutator"
         }
         hf_coverage::StagnationProposal::Stop => "consider stopping this target",
     }
@@ -9252,34 +9280,104 @@ mod casrep_path_tests {
 #[cfg(test)]
 mod coverage_feedback_tests {
     use super::{CoverageFeedback, FuzzProgress};
-    use hf_coverage::StagnationProposal;
+    use hf_coverage::{StagnationPolicy, StagnationProposal};
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    fn policy(threshold_secs: u64) -> StagnationPolicy {
+        StagnationPolicy {
+            threshold_secs,
+            new_harness_windows: 2,
+            stop_windows: 3,
+        }
+    }
+
+    fn log_line_count(emitted: &Mutex<Vec<FuzzProgress>>) -> usize {
+        emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| matches!(p, FuzzProgress::LogLine(_)))
+            .count()
+    }
+
+    /// An instant `secs` in the past, for deterministic stagnation aging.
+    fn backdated(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .unwrap()
+    }
 
     #[test]
     fn proposes_once_when_edges_plateau() {
         let emitted: Mutex<Vec<FuzzProgress>> = Mutex::new(Vec::new());
         let emit = |p: FuzzProgress| emitted.lock().unwrap().push(p);
         // threshold 0: the first flat pulse after the initial reading is stagnant.
-        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), 0, &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), policy(0), &emit);
         fb.on_edges(100); // first reading -- never stagnant (needs >1 update)
         assert_eq!(fb.proposal(), None);
-        fb.on_edges(100); // flat -> stagnant -> propose
-        fb.on_edges(100); // still flat -> must NOT propose again (latched)
+        fb.on_edges(100); // flat -> stagnant -> propose the first tier
+        fb.on_edges(100); // still flat, same tier -> must NOT propose again (latched)
 
-        assert_eq!(fb.proposal(), Some(StagnationProposal::NewHarness));
-        let log_lines = emitted
+        assert_eq!(fb.proposal(), Some(StagnationProposal::CustomMutator));
+        assert_eq!(
+            log_line_count(&emitted),
+            1,
+            "the proposal must be surfaced exactly once"
+        );
+    }
+
+    #[test]
+    fn escalates_the_proposal_as_stagnation_drags_on() {
+        let emitted: Mutex<Vec<FuzzProgress>> = Mutex::new(Vec::new());
+        let emit = |p: FuzzProgress| emitted.lock().unwrap().push(p);
+        let run_id = uuid::Uuid::new_v4();
+        let fb = CoverageFeedback::new(run_id, policy(100), &emit);
+        let report = |edges| hf_core::coverage::CoverageReport {
+            run_id,
+            edges,
+            blocks: 0,
+            delta_edges: 0,
+            stagnation_secs: 0,
+            new_edges_files: Vec::new(),
+        };
+
+        // Coverage last progressed 150s ago: one full 100s stagnation window.
+        fb.tracker
             .lock()
             .unwrap()
-            .iter()
-            .filter(|p| matches!(p, FuzzProgress::LogLine(_)))
-            .count();
-        assert_eq!(log_lines, 1, "the proposal must be surfaced exactly once");
+            .update_at(&report(100), backdated(150));
+        fb.on_edges(100);
+        assert_eq!(fb.proposal(), Some(StagnationProposal::CustomMutator));
+
+        // 250s flat: the second window escalates to a new-harness proposal.
+        fb.tracker
+            .lock()
+            .unwrap()
+            .update_at(&report(101), backdated(250));
+        fb.on_edges(101);
+        assert_eq!(fb.proposal(), Some(StagnationProposal::NewHarness));
+
+        // 350s flat: the third window recommends stopping the target.
+        fb.tracker
+            .lock()
+            .unwrap()
+            .update_at(&report(102), backdated(350));
+        fb.on_edges(102);
+        fb.on_edges(102); // same tier again -> not re-surfaced
+        assert_eq!(fb.proposal(), Some(StagnationProposal::Stop));
+
+        assert_eq!(
+            log_line_count(&emitted),
+            3,
+            "each escalation tier must be surfaced exactly once"
+        );
     }
 
     #[test]
     fn no_proposal_on_a_single_reading() {
         let emit = |_p: FuzzProgress| {};
-        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), 0, &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), policy(0), &emit);
         fb.on_edges(100);
         assert_eq!(fb.proposal(), None);
     }
@@ -9289,7 +9387,7 @@ mod coverage_feedback_tests {
         let emit = |_p: FuzzProgress| {};
         // A high threshold is not reached in the test's wall-clock window, so a
         // flat plateau does not (yet) propose.
-        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), 3600, &emit);
+        let fb = CoverageFeedback::new(uuid::Uuid::new_v4(), policy(3600), &emit);
         fb.on_edges(100);
         fb.on_edges(100);
         assert_eq!(fb.proposal(), None);
@@ -9301,7 +9399,7 @@ mod coverage_feedback_tests {
         // measured for, not the nil UUID.
         let emit = |_p: FuzzProgress| {};
         let run_id = uuid::Uuid::new_v4();
-        let fb = CoverageFeedback::new(run_id, 0, &emit);
+        let fb = CoverageFeedback::new(run_id, policy(0), &emit);
         fb.on_edges(100);
         assert_eq!(fb.tracker.lock().unwrap().run_id(), run_id);
     }

@@ -17,4 +17,4 @@ pub use ingest::{
     MAX_SANITIZER_REPORT_BYTES,
 };
 pub use minimize::build_minimize_args;
-pub use report::{draft_report, MAX_SOURCE_CONTEXT_CHARS};
+pub use report::{draft_report, draft_report_with_context, MAX_SOURCE_CONTEXT_CHARS};
