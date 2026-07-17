@@ -21,7 +21,16 @@ pub(crate) const MAX_SSH_KEY_BYTES: u64 = 1024 * 1024;
 const MAX_ROOTFS_IMAGE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_WRITABLE_GROWTH_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_WRITABLE_ENTRIES: usize = 100_000;
-const MAX_VM_COUNT: u32 = 4;
+pub(crate) const MAX_VM_COUNT: u32 = 4;
+/// RAM (MiB) reserved for `syz-manager` and the container userland before any
+/// guest is provisioned. Kept out of the pool divided among VMs.
+const SYZ_MANAGER_OVERHEAD_MB: u64 = 512;
+/// Smallest RAM (MiB) a KCOV-instrumented guest is given. VM fan-out is reduced
+/// until every VM receives at least this much within the container budget.
+const SYZ_MIN_VM_MEM_MB: u64 = 1024;
+/// Parallel test processes per VM. This is syzkaller's `procs`, which is the
+/// in-guest concurrency and is independent of the number of VMs.
+const SYZ_PROCS_PER_VM: u32 = 6;
 
 /// Inputs needed to prepare one isolated syzkaller campaign.
 pub(crate) struct SyzkallerStageRequest {
@@ -34,6 +43,66 @@ pub(crate) struct SyzkallerStageRequest {
     pub ssh_key: Option<PathBuf>,
     pub vm_count: Option<u32>,
     pub use_kvm: bool,
+    /// Container memory budget in MiB. VM count and per-VM RAM are derived from
+    /// this so the campaign cannot be provisioned to exceed the sandbox cgroup.
+    pub container_mem_mb: u64,
+    /// Container CPU budget. The per-VM vCPU count is derived from it.
+    pub max_cpus: u32,
+}
+
+/// VM fan-out sized to fit within a container memory and CPU budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CampaignResources {
+    /// Number of fuzzing VMs that fit within the budget.
+    count: u32,
+    /// RAM (MiB) handed to each guest via qemu `-m`.
+    vm_mem_mb: u64,
+    /// vCPUs handed to each guest.
+    vm_cpu: u32,
+}
+
+/// Size the VM fan-out so `count * vm_mem_mb + manager overhead` never exceeds
+/// the container memory budget.
+///
+/// The container runs swap-less (Docker `--memory-swap` is pinned to
+/// `--memory`), so over-provisioning VMs OOM-kills qemu and yields a campaign
+/// that reports success with near-zero coverage. The requested fan-out is
+/// reduced until every VM receives at least [`SYZ_MIN_VM_MEM_MB`]; if not even a
+/// single guest fits after reserving [`SYZ_MANAGER_OVERHEAD_MB`], the campaign
+/// is rejected loudly rather than launched into a guaranteed OOM.
+///
+/// # Errors
+/// Returns [`ClassifiedError::Validation`] when the budget cannot host one VM.
+fn plan_campaign_resources(
+    container_mem_mb: u64,
+    max_cpus: u32,
+    requested_count: Option<u32>,
+) -> Result<CampaignResources, ClassifiedError> {
+    let requested = requested_count.unwrap_or(2).clamp(1, MAX_VM_COUNT);
+    let available = container_mem_mb
+        .checked_sub(SYZ_MANAGER_OVERHEAD_MB)
+        .filter(|available| *available >= SYZ_MIN_VM_MEM_MB)
+        .ok_or_else(|| {
+            ClassifiedError::Validation(format!(
+                "syzkaller needs at least {} MiB (>= {SYZ_MIN_VM_MEM_MB} MiB per VM plus \
+                 {SYZ_MANAGER_OVERHEAD_MB} MiB manager overhead) but the sandbox memory budget \
+                 is {container_mem_mb} MiB; raise fuzzing.sandbox.max_mem_mb",
+                SYZ_MIN_VM_MEM_MB + SYZ_MANAGER_OVERHEAD_MB
+            ))
+        })?;
+    let max_fit = u32::try_from(available / SYZ_MIN_VM_MEM_MB)
+        .unwrap_or(MAX_VM_COUNT)
+        .clamp(1, MAX_VM_COUNT);
+    let count = requested.min(max_fit);
+    // count <= floor(available / SYZ_MIN_VM_MEM_MB), so this share is always
+    // at least SYZ_MIN_VM_MEM_MB and the total never exceeds `available`.
+    let vm_mem_mb = available / u64::from(count);
+    let vm_cpu = max_cpus.clamp(1, 2);
+    Ok(CampaignResources {
+        count,
+        vm_mem_mb,
+        vm_cpu,
+    })
 }
 
 /// Service-owned files and mounts for one syzkaller campaign.
@@ -80,16 +149,19 @@ impl WritableBudgetMonitor {
                     () = task_stop.cancelled() => return,
                     _ = interval.tick() => {
                         let check_roots = task_roots.clone();
-                        let within_budget = tokio::task::spawn_blocking(move || {
-                            writable_trees_within_budget(
+                        // A join failure is treated as transient, not an
+                        // overflow: only a proven `Exceeded` verdict tears the
+                        // run down, so a flaky tick cannot kill a healthy campaign.
+                        let scan = tokio::task::spawn_blocking(move || {
+                            writable_trees_scan(
                                 &check_roots,
                                 max_bytes,
                                 max_entries,
                             )
                         })
                         .await
-                        .unwrap_or(false);
-                        if !within_budget {
+                        .unwrap_or(WritableBudgetScan::Indeterminate);
+                        if scan == WritableBudgetScan::Exceeded {
                             task_exceeded.store(true, Ordering::Release);
                             run_cancel.cancel();
                             return;
@@ -306,8 +378,12 @@ fn prepare_stage_contents(
     Ok(rootfs_size)
 }
 
+/// Build the manager.cfg skeleton for a campaign without a supplied config.
+///
+/// VM sizing fields (`procs`, `vm.count`, `vm.mem`, `vm.cpu`) are intentionally
+/// left to [`rewrite_manager_config`], which is the single place that derives
+/// them from the container budget for both synthesized and supplied configs.
 fn synthesized_config(request: &SyzkallerStageRequest) -> Value {
-    let count = request.vm_count.unwrap_or(2).clamp(1, MAX_VM_COUNT);
     let machine = if request.target_triple.ends_with("/arm64") {
         "virt"
     } else {
@@ -321,16 +397,21 @@ fn synthesized_config(request: &SyzkallerStageRequest) -> Value {
         "workdir": CONTAINER_WORKDIR,
         "image": format!("{CONTAINER_SCRATCH}/rootfs.img"),
         "syzkaller": "/opt/syzkaller",
-        "procs": count,
         "type": "qemu",
         "vm": {
-            "count": count,
             "kernel": format!("{CONTAINER_INPUTS}/kernel"),
-            "cpu": 2,
-            "mem": 2048,
             "qemu_args": format!("-machine {machine},accel={accel} -cpu {cpu}")
         }
     })
+}
+
+/// Normalize a supplied `qemu_args` for a sandbox that cannot pass `/dev/kvm`
+/// through: rewrite `accel=kvm` to `accel=tcg` and `-cpu host` to `-cpu max` so
+/// qemu boots under emulation instead of failing to find KVM and reporting an
+/// empty campaign as complete.
+fn normalize_qemu_accel_for_tcg(args: &str) -> String {
+    args.replace("accel=kvm", "accel=tcg")
+        .replace("-cpu host", "-cpu max")
 }
 
 fn rewrite_manager_config(
@@ -342,11 +423,11 @@ fn rewrite_manager_config(
         .pointer("/vm/count")
         .and_then(Value::as_u64)
         .and_then(|count| u32::try_from(count).ok());
-    let count = request
-        .vm_count
-        .or(inherited_count)
-        .unwrap_or(2)
-        .clamp(1, MAX_VM_COUNT);
+    let resources = plan_campaign_resources(
+        request.container_mem_mb,
+        request.max_cpus,
+        request.vm_count.or(inherited_count),
+    )?;
     let root = config.as_object_mut().ok_or_else(|| {
         ClassifiedError::Validation("manager.cfg must contain a JSON object".to_owned())
     })?;
@@ -368,7 +449,9 @@ fn rewrite_manager_config(
         root.remove("sshkey");
     }
 
-    root.insert("procs".to_owned(), json!(count));
+    // `procs` is the in-guest parallel-test-process count, not the number of
+    // VMs; set it to an independent, budget-agnostic default.
+    root.insert("procs".to_owned(), json!(SYZ_PROCS_PER_VM));
     let vm = root
         .get_mut("vm")
         .and_then(Value::as_object_mut)
@@ -379,7 +462,24 @@ fn rewrite_manager_config(
         "kernel".to_owned(),
         json!(format!("{CONTAINER_INPUTS}/kernel")),
     );
-    vm.insert("count".to_owned(), json!(count));
+    vm.insert("count".to_owned(), json!(resources.count));
+    // Size guests to fit the container budget so the swap-less cgroup cannot
+    // OOM-kill qemu (which would report a coverage-less campaign as success).
+    vm.insert("mem".to_owned(), json!(resources.vm_mem_mb));
+    vm.insert("cpu".to_owned(), json!(resources.vm_cpu));
+    // Reconcile a supplied config's acceleration with what the sandbox can
+    // actually provide: without host KVM, `/dev/kvm` is not passed through, so
+    // an `accel=kvm` guest would fail to boot and look like a completed but
+    // empty run.
+    if !request.use_kvm {
+        let normalized = vm
+            .get("qemu_args")
+            .and_then(Value::as_str)
+            .map(normalize_qemu_accel_for_tcg);
+        if let Some(normalized) = normalized {
+            vm.insert("qemu_args".to_owned(), json!(normalized));
+        }
+    }
     Ok(())
 }
 
@@ -685,13 +785,32 @@ fn is_managed_container_path(path: &Path) -> bool {
             || path.starts_with(CONTAINER_WORKDIR))
 }
 
-/// Validate the aggregate logical size and entry count of writable campaign
+/// Verdict of one writable-tree budget scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WritableBudgetScan {
+    /// The trees are within their byte and entry budget.
+    Within,
+    /// A hard budget or structural violation was observed: an oversize tree,
+    /// too many entries, a symlink, or a special file. The run must stop.
+    Exceeded,
+    /// A transient IO error (for example `EINTR`/`EMFILE`, or an entry that
+    /// vanished mid-scan) prevented a complete measurement. This is not
+    /// evidence of an overflow, so the caller should retry rather than kill a
+    /// healthy campaign.
+    Indeterminate,
+}
+
+/// Measure the aggregate logical size and entry count of writable campaign
 /// trees without following symlinks or accepting special files.
-pub(crate) fn writable_trees_within_budget(
+///
+/// Security and structural violations fail closed ([`WritableBudgetScan::Exceeded`]);
+/// transient IO faults are reported as [`WritableBudgetScan::Indeterminate`] so
+/// a single flaky `read_dir`/`metadata` tick does not tear down a healthy run.
+pub(crate) fn writable_trees_scan(
     roots: &[PathBuf],
     max_bytes: u64,
     max_entries: usize,
-) -> bool {
+) -> WritableBudgetScan {
     let mut pending: Vec<(PathBuf, bool)> =
         roots.iter().cloned().map(|root| (root, true)).collect();
     let mut total_bytes = 0_u64;
@@ -699,50 +818,206 @@ pub(crate) fn writable_trees_within_budget(
     while let Some((directory, is_root)) = pending.pop() {
         let metadata = match std::fs::symlink_metadata(&directory) {
             Ok(metadata) => metadata,
-            Err(error) if !is_root && error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return false,
+            // A subtree that vanished mid-scan only reduces usage; a missing
+            // root cannot be measured, so defer to the next tick.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if is_root {
+                    return WritableBudgetScan::Indeterminate;
+                }
+                continue;
+            }
+            Err(_) => return WritableBudgetScan::Indeterminate,
         };
+        // A writable root that is not a directory is a structural violation.
         if !metadata.file_type().is_dir() {
-            return false;
+            return WritableBudgetScan::Exceeded;
         }
-        let Ok(children) = std::fs::read_dir(&directory) else {
-            return false;
+        let children = match std::fs::read_dir(&directory) {
+            Ok(children) => children,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if is_root {
+                    return WritableBudgetScan::Indeterminate;
+                }
+                continue;
+            }
+            Err(_) => return WritableBudgetScan::Indeterminate,
         };
         for child in children {
-            let Ok(child) = child else {
-                return false;
+            let child = match child {
+                Ok(child) => child,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return WritableBudgetScan::Indeterminate,
             };
             let Some(next_entries) = entries.checked_add(1) else {
-                return false;
+                return WritableBudgetScan::Exceeded;
             };
             entries = next_entries;
             if entries > max_entries {
-                return false;
+                return WritableBudgetScan::Exceeded;
             }
             let path = child.path();
             let metadata = match std::fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 // A concurrent delete only reduces retained usage. The next
-                // scan observes any replacement; other errors fail closed.
+                // scan observes any replacement; other errors are transient.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return false,
+                Err(_) => return WritableBudgetScan::Indeterminate,
             };
             if metadata.file_type().is_dir() {
                 pending.push((path, false));
             } else if metadata.file_type().is_file() {
                 let Some(next_bytes) = total_bytes.checked_add(metadata.len()) else {
-                    return false;
+                    return WritableBudgetScan::Exceeded;
                 };
                 total_bytes = next_bytes;
                 if total_bytes > max_bytes {
-                    return false;
+                    return WritableBudgetScan::Exceeded;
                 }
             } else {
-                return false;
+                // Symlink or special file: never allowed in a writable tree.
+                return WritableBudgetScan::Exceeded;
             }
         }
     }
-    true
+    WritableBudgetScan::Within
+}
+
+/// Fail-closed convenience wrapper over [`writable_trees_scan`]: only a proven
+/// overflow or structural violation is treated as out of budget. A transient
+/// IO fault is not, so a flaky final scan does not fail an otherwise clean run.
+pub(crate) fn writable_trees_within_budget(
+    roots: &[PathBuf],
+    max_bytes: u64,
+    max_entries: usize,
+) -> bool {
+    !matches!(
+        writable_trees_scan(roots, max_bytes, max_entries),
+        WritableBudgetScan::Exceeded
+    )
+}
+
+/// Copy a finished campaign's crash reproducers and corpus database out of the
+/// disposable staging workdir into a retained evidence directory that survives
+/// the [`SyzkallerStage`] teardown.
+///
+/// Without this, `syz-manager`'s `workdir/crashes` and `workdir/corpus.db` are
+/// deleted on drop, so found crashes never reach triage and the corpus never
+/// persists across runs. Returns the destination when any evidence was copied.
+///
+/// The copy never follows symlinks and refuses special files, and is bounded by
+/// the same size/entry ceilings as the live writable budget, so untrusted
+/// campaign output cannot redirect writes outside `destination` or exhaust disk.
+///
+/// # Errors
+/// Returns [`ClassifiedError`] if the destination cannot be created or a bounded
+/// copy fails.
+pub(crate) fn retain_campaign_evidence(
+    stage_root: &Path,
+    destination: &Path,
+) -> Result<Option<PathBuf>, ClassifiedError> {
+    let workdir = stage_root.join("workdir");
+    let crashes_src = workdir.join("crashes");
+    let corpus_src = workdir.join("corpus.db");
+    let has_crashes = std::fs::symlink_metadata(&crashes_src)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false);
+    let has_corpus = std::fs::symlink_metadata(&corpus_src)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false);
+    if !has_crashes && !has_corpus {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(destination).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create syzkaller evidence directory {}: {error}",
+            destination.display()
+        ))
+    })?;
+    if has_crashes {
+        copy_tree_within_limits(
+            &crashes_src,
+            &destination.join("crashes"),
+            MAX_WRITABLE_GROWTH_BYTES,
+            MAX_WRITABLE_ENTRIES,
+        )?;
+    }
+    if has_corpus {
+        let metadata = std::fs::symlink_metadata(&corpus_src)
+            .map_err(|error| input_error("inspect", "syzkaller corpus", &corpus_src, &error))?;
+        if metadata.file_type().is_file() && metadata.len() <= MAX_WRITABLE_GROWTH_BYTES {
+            std::fs::copy(&corpus_src, destination.join("corpus.db"))
+                .map_err(|error| input_error("copy", "syzkaller corpus", &corpus_src, &error))?;
+        }
+    }
+    Ok(Some(destination.to_path_buf()))
+}
+
+/// Recursively copy `src` into `dst`, skipping symlinks and special files and
+/// bounding the aggregate byte and entry counts. Used to lift retained campaign
+/// evidence out of the disposable staging area.
+fn copy_tree_within_limits(
+    src: &Path,
+    dst: &Path,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<(), ClassifiedError> {
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    let mut copied_bytes = 0_u64;
+    let mut copied_entries = 0usize;
+    while let Some((from, to)) = stack.pop() {
+        let metadata = std::fs::symlink_metadata(&from)
+            .map_err(|error| input_error("inspect evidence", "syzkaller output", &from, &error))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            // Never follow a symlink out of the untrusted workdir.
+            continue;
+        }
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|error| {
+                input_error("create evidence directory", "syzkaller output", &to, &error)
+            })?;
+            let children = std::fs::read_dir(&from)
+                .map_err(|error| input_error("read evidence", "syzkaller output", &from, &error))?;
+            for child in children {
+                let child = child.map_err(|error| {
+                    input_error("read evidence entry", "syzkaller output", &from, &error)
+                })?;
+                copied_entries = copied_entries
+                    .checked_add(1)
+                    .filter(|n| *n <= max_entries)
+                    .ok_or_else(|| {
+                        ClassifiedError::Validation(
+                            "syzkaller evidence exceeds the retained entry budget".to_owned(),
+                        )
+                    })?;
+                let name = child.file_name();
+                stack.push((from.join(&name), to.join(&name)));
+            }
+        } else if file_type.is_file() {
+            copied_bytes = copied_bytes
+                .checked_add(metadata.len())
+                .filter(|total| *total <= max_bytes)
+                .ok_or_else(|| {
+                    ClassifiedError::Validation(
+                        "syzkaller evidence exceeds the retained size budget".to_owned(),
+                    )
+                })?;
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    input_error(
+                        "create evidence directory",
+                        "syzkaller output",
+                        parent,
+                        &error,
+                    )
+                })?;
+            }
+            std::fs::copy(&from, &to)
+                .map_err(|error| input_error("copy evidence", "syzkaller output", &from, &error))?;
+        }
+        // Special files (sockets, fifos, devices) are silently skipped.
+    }
+    Ok(())
 }
 
 fn input_error(
@@ -812,8 +1087,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        prepare_stage, sandbox_options, writable_trees_within_budget, SyzkallerStageRequest,
-        MAX_SSH_KEY_BYTES,
+        plan_campaign_resources, prepare_stage, retain_campaign_evidence, sandbox_options,
+        writable_trees_scan, writable_trees_within_budget, SyzkallerStageRequest,
+        WritableBudgetScan, MAX_SSH_KEY_BYTES, SYZ_MANAGER_OVERHEAD_MB, SYZ_MIN_VM_MEM_MB,
+        SYZ_PROCS_PER_VM,
     };
 
     fn write_artifacts(directory: &Path) {
@@ -857,6 +1134,8 @@ mod tests {
             ssh_key: None,
             vm_count: Some(1),
             use_kvm: false,
+            container_mem_mb: 4096,
+            max_cpus: 2,
         }
     }
 
@@ -911,14 +1190,18 @@ mod tests {
         );
         let mut stage_request = request(workspace.path(), &config);
         stage_request.vm_count = None;
+        // Ample memory so the MAX_VM_COUNT clamp, not the budget, bounds fan-out.
+        stage_request.container_mem_mb = 16_384;
 
         let stage = prepare_stage(&stage_request).unwrap();
         let staged: Value =
             serde_json::from_slice(&std::fs::read(stage.root.join("inputs/manager.cfg")).unwrap())
                 .unwrap();
 
-        assert_eq!(staged["procs"], 4);
         assert_eq!(staged["vm"]["count"], 4);
+        // procs is per-VM parallelism, independent of the VM count.
+        assert_eq!(staged["procs"], SYZ_PROCS_PER_VM);
+        assert_ne!(staged["procs"], staged["vm"]["count"]);
     }
 
     #[test]
@@ -955,6 +1238,8 @@ mod tests {
             ssh_key: Some(artifacts.path().join("id_rsa")),
             vm_count: Some(2),
             use_kvm: false,
+            container_mem_mb: 8192,
+            max_cpus: 2,
         })
         .unwrap();
         let staged: Value =
@@ -1162,5 +1447,169 @@ mod tests {
             .expect("budget monitor did not cancel the campaign");
 
         assert!(!monitor.finish().await);
+    }
+
+    #[test]
+    fn campaign_memory_fits_within_container_budget() {
+        // A 2048 MiB swap-less container hosts exactly one guest after the
+        // manager overhead; requesting two would OOM, so the count is reduced.
+        let one = plan_campaign_resources(2048, 1, Some(2)).unwrap();
+        assert_eq!(one.count, 1);
+        assert!(one.vm_mem_mb >= SYZ_MIN_VM_MEM_MB);
+        assert!(one.vm_mem_mb * u64::from(one.count) + SYZ_MANAGER_OVERHEAD_MB <= 2048);
+
+        // A larger budget admits the requested fan-out and still fits.
+        let three = plan_campaign_resources(6144, 2, Some(3)).unwrap();
+        assert_eq!(three.count, 3);
+        assert!(three.vm_mem_mb >= SYZ_MIN_VM_MEM_MB);
+        assert!(three.vm_mem_mb * u64::from(three.count) + SYZ_MANAGER_OVERHEAD_MB <= 6144);
+
+        // Too small to host even one guest fails loudly instead of OOM-as-success.
+        let error = plan_campaign_resources(1024, 1, Some(1)).unwrap_err();
+        assert!(
+            error.to_string().contains("syzkaller needs at least"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn synthesized_config_memory_fits_a_small_budget() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        write_artifacts(artifacts.path());
+        let stage = prepare_stage(&SyzkallerStageRequest {
+            workspace_root: workspace.path().to_path_buf(),
+            run_id: Uuid::new_v4(),
+            target_triple: "linux/amd64".to_owned(),
+            manager_cfg: None,
+            kernel_image: Some(artifacts.path().join("kernel")),
+            disk_image: Some(artifacts.path().join("rootfs.img")),
+            ssh_key: None,
+            vm_count: Some(2),
+            use_kvm: false,
+            container_mem_mb: 2048,
+            max_cpus: 1,
+        })
+        .unwrap();
+        let staged: Value =
+            serde_json::from_slice(&std::fs::read(stage.root.join("inputs/manager.cfg")).unwrap())
+                .unwrap();
+
+        let count = staged["vm"]["count"].as_u64().unwrap();
+        let mem = staged["vm"]["mem"].as_u64().unwrap();
+        assert_eq!(count, 1, "two guests would OOM a 2048 MiB swap-less cgroup");
+        assert!(mem >= SYZ_MIN_VM_MEM_MB);
+        assert!(mem * count + SYZ_MANAGER_OVERHEAD_MB <= 2048);
+    }
+
+    #[test]
+    fn writable_scan_distinguishes_overflow_from_transient_gaps() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("rootfs.img"), b"1234").unwrap();
+        let roots = [scratch.path().to_path_buf()];
+
+        // A real oversize tree is a hard overflow.
+        assert_eq!(
+            writable_trees_scan(&roots, 3, 10),
+            WritableBudgetScan::Exceeded
+        );
+        // Within budget.
+        assert_eq!(
+            writable_trees_scan(&roots, 10, 10),
+            WritableBudgetScan::Within
+        );
+
+        // A vanished root cannot be measured and must be Indeterminate, never
+        // Exceeded, so a transient gap does not kill a healthy campaign.
+        let missing = scratch.path().join("does-not-exist");
+        let missing_roots = [missing];
+        assert_eq!(
+            writable_trees_scan(&missing_roots, 10, 10),
+            WritableBudgetScan::Indeterminate
+        );
+        // The fail-closed wrapper does not report a transient gap as overflow.
+        assert!(writable_trees_within_budget(&missing_roots, 10, 10));
+    }
+
+    #[test]
+    fn retained_evidence_copies_crashes_and_corpus_out_of_staging() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        write_artifacts(artifacts.path());
+        let config = supplied_config(artifacts.path(), json!({}));
+        let stage = prepare_stage(&request(workspace.path(), &config)).unwrap();
+
+        // Simulate syz-manager output inside the disposable workdir.
+        let crash_dir = stage.root.join("workdir/crashes/0123abcd");
+        std::fs::create_dir_all(&crash_dir).unwrap();
+        std::fs::write(crash_dir.join("repro.prog"), b"syscall-sequence").unwrap();
+        std::fs::write(stage.root.join("workdir/corpus.db"), b"corpus-bytes").unwrap();
+
+        let destination = workspace.path().join("evidence");
+        let retained = retain_campaign_evidence(&stage.root, &destination)
+            .unwrap()
+            .expect("evidence should be retained");
+
+        assert_eq!(retained, destination);
+        assert_eq!(
+            std::fs::read(destination.join("crashes/0123abcd/repro.prog")).unwrap(),
+            b"syscall-sequence"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("corpus.db")).unwrap(),
+            b"corpus-bytes"
+        );
+
+        // Evidence survives the staging teardown.
+        let stage_root = stage.root.clone();
+        drop(stage);
+        assert!(!stage_root.exists());
+        assert!(destination.join("crashes/0123abcd/repro.prog").exists());
+    }
+
+    #[test]
+    fn retained_evidence_is_absent_when_no_output_exists() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        write_artifacts(artifacts.path());
+        let config = supplied_config(artifacts.path(), json!({}));
+        let stage = prepare_stage(&request(workspace.path(), &config)).unwrap();
+
+        let destination = workspace.path().join("evidence");
+        assert!(retain_campaign_evidence(&stage.root, &destination)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn supplied_kvm_config_is_normalized_for_a_tcg_sandbox() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        write_artifacts(artifacts.path());
+        let config = supplied_config(
+            artifacts.path(),
+            json!({
+                "vm": {
+                    "count": 2,
+                    "kernel": "kernel",
+                    "qemu_args": "-machine pc,accel=kvm -cpu host"
+                }
+            }),
+        );
+        let mut stage_request = request(workspace.path(), &config);
+        stage_request.use_kvm = false;
+        stage_request.vm_count = Some(2);
+        stage_request.container_mem_mb = 8192;
+
+        let stage = prepare_stage(&stage_request).unwrap();
+        let staged: Value =
+            serde_json::from_slice(&std::fs::read(stage.root.join("inputs/manager.cfg")).unwrap())
+                .unwrap();
+
+        // KVM acceleration is normalized to TCG since /dev/kvm is not provided.
+        assert_eq!(staged["vm"]["qemu_args"], "-machine pc,accel=tcg -cpu max");
+        // procs is set independently of the VM count.
+        assert_eq!(staged["procs"], SYZ_PROCS_PER_VM);
+        assert_ne!(staged["procs"], staged["vm"]["count"]);
     }
 }
