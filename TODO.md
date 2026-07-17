@@ -169,22 +169,26 @@ fixed the following; open design decisions are listed at the end.
 - [x] `ENGINE_ADAPTER_STANDARD.md` section 5 documents the real flat crash
   layout ingestion accepts; stale hf-scheduler doc references corrected.
 
-### Open design decisions (deliberately not changed by this audit)
+### Open design decisions (status after TODO batches 1-2)
 - [ ] Guardrail authorization decisions are only traced, never persisted; the
   GUI "Policy Audit" view shows auto-revert events instead. Persisting
   decisions (who/what/when/outcome) would close the audit-trail gap.
-- [ ] Unwired-but-designed subsystems kept as roadmap surface: hf-context
-  working-memory/pruning pipeline, hf-knowledge injection middleware +
-  ingestion + vector indexer, hf-scheduler parameter resolution + event
-  triggers, guardrail authorization of discover/corpus/chat actions.
-- [ ] Provider `thaw` has no operator surface (a permanent freeze still needs a
-  process restart); `health_check_interval_secs` is parsed but unused.
+- [~] Unwired-but-designed subsystems:
+  - [x] guardrail authorization of discover/corpus/chat actions (batch 1);
+  - [x] knowledge-augmented harness/triage prompts via the live retrieval path
+    (batch 2) -- the standalone `InjectKnowledge` middleware, ingestion
+    pipeline, and vector indexer remain unwired;
+  - [ ] hf-context working-memory/pruning pipeline (agent-loop wiring);
+  - [ ] hf-scheduler parameter resolution + event triggers.
+- [x] Provider `thaw` operator surface (CLI `providers thaw`, web
+  `POST /providers/{id}/thaw`) + `health_check_interval_secs` honored by a
+  bootstrap health-check task (batch 1).
 - [ ] Same-named C functions share one `(project, symbol)` persistence
   identity; a file-scoped identity is a High-risk-tier schema change.
-- [ ] REST routes and Tauri commands with no frontend caller: keep as
-  supported public API or prune.
-- [ ] One `CoverageReport` construction in hf-service still uses a nil run id
-  and write-only delta fields.
+- [x] REST routes kept as supported public API; 8 never-invoked Tauri
+  commands pruned (batch 1).
+- [x] `CoverageReport` carries the real run id through the coverage feedback
+  path (batch 1); delta fields retained after `main` made them real.
 
 ## Audit backlog (refreshed 2026-07-15)
 
