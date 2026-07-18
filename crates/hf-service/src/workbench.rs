@@ -199,10 +199,6 @@ pub async fn dashboard(
         .list_all_crashes()
         .await
         .map_err(ClassifiedError::from)?;
-    let corpus_entries = store
-        .list_all_corpus_entries()
-        .await
-        .map_err(ClassifiedError::from)?;
 
     let project_scoped_targets: Vec<TargetCandidate> = targets
         .iter()
@@ -271,19 +267,16 @@ pub async fn dashboard(
 
     let harness_reviews = harness_review_items(filtered_harnesses, &target_by_id);
     let crash_reviews = crash_review_items(filtered_crashes, &target_by_id);
-    let corpus_entry_count = if project_filter_ref.is_some() || active_target.is_some() {
-        let mut count = 0;
-        for target in &filtered_targets {
-            count += store
-                .list_corpus_entries(target.id)
-                .await
-                .map_err(ClassifiedError::from)?
-                .len();
-        }
-        count
-    } else {
-        corpus_entries.len()
-    };
+    // A project is always selected past the early return above, so scope the
+    // corpus count to this project's targets rather than loading every row.
+    let mut corpus_entry_count = 0;
+    for target in &filtered_targets {
+        corpus_entry_count += store
+            .list_corpus_entries(target.id)
+            .await
+            .map_err(ClassifiedError::from)?
+            .len();
+    }
     let active_runs = filtered_runs
         .iter()
         .filter(|r| matches!(r.status, RunStatus::Pending | RunStatus::Running))

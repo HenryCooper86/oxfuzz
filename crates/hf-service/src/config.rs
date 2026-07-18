@@ -1822,11 +1822,20 @@ fn resolve_auto_revert_policy(
     let enabled = parse_flag(env_enabled)
         .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_enabled))
         .unwrap_or(false);
+    // Validate each source independently so an out-of-range env value falls
+    // through to a valid TOML threshold instead of skipping it and landing on the
+    // hard-coded default (the env value would otherwise win the `or_else`, then be
+    // filtered out after TOML was already bypassed).
     let threshold_pct = env_threshold
         .map(str::trim)
         .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_threshold_pct))
         .filter(|v| valid_auto_revert_threshold(*v))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|c| c.auto_revert_threshold_pct)
+                .filter(|v| valid_auto_revert_threshold(*v))
+        })
         .unwrap_or(DEFAULT_AUTO_REVERT_THRESHOLD_PCT);
     let notify_only = parse_flag(env_notify_only)
         .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_notify_only))

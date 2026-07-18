@@ -488,12 +488,14 @@ fn is_path_key(key: &str) -> bool {
 }
 
 fn looks_like_absolute_host_path(value: &str) -> bool {
-    Path::new(value).is_absolute()
-        || value.starts_with("\\\\")
-        || value
-            .as_bytes()
-            .get(1)
-            .is_some_and(|separator| *separator == b':')
+    // A Windows drive prefix is a single ASCII letter followed by `:` (e.g.
+    // `C:\`). Requiring the letter avoids over-redacting unrelated values whose
+    // second byte merely happens to be `:` (e.g. `a:b`).
+    let drive_prefix = {
+        let bytes = value.as_bytes();
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':')
+    };
+    Path::new(value).is_absolute() || value.starts_with("\\\\") || drive_prefix
 }
 
 #[cfg(test)]

@@ -205,10 +205,29 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
     });
     let key = project.to_string_lossy().to_string();
     if let Ok(mut map) = cache().lock() {
+        // Bound the process-global cache: a long-running `serve` handling many
+        // distinct project paths would otherwise pin every retriever plus its
+        // full source text in RAM forever, growing to OOM. When at capacity,
+        // evict the oldest-built entry (it is rebuilt on demand on next access).
+        if !map.contains_key(&key) && map.len() >= MAX_CACHED_PROJECT_INDEXES {
+            if let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, index)| index.indexed_at)
+                .map(|(oldest_key, _)| oldest_key.clone())
+            {
+                map.remove(&oldest);
+            }
+        }
         map.insert(key, index);
     }
     KnowledgeStats { files, chunks }
 }
+
+/// Maximum number of per-project indexes held in the process-global cache.
+/// Each entry retains a full hybrid retriever plus every chunk's original
+/// source text, so this caps resident memory for a server that indexes many
+/// projects over its lifetime.
+const MAX_CACHED_PROJECT_INDEXES: usize = 8;
 
 /// The per-project directory holding ingested documents (converted to Markdown
 /// by markitdown). Kept under the app data dir, not in the user's repo, so

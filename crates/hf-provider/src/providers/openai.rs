@@ -845,6 +845,19 @@ fn build_openai_inter_stream(
 
                     match serde_json::from_str::<OpenAiStreamChunk>(trimmed) {
                         Ok(chunk) => {
+                            if let Some(err) = &chunk.error {
+                                // Mid-stream error frame: fail the stream so the
+                                // pool can freeze/fail over instead of returning a
+                                // silently truncated success (see the `error`
+                                // field docs and the Anthropic backend's parity).
+                                state.done = true;
+                                return Some((
+                                    Err(crate::error_classifier::stream_error_to_provider_error(
+                                        "openai", err,
+                                    )),
+                                    composite,
+                                ));
+                            }
                             let mut events = map_to_inter_events(&chunk, tool_acc);
                             if events.is_empty() {
                                 continue;
@@ -1249,6 +1262,12 @@ struct OpenAiStreamChunk {
     #[serde(default)]
     choices: Vec<OpenAiStreamChoice>,
     usage: Option<OpenAiUsage>,
+    /// A mid-stream error object. OpenAI-compat relays and content filters emit
+    /// `data: {"error": {...}}` at HTTP 200; without this field it would parse
+    /// into an otherwise-empty chunk and be silently swallowed as a clean end
+    /// of stream (no freeze, no failover).
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1956,6 +1975,7 @@ mod tests {
                 finish_reason: None,
             }],
             usage: None,
+            error: None,
         };
 
         let mut acc = ToolCallAccumulatorSet::default();
@@ -1989,6 +2009,7 @@ mod tests {
                 finish_reason: None,
             }],
             usage: None,
+            error: None,
         };
         let events1 = map_to_inter_events(&chunk1, &mut acc);
         assert!(events1.is_empty());
@@ -2012,6 +2033,7 @@ mod tests {
                 finish_reason: None,
             }],
             usage: None,
+            error: None,
         };
         let events2 = map_to_inter_events(&chunk2, &mut acc);
         assert!(events2.is_empty());
@@ -2031,6 +2053,7 @@ mod tests {
                 prompt_tokens: 100,
                 completion_tokens: 20,
             }),
+            error: None,
         };
         let events3 = map_to_inter_events(&chunk3, &mut acc);
         let tool_events: Vec<_> = events3
@@ -2268,5 +2291,38 @@ mod tests {
             .collect();
         assert_eq!(texts, vec!["ok"]);
         assert!(events.iter().all(Result::is_ok));
+    }
+
+    /// A mid-stream `{"error": ...}` frame (delivered at HTTP 200 by compat
+    /// relays / content filters) must fail the stream so the pool can freeze
+    /// and fail over, not be swallowed into a silently truncated success.
+    #[tokio::test]
+    async fn stream_surfaces_mid_stream_error_frame() {
+        use crate::inter_stream::InterStreamEvent;
+        use futures::StreamExt as _;
+
+        let stream = inter_stream_from_chunks(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"error\":{\"message\":\"upstream overloaded\",\"type\":\"server_error\"}}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+
+        let events: Vec<_> = stream.collect().await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(InterStreamEvent::TextDelta(t)) if t == "partial")),
+            "expected the partial delta before the error: {events:?}"
+        );
+
+        let err = events.iter().find_map(|e| e.as_ref().err());
+        assert!(
+            matches!(
+                err,
+                Some(ProviderError::ServerError { message, .. }) if message.contains("upstream overloaded")
+            ),
+            "mid-stream error frame was not surfaced as a ServerError: {events:?}"
+        );
     }
 }

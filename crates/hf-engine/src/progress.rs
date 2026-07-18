@@ -189,7 +189,15 @@ fn edges_from_line(line: &str) -> Option<u64> {
         return None;
     }
     if lower.contains("cov:") || lower.contains("edges") || lower.contains("coverage") {
-        return parse_number_near(line, "cov").or_else(|| parse_number_near(line, "edges"));
+        // Whole-word matching so `cov` does not match inside `coverage` and read
+        // an unrelated number -- e.g. AFL++'s `count coverage : 2.51 bits/tuple`,
+        // whose `2` would otherwise latch as the first edge count and inflate the
+        // run delta. `number_near_word` also reads a number that precedes the
+        // keyword (libFuzzer's `INFO: 1024 edges covered.`). `edges` before `edge`
+        // so honggfuzz's `Coverage : edge: N` and generic `edges: N` both parse.
+        return number_near_word(line, "cov")
+            .or_else(|| number_near_word(line, "edges"))
+            .or_else(|| number_near_word(line, "edge"));
     }
     None
 }
@@ -213,6 +221,33 @@ fn execs_from_line(line: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// Find the `u64` nearest `word` used as a whole token, preferring a number
+/// after the word (`cov: 10`) and falling back to one before it
+/// (`1024 edges covered`). The whole-token boundary (non-alphanumeric before,
+/// non-letter after) prevents `cov` from matching inside `coverage` and reading
+/// an unrelated number.
+fn number_near_word(line: &str, word: &str) -> Option<u64> {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(word) {
+        let start = from + rel;
+        let end = start + word.len();
+        let before_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_boundary = end >= bytes.len() || !bytes[end].is_ascii_alphabetic();
+        if before_boundary && after_boundary {
+            if let Some(n) = first_number(&lower[end..]) {
+                return Some(n);
+            }
+            if let Some(n) = last_number(&lower[..start]) {
+                return Some(n);
+            }
+        }
+        from = end;
+    }
+    None
 }
 
 /// Find the `u64` that follows `word` used as a whole token: the character
@@ -376,6 +411,16 @@ mod tests {
             cov.iter()
                 .any(|e| matches!(e, FuzzProgress::EdgesCovered(123))),
             "the real Coverage line must still yield edges, got {cov:?}"
+        );
+        // AFL++'s `count coverage : N.NN bits/tuple` carries a density, not an edge
+        // count. Substring matching would read the `2` out of `2.51` via `cov`
+        // inside `coverage`; word-boundary matching must reject the whole line.
+        let bogus = parse_progress_events("  count coverage : 2.51 bits/tuple");
+        assert!(
+            !bogus
+                .iter()
+                .any(|e| matches!(e, FuzzProgress::EdgesCovered(_))),
+            "AFL++ bits/tuple density must not be read as an edge count, got {bogus:?}"
         );
     }
 

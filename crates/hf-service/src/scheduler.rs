@@ -624,6 +624,18 @@ impl FuzzCampaignDispatcher {
             }
         });
     }
+
+    /// Advance the target-rotation cursor after a failed fire, best-effort.
+    ///
+    /// A persistence failure here is logged rather than masking the original
+    /// campaign failure; the next fire simply retries the advance.
+    fn advance_rotation_after_failure(&self, schedule_id: &str) {
+        if let Err(error) = self.state.advance_cursor(schedule_id) {
+            tracing::warn!(
+                "could not persist rotation advance after a failed fire on {schedule_id}: {error}"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -684,6 +696,9 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             pick.engine.parse::<EngineKind>(),
             pick.language.parse::<TargetLanguage>(),
         ) else {
+            // This target can never run; advance past it so the rotation is not
+            // pinned here forever, starving the other promoted targets.
+            self.advance_rotation_after_failure(&params.schedule_id);
             return Ok(DispatchResult {
                 success: false,
                 summary: format!("target '{}' has an unparseable engine/lang", pick.target),
@@ -702,8 +717,10 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
             targets.len(),
         );
 
-        // 4. Run one promoted target. Only a successful outcome advances the
-        // rotation and charges its actual iterations/measured elapsed time.
+        // 4. Run one promoted target. A successful outcome advances the rotation
+        // and charges its actual iterations/measured elapsed time; a failed fire
+        // advances the cursor only (no charge) so a target that keeps failing
+        // yields to the next instead of pinning the rotation.
         let started = std::time::Instant::now();
         let result = self
             .container
@@ -777,13 +794,19 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
                     error: None,
                 })
             }
-            Err(e) => Ok(DispatchResult {
-                success: false,
-                summary: format!("campaign failed on {}", pick.target),
-                output: serde_json::Value::Null,
-                duration_ms,
-                error: Some(e.to_string()),
-            }),
+            Err(e) => {
+                // The target's harness could not build/run; advance the cursor so
+                // the next fire tries a different target rather than re-picking
+                // this one forever.
+                self.advance_rotation_after_failure(&params.schedule_id);
+                Ok(DispatchResult {
+                    success: false,
+                    summary: format!("campaign failed on {}", pick.target),
+                    output: serde_json::Value::Null,
+                    duration_ms,
+                    error: Some(e.to_string()),
+                })
+            }
         }
     }
 }
