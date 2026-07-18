@@ -259,6 +259,7 @@ pub(crate) fn trigger_at(batch: &RecoveryBatch, at: DateTime<Utc>) -> FiredTrigg
         fired_at: at,
         trigger_type: batch.trigger_type,
         is_recovery: true,
+        event_payload: None,
     }
 }
 
@@ -382,6 +383,7 @@ mod tests {
             TriggerConfig::Event {
                 event_type: "push".to_owned(),
                 debounce_secs: 0,
+                filter: None,
             },
             "wf",
         ));
