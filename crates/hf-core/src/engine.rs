@@ -119,12 +119,9 @@ impl EngineKind {
                 language,
                 crate::target::TargetLanguage::C | crate::target::TargetLanguage::Cpp
             ),
-            Self::LibFuzzer | Self::ClusterFuzzLite => matches!(
-                language,
-                crate::target::TargetLanguage::C
-                    | crate::target::TargetLanguage::Cpp
-                    | crate::target::TargetLanguage::Rust
-            ),
+            // libFuzzer-driven engines accept anything that compiles to a
+            // libFuzzer binary -- the single source of truth on `TargetLanguage`.
+            Self::LibFuzzer | Self::ClusterFuzzLite => language.libfuzzer_compatible(),
             Self::Syzkaller => false,
         }
     }
