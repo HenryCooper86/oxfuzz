@@ -2,7 +2,7 @@ import type { ViewType } from "../types";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
-import { useDefectDojo } from "../lib";
+import { useAutomotive, useDefectDojo } from "../lib";
 import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
@@ -16,35 +16,51 @@ interface SidebarProps {
 
 // Labels are resolved from i18n at render (`t(`nav.${view}`)`), so an item only
 // needs its view id and icon -- no hardcoded label to drift out of sync.
-type NavItem = { view: ViewType; icon: React.ComponentType<{ size?: number }> };
+// `children` renders indented sub-items, used to nest the workflow stages under
+// the unified entry they belong to.
+type NavItem = {
+  view: ViewType;
+  icon: React.ComponentType<{ size?: number }>;
+  children?: NavItem[];
+};
 
-// The pipeline tools that operate on the active target, in fuzzing-workflow
-// order: chat drives the agent, then discover -> harness -> run -> triage ->
-// corpus mirrors a campaign's lifecycle.
+// Pipeline: the campaign lifecycle. "Fuzzing Workflow" (WorkflowView) is the
+// unified accordion that drives discover -> harness -> run -> triage -> corpus
+// as one connected flow and is the landing view when a target is opened, so
+// those five stages are its children here -- also reachable as standalone
+// deep-dive pages. Dashboard is the cross-target overview and leads the section.
 const PIPELINE_ITEMS: NavItem[] = [
   { view: "dashboard", icon: LayoutDashboard },
-  { view: "chat", icon: MessageSquare },
-  { view: "workflow", icon: Workflow },
-  { view: "discover", icon: Crosshair },
-  { view: "harness", icon: FileCode },
-  { view: "run", icon: Play },
-  { view: "triage", icon: Bug },
-  { view: "corpus", icon: Database },
+  {
+    view: "workflow",
+    icon: Workflow,
+    children: [
+      { view: "discover", icon: Crosshair },
+      { view: "harness", icon: FileCode },
+      { view: "run", icon: Play },
+      { view: "triage", icon: Bug },
+      { view: "corpus", icon: Database },
+    ],
+  },
 ];
 
-// Cross-cutting resources, not tied to a single target.
-const LIBRARY_ITEMS: NavItem[] = [
+// Results: the durable records a campaign produces.
+const RESULTS_ITEMS: NavItem[] = [
   { view: "projects", icon: FolderOpen },
   { view: "artifacts", icon: Boxes },
   { view: "reports", icon: FileText },
   { view: "runs", icon: History },
   { view: "audit", icon: ScrollText },
+];
+
+// AI system: the assistant plus the agents, skills, knowledge, and automation
+// that drive it -- previously scattered between Pipeline and Library.
+const AI_SYSTEM_ITEMS: NavItem[] = [
+  { view: "chat", icon: MessageSquare },
   { view: "agents", icon: Bot },
   { view: "skills", icon: Puzzle },
   { view: "knowledge", icon: BookOpen },
   { view: "automation", icon: Zap },
-  { view: "automotive", icon: CarFront },
-  { view: "help", icon: LifeBuoy },
 ];
 
 function basename(path: string): string {
@@ -66,10 +82,13 @@ function NavButton({
   item,
   active,
   onNavigate,
+  depth = 0,
 }: {
   item: NavItem;
   active: boolean;
   onNavigate: (view: ViewType) => void;
+  /** Indent level; >0 marks a sub-item nested under its parent entry. */
+  depth?: number;
 }) {
   const { view, icon: Icon } = item;
   const { t } = useI18n();
@@ -81,10 +100,16 @@ function NavButton({
           ? "bg-surface-active text-text-primary border border-border"
           : "bg-transparent text-text-secondary border border-transparent hover:bg-accent-subtle hover:text-text-primary"
       }`}
-      style={{ padding: "7px 10px", fontSize: "13px", fontWeight: 500, marginBottom: "2px" }}
+      style={{
+        padding: "7px 10px",
+        paddingLeft: 10 + depth * 18,
+        fontSize: "13px",
+        fontWeight: 500,
+        marginBottom: "2px",
+      }}
     >
       <span style={{ color: active ? "var(--accent)" : "inherit", display: "flex" }}>
-        <Icon size={18} />
+        <Icon size={depth > 0 ? 16 : 18} />
       </span>
       <span>{t(`nav.${view}`)}</span>
     </button>
@@ -180,9 +205,11 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { activeProject, recentProjects, removeRecent } = useProject();
   const { target } = useTarget();
   const { t } = useI18n();
-  // Surface DefectDojo in the Library only once it is actually configured, so the
-  // sidebar stays clean for users who do not use it.
+  // Surface the optional integrations only once they are actually enabled, so the
+  // sidebar stays clean for the many users who use neither: DefectDojo when its
+  // config is present, Automotive when the CAN/UDS subsystem is turned on.
   const { configured: defectDojoOn } = useDefectDojo();
+  const { enabled: automotiveOn } = useAutomotive();
 
   return (
     <nav
@@ -219,20 +246,57 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
 
         <SectionLabel>{t("sidebar.pipeline")}</SectionLabel>
         {PIPELINE_ITEMS.map((item) => (
+          <div key={item.view}>
+            <NavButton item={item} active={activeView === item.view} onNavigate={onNavigate} />
+            {item.children?.map((child) => (
+              <NavButton
+                key={child.view}
+                item={child}
+                active={activeView === child.view}
+                onNavigate={onNavigate}
+                depth={1}
+              />
+            ))}
+          </div>
+        ))}
+
+        <SectionLabel>{t("sidebar.results")}</SectionLabel>
+        {RESULTS_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
 
-        <SectionLabel>{t("sidebar.library")}</SectionLabel>
-        {LIBRARY_ITEMS.map((item) => (
+        <SectionLabel>{t("sidebar.aiSystem")}</SectionLabel>
+        {AI_SYSTEM_ITEMS.map((item) => (
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
-        {defectDojoOn && (
-          <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
+
+        {/* Optional add-ons, each shown only when enabled; the whole section
+            disappears when a user uses neither, keeping the sidebar uncluttered. */}
+        {(automotiveOn || defectDojoOn) && (
+          <>
+            <SectionLabel>{t("sidebar.integrations")}</SectionLabel>
+            {automotiveOn && (
+              <NavButton
+                item={{ view: "automotive", icon: CarFront }}
+                active={activeView === "automotive"}
+                onNavigate={onNavigate}
+              />
+            )}
+            {defectDojoOn && (
+              <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
+            )}
+          </>
         )}
       </div>
 
-      {/* Footer: Settings pinned at the bottom (Apple-style nav), then version */}
+      {/* Footer: help and settings pinned at the bottom (Apple-style nav), then
+          version. These meta entries sit apart from the working sections above. */}
       <div className="border-t border-border" style={{ padding: "6px 8px 8px 8px" }}>
+        <NavButton
+          item={{ view: "help", icon: LifeBuoy }}
+          active={activeView === "help"}
+          onNavigate={onNavigate}
+        />
         <NavButton
           item={{ view: "settings", icon: Settings }}
           active={activeView === "settings"}
