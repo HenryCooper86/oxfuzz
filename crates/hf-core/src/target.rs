@@ -138,3 +138,33 @@ impl TargetInventory {
         sorted
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TargetLanguage;
+
+    #[test]
+    fn test_target_language_serde_roundtrip() {
+        for lang in [
+            TargetLanguage::C,
+            TargetLanguage::Cpp,
+            TargetLanguage::Rust,
+            TargetLanguage::Go,
+            TargetLanguage::Python,
+        ] {
+            let json = serde_json::to_string(&lang).unwrap();
+            let parsed: TargetLanguage = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, lang);
+        }
+        // The wire representation is the variant name; adding Go/Python must
+        // not change the encoding of the existing variants.
+        assert_eq!(
+            serde_json::to_string(&TargetLanguage::Go).unwrap(),
+            "\"Go\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TargetLanguage::Python).unwrap(),
+            "\"Python\""
+        );
+    }
+}

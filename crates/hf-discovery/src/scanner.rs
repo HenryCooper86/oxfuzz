@@ -1,9 +1,9 @@
 //! Target discovery scanner.
 //!
 //! Walks a project with the `ignore` crate, parses C/C++ source with
-//! Tree-sitter, extracts function definitions, filters trivial ones, scores
-//! them with input-surface and complexity heuristics, and returns a
-//! `TargetInventory`.
+//! Tree-sitter, scans Rust/Go/Python with dependency-free lexical scanners,
+//! extracts function definitions, filters trivial ones, scores them with
+//! input-surface and complexity heuristics, and returns a `TargetInventory`.
 //!
 //! See `docs/design/target-discovery-design.md`.
 
@@ -31,11 +31,8 @@ pub async fn discover(
     let (mut candidates, call_graph) = match lang {
         TargetLanguage::C | TargetLanguage::Cpp => scan_c(&project_root, lang)?,
         TargetLanguage::Rust => scan_rust(&project_root)?,
-        _ => {
-            return Err(ClassifiedError::Validation(format!(
-                "language {lang:?} not yet supported by the scanner"
-            )));
-        }
+        TargetLanguage::Go => scan_go(&project_root)?,
+        TargetLanguage::Python => scan_python(&project_root)?,
     };
     // Stamp the project root onto every candidate so downstream consumers
     // (persistence dedup keyed on (project, symbol), reports, ranking) can tell
@@ -99,12 +96,14 @@ fn deterministic_target_id(project_root: &Path, symbol: &str) -> Uuid {
     Uuid::new_v5(&TARGET_ID_NAMESPACE, key.as_bytes())
 }
 
-/// File extensions considered for C vs C++.
+/// File extensions considered per language.
 fn exts_for(lang: TargetLanguage) -> &'static [&'static str] {
     match lang {
         TargetLanguage::C => &["c", "h"],
         TargetLanguage::Cpp => &["cc", "cpp", "cxx", "hpp", "hh"],
-        _ => &[],
+        TargetLanguage::Rust => &["rs"],
+        TargetLanguage::Go => &["go"],
+        TargetLanguage::Python => &["py"],
     }
 }
 
@@ -112,6 +111,36 @@ type ScanResult = (
     Vec<TargetCandidate>,
     std::collections::HashMap<String, Vec<String>>,
 );
+
+/// Shared walker for the dependency-free lexical scanners (Rust, Go,
+/// Python): visit every file with a matching extension, skipping files
+/// `skip_file` rejects, and run `extract` over the text. Like the Rust
+/// scanner precedent, no call edges are extracted, so the call graph comes
+/// back empty and candidates flow into ranking unannotated.
+fn scan_lexical(
+    root: &Path,
+    exts: &'static [&'static str],
+    skip_file: fn(&Path) -> bool,
+    extract: fn(&str, &Path, &mut Vec<TargetCandidate>),
+) -> Result<ScanResult, ClassifiedError> {
+    let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
+    let mut candidates = Vec::new();
+    for entry in walker {
+        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !exts.contains(&ext) || skip_file(path) {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).map_err(|error| {
+            ClassifiedError::Internal(format!("read {}: {error}", path.display()))
+        })?;
+        extract(&src, path, &mut candidates);
+    }
+    Ok((candidates, std::collections::HashMap::new()))
+}
 
 /// Discover Rust fuzz targets with a dependency-free lexical scan.
 ///
@@ -122,20 +151,46 @@ type ScanResult = (
 /// the C scanner. It is intentionally conservative: a missed multi-line
 /// signature is a lost candidate, never a wrong one.
 fn scan_rust(root: &Path) -> Result<ScanResult, ClassifiedError> {
-    let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
-    let mut candidates = Vec::new();
-    for entry in walker {
-        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let src = std::fs::read_to_string(path).map_err(|error| {
-            ClassifiedError::Internal(format!("read {}: {error}", path.display()))
-        })?;
-        extract_rust_functions(&src, path, &mut candidates);
-    }
-    Ok((candidates, std::collections::HashMap::new()))
+    scan_lexical(
+        root,
+        exts_for(TargetLanguage::Rust),
+        |_| false,
+        extract_rust_functions,
+    )
+}
+
+/// Discover Go fuzz targets with a dependency-free lexical scan, in the same
+/// conservative style as the Rust scanner: exported (capitalized)
+/// package-level functions and methods with at least one parameter.
+fn scan_go(root: &Path) -> Result<ScanResult, ClassifiedError> {
+    scan_lexical(
+        root,
+        exts_for(TargetLanguage::Go),
+        skip_go_file,
+        extract_go_functions,
+    )
+}
+
+/// Go test files hold tests, not fuzzable library surface, and `vendor/`
+/// holds third-party dependencies rather than the project's own targets.
+fn skip_go_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with("_test.go"))
+        || path.components().any(|c| c.as_os_str() == "vendor")
+}
+
+/// Discover Python fuzz targets with a dependency-free lexical scan, in the
+/// same conservative style as the Rust scanner: top-level `def`s and class
+/// methods (incl. `async`/decorated) with at least one parameter besides
+/// `self`/`cls`.
+fn scan_python(root: &Path) -> Result<ScanResult, ClassifiedError> {
+    scan_lexical(
+        root,
+        exts_for(TargetLanguage::Python),
+        |_| false,
+        extract_python_functions,
+    )
 }
 
 /// Extract public, parameter-bearing function definitions from Rust source.
@@ -204,6 +259,308 @@ fn extract_rust_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>
             accumulated_complexity: 0,
         });
     }
+}
+
+/// Extract exported, parameter-bearing function and method definitions from
+/// Go source. Methods are named `Receiver.Method` so same-named methods of
+/// different types do not collide in the name-keyed inventory. Conservative
+/// like the Rust scanner: a missed multi-line signature is a lost candidate,
+/// never a wrong one.
+fn extract_go_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) {
+    let mut byte_off = 0usize;
+    // Same `split_inclusive` offset discipline as the Rust scanner: CRLF
+    // sources must not drift the offsets (see `extract_rust_functions`).
+    for (idx, raw) in src.split_inclusive('\n').enumerate() {
+        let line_start = byte_off;
+        byte_off += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        let Some(after_func) = trimmed.strip_prefix("func ") else {
+            continue;
+        };
+        // Byte offset of `after_func` within `src`, so multi-line signatures
+        // are read from the full source rather than from this line alone.
+        let mut cursor = line_start + (line.len() - trimmed.len()) + "func ".len();
+        let after_func = after_func.trim_start();
+        cursor += trimmed["func ".len()..].len() - after_func.len();
+        // Two declaration forms:
+        //   func Name(params) ...             -- package-level function
+        //   func (r *Receiver) Name(params)   -- method with a receiver
+        let (receiver, rest) = match paren_group_end(after_func) {
+            Some(end) => (
+                go_receiver_type(&after_func[1..end - 1]),
+                after_func[end..].trim_start(),
+            ),
+            None => (String::new(), after_func),
+        };
+        cursor += after_func.len() - rest.len();
+        let name = read_ident(rest);
+        // Only exported (capitalized) API is reachable from a harness; this
+        // also excludes the `main`/`init` entry points. Test helpers follow
+        // the same exported shape, so they are filtered by name (their
+        // `_test.go` files are skipped by the walker too).
+        if name.is_empty()
+            || !name.chars().next().is_some_and(char::is_uppercase)
+            || name.starts_with("Test")
+            || name.starts_with("Benchmark")
+        {
+            continue;
+        }
+        // The declaration slice starts at the function name, so the first
+        // balanced `(...)` is the parameter list (past the receiver for
+        // methods and past any `[T ...]` generic section).
+        let decl = &src[cursor..];
+        let Some(params) = extract_paren_group(decl) else {
+            continue;
+        };
+        let param_count = if params.trim().is_empty() {
+            0
+        } else {
+            params.split(',').filter(|p| !p.trim().is_empty()).count()
+        };
+        if param_count == 0 {
+            continue; // no untrusted input to feed
+        }
+        let input_surface = go_input_surface(&params);
+        let lower = name.to_ascii_lowercase();
+        let kind = if [
+            "parse",
+            "decode",
+            "unmarshal",
+            "read",
+            "scan",
+            "deserialize",
+        ]
+        .iter()
+        .any(|k| lower.contains(k))
+        {
+            TargetKind::Parser
+        } else {
+            TargetKind::Function
+        };
+        let symbol = if receiver.is_empty() {
+            name
+        } else {
+            format!("{receiver}.{name}")
+        };
+        let complexity = go_body_complexity(decl);
+        let fit_score = compute_fit_score(kind, input_surface, complexity, param_count);
+        let signature = line.trim().trim_end_matches('{').trim().to_owned();
+        out.push(TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: PathBuf::new(),
+            language: TargetLanguage::Go,
+            symbol,
+            kind,
+            location: SourceLocation {
+                file: path.to_path_buf(),
+                line: (idx + 1) as u32,
+                col: 1,
+            },
+            signature: Some(signature),
+            input_surface,
+            complexity,
+            fit_score,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        });
+    }
+}
+
+/// The type name of a Go method receiver: `d *Decoder` -> `Decoder`.
+/// Generic instantiations (`*List[T]`) reduce to the base type.
+fn go_receiver_type(receiver: &str) -> String {
+    let last = receiver.split_whitespace().next_back().unwrap_or("");
+    let base = last.trim_start_matches('*');
+    let end = base.find('[').unwrap_or(base.len());
+    base[..end].to_owned()
+}
+
+/// Infer the input surface from a Go parameter list.
+fn go_input_surface(params: &str) -> InputSurface {
+    // Byte slices, strings, and io readers are all direct untrusted-input
+    // surfaces a fuzzer can feed raw bytes into.
+    let byte_like = ["[]byte", "string", "io.Reader", "io.ReadCloser"];
+    if byte_like.iter().any(|p| params.contains(p)) {
+        InputSurface::Bytes
+    } else {
+        InputSurface::Structured
+    }
+}
+
+/// Go cyclomatic estimate over the same balanced-brace heuristic as Rust.
+fn go_body_complexity(s: &str) -> u32 {
+    brace_body_complexity(s, &["if ", "for ", "case ", "&&", "||"])
+}
+
+/// Extract parameter-bearing `def` definitions from Python source. Top-level
+/// functions and direct class methods are candidates; closures nested inside
+/// another `def` are not importable from a harness and are skipped. Methods
+/// are named `Class.method` so same-named methods of different classes do not
+/// collide, and `self`/`cls` are excluded from the parameter count.
+/// Conservative like the Rust scanner: a missed multi-line signature is a
+/// lost candidate, never a wrong one.
+fn extract_python_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) {
+    // Indentation scopes: (indent, class name when the scope is a class).
+    // A def is a candidate at module level (empty stack) or directly inside
+    // a class; defs push a scope so deeper-nested defs stay non-candidates.
+    let mut scopes: Vec<(usize, Option<String>)> = Vec::new();
+    let mut byte_off = 0usize;
+    for (idx, raw) in src.split_inclusive('\n').enumerate() {
+        let line_start = byte_off;
+        byte_off += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        // A line at this indent closes every block that began deeper in.
+        while scopes
+            .last()
+            .is_some_and(|&(scope_indent, _)| indent <= scope_indent)
+        {
+            scopes.pop();
+        }
+        if let Some(after_class) = trimmed.strip_prefix("class ") {
+            scopes.push((indent, Some(read_ident(after_class))));
+            continue;
+        }
+        let Some(after_def) = trimmed
+            .strip_prefix("async def ")
+            .or_else(|| trimmed.strip_prefix("def "))
+        else {
+            continue;
+        };
+        let class = scopes.last().and_then(|(_, class)| class.as_ref()).cloned();
+        let nested_in_def = scopes.last().is_some_and(|(_, class)| class.is_none());
+        scopes.push((indent, None));
+        let name = read_ident(after_def);
+        // Underscore-privates (incl. dunders) and test functions are not
+        // library surface, and a nested closure is not importable.
+        if name.is_empty() || name.starts_with('_') || name.starts_with("test_") || nested_in_def {
+            continue;
+        }
+        // The declaration slice starts at the function name, so the first
+        // balanced `(...)` is the parameter list even when it spans lines.
+        let name_off =
+            line_start + (line.len() - trimmed.len()) + (trimmed.len() - after_def.len());
+        let decl = &src[name_off..];
+        let Some(params) = extract_paren_group(decl) else {
+            continue;
+        };
+        let mut param_count = if params.trim().is_empty() {
+            0
+        } else {
+            params.split(',').filter(|p| !p.trim().is_empty()).count()
+        };
+        if class.is_some() {
+            // self/cls bind the instance/class; they are not untrusted input.
+            param_count = param_count.saturating_sub(
+                params
+                    .split(',')
+                    .filter(|p| matches!(p.trim(), "self" | "cls"))
+                    .count(),
+            );
+        }
+        if param_count == 0 {
+            continue; // no untrusted input to feed
+        }
+        let input_surface = python_input_surface(&params);
+        let kind = if [
+            "parse",
+            "decode",
+            "deserialize",
+            "load",
+            "read",
+            "from_bytes",
+        ]
+        .iter()
+        .any(|k| name.contains(k))
+        {
+            TargetKind::Parser
+        } else {
+            TargetKind::Function
+        };
+        let symbol = match &class {
+            Some(class) => format!("{class}.{name}"),
+            None => name,
+        };
+        let complexity = python_body_complexity(decl, indent);
+        let fit_score = compute_fit_score(kind, input_surface, complexity, param_count);
+        let signature = line.trim().trim_end_matches(':').trim().to_owned();
+        out.push(TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: PathBuf::new(),
+            language: TargetLanguage::Python,
+            symbol,
+            kind,
+            location: SourceLocation {
+                file: path.to_path_buf(),
+                line: (idx + 1) as u32,
+                col: (indent + 1) as u32,
+            },
+            signature: Some(signature),
+            input_surface,
+            complexity,
+            fit_score,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        });
+    }
+}
+
+/// Infer the input surface from a Python parameter list.
+fn python_input_surface(params: &str) -> InputSurface {
+    // Python parameters are usually untyped, so surface inference keys on the
+    // conventional byte-carrying names and annotations.
+    let byte_like = [
+        "bytes",
+        "bytearray",
+        "data",
+        "buf",
+        "raw",
+        "payload",
+        ": str",
+    ];
+    if byte_like.iter().any(|p| params.contains(p)) {
+        InputSurface::Bytes
+    } else {
+        InputSurface::Structured
+    }
+}
+
+/// Python cyclomatic estimate: 1 plus the control-flow keywords in the
+/// indented body. The body is every line indented past `def_indent`; the
+/// first non-blank line back at or left of it ends the block. Lexical, so it
+/// is an estimate, not exact.
+fn python_body_complexity(s: &str, def_indent: usize) -> u32 {
+    let mut count = 1u32;
+    for raw in s.split_inclusive('\n').skip(1) {
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if line.len() - trimmed.len() <= def_indent {
+            break;
+        }
+        for kw in [
+            "if ", "if(", "elif ", "for ", "while ", "except", "match ", "case ",
+        ] {
+            if trimmed.starts_with(kw) {
+                count += 1;
+                break;
+            }
+        }
+        count += u32::try_from(trimmed.matches(" and ").count() + trimmed.matches(" or ").count())
+            .unwrap_or(0);
+    }
+    count.min(200)
 }
 
 /// If `line` (already left-trimmed) declares a public function, return the slice
@@ -309,6 +666,27 @@ fn extract_paren_group(s: &str) -> Option<String> {
     None
 }
 
+/// If `s` starts with `(`, return the byte index just past the matching `)`.
+fn paren_group_end(s: &str) -> Option<usize> {
+    if !s.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Infer the input surface from a Rust parameter list.
 fn rust_input_surface(params: &str) -> InputSurface {
     // Byte slices/vectors and string types are all direct untrusted-input
@@ -324,7 +702,7 @@ fn rust_input_surface(params: &str) -> InputSurface {
 /// Approximate cyclomatic complexity: 1 plus the number of control-flow
 /// keywords/operators in the function body (the first balanced `{...}` after
 /// the signature). Lexical, so it is an estimate, not exact.
-fn rust_body_complexity(s: &str) -> u32 {
+fn brace_body_complexity(s: &str, keywords: &[&str]) -> u32 {
     let Some(open) = s.find('{') else {
         return 1;
     };
@@ -344,10 +722,18 @@ fn rust_body_complexity(s: &str) -> u32 {
         body.push(ch);
     }
     let mut count = 1u32;
-    for kw in ["if ", "match ", "for ", "while ", "loop ", "&&", "||", "?"] {
+    for kw in keywords {
         count += u32::try_from(body.matches(kw).count()).unwrap_or(0);
     }
     count.min(200)
+}
+
+/// Rust cyclomatic estimate over the balanced-brace body heuristic.
+fn rust_body_complexity(s: &str) -> u32 {
+    brace_body_complexity(
+        s,
+        &["if ", "match ", "for ", "while ", "loop ", "&&", "||", "?"],
+    )
 }
 
 fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedError> {
@@ -696,4 +1082,257 @@ fn compute_fit_score(
         score += 0.05;
     }
     score.clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_go_functions, extract_python_functions};
+    use hf_core::target::{InputSurface, TargetCandidate, TargetKind, TargetLanguage};
+    use std::path::Path;
+
+    fn go_candidates(src: &str) -> Vec<TargetCandidate> {
+        let mut out = Vec::new();
+        extract_go_functions(src, Path::new("parser.go"), &mut out);
+        out
+    }
+
+    fn python_candidates(src: &str) -> Vec<TargetCandidate> {
+        let mut out = Vec::new();
+        extract_python_functions(src, Path::new("codec.py"), &mut out);
+        out
+    }
+
+    #[test]
+    fn go_finds_exported_functions_only() {
+        let out = go_candidates(
+            "package parser\n\
+             func ParsePacket(data []byte, offset int) bool {\n\
+             \treturn len(data) > offset\n\
+             }\n\
+             func helper(x int) int { return x + 1 }\n\
+             func main() {}\n\
+             func init() {}\n",
+        );
+        // Only the exported, parameter-bearing function is a candidate;
+        // unexported helpers and the main/init entry points are not.
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "ParsePacket");
+        assert_eq!(out[0].language, TargetLanguage::Go);
+        assert_eq!(out[0].kind, TargetKind::Parser);
+        assert_eq!(out[0].location.line, 2);
+    }
+
+    #[test]
+    fn go_qualifies_methods_with_the_receiver_type() {
+        let out = go_candidates(
+            "package parser\n\
+             func (d *Decoder) DecodeFrame(buf []byte) error { return nil }\n\
+             func (d Decoder) Name() string { return d.name }\n",
+        );
+        // The exported method is a candidate named by receiver type so two
+        // types with same-named methods do not collide; the unexported
+        // zero-parameter method is not fuzzable input.
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "Decoder.DecodeFrame");
+        assert_eq!(out[0].kind, TargetKind::Parser);
+    }
+
+    #[test]
+    fn go_skips_test_and_benchmark_functions() {
+        let out = go_candidates(
+            "package parser\n\
+             func TestParse(t *testing.T) {}\n\
+             func BenchmarkParse(b *testing.B) {}\n\
+             func ParseReal(data []byte) bool { return len(data) > 0 }\n",
+        );
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "ParseReal");
+    }
+
+    #[test]
+    fn go_requires_at_least_one_parameter() {
+        let out = go_candidates(
+            "package parser\n\
+             func Version() string { return \"1.0\" }\n\
+             func ReadChunk(buf []byte, n int) int { return n }\n",
+        );
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "ReadChunk");
+    }
+
+    #[test]
+    fn go_infers_byte_surface_from_byte_slice_string_and_reader_params() {
+        let out = go_candidates(
+            "package parser\n\
+             func ParseBytes(data []byte) bool { return len(data) > 0 }\n\
+             func ParseString(s string) bool { return s != \"\" }\n\
+             func ParseReader(r io.Reader) bool { return r != nil }\n\
+             func Compute(n int) int { return n }\n",
+        );
+        assert_eq!(out.len(), 4, "unexpected candidates: {out:?}");
+        for symbol in ["ParseBytes", "ParseString", "ParseReader"] {
+            let c = out
+                .iter()
+                .find(|c| c.symbol == symbol)
+                .unwrap_or_else(|| panic!("{symbol} must be present"));
+            assert_eq!(
+                c.input_surface,
+                InputSurface::Bytes,
+                "{symbol} should read untrusted bytes"
+            );
+        }
+        let compute = out.iter().find(|c| c.symbol == "Compute").unwrap();
+        assert_eq!(compute.input_surface, InputSurface::Structured);
+    }
+
+    #[test]
+    fn go_complexity_grows_with_control_flow() {
+        let out = go_candidates(
+            "package parser\n\
+             func Trivial(x int) int { return x }\n\
+             func ScanTokens(data []byte) int {\n\
+             \tn := 0\n\
+             \tfor i := 0; i < len(data); i++ {\n\
+             \t\tif data[i] == 0x7f && n < 10 {\n\
+             \t\t\tn++\n\
+             \t\t}\n\
+             \t}\n\
+             \treturn n\n\
+             }\n",
+        );
+        let trivial = out.iter().find(|c| c.symbol == "Trivial").unwrap();
+        let scan = out.iter().find(|c| c.symbol == "ScanTokens").unwrap();
+        assert_eq!(trivial.complexity, 1);
+        // 1 + for + if + && -- the branchy scanner is strictly more complex.
+        assert!(
+            scan.complexity >= 4,
+            "ScanTokens complexity {} should reflect its control flow",
+            scan.complexity
+        );
+    }
+
+    #[test]
+    fn python_finds_top_level_defs() {
+        let out = python_candidates(
+            "def parse_packet(data, offset=0):\n\
+             \x20   if not data:\n\
+             \x20       return None\n\
+             \x20   return data[offset:]\n\
+             def helper():\n\
+             \x20   return 1\n",
+        );
+        // The parameter-bearing parser is a candidate; the zero-arg helper
+        // has no untrusted input to feed.
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "parse_packet");
+        assert_eq!(out[0].language, TargetLanguage::Python);
+        assert_eq!(out[0].kind, TargetKind::Parser);
+        assert_eq!(out[0].location.line, 1);
+    }
+
+    #[test]
+    fn python_tolerates_decorators_and_async_defs() {
+        let out = python_candidates(
+            "@functools.lru_cache(maxsize=None)\n\
+             def decode_frame(buf):\n\
+             \x20   return buf\n\
+             async def fetch_payload(url, timeout=10):\n\
+             \x20   return url\n",
+        );
+        let symbols: Vec<&str> = out.iter().map(|c| c.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"decode_frame"),
+            "decorated def must count; got {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"fetch_payload"),
+            "async def must count; got {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn python_class_methods_exclude_self_and_cls_from_params() {
+        let out = python_candidates(
+            "class Decoder:\n\
+             \x20   def decode_frame(self, buf):\n\
+             \x20       return buf\n\
+             \x20   def name(self):\n\
+             \x20       return self._name\n\
+             \x20   @classmethod\n\
+             \x20   def load(cls, raw, strict=False):\n\
+             \x20       return raw\n\
+             \x20   @staticmethod\n\
+             \x20   def from_bytes(payload):\n\
+             \x20       return payload\n",
+        );
+        let symbols: Vec<&str> = out.iter().map(|c| c.symbol.as_str()).collect();
+        // `name(self)` has no input parameter once self is excluded.
+        assert!(
+            !symbols.contains(&"Decoder.name"),
+            "self-only method must not be a candidate; got {symbols:?}"
+        );
+        for symbol in ["Decoder.decode_frame", "Decoder.load", "Decoder.from_bytes"] {
+            assert!(
+                symbols.contains(&symbol),
+                "{symbol} must be a candidate; got {symbols:?}"
+            );
+        }
+        let from_bytes = out
+            .iter()
+            .find(|c| c.symbol == "Decoder.from_bytes")
+            .unwrap();
+        assert_eq!(from_bytes.kind, TargetKind::Parser);
+    }
+
+    #[test]
+    fn python_skips_underscore_test_and_dunder_defs() {
+        let out = python_candidates(
+            "def _helper(data):\n\
+             \x20   return data\n\
+             def __repr__(self):\n\
+             \x20   return \"x\"\n\
+             def test_parse(data):\n\
+             \x20   return data\n\
+             def parse_real(data):\n\
+             \x20   return data\n",
+        );
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "parse_real");
+    }
+
+    #[test]
+    fn python_nested_defs_are_not_candidates() {
+        let out = python_candidates(
+            "def outer(data):\n\
+             \x20   def inner(chunk):\n\
+             \x20       return chunk\n\
+             \x20   return inner(data)\n",
+        );
+        // A closure nested inside another def is not importable from a
+        // harness, so only the outer function is a candidate.
+        assert_eq!(out.len(), 1, "unexpected candidates: {out:?}");
+        assert_eq!(out[0].symbol, "outer");
+    }
+
+    #[test]
+    fn python_complexity_stops_at_the_indented_block_end() {
+        let out = python_candidates(
+            "def branchy(data):\n\
+             \x20   if data:\n\
+             \x20       for b in data:\n\
+             \x20           if b > 0 and b < 10:\n\
+             \x20               return True\n\
+             \x20   return False\n\
+             def other(x):\n\
+             \x20   if x:\n\
+             \x20       return 1\n\
+             \x20   return 0\n",
+        );
+        let branchy = out.iter().find(|c| c.symbol == "branchy").unwrap();
+        let other = out.iter().find(|c| c.symbol == "other").unwrap();
+        // 1 + if + for + if + and; the dedented `def other` ends the block,
+        // so its `if x` must not leak into branchy's score.
+        assert_eq!(branchy.complexity, 5);
+        assert_eq!(other.complexity, 2);
+    }
 }

@@ -335,3 +335,160 @@ async fn discover_rust_scans_crlf_identically_to_lf() {
         "CRLF scan diverged from LF (offset drift): LF={lf_frame:?} CRLF={crlf_frame:?}"
     );
 }
+
+#[tokio::test]
+async fn discover_go_finds_exported_functions_and_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("parser.go"),
+        "package parser\n\
+         \n\
+         func ParsePacket(data []byte, offset int) bool {\n\
+         \tif len(data) == 0 {\n\
+         \t\treturn false\n\
+         \t}\n\
+         \treturn data[0] == 0x7f && offset >= 0\n\
+         }\n\
+         \n\
+         func (d *Decoder) DecodeFrame(buf []byte) error {\n\
+         \tif d.strict && len(buf) > 0 {\n\
+         \t\treturn nil\n\
+         \t}\n\
+         \treturn nil\n\
+         }\n\
+         \n\
+         func helper(x int) int { return x + 1 }\n\
+         func main() {}\n\
+         func init() {}\n\
+         func NoParams() int { return 42 }\n",
+    )
+    .unwrap();
+    // Test files are not fuzz-target sources: the scanner skips them.
+    std::fs::write(
+        dir.path().join("parser_test.go"),
+        "package parser\n\
+         \n\
+         import \"testing\"\n\
+         \n\
+         func TestParsePacket(t *testing.T) {}\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(dir.path(), TargetLanguage::Go)
+        .await
+        .expect("go discovery should succeed");
+
+    // Every candidate is stamped with the Go language.
+    assert!(
+        !inv.candidates.is_empty()
+            && inv
+                .candidates
+                .iter()
+                .all(|c| c.language == TargetLanguage::Go),
+        "all candidates must carry TargetLanguage::Go"
+    );
+
+    let ranked: Vec<&str> = inv.ranked().iter().map(|c| c.symbol.as_str()).collect();
+    assert!(
+        ranked.contains(&"ParsePacket"),
+        "exported parser must be ranked; got {ranked:?}"
+    );
+    assert!(
+        ranked.contains(&"Decoder.DecodeFrame"),
+        "exported method must be ranked under its receiver type; got {ranked:?}"
+    );
+    for skipped in ["helper", "main", "init", "NoParams", "TestParsePacket"] {
+        assert!(
+            !ranked.contains(&skipped),
+            "{skipped} must not be a candidate; got {ranked:?}"
+        );
+    }
+
+    let parse = inv
+        .candidates
+        .iter()
+        .find(|c| c.symbol == "ParsePacket")
+        .expect("ParsePacket should be discovered");
+    assert_eq!(parse.kind, TargetKind::Parser);
+}
+
+#[tokio::test]
+async fn discover_python_finds_defs_and_methods() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("codec.py"),
+        "import struct\n\
+         \n\
+         \n\
+         def parse_packet(data, offset=0):\n\
+         \x20   if not data:\n\
+         \x20       return None\n\
+         \x20   while offset < len(data):\n\
+         \x20       if data[offset] == 0x7f:\n\
+         \x20           return data[offset:]\n\
+         \x20       offset += 1\n\
+         \x20   return None\n\
+         \n\
+         \n\
+         async def fetch_payload(url, timeout=10):\n\
+         \x20   return url\n\
+         \n\
+         \n\
+         class Decoder:\n\
+         \x20   @staticmethod\n\
+         \x20   def load(raw, strict=False):\n\
+         \x20       return raw\n\
+         \n\
+         \x20   def decode_frame(self, buf):\n\
+         \x20       if self.strict and buf:\n\
+         \x20           return buf\n\
+         \x20       return None\n\
+         \n\
+         \x20   def _validate(self):\n\
+         \x20       return True\n\
+         \n\
+         \n\
+         def test_parse_packet():\n\
+         \x20   assert parse_packet(b\"\\x7f\")\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(dir.path(), TargetLanguage::Python)
+        .await
+        .expect("python discovery should succeed");
+
+    assert!(
+        !inv.candidates.is_empty()
+            && inv
+                .candidates
+                .iter()
+                .all(|c| c.language == TargetLanguage::Python),
+        "all candidates must carry TargetLanguage::Python"
+    );
+
+    let ranked: Vec<&str> = inv.ranked().iter().map(|c| c.symbol.as_str()).collect();
+    for expected in [
+        "parse_packet",
+        "fetch_payload",
+        "Decoder.load",
+        "Decoder.decode_frame",
+    ] {
+        assert!(
+            ranked.contains(&expected),
+            "{expected} must be ranked; got {ranked:?}"
+        );
+    }
+    for skipped in ["Decoder._validate", "test_parse_packet"] {
+        assert!(
+            !ranked.contains(&skipped),
+            "{skipped} must not be a candidate; got {ranked:?}"
+        );
+    }
+
+    let parse = inv
+        .candidates
+        .iter()
+        .find(|c| c.symbol == "parse_packet")
+        .expect("parse_packet should be discovered");
+    assert_eq!(parse.kind, TargetKind::Parser);
+}

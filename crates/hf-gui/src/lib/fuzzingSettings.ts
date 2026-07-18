@@ -185,6 +185,12 @@ export function enabledEngineOptions(
     if (language === "rust") {
       return option.value === "libfuzzer" || option.value === "clusterfuzzlite";
     }
+    if (language === "go" || language === "python") {
+      // Discovery scans Go/Python, but no engine adapter builds those
+      // harness languages yet (EngineKind::supports_language in hf-core);
+      // returning no options keeps the harness action disabled.
+      return false;
+    }
     return true;
   });
 }

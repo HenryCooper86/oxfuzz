@@ -444,6 +444,8 @@ export function HarnessView({
                 { value: "c", label: "C" },
                 { value: "cpp", label: "C++" },
                 { value: "rust", label: "Rust" },
+                { value: "go", label: "Go" },
+                { value: "python", label: "Python" },
               ]}
             />
           </div>
