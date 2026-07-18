@@ -824,6 +824,15 @@ use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
 
 #[async_trait]
 impl RuntimeAdapter for DockerRuntime {
+    async fn image_present(&self, image: &str) -> bool {
+        // The presence probe is a blocking, bounded `docker image inspect`; run
+        // it off the async runtime so it never stalls a worker thread.
+        let image = image.to_owned();
+        tokio::task::spawn_blocking(move || crate::config::image_present(&image))
+            .await
+            .unwrap_or(false)
+    }
+
     async fn run_command(
         &self,
         cmd: &[String],
