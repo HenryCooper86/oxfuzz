@@ -1006,13 +1006,8 @@ fn parse_crashes(stdout: &str) -> u32 {
 /// drives how the compiler front-end parses the file (C vs C++), so it must
 /// match the harness language rather than always being `.c`.
 fn source_filename(lang: TargetLanguage) -> &'static str {
-    match lang {
-        TargetLanguage::Cpp => "harness.cc",
-        TargetLanguage::Rust => "harness.rs",
-        TargetLanguage::Go => "harness.go",
-        TargetLanguage::Python => "harness.py",
-        TargetLanguage::C => "harness.c",
-    }
+    // Single source of truth on `TargetLanguage` (hf-core).
+    lang.harness_filename()
 }
 
 /// List all C/C++ source files in the workspace (excluding the harness source

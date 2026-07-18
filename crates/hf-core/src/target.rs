@@ -30,6 +30,70 @@ impl TargetLanguage {
             Self::Python => "python",
         }
     }
+
+    /// Source-file extensions (without the dot) that belong to this language.
+    /// The single source of truth for the discovery scanners; the
+    /// [`LanguageBackend`] trait delegates here.
+    #[must_use]
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::C => &["c", "h"],
+            Self::Cpp => &["cc", "cpp", "cxx", "hpp", "hh"],
+            Self::Rust => &["rs"],
+            Self::Go => &["go"],
+            Self::Python => &["py"],
+        }
+    }
+
+    /// The generated harness source filename (e.g. `harness.c`).
+    #[must_use]
+    pub const fn harness_filename(self) -> &'static str {
+        match self {
+            Self::C => "harness.c",
+            Self::Cpp => "harness.cc",
+            Self::Rust => "harness.rs",
+            Self::Go => "harness.go",
+            Self::Python => "harness.py",
+        }
+    }
+
+    /// Whether a target in this language compiles to a libFuzzer binary, so the
+    /// libFuzzer / `ClusterFuzzLite` engines can drive it.
+    #[must_use]
+    pub const fn libfuzzer_compatible(self) -> bool {
+        matches!(self, Self::C | Self::Cpp | Self::Rust)
+    }
+}
+
+/// Per-language facts the fuzzing pipeline dispatches on: source extensions, the
+/// harness filename, and whether the language compiles to a libFuzzer binary.
+///
+/// Centralizing these makes [`TargetLanguage`] the single source of truth,
+/// replacing the `match TargetLanguage` arms that were scattered across the
+/// discovery, harness, and engine crates. Adding a language means adding a
+/// variant plus one arm to each method here -- not editing every dispatch site.
+pub trait LanguageBackend {
+    /// Source-file extensions (without the dot) that belong to this language.
+    fn extensions(&self) -> &'static [&'static str];
+    /// The generated harness source filename (e.g. `harness.c`).
+    fn harness_filename(&self) -> &'static str;
+    /// Whether a target in this language compiles to a libFuzzer binary, so the
+    /// libFuzzer / `ClusterFuzzLite` engines can drive it.
+    fn libfuzzer_compatible(&self) -> bool;
+}
+
+impl LanguageBackend for TargetLanguage {
+    fn extensions(&self) -> &'static [&'static str] {
+        (*self).extensions()
+    }
+
+    fn harness_filename(&self) -> &'static str {
+        (*self).harness_filename()
+    }
+
+    fn libfuzzer_compatible(&self) -> bool {
+        (*self).libfuzzer_compatible()
+    }
 }
 
 impl std::str::FromStr for TargetLanguage {
@@ -158,7 +222,9 @@ impl TargetInventory {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage};
+    use super::{
+        InputSurface, LanguageBackend, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
     use std::path::PathBuf;
 
     fn candidate(project_root: &str, file: &str) -> TargetCandidate {
@@ -182,6 +248,34 @@ mod tests {
             reachable_functions: Vec::new(),
             accumulated_complexity: 0,
         }
+    }
+
+    #[test]
+    fn language_backend_delegates_to_inherent_facts() {
+        for lang in [
+            TargetLanguage::C,
+            TargetLanguage::Cpp,
+            TargetLanguage::Rust,
+            TargetLanguage::Go,
+            TargetLanguage::Python,
+        ] {
+            // The trait is a thin, dyn-capable view over the inherent const
+            // methods -- both must agree so the single source of truth holds.
+            assert_eq!(LanguageBackend::extensions(&lang), lang.extensions());
+            assert_eq!(
+                LanguageBackend::harness_filename(&lang),
+                lang.harness_filename()
+            );
+            assert_eq!(
+                LanguageBackend::libfuzzer_compatible(&lang),
+                lang.libfuzzer_compatible()
+            );
+            // The harness filename carries a matching extension.
+            let ext = lang.harness_filename().rsplit('.').next().unwrap();
+            assert!(lang.extensions().contains(&ext), "{lang:?} harness ext");
+        }
+        assert!(TargetLanguage::C.libfuzzer_compatible());
+        assert!(!TargetLanguage::Go.libfuzzer_compatible());
     }
 
     #[test]
