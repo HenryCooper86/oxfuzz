@@ -184,7 +184,7 @@ fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<std
 /// Whether the Docker daemon is actually reachable. `docker info` only
 /// succeeds when a daemon is up, so this is a true readiness check (unlike
 /// `docker --version`, which only proves the CLI exists). Bounded by
-/// [`DOCKER_PROBE_TIMEOUT`]: a wedged daemon reports not-ready.
+/// `DOCKER_PROBE_TIMEOUT`: a wedged daemon reports not-ready.
 #[must_use]
 pub fn docker_daemon_ready() -> bool {
     run_bounded(
