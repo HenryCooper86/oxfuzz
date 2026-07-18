@@ -264,6 +264,71 @@ pub fn dict_run_args(engine: EngineKind, container_path: &str) -> Vec<String> {
     }
 }
 
+/// Parse an AFL++/libFuzzer dictionary body back into tokens -- the inverse of
+/// [`render_dict`]. Blank and `#`-comment lines are skipped; for any other line
+/// the content between its first and last `"` is decoded (so a `name="token"`
+/// level entry works, and a stray unquoted line is ignored). Decodes `\\`, `\"`,
+/// and `\xNN`. Used to merge externally-produced tokens (e.g. LLM-proposed) into
+/// an existing dictionary.
+#[must_use]
+pub fn parse_dict(text: &str) -> Vec<Vec<u8>> {
+    let mut tokens = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (Some(start), Some(end)) = (line.find('"'), line.rfind('"')) else {
+            continue;
+        };
+        if end <= start {
+            continue;
+        }
+        let token = decode_dict_token(&line[start + 1..end]);
+        if !token.is_empty() && token.len() <= MAX_TOKEN_LEN {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// Decode the escaped body of a dictionary token (`\\`, `\"`, `\xNN`).
+fn decode_dict_token(body: &str) -> Vec<u8> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                }
+                b'x' | b'X'
+                    if i + 3 < bytes.len()
+                        && bytes[i + 2].is_ascii_hexdigit()
+                        && bytes[i + 3].is_ascii_hexdigit() =>
+                {
+                    out.push(hex_val(bytes[i + 2]) * 16 + hex_val(bytes[i + 3]));
+                    i += 4;
+                }
+                other => {
+                    out.push(other);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +398,31 @@ mod tests {
     fn render_escapes_nonprintable_and_quotes() {
         let rendered = render_dict(&[vec![0x89, b'P', b'N', b'"', b'G']]);
         assert_eq!(rendered, "\"\\x89PN\\\"G\"\n");
+    }
+
+    #[test]
+    fn parse_dict_round_trips_render_dict() {
+        let tokens = vec![
+            vec![0x89u8, b'P', b'N', b'G'],
+            b("MAGIC"),
+            vec![b'"', b'\\', 0x0a],
+        ];
+        let rendered = render_dict(&tokens);
+        assert_eq!(
+            parse_dict(&rendered),
+            tokens,
+            "render -> parse must be lossless"
+        );
+    }
+
+    #[test]
+    fn parse_dict_skips_comments_and_level_prefix() {
+        let text = "# a comment\n\
+                    \n\
+                    \"plain\"\n\
+                    kw=\"leveled\"\n\
+                    not a token line\n";
+        assert_eq!(parse_dict(text), vec![b("plain"), b("leveled")]);
     }
 
     #[test]
