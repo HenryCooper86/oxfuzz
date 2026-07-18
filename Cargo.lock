@@ -2584,6 +2584,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "globset",
  "hf-core",
  "serde",
  "serde_json",

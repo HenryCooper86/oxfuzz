@@ -23,6 +23,11 @@ pub struct FiredTrigger {
     /// policy cannot silently discard missed occurrences.
     #[serde(default)]
     pub is_recovery: bool,
+    /// Payload of the event that fired this trigger (`None` for time triggers).
+    ///
+    /// Feeds `{{ event.payload.* }}` parameter expressions at dispatch.
+    #[serde(default)]
+    pub event_payload: Option<serde_json::Value>,
 }
 
 /// Discriminant for trigger types (used in context injection).
@@ -80,7 +85,9 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
             schedule.last_fire.is_none() && OneTimeSchedule::new(*at).should_fire(now)
         }
         TriggerConfig::Event { .. } => {
-            // Event triggers are handled externally via the EventBridge (Phase S6).
+            // Event schedules are fired by the EventBridge when a matching
+            // event arrives (`SchedulerManager::emit_event`), not by the
+            // time-based tick: with no event pending there is nothing to do.
             false
         }
     };
@@ -97,6 +104,9 @@ pub fn evaluate_trigger(schedule: &Schedule, now: DateTime<Utc>) -> Option<Fired
             fired_at: now,
             trigger_type,
             is_recovery: false,
+            // Time-triggered fires carry no event payload; the EventBridge
+            // attaches one when it enqueues an event-driven fire.
+            event_payload: None,
         })
     } else {
         None

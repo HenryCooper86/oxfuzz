@@ -385,10 +385,11 @@ enum ScheduleOp {
         /// Target language of the promoted harness: c | cpp | rust.
         #[arg(long, default_value = "c")]
         lang: String,
-        /// Trigger kind: interval | cron | once.
+        /// Trigger kind: interval | cron | once | event.
         #[arg(long)]
         trigger_kind: String,
-        /// Trigger value (interval seconds, a cron expr, or an RFC3339 time).
+        /// Trigger value: interval seconds, a cron expr, an RFC3339 time, or an
+        /// event type (crash.found, run.completed, run.failed).
         #[arg(long)]
         trigger_value: String,
         /// Per-run duration (e.g. 30m, 1h).

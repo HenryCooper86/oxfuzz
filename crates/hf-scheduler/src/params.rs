@@ -4,6 +4,10 @@
 //! 1. Defaults from a parameter schema
 //! 2. Static overrides from the schedule's `parameter_values`
 //! 3. Dynamic expressions evaluated at trigger time (e.g. `{{ trigger.time }}`)
+//!
+//! An expression that cannot be resolved is a hard [`ResolveError`]: silently
+//! passing a raw `{{ ... }}` template through to a workflow would run it with
+//! a parameter the author never intended.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -23,20 +27,35 @@ pub struct ResolutionContext {
     pub event_payload: Option<Value>,
 }
 
+/// A parameter expression that could not be resolved.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolveError {
+    /// The expression inside `{{ ... }}` is not one of the supported forms.
+    #[error("unknown parameter expression: {0}")]
+    UnknownExpression(String),
+    /// An `event.payload.*` reference has no event payload or no such field.
+    #[error("event payload field not found: {0}")]
+    EventFieldNotFound(String),
+}
+
 /// Resolve parameter values for a scheduled workflow execution.
 ///
 /// Resolution chain:
 /// 1. Start with `defaults`
 /// 2. Override with `static_values` (schedule's `parameter_values`)
 /// 3. Resolve expression strings (`{{ expr }}`) using `context`
+///
+/// # Errors
+/// Returns [`ResolveError`] when any `{{ ... }}` expression in the merged
+/// values cannot be resolved against `context`.
 pub fn resolve_parameters(
     defaults: &Value,
     static_values: &Value,
     context: &ResolutionContext,
-) -> Value {
+) -> Result<Value, ResolveError> {
     let mut result = merge_values(defaults, static_values);
-    resolve_expressions(&mut result, context);
-    result
+    resolve_expressions(&mut result, context)?;
+    Ok(result)
 }
 
 /// Merge two JSON objects. Values in `overlay` override those in `base`.
@@ -59,25 +78,26 @@ fn merge_values(base: &Value, overlay: &Value) -> Value {
 }
 
 /// Resolve `{{ expression }}` strings in a JSON value tree.
-fn resolve_expressions(value: &mut Value, ctx: &ResolutionContext) {
+fn resolve_expressions(value: &mut Value, ctx: &ResolutionContext) -> Result<(), ResolveError> {
     match value {
         Value::String(s) => {
-            if let Some(resolved) = try_resolve_expression(s, ctx) {
+            if let Some(resolved) = try_resolve_expression(s, ctx)? {
                 *value = resolved;
             }
         }
         Value::Object(map) => {
             for v in map.values_mut() {
-                resolve_expressions(v, ctx);
+                resolve_expressions(v, ctx)?;
             }
         }
         Value::Array(arr) => {
             for v in arr.iter_mut() {
-                resolve_expressions(v, ctx);
+                resolve_expressions(v, ctx)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// Try to resolve a single `{{ expr }}` expression.
@@ -87,30 +107,35 @@ fn resolve_expressions(value: &mut Value, ctx: &ResolutionContext) {
 /// - `{{ trigger.type }}` → trigger type string
 /// - `{{ execution.sequence }}` → sequence number
 /// - `{{ event.payload.FIELD }}` → field from event payload
-fn try_resolve_expression(s: &str, ctx: &ResolutionContext) -> Option<Value> {
+///
+/// Returns `Ok(None)` for plain strings that are not expressions at all;
+/// `Err` for strings that are expressions but cannot be resolved.
+fn try_resolve_expression(s: &str, ctx: &ResolutionContext) -> Result<Option<Value>, ResolveError> {
     let trimmed = s.trim();
     if !trimmed.starts_with("{{") || !trimmed.ends_with("}}") {
-        return None;
+        return Ok(None);
     }
 
     let expr = trimmed[2..trimmed.len() - 2].trim();
 
     match expr {
-        "trigger.time" => Some(Value::String(ctx.trigger_time.to_rfc3339())),
-        "trigger.type" => Some(Value::String(ctx.trigger_type.to_string())),
-        "execution.sequence" => Some(Value::Number(ctx.execution_sequence.into())),
+        "trigger.time" => Ok(Some(Value::String(ctx.trigger_time.to_rfc3339()))),
+        "trigger.type" => Ok(Some(Value::String(ctx.trigger_type.to_string()))),
+        "execution.sequence" => Ok(Some(Value::Number(ctx.execution_sequence.into()))),
         _ if expr.starts_with("event.payload.") => {
             let field = &expr["event.payload.".len()..];
             ctx.event_payload
                 .as_ref()
                 .and_then(|payload| resolve_json_path(payload, field))
+                .map(Some)
+                .ok_or_else(|| ResolveError::EventFieldNotFound(field.to_owned()))
         }
-        _ => None, // Unknown expression — leave as-is.
+        _ => Err(ResolveError::UnknownExpression(expr.to_owned())),
     }
 }
 
 /// Resolve a dot-path (e.g. `"nested.field"`) in a JSON value.
-fn resolve_json_path(value: &Value, path: &str) -> Option<Value> {
+pub(crate) fn resolve_json_path(value: &Value, path: &str) -> Option<Value> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = value;
     for part in parts {
@@ -147,7 +172,7 @@ mod tests {
         let static_values = json!({});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["key"], "default_value");
         assert_eq!(result["count"], 10);
     }
@@ -158,7 +183,7 @@ mod tests {
         let static_values = json!({"key": "overridden"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["key"], "overridden");
         assert_eq!(result["count"], 10); // Not overridden.
     }
@@ -169,7 +194,7 @@ mod tests {
         let static_values = json!({"fired_at": "{{ trigger.time }}"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert!(result["fired_at"].as_str().unwrap().contains("2026-03-11"));
     }
 
@@ -179,7 +204,7 @@ mod tests {
         let static_values = json!({"type": "{{ trigger.type }}"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["type"], "cron");
     }
 
@@ -189,7 +214,7 @@ mod tests {
         let static_values = json!({"seq": "{{ execution.sequence }}"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["seq"], 42);
     }
 
@@ -199,7 +224,7 @@ mod tests {
         let static_values = json!({"file": "{{ event.payload.path }}"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["file"], "/workspace/test.md");
     }
 
@@ -209,19 +234,45 @@ mod tests {
         let static_values = json!({"val": "{{ event.payload.nested.value }}"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["val"], 123);
     }
 
     #[test]
-    fn test_param_resolution_unknown_expression_unchanged() {
+    fn test_param_resolution_unknown_expression_fails() {
         let defaults = json!({});
         let static_values = json!({"x": "{{ unknown.expr }}"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
-        // Unknown expressions remain as string.
-        assert_eq!(result["x"], "{{ unknown.expr }}");
+        // An unresolvable expression must fail visibly, never pass the raw
+        // template through to the workflow as if it were a literal value.
+        let error = resolve_parameters(&defaults, &static_values, &ctx).unwrap_err();
+        assert!(
+            matches!(error, ResolveError::UnknownExpression(ref expr) if expr == "unknown.expr")
+        );
+    }
+
+    #[test]
+    fn test_param_resolution_event_field_without_payload_fails() {
+        let defaults = json!({});
+        let static_values = json!({"file": "{{ event.payload.path }}"});
+        let ctx = ResolutionContext {
+            event_payload: None,
+            ..test_context()
+        };
+
+        let error = resolve_parameters(&defaults, &static_values, &ctx).unwrap_err();
+        assert!(matches!(error, ResolveError::EventFieldNotFound(ref field) if field == "path"));
+    }
+
+    #[test]
+    fn test_param_resolution_missing_event_field_fails() {
+        let defaults = json!({});
+        let static_values = json!({"file": "{{ event.payload.absent }}"});
+        let ctx = test_context();
+
+        let error = resolve_parameters(&defaults, &static_values, &ctx).unwrap_err();
+        assert!(matches!(error, ResolveError::EventFieldNotFound(ref field) if field == "absent"));
     }
 
     #[test]
@@ -230,7 +281,7 @@ mod tests {
         let static_values = json!({"msg": "Hello world"});
         let ctx = test_context();
 
-        let result = resolve_parameters(&defaults, &static_values, &ctx);
+        let result = resolve_parameters(&defaults, &static_values, &ctx).unwrap();
         assert_eq!(result["msg"], "Hello world");
     }
 

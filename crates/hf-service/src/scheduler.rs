@@ -166,6 +166,21 @@ const TICK: Duration = Duration::from_secs(30);
 /// the campaign from `parameter_values`, not the id).
 const CAMPAIGN_KIND: &str = "fuzz-campaign";
 
+/// Event type emitted when triage completes with newly classified crashes.
+pub const EVENT_CRASH_FOUND: &str = "crash.found";
+/// Event type emitted when a fuzz run terminates successfully (including a
+/// cooperative cancellation, which is carried in the payload).
+pub const EVENT_RUN_COMPLETED: &str = "run.completed";
+/// Event type emitted when a started fuzz run terminates with a failure.
+pub const EVENT_RUN_FAILED: &str = "run.failed";
+
+/// Every event type an event-driven schedule may listen for.
+///
+/// These are the events the service genuinely emits today; schedule creation
+/// rejects anything else so a typo can never silently arm a schedule that can
+/// never fire.
+pub const KNOWN_EVENT_TYPES: &[&str] = &[EVENT_CRASH_FOUND, EVENT_RUN_COMPLETED, EVENT_RUN_FAILED];
+
 /// Parameters for a scheduled fuzz campaign (stored in `Schedule.parameter_values`).
 ///
 /// A campaign is a *portfolio*: `target: None` fuzzes every promoted target in the
@@ -404,6 +419,8 @@ fn view_of(schedule: &Schedule) -> CampaignView {
 /// - `interval` + seconds, e.g. `("interval", "3600")`
 /// - `cron` + expression, e.g. `("cron", "0 2 * * *")`
 /// - `once` + RFC3339 timestamp, e.g. `("once", "2026-07-01T02:00:00Z")`
+/// - `event` + event type, e.g. `("event", "crash.found")` — fires when the
+///   service emits that event; see [`KNOWN_EVENT_TYPES`].
 ///
 /// # Errors
 /// Returns a message when the kind is unknown or the value cannot be parsed.
@@ -461,6 +478,23 @@ pub fn parse_trigger(kind: &str, value: &str) -> Result<TriggerConfig, String> {
                 .parse::<chrono::DateTime<chrono::Utc>>()
                 .map_err(|e| format!("invalid RFC3339 time {value:?}: {e}"))?;
             Ok(TriggerConfig::OneTime { at })
+        }
+        "event" => {
+            let event_type = value.trim();
+            if event_type.is_empty() {
+                return Err("event type is empty".to_owned());
+            }
+            if !KNOWN_EVENT_TYPES.contains(&event_type) {
+                return Err(format!(
+                    "unknown event type: {event_type:?} (known: {})",
+                    KNOWN_EVENT_TYPES.join(", ")
+                ));
+            }
+            Ok(TriggerConfig::Event {
+                event_type: event_type.to_owned(),
+                debounce_secs: 0,
+                filter: None,
+            })
         }
         other => Err(format!("unknown trigger kind: {other}")),
     }
@@ -875,6 +909,9 @@ impl CampaignScheduler {
         ))?);
         let gate = Arc::new(ConcurrencyGate::new(state.max_concurrent()));
         let notifier: NotifierSlot = Arc::new(Mutex::new(notifier));
+        // Let every clone of the service container emit scheduler events
+        // (crash found, run terminated) into this manager's event bridge.
+        container.bind_scheduler_events(&manager);
         let dispatcher = Arc::new(FuzzCampaignDispatcher {
             container: container.with_guardrails(Guardrails::permissive()),
             state: Arc::clone(&state),
@@ -1330,6 +1367,83 @@ mod tests {
         assert!(parse_trigger("cron", "CRON_TZ=Mars/Olympus 0 9 * * *").is_err());
         assert!(parse_trigger("cron", "CRON_TZ=Asia/Shanghai invalid").is_err());
         assert!(parse_trigger("cron", "CRON_TZ= 0 9 * * *").is_err());
+    }
+
+    #[test]
+    fn parse_trigger_accepts_event_kinds_and_rejects_unknown_event_types() {
+        for event_type in KNOWN_EVENT_TYPES {
+            let trigger = parse_trigger("event", event_type).unwrap();
+            assert!(matches!(
+                trigger,
+                TriggerConfig::Event {
+                    debounce_secs: 0,
+                    filter: None,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            parse_trigger("event", EVENT_CRASH_FOUND),
+            Ok(TriggerConfig::Event { ref event_type, .. }) if event_type == EVENT_CRASH_FOUND
+        ));
+        let error = parse_trigger("event", "disk.full").unwrap_err();
+        assert!(
+            error.contains("unknown event type"),
+            "rejection must name the problem: {error}"
+        );
+        assert!(parse_trigger("event", "   ").is_err());
+    }
+
+    #[test]
+    fn event_trigger_schedule_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedules.json");
+        let schedule = Schedule::new(
+            "evt",
+            "on crash",
+            parse_trigger("event", EVENT_CRASH_FOUND).unwrap(),
+            CAMPAIGN_KIND,
+        );
+        atomic_write_schedules(&path, std::slice::from_ref(&schedule)).unwrap();
+
+        let loaded = load_schedules(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(
+            &loaded[0].trigger,
+            TriggerConfig::Event { event_type, debounce_secs: 0, filter: None }
+                if event_type == EVENT_CRASH_FOUND
+        ));
+    }
+
+    #[test]
+    fn schedules_persisted_before_event_triggers_still_load() {
+        // A schedule file written by an older build: no `policies`,
+        // `description`, or `tags` keys, and a trigger without `filter`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedules.json");
+        let legacy = serde_json::json!([{
+            "id": "old",
+            "name": "old nightly",
+            "enabled": true,
+            "trigger": { "type": "interval", "interval_secs": 3600 },
+            "workflow_id": CAMPAIGN_KIND,
+            "parameter_values": {
+                "project": "/p", "target": "t", "engine": "libfuzzer", "duration_secs": 60
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_fire": null
+        }]);
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let loaded = load_schedules(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(
+            loaded[0].trigger,
+            TriggerConfig::Interval {
+                interval_secs: 3600
+            }
+        ));
     }
 
     #[test]
