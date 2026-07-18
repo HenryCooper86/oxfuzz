@@ -947,6 +947,17 @@ pub(crate) fn retain_campaign_evidence(
         if metadata.file_type().is_file() && metadata.len() <= MAX_WRITABLE_GROWTH_BYTES {
             std::fs::copy(&corpus_src, destination.join("corpus.db"))
                 .map_err(|error| input_error("copy", "syzkaller corpus", &corpus_src, &error))?;
+        } else {
+            // Do not silently drop an oversized/non-regular corpus: crashes are
+            // still retained above, but surface the skip so it is not mistaken
+            // for a persisted corpus on the next run.
+            tracing::warn!(
+                corpus = %corpus_src.display(),
+                len = metadata.len(),
+                limit = MAX_WRITABLE_GROWTH_BYTES,
+                is_file = metadata.file_type().is_file(),
+                "syzkaller corpus.db skipped from retained evidence (oversized or not a regular file)"
+            );
         }
     }
     Ok(Some(destination.to_path_buf()))

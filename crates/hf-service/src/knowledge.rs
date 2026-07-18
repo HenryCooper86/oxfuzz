@@ -69,7 +69,8 @@ pub struct KnowledgeIndexStatus {
     pub files: usize,
     /// Chunks in the current index (0 when not indexed).
     pub chunks: usize,
-    /// Ingested documents on disk (picked up by the next reindex).
+    /// Ingested documents on disk, indexed into the retriever alongside the
+    /// source `files` (counted separately, never folded into `files`).
     pub documents: usize,
     /// RFC3339 build time of the current index, when one exists.
     pub indexed_at: Option<String>,
@@ -187,12 +188,13 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
     }
 
     // Also index any documents ingested for this project (markitdown output).
+    // Ingested docs are counted separately as `documents`, not as source
+    // `files`, so a single doc is not double-counted across both stats.
     index_docs_dir(
         &docs_dir(project),
         &chunker,
         &mut retriever,
         &mut originals,
-        &mut files,
         &mut chunks,
     );
 
@@ -268,7 +270,6 @@ fn index_docs_dir(
     chunker: &ChunkingStrategy,
     retriever: &mut HybridRetriever<AutoTokenizer>,
     originals: &mut HashMap<String, String>,
-    files: &mut usize,
     chunks: &mut usize,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -289,7 +290,6 @@ fn index_docs_dir(
         if content.trim().is_empty() {
             continue;
         }
-        *files += 1;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("doc");
         let source = format!("doc:{name}");
         let meta = ChunkMetadata {
@@ -693,7 +693,13 @@ mod tests {
         .unwrap();
 
         let stats = index_project(dir.path()).unwrap();
-        assert!(stats.files >= 1, "ingested doc counted");
+        // The doc is indexed (produces chunks) but is counted as a `document`,
+        // not folded into source `files` (which stays 0 for a docs-only project).
+        assert_eq!(stats.files, 0, "an ingested doc is not a source file");
+        assert!(
+            stats.chunks >= 1,
+            "the ingested doc produced indexed chunks"
+        );
 
         let hits = search_project(dir.path(), "frobnicate", 10);
         assert!(!hits.is_empty(), "ingested doc is searchable");
