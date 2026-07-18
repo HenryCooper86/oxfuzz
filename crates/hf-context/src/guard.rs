@@ -125,11 +125,11 @@ impl ContextWindowGuard {
             "[Context Status: working_tokens={used}, threshold={total}, utilization={utilization}%]"
         );
 
-        if utilization >= 95 {
+        if utilization >= self.critical_threshold {
             format!("{base}\nCRITICAL: context overflow imminent. System compaction will be triggered if compress_experience is not called.")
-        } else if utilization >= 85 {
+        } else if utilization >= self.compaction_threshold {
             format!("{base}\nWARNING: working context approaching threshold. Use compress_experience now to avoid forced compaction.")
-        } else if utilization >= 70 {
+        } else if utilization >= self.warning_threshold {
             format!("{base}\nConsider using compress_experience to archive evidence before context grows further.")
         } else {
             base
@@ -245,6 +245,39 @@ mod tests {
 
         let msg = guard.status_message(&make_ctx(110_000));
         assert!(msg.contains("CRITICAL"));
+    }
+
+    #[test]
+    fn test_status_message_uses_configured_thresholds() {
+        // Non-default thresholds must drive the message levels; the old
+        // hardcoded 95/85/70 cutoffs must not apply.
+        let guard = ContextWindowGuard {
+            warning_threshold: 10,
+            compaction_threshold: 20,
+            critical_threshold: 30,
+            ..ContextWindowGuard::new()
+        };
+        // Total budget is 112k. 25% is above the configured compaction
+        // threshold (20%) but far below the old hardcoded 85%.
+        let msg = guard.status_message(&make_ctx(28_000));
+        assert!(
+            msg.contains("WARNING"),
+            "configured compaction threshold ignored: {msg}"
+        );
+        assert!(!msg.contains("CRITICAL"));
+        // ~36% is above the configured critical threshold (30%) but below the
+        // old hardcoded 95%.
+        let msg = guard.status_message(&make_ctx(40_000));
+        assert!(
+            msg.contains("CRITICAL"),
+            "configured critical threshold ignored: {msg}"
+        );
+        // ~4% is below the configured warning threshold (10%): no guidance.
+        let msg = guard.status_message(&make_ctx(5_000));
+        assert!(
+            !msg.contains("compress_experience"),
+            "configured warning threshold ignored: {msg}"
+        );
     }
 
     #[test]
