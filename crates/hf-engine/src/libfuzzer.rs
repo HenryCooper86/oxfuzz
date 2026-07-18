@@ -26,6 +26,13 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     // `/work/outcrash-...` (workspace root) instead of `/work/out/crash-...`,
     // and triage -- which scans `out/` -- never finds it.
     args.push(format!("-artifact_prefix={}/", out.trim_end_matches('/')));
+    // Comparison feedback (value profile): libFuzzer tracks partial progress on
+    // each `memcmp`/integer comparison, so it can incrementally solve magic-value
+    // and checksum gates that otherwise wall off most of the target. This is one
+    // of the highest-yield coverage settings; complements the extracted
+    // dictionary. Placed before `extra_args` so a caller can override with
+    // `-use_value_profile=0` (libFuzzer takes the last occurrence).
+    args.push("-use_value_profile=1".to_owned());
     args.push(corpus.to_owned());
     if !cfg.env.is_empty() {
         let mut env_prefix = vec!["env".to_owned()];
