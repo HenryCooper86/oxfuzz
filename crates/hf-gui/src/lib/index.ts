@@ -22,3 +22,4 @@ export type { Transport, UnlistenFn } from "./transport";
 export { pickFolder, pickFile, openExternal } from "./platform";
 export { emitDataChanged, onDataChanged } from "./events";
 export { useDefectDojo, type DefectDojoAccess } from "./useDefectDojo";
+export { useAutomotive, type AutomotiveAccess } from "./useAutomotive";
