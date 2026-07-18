@@ -280,6 +280,27 @@ pub(crate) fn http_failure_to_provider_error(
     }
 }
 
+/// Convert a mid-stream `{"error": {...}}` frame into a classified
+/// [`ProviderError`].
+///
+/// OpenAI-compatible relays and content filters deliver terminal errors as an
+/// SSE data frame at HTTP 200 rather than a non-2xx status. Mirroring the
+/// Anthropic backend, this maps to a transient `ServerError` so the pool
+/// freezes and fails over instead of accepting a silently truncated reply.
+pub(crate) fn stream_error_to_provider_error(
+    provider_id: &str,
+    error: &serde_json::Value,
+) -> hf_core::provider::ProviderError {
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| error.to_string(), ToOwned::to_owned);
+    hf_core::provider::ProviderError::ServerError {
+        provider: provider_id.to_string(),
+        message,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal classification helpers
 // ---------------------------------------------------------------------------

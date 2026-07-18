@@ -4685,14 +4685,20 @@ impl ServiceContainer {
     /// removal fails.
     pub async fn delete_project(&self, project: &Path) -> Result<(), ClassifiedError> {
         let _workspace_operation = self.acquire_workspace_operation().await?;
+        // The DB stores canonical project roots (discovery/run inserts go through
+        // `canonical_project_root`), and the on-disk workspace slug canonicalizes
+        // too. Delete both halves under one canonical identity so a raw, symlinked,
+        // or trailing-slash caller path can never wipe the disk while orphaning the
+        // DB rows (e.g. `/tmp/p` vs the stored `/private/tmp/p` on macOS).
+        let identity = project_lookup_identity(project);
         if let Some(store) = &self.store {
-            let key = project.to_string_lossy();
+            let key = identity.to_string_lossy();
             store
                 .delete_project(&key)
                 .await
                 .map_err(|e| ClassifiedError::Internal(format!("delete project: {e}")))?;
         }
-        let dir = project_workspace_dir(project);
+        let dir = project_workspace_dir(&identity);
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {}
             // Already absent is success -- nothing on disk to reclaim.
@@ -9519,6 +9525,12 @@ fn generate_harness_body(symbol: &str, signature: Option<&str>) -> String {
     let (Some(open), Some(close)) = (sig.find('('), sig.rfind(')')) else {
         return fallback;
     };
+    // Guard against a malformed declarator where the first `(` is at or after the
+    // last `)` (e.g. an oddly-parsed `foo)(...` signature): `open + 1 > close`
+    // would make the slice below panic on a start-past-end range.
+    if open >= close {
+        return fallback;
+    }
     let params_str = &sig[open + 1..close];
     let params: Vec<&str> = params_str
         .split(',')

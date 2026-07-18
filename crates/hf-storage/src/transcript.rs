@@ -299,6 +299,13 @@ async fn read_last_messages_from_file(
 ) -> Result<Vec<Message>, SessionError> {
     use std::collections::VecDeque;
 
+    // "Last zero messages" is the empty set. Without this guard the ring-trim
+    // `ring.len() == count` never fires (len is >= 1 after the first push), so
+    // every line accumulates and the whole transcript is returned.
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| SessionError::TranscriptError {
