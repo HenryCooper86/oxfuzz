@@ -91,9 +91,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
   `LlmProviderBridge` -> `DiagnosticsRecorder`, aggregated by
   `ServiceContainer::cost_summary` and surfaced via the `diagnostics_cost_summary`
   command; the DiagnosticsPanel renders real per-model cost/usage.
-- [ ] Agents/Skills/Knowledge GUI views: back with real data (needs an
-  `hf-skills` command surface and sub-agent pools; knowledge search is wired but
-  does not yet have a dedicated management view).
+- [~] Agents/Skills/Knowledge GUI views: backed by real data -- skills/agents
+  are served from the registries (list/read/save/delete via `hf-service`,
+  Tauri commands, and REST twins), and the Knowledge view shows the real
+  per-project index status (`knowledge_stats`: size, build time, ingested
+  documents, retrieval config). Remaining: sub-agent pools.
 - [ ] Review and either complete or remove the remaining thin extension
   surfaces: hf-mcp, hf-skills, hf-hooks, and hf-test-utils.
 

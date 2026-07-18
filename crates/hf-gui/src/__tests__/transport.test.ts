@@ -473,6 +473,31 @@ describe("transport", () => {
     }
   });
 
+  it("maps knowledge_stats to a GET with the project as a query param", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ indexed: false, files: 0, chunks: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const transport = createHttpTransport();
+      await transport.invoke("knowledge_stats", { project: "/tmp/proj" });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        "http://localhost:8081/knowledge/stats?project=%2Ftmp%2Fproj",
+      ]);
+      expect(calls[0].init.method).toBe("GET");
+      expect(calls[0].init.body).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("maps system status commands to a JSON endpoint in web mode", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const originalFetch = globalThis.fetch;
