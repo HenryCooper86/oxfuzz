@@ -1838,17 +1838,6 @@ fn dict_llm_cache() -> &'static DictLlmCache {
 
 /// Read the current harness source from a target workspace, trying the known
 /// per-language harness filenames. Returns `None` when none exists yet.
-/// The source filename used inside a reproduction bundle for a language.
-fn harness_bundle_filename(lang: TargetLanguage) -> &'static str {
-    match lang {
-        TargetLanguage::C => "harness.c",
-        TargetLanguage::Cpp => "harness.cc",
-        TargetLanguage::Rust => "harness.rs",
-        TargetLanguage::Go => "harness.go",
-        TargetLanguage::Python => "harness.py",
-    }
-}
-
 fn read_current_harness_source(workspace: &Path) -> Option<String> {
     let canonical = workspace.join("harness.source");
     if is_regular_file(&canonical) {
@@ -7794,7 +7783,7 @@ impl ServiceContainer {
                 crash.input_path.display()
             ))
         })?;
-        let harness_filename = harness_bundle_filename(lang).to_owned();
+        let harness_filename = lang.harness_filename().to_owned();
         let build = hf_harness::build_command(engine, lang, "fuzz_bin");
         let build_command = format!(
             "{} {} {} -o {}",
