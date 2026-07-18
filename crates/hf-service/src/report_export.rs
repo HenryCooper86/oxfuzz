@@ -328,9 +328,13 @@ fn pandoc_convert(
             .stdin
             .take()
             .ok_or_else(|| ClassifiedError::Internal("pandoc stdin unavailable".to_owned()))?;
-        stdin
-            .write_all(markdown.as_bytes())
-            .map_err(|e| ClassifiedError::Internal(format!("pandoc write: {e}")))?;
+        if let Err(e) = stdin.write_all(markdown.as_bytes()) {
+            // pandoc exited early (broken pipe): reap it before returning so a
+            // failed export does not leave an unwaited/zombie process behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ClassifiedError::Internal(format!("pandoc write: {e}")));
+        }
     } // stdin dropped -> EOF so pandoc can finish
     let out = child
         .wait_with_output()

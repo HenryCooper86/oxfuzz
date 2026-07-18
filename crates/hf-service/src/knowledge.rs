@@ -16,9 +16,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use hf_core::embedding::EmbeddingProvider;
 use hf_core::error::ClassifiedError;
 use hf_core::target::TargetCandidate;
-use hf_knowledge::chunking::{ChunkLevel, ChunkMetadata, ChunkingStrategy};
+use hf_knowledge::chunking::{Chunk, ChunkLevel, ChunkMetadata, ChunkingStrategy};
 use hf_knowledge::config::KnowledgeConfig;
 use hf_knowledge::retrieval::{HybridRetriever, RetrievalConfig, RetrievalFilter, SearchStrategy};
 use hf_knowledge::tokenizer::AutoTokenizer;
@@ -69,11 +70,13 @@ pub struct KnowledgeIndexStatus {
     pub files: usize,
     /// Chunks in the current index (0 when not indexed).
     pub chunks: usize,
-    /// Ingested documents on disk (picked up by the next reindex).
+    /// Ingested documents on disk, indexed into the retriever alongside the
+    /// source `files` (counted separately, never folded into `files`).
     pub documents: usize,
     /// RFC3339 build time of the current index, when one exists.
     pub indexed_at: Option<String>,
-    /// Retrieval strategy a (re)index applies ("hybrid" or "keyword").
+    /// Retrieval strategy a (re)index applies ("hybrid", "keyword", or
+    /// "semantic" when the embedding pipeline is enabled).
     pub retrieval_strategy: String,
     /// Token budget per indexed chunk (L2).
     pub chunk_max_tokens: u32,
@@ -125,6 +128,7 @@ fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
         .as_str()
     {
         "keyword" => SearchStrategy::KeywordSearch,
+        "semantic" => SearchStrategy::SemanticSearch,
         _ => SearchStrategy::Hybrid,
     };
     RetrievalConfig {
@@ -137,12 +141,15 @@ fn retrieval_config(config: &KnowledgeConfig) -> RetrievalConfig {
 }
 
 fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> KnowledgeStats {
+    let embedder = build_embedder(&config);
     let retrieval = retrieval_config(&config);
     let chunker = ChunkingStrategy::new(config);
     let mut retriever = HybridRetriever::with_config(AutoTokenizer::new(), retrieval);
     let mut originals: HashMap<String, String> = HashMap::new();
+    // Collect chunks first so embeddings (when enabled) can be produced in a
+    // single batch call, rather than one API round-trip per chunk.
+    let mut collected: Vec<Chunk> = Vec::new();
     let mut files = 0usize;
-    let mut chunks = 0usize;
 
     for entry in WalkBuilder::new(project)
         .hidden(true)
@@ -181,20 +188,17 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
             // Keep the original text for the snippet; index a normalized copy.
             originals.insert(chunk.id.clone(), chunk.content.clone());
             chunk.content = code_normalize(&chunk.content);
-            retriever.index(chunk);
-            chunks += 1;
+            collected.push(chunk);
         }
     }
 
     // Also index any documents ingested for this project (markitdown output).
-    index_docs_dir(
-        &docs_dir(project),
-        &chunker,
-        &mut retriever,
-        &mut originals,
-        &mut files,
-        &mut chunks,
-    );
+    // Ingested docs are counted separately as `documents`, not as source
+    // `files`, so a single doc is not double-counted across both stats.
+    index_docs_dir(&docs_dir(project), &chunker, &mut originals, &mut collected);
+
+    let chunks = collected.len();
+    finalize_index(&mut retriever, collected, embedder.as_ref());
 
     let index = Arc::new(ProjectIndex {
         retriever,
@@ -266,10 +270,8 @@ fn docs_root_from(workspace_override: Option<OsString>) -> PathBuf {
 fn index_docs_dir(
     dir: &Path,
     chunker: &ChunkingStrategy,
-    retriever: &mut HybridRetriever<AutoTokenizer>,
     originals: &mut HashMap<String, String>,
-    files: &mut usize,
-    chunks: &mut usize,
+    collected: &mut Vec<Chunk>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -289,7 +291,6 @@ fn index_docs_dir(
         if content.trim().is_empty() {
             continue;
         }
-        *files += 1;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("doc");
         let source = format!("doc:{name}");
         let meta = ChunkMetadata {
@@ -300,9 +301,78 @@ fn index_docs_dir(
         for mut chunk in chunker.chunk(&source, &content, ChunkLevel::L2, &meta) {
             originals.insert(chunk.id.clone(), chunk.content.clone());
             chunk.content = code_normalize(&chunk.content);
-            retriever.index(chunk);
-            *chunks += 1;
+            collected.push(chunk);
         }
+    }
+}
+
+/// Build the embedding provider for a config, or `None` when embedding is
+/// disabled (the guaranteed-offline BM25-only default).
+fn build_embedder(config: &KnowledgeConfig) -> Option<Arc<dyn EmbeddingProvider>> {
+    if !config.embedding_enabled {
+        return None;
+    }
+    let api_key = if config.embedding_api_key.is_empty() {
+        std::env::var(&config.embedding_api_key_env).unwrap_or_default()
+    } else {
+        config.embedding_api_key.clone()
+    };
+    Some(Arc::new(hf_provider::OpenAiEmbedding::new(
+        &config.embedding_base_url,
+        &api_key,
+        &config.embedding_model,
+        config.embedding_dimensions,
+    )))
+}
+
+/// Drive an async batch-embed to completion from this synchronous, possibly
+/// `spawn_blocking` context without risking a `block_on`-within-a-runtime panic:
+/// the future runs on a fresh scoped thread (never a runtime worker). Returns
+/// `None` when no tokio runtime is available (e.g. a pure-sync unit test) or the
+/// embedding call fails, so callers fall back to BM25-only indexing.
+fn embed_blocking(
+    embedder: &Arc<dyn EmbeddingProvider>,
+    texts: &[String],
+) -> Option<Vec<Vec<f32>>> {
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    let joined = std::thread::scope(|scope| {
+        scope
+            .spawn(|| handle.block_on(embedder.embed_batch(texts)))
+            .join()
+            .ok()
+    })?;
+    match joined {
+        Ok(results) => Some(results.into_iter().map(|r| r.vector).collect()),
+        Err(error) => {
+            tracing::warn!("embedding failed, falling back to BM25 for this index: {error}");
+            None
+        }
+    }
+}
+
+/// Index every collected chunk. With an embedder present, batch-embed the
+/// normalized chunk text and index chunk+vector (enabling real cosine); on any
+/// embedding failure or dimension mismatch, fall back to BM25-only indexing so
+/// retrieval never silently breaks.
+fn finalize_index(
+    retriever: &mut HybridRetriever<AutoTokenizer>,
+    collected: Vec<Chunk>,
+    embedder: Option<&Arc<dyn EmbeddingProvider>>,
+) {
+    if let Some(embedder) = embedder {
+        let texts: Vec<String> = collected.iter().map(|c| c.content.clone()).collect();
+        if let Some(vectors) = embed_blocking(embedder, &texts) {
+            if vectors.len() == collected.len() {
+                for (chunk, vector) in collected.into_iter().zip(vectors) {
+                    retriever.index_with_embedding(chunk, vector, 1.0);
+                }
+                return;
+            }
+            tracing::warn!("embedding count mismatch; indexing BM25-only");
+        }
+    }
+    for chunk in collected {
+        retriever.index(chunk);
     }
 }
 
@@ -383,9 +453,21 @@ pub fn search_project(project: &Path, query: &str, limit: usize) -> Vec<Knowledg
         ..Default::default()
     };
     let normalized = code_normalize(query);
-    index
-        .retriever
-        .search(&normalized, &filter)
+    // Embed the query when embeddings are enabled so the hybrid ranker runs real
+    // cosine against the stored chunk vectors; fall back to BM25-only otherwise.
+    let config = crate::config::effective_knowledge_config();
+    let results = match build_embedder(&config)
+        .and_then(|embedder| embed_blocking(&embedder, std::slice::from_ref(&normalized)))
+        .and_then(|mut vectors| vectors.pop())
+    {
+        Some(query_vector) => index.retriever.search_with_embedding(
+            &normalized,
+            Some(query_vector.as_slice()),
+            &filter,
+        ),
+        None => index.retriever.search(&normalized, &filter),
+    };
+    results
         .into_iter()
         .map(|r| {
             let snippet = index
@@ -693,7 +775,13 @@ mod tests {
         .unwrap();
 
         let stats = index_project(dir.path()).unwrap();
-        assert!(stats.files >= 1, "ingested doc counted");
+        // The doc is indexed (produces chunks) but is counted as a `document`,
+        // not folded into source `files` (which stays 0 for a docs-only project).
+        assert_eq!(stats.files, 0, "an ingested doc is not a source file");
+        assert!(
+            stats.chunks >= 1,
+            "the ingested doc produced indexed chunks"
+        );
 
         let hits = search_project(dir.path(), "frobnicate", 10);
         assert!(!hits.is_empty(), "ingested doc is searchable");
