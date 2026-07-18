@@ -185,8 +185,9 @@ fixed the following; open design decisions are listed at the end.
 - [x] Provider `thaw` operator surface (CLI `providers thaw`, web
   `POST /providers/{id}/thaw`) + `health_check_interval_secs` honored by a
   bootstrap health-check task (batch 1).
-- [ ] Same-named C functions share one `(project, symbol)` persistence
-  identity; a file-scoped identity is a High-risk-tier schema change.
+- [x] Same-named C functions share one `(project, symbol)` persistence
+  identity -- resolved by file-scoped identity `(project_root, file, symbol)`
+  (migration 0019, `file::symbol` qualifier in target resolution).
 - [x] REST routes kept as supported public API; 8 never-invoked Tauri
   commands pruned (batch 1).
 - [x] `CoverageReport` carries the real run id through the coverage feedback

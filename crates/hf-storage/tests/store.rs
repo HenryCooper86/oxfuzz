@@ -656,13 +656,14 @@ async fn list_all_crashes_is_newest_first_by_insertion_order() {
 }
 
 #[tokio::test]
-async fn upsert_target_keeps_one_row_per_project_symbol() {
+async fn upsert_target_keeps_one_row_per_project_symbol_file() {
     let (store, _dir) = temp_store().await;
     let project = "/home/user/proj-unique";
 
-    // Two discoveries of the same symbol under the same project arrive with
-    // different scanner UUIDs. Identity is (project, symbol), so exactly one
-    // row must survive, and it must keep the first stable id.
+    // Two discoveries of the same symbol in the same file under the same
+    // project arrive with different scanner UUIDs. Identity is (project,
+    // symbol, file), so exactly one row must survive, and it must keep the
+    // first stable id.
     let first = sample_target(project);
     let mut second = sample_target(project);
     second.id = Uuid::new_v4();
@@ -672,8 +673,165 @@ async fn upsert_target_keeps_one_row_per_project_symbol() {
     store.upsert_target(&second, Utc::now()).await.unwrap();
 
     let targets = store.list_targets(project).await.unwrap();
-    assert_eq!(targets.len(), 1, "one row per (project, symbol)");
+    assert_eq!(targets.len(), 1, "one row per (project, symbol, file)");
     assert_eq!(targets[0].id, first.id, "stable id is preserved");
+}
+
+#[tokio::test]
+async fn upsert_target_distinguishes_same_symbol_in_different_files() {
+    let (store, _dir) = temp_store().await;
+    let project = "/proj";
+
+    // Two same-named functions in different files of one project are distinct
+    // persisted targets, each with its own stable id.
+    let mut in_a = sample_target(project);
+    in_a.location.file = PathBuf::from("/proj/src/a.c");
+    let mut in_b = sample_target(project);
+    in_b.id = Uuid::new_v4();
+    in_b.location.file = PathBuf::from("/proj/src/b.c");
+
+    store.upsert_target(&in_a, Utc::now()).await.unwrap();
+    store.upsert_target(&in_b, Utc::now()).await.unwrap();
+    assert_eq!(store.list_targets(project).await.unwrap().len(), 2);
+
+    // Rediscovering the definition in src/a.c re-homes onto that file's row
+    // only; the src/b.c row is untouched.
+    let mut rediscovered = sample_target(project);
+    rediscovered.id = Uuid::new_v4();
+    rediscovered.location.file = PathBuf::from("/proj/src/a.c");
+    store
+        .upsert_target(&rediscovered, Utc::now())
+        .await
+        .unwrap();
+    let targets = store.list_targets(project).await.unwrap();
+    assert_eq!(targets.len(), 2, "no duplicates and no cross-file collapse");
+    assert!(
+        targets.iter().any(|t| t.id == in_a.id),
+        "the src/a.c row keeps its stable id"
+    );
+    assert!(
+        targets.iter().any(|t| t.id == in_b.id),
+        "the src/b.c row keeps its stable id"
+    );
+}
+
+#[tokio::test]
+async fn legacy_row_without_file_survives_and_rescan_adds_a_file_scoped_row() {
+    let (store, _dir) = temp_store().await;
+    let project = "/proj";
+
+    // Simulate a legacy row whose file could not be backfilled: migration 0019
+    // leaves such rows valid with file = ''.
+    let legacy = sample_target(project);
+    sqlx::query(
+        "INSERT INTO targets
+            (id, project_root, symbol, language, fit_score, rationale, discovered_at, data_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )
+    .bind(legacy.id.to_string())
+    .bind(project)
+    .bind(&legacy.symbol)
+    .bind("c")
+    .bind(legacy.fit_score)
+    .bind(&legacy.rationale)
+    .bind(Utc::now().to_rfc3339())
+    .bind(serde_json::to_string(&legacy).unwrap())
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // A rescan upserts against the file-scoped key; it cannot re-home onto the
+    // file-less row, so a second row appears while the legacy row is kept.
+    let mut scanned = sample_target(project);
+    scanned.id = Uuid::new_v4();
+    store.upsert_target(&scanned, Utc::now()).await.unwrap();
+
+    let targets = store.list_targets(project).await.unwrap();
+    assert_eq!(targets.len(), 2, "legacy row and file-scoped row coexist");
+    assert!(targets.iter().any(|t| t.id == legacy.id));
+    assert!(targets.iter().any(|t| t.id == scanned.id));
+}
+
+#[tokio::test]
+async fn migration_0019_backfills_relative_file_and_preserves_identity_on_rescan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(opts)
+        .await
+        .unwrap();
+
+    // Bring the database to its pre-0019 shape, then seed a legacy row exactly
+    // as a pre-0019 database holds it: no file column, the scanner's absolute
+    // location.file carried inside data_json.
+    let mut pre_0019 = sqlx::migrate!();
+    pre_0019.migrations.to_mut().retain(|m| m.version <= 18);
+    pre_0019.run(&pool).await.unwrap();
+    let mut legacy = sample_target("/proj");
+    legacy.location.file = PathBuf::from("/proj/src/a.c");
+    sqlx::query(
+        "INSERT INTO targets
+            (id, project_root, symbol, language, fit_score, rationale, discovered_at, data_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )
+    .bind(legacy.id.to_string())
+    .bind("/proj")
+    .bind(&legacy.symbol)
+    .bind("c")
+    .bind(legacy.fit_score)
+    .bind(&legacy.rationale)
+    .bind(Utc::now().to_rfc3339())
+    .bind(serde_json::to_string(&legacy).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Applying 0019 backfills the root-relative file from data_json and swaps
+    // the unique index for the file-scoped one.
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let file: String = sqlx::query_scalar("SELECT file FROM targets WHERE id = ?1")
+        .bind(legacy.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(file, "src/a.c", "file is relativized against project_root");
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'targets'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(indexes
+        .iter()
+        .any(|i| i == "idx_targets_project_symbol_file"));
+    assert!(!indexes.iter().any(|i| i == "idx_targets_project_symbol"));
+    pool.close().await;
+
+    // Rescanning re-homes onto the backfilled row, keeping the legacy id, and
+    // the second definition of the same symbol becomes a distinct new row.
+    let store = Store::connect(&path).await.unwrap();
+    let mut rescan_a = sample_target("/proj");
+    rescan_a.id = Uuid::new_v4();
+    rescan_a.location.file = PathBuf::from("/proj/src/a.c");
+    store.upsert_target(&rescan_a, Utc::now()).await.unwrap();
+    let mut scanned_b = sample_target("/proj");
+    scanned_b.id = Uuid::new_v4();
+    scanned_b.location.file = PathBuf::from("/proj/src/b.c");
+    store.upsert_target(&scanned_b, Utc::now()).await.unwrap();
+
+    let targets = store.list_targets("/proj").await.unwrap();
+    assert_eq!(targets.len(), 2);
+    assert!(
+        targets.iter().any(|t| t.id == legacy.id),
+        "the surviving row keeps its pre-migration id"
+    );
+    assert!(
+        targets.iter().any(|t| t.id == scanned_b.id),
+        "the second definition gets its own row"
+    );
 }
 
 #[tokio::test]
@@ -887,8 +1045,8 @@ async fn rediscovering_a_symbol_does_not_accumulate_duplicates() {
     let (store, _dir) = temp_store().await;
 
     // Each discovery pass assigns a fresh id to the same symbol (as the scanner
-    // does). The store must keep one stable row per (project, symbol), not pile
-    // up or invalidate harness/corpus/crash foreign-key attribution.
+    // does). The store must keep one stable row per (project, symbol, file),
+    // not pile up or invalidate harness/corpus/crash foreign-key attribution.
     let stable_id = sample_target("/proj").id;
     for _ in 0..5 {
         let mut t = sample_target("/proj");

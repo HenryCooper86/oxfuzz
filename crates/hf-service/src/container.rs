@@ -1614,6 +1614,48 @@ fn project_lookup_identity(project: &Path) -> PathBuf {
     std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
 }
 
+/// Select the candidate referenced by `target` from `candidates`.
+///
+/// `target` is either a plain symbol or a file-qualified `file::symbol` (the
+/// file relative to the project root, matching `TargetCandidate::relative_file`).
+/// A plain symbol matching zero candidates yields `Ok(None)` (the caller
+/// reports "not found"); exactly one yields that candidate; more than one is a
+/// `Validation` error listing the file-qualified forms so the user can
+/// disambiguate. When no plain match exists and the string carries a `::`
+/// qualifier, the part before the last `::` is matched exactly against each
+/// candidate's root-relative file. The plain match is tried first so a symbol
+/// that itself contains `::` (C++-style) still resolves.
+fn select_target_candidate<'c>(
+    candidates: &'c [TargetCandidate],
+    target: &str,
+) -> Result<Option<&'c TargetCandidate>, ClassifiedError> {
+    let mut plain = candidates.iter().filter(|c| c.symbol == target);
+    if let Some(first) = plain.next() {
+        if plain.next().is_some() {
+            let mut qualified: Vec<String> = candidates
+                .iter()
+                .filter(|c| c.symbol == target)
+                .map(|c| format!("{}::{}", c.relative_file(), c.symbol))
+                .collect();
+            qualified.sort();
+            qualified.dedup();
+            return Err(ClassifiedError::Validation(format!(
+                "target '{target}' is ambiguous; qualify it with the defining file: {}",
+                qualified.join(", ")
+            )));
+        }
+        return Ok(Some(first));
+    }
+    if let Some((file, symbol)) = target.rsplit_once("::") {
+        if !file.is_empty() && !symbol.is_empty() {
+            return Ok(candidates
+                .iter()
+                .find(|c| c.symbol == symbol && c.relative_file() == file));
+        }
+    }
+    Ok(None)
+}
+
 /// A per-project workspace directory name: the human-readable basename plus a
 /// short deterministic hash of the full path. The hash disambiguates projects
 /// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
@@ -4871,10 +4913,7 @@ impl ServiceContainer {
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
-        let candidate = inv
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
@@ -4922,19 +4961,19 @@ impl ServiceContainer {
         let project = canonical_project_root(project)?;
         if let Some(store) = &self.store {
             let targets = store.list_all_targets().await?;
-            if let Some(candidate) = targets.iter().find(|candidate| {
-                stored_project_matches(&candidate.project_root, &project)
-                    && candidate.symbol == target
-                    && candidate.language == lang
-            }) {
+            let project_targets: Vec<TargetCandidate> = targets
+                .into_iter()
+                .filter(|candidate| {
+                    stored_project_matches(&candidate.project_root, &project)
+                        && candidate.language == lang
+                })
+                .collect();
+            if let Some(candidate) = select_target_candidate(&project_targets, target)? {
                 return Ok(candidate.id);
             }
         }
-        self.discover(&project, lang)
-            .await?
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let inventory = self.discover(&project, lang).await?;
+        select_target_candidate(&inventory.candidates, target)?
             .map(|c| c.id)
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))
     }
@@ -5023,10 +5062,11 @@ impl ServiceContainer {
         let project = canonical_project_root(project)?;
         if let Some(store) = &self.store {
             let targets = store.list_all_targets().await?;
-            if let Some(candidate) = targets.iter().find(|candidate| {
-                stored_project_matches(&candidate.project_root, &project)
-                    && candidate.symbol == target
-            }) {
+            let project_targets: Vec<TargetCandidate> = targets
+                .into_iter()
+                .filter(|candidate| stored_project_matches(&candidate.project_root, &project))
+                .collect();
+            if let Some(candidate) = select_target_candidate(&project_targets, target)? {
                 return Ok(Some(candidate.clone()));
             }
         }
@@ -5039,12 +5079,9 @@ impl ServiceContainer {
         ] {
             match self.discover(&project, language).await {
                 Ok(inventory) => {
-                    if let Some(candidate) = inventory
-                        .candidates
-                        .into_iter()
-                        .find(|candidate| candidate.symbol == target)
+                    if let Some(candidate) = select_target_candidate(&inventory.candidates, target)?
                     {
-                        return Ok(Some(candidate));
+                        return Ok(Some(candidate.clone()));
                     }
                 }
                 Err(ClassifiedError::Validation(message))
@@ -5314,10 +5351,7 @@ impl ServiceContainer {
         self.authorize_recorded(Action::CompileHarness, "harness_generate", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
-        let candidate = inv
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
@@ -5463,10 +5497,7 @@ impl ServiceContainer {
         self.authorize_recorded(Action::CompileHarness, "harness_refine", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
-        let candidate = inv
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
@@ -5968,7 +5999,7 @@ impl ServiceContainer {
         let mut datas: Vec<Vec<u8>> = Vec::new();
         if let Some(pool) = self.provider_pool() {
             if let Ok(inv) = self.discover(project, lang).await {
-                if let Some(candidate) = inv.candidates.iter().find(|c| c.symbol == target) {
+                if let Ok(Some(candidate)) = select_target_candidate(&inv.candidates, target) {
                     let provider = LlmProviderBridge::new(pool)
                         .with_diagnostics(Arc::clone(&self.diagnostics), "seed_gen");
                     match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
@@ -9515,6 +9546,109 @@ mod casrep_path_tests {
             casrep_input_path(out, casrep, &[]),
             PathBuf::from("/work/out/crash-abc")
         );
+    }
+}
+
+#[cfg(test)]
+mod target_resolution_tests {
+    use super::select_target_candidate;
+    use hf_core::error::ClassifiedError;
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use std::path::PathBuf;
+
+    fn candidate(file: &str, symbol: &str) -> TargetCandidate {
+        TargetCandidate {
+            id: uuid::Uuid::new_v4(),
+            project_root: PathBuf::from("/proj"),
+            language: TargetLanguage::C,
+            symbol: symbol.to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from(file),
+                line: 1,
+                col: 1,
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            fit_score: 0.5,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        }
+    }
+
+    #[test]
+    fn unique_plain_symbol_resolves() {
+        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
+        let found = select_target_candidate(&candidates, "parse_opts").unwrap();
+        assert_eq!(found.map(|c| c.id), Some(candidates[0].id));
+    }
+
+    #[test]
+    fn unknown_plain_symbol_is_not_found() {
+        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
+        assert!(select_target_candidate(&candidates, "missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn ambiguous_plain_symbol_errors_with_file_qualified_forms() {
+        let candidates = vec![
+            candidate("/proj/src/a.c", "parse_opts"),
+            candidate("/proj/src/b.c", "parse_opts"),
+            candidate("/proj/src/c.c", "unique_fn"),
+        ];
+        let Err(ClassifiedError::Validation(message)) =
+            select_target_candidate(&candidates, "parse_opts")
+        else {
+            panic!("an ambiguous symbol must be a validation error");
+        };
+        assert!(
+            message.contains("src/a.c::parse_opts"),
+            "lists the src/a.c qualifier: {message}"
+        );
+        assert!(
+            message.contains("src/b.c::parse_opts"),
+            "lists the src/b.c qualifier: {message}"
+        );
+        assert!(
+            !message.contains("unique_fn"),
+            "unrelated symbols are not listed: {message}"
+        );
+    }
+
+    #[test]
+    fn file_qualified_symbol_resolves_exactly() {
+        let candidates = vec![
+            candidate("/proj/src/a.c", "parse_opts"),
+            candidate("/proj/src/b.c", "parse_opts"),
+        ];
+        let found = select_target_candidate(&candidates, "src/b.c::parse_opts").unwrap();
+        assert_eq!(found.map(|c| c.id), Some(candidates[1].id));
+    }
+
+    #[test]
+    fn file_qualified_symbol_with_unknown_file_is_not_found() {
+        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
+        assert!(
+            select_target_candidate(&candidates, "src/missing.c::parse_opts")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn symbol_containing_colons_prefers_the_plain_match() {
+        // A symbol that itself contains `::` (C++-style) still resolves as a
+        // plain symbol; the qualifier split is only a fallback.
+        let candidates = vec![candidate("/proj/src/ns.c", "ns::func")];
+        let found = select_target_candidate(&candidates, "ns::func").unwrap();
+        assert_eq!(found.map(|c| c.id), Some(candidates[0].id));
     }
 }
 
