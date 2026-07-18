@@ -2123,6 +2123,50 @@ pub async fn export_report(
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
+/// Export a self-contained reproduction bundle (harness + crash input +
+/// REPRODUCE.md) for a crash from the target's latest run, into a folder chosen
+/// via a native folder picker. Returns the bundle path or `None` if cancelled.
+#[tauri::command]
+pub async fn export_repro(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    project: String,
+    target: String,
+    engine: String,
+    lang: String,
+    crash: Option<String>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let engine = parse_engine(&engine)?;
+    let lang = parse_lang(&lang)?;
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("Choose a folder for the reproduction bundle")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let folder = folder
+        .into_path()
+        .map_err(|e| format!("invalid folder path: {e}"))?;
+    let dest = folder.join(format!("hobot_fuzz_repro_{}", sanitize_filename(&target)));
+    let written = state
+        .container
+        .export_repro_bundle_for_latest(
+            std::path::Path::new(&project),
+            &target,
+            engine,
+            lang,
+            crash.as_deref(),
+            &dest,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(written.to_string_lossy().to_string()))
+}
+
 /// Export already-composed report `content` (e.g. a saved draft) in `format`
 /// via a native save dialog. Returns the saved path or `None` if cancelled.
 #[tauri::command]
