@@ -9396,6 +9396,29 @@ struct LlmProviderBridge {
     /// When set, each completion is recorded as a cost/trace diagnostic under
     /// the given operation label.
     diag: Option<(Arc<crate::diagnostics::DiagnosticsRecorder>, String)>,
+    /// Task-tiered routing: soft-preferred provider tags derived from the task
+    /// label. Empty (no preference) unless a task tier is set.
+    route: hf_core::provider::RouteRequest,
+}
+
+/// Map a task label to soft-preferred provider tags so, in a tagged deployment,
+/// authoring/triage work routes to a `reasoning`-tagged model and mechanical
+/// work to a `fast` one. Untagged deployments are unaffected (the preference is
+/// soft -- see [`RouteRequest::preferred_tags`]).
+fn preferred_tags_for_task(task: &str) -> Vec<String> {
+    let task = task.to_ascii_lowercase();
+    if task.contains("harness")
+        || task.contains("refine")
+        || task.contains("triage")
+        || task.contains("report")
+        || task.contains("chat")
+    {
+        vec!["reasoning".to_owned()]
+    } else if task.contains("seed") || task.contains("rank") {
+        vec!["fast".to_owned()]
+    } else {
+        Vec::new()
+    }
 }
 
 impl LlmProviderBridge {
@@ -9419,15 +9442,18 @@ impl LlmProviderBridge {
             pool,
             meta,
             diag: None,
+            route: hf_core::provider::RouteRequest::default(),
         }
     }
 
-    /// Record completions through this bridge as diagnostics under `op`.
+    /// Record completions through this bridge as diagnostics under `op`, and
+    /// derive task-tiered routing from the same label.
     fn with_diagnostics(
         mut self,
         recorder: Arc<crate::diagnostics::DiagnosticsRecorder>,
         op: &str,
     ) -> Self {
+        self.route = hf_core::provider::RouteRequest::preferring_tags(preferred_tags_for_task(op));
         self.diag = Some((recorder, op.to_owned()));
         self
     }
@@ -9439,10 +9465,7 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
         &self,
         request: &hf_core::provider::ChatRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
-        let response = self
-            .pool
-            .chat_completion(request, &hf_core::provider::RouteRequest::default())
-            .await?;
+        let response = self.pool.chat_completion(request, &self.route).await?;
         if let Some((recorder, op)) = &self.diag {
             recorder.record(op, &response.model, &response.usage).await;
         }
@@ -9453,9 +9476,7 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
         &self,
         request: &hf_core::provider::ChatRequest,
     ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
-        self.pool
-            .chat_completion_stream(request, &hf_core::provider::RouteRequest::default())
-            .await
+        self.pool.chat_completion_stream(request, &self.route).await
     }
 
     fn metadata(&self) -> &hf_core::provider::ProviderMetadata {
