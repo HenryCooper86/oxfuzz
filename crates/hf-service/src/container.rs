@@ -1797,6 +1797,45 @@ fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathB
     Some(dict_path)
 }
 
+/// A bounded excerpt of the target's non-harness C/C++ sources, for the LLM
+/// dictionary author. Capped so a large target cannot blow the prompt budget.
+fn read_dictionary_source_excerpt(workspace: &Path, max_bytes: usize) -> String {
+    let mut excerpt = String::new();
+    let Ok(entries) = std::fs::read_dir(workspace) else {
+        return excerpt;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
+            continue;
+        }
+        if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
+            continue;
+        }
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            excerpt.push_str(&src);
+            excerpt.push('\n');
+            if excerpt.len() >= max_bytes {
+                excerpt.truncate(max_bytes);
+                break;
+            }
+        }
+    }
+    excerpt
+}
+
+/// Cache of LLM-proposed dictionary tokens, keyed by `project::target` and
+/// tagged with the static dictionary's content hash, so the LLM is queried at
+/// most once per source version.
+type DictLlmCache = std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<Vec<u8>>)>>;
+
+fn dict_llm_cache() -> &'static DictLlmCache {
+    static CACHE: std::sync::OnceLock<DictLlmCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Read the current harness source from a target workspace, trying the known
 /// per-language harness filenames. Returns `None` when none exists yet.
 /// The source filename used inside a reproduction bundle for a language.
@@ -6497,7 +6536,14 @@ impl ServiceContainer {
         // A dictionary of the literals the target compares against is one of the
         // cheapest coverage multipliers; absent literals just yield no flag.
         let dict_name = "fuzzer.dict".to_owned();
-        let extra_args = if build_workspace_dictionary(&workspace, &dict_name).is_some() {
+        let extra_args = if let Some(dict_path) = build_workspace_dictionary(&workspace, &dict_name)
+        {
+            // Augment the statically-extracted dictionary with LLM-proposed
+            // tokens (format keywords / magic values a lexical scan may miss).
+            // Cached per source version, provider-gated, best-effort: a failure
+            // leaves the static dictionary in place.
+            self.augment_dictionary_llm(project, target, &workspace, &dict_path)
+                .await;
             hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
         } else {
             Vec::new()
@@ -7593,6 +7639,84 @@ impl ServiceContainer {
                 tracing::warn!("coverage collection failed: {e}");
                 None
             }
+        }
+    }
+
+    /// Merge LLM-proposed dictionary tokens into the static dictionary at
+    /// `dict_path`: format keywords / magic sequences the lexical scan may miss.
+    /// No-op without a provider or source. The LLM tokens are cached per target
+    /// by the static dictionary's hash, so a repeated run on unchanged sources
+    /// makes no LLM call; failures leave the static dictionary intact.
+    async fn augment_dictionary_llm(
+        &self,
+        project: &Path,
+        target: &str,
+        workspace: &Path,
+        dict_path: &Path,
+    ) {
+        use hf_core::provider::{ChatRequest, LlmProvider as _};
+        use hf_core::types::Message;
+        use std::hash::{Hash as _, Hasher as _};
+
+        let Some(pool) = self.provider_pool() else {
+            return;
+        };
+        let Ok(static_text) = std::fs::read_to_string(dict_path) else {
+            return;
+        };
+        let mut tokens = hf_engine::dict::parse_dict(&static_text);
+        let key = format!("{}::{target}", project.display());
+        let signature = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            static_text.hash(&mut hasher);
+            hasher.finish()
+        };
+        let cached = dict_llm_cache()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&key).cloned())
+            .filter(|(cached_sig, _)| *cached_sig == signature);
+        let llm_tokens = if let Some((_, cached_tokens)) = cached {
+            cached_tokens
+        } else {
+            let excerpt = read_dictionary_source_excerpt(workspace, 8192);
+            if excerpt.trim().is_empty() {
+                return;
+            }
+            let prompt = hf_prompt::render_dictionary_prompt(target, &excerpt);
+            let provider = LlmProviderBridge::new(pool)
+                .with_diagnostics(Arc::clone(&self.diagnostics), "dict_gen");
+            let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
+            let fresh = match provider.chat_completion(&req).await {
+                Ok(resp) => hf_engine::dict::parse_dict(resp.text()),
+                Err(e) => {
+                    tracing::warn!("LLM dictionary generation for '{target}' failed: {e}");
+                    return;
+                }
+            };
+            if let Ok(mut map) = dict_llm_cache().lock() {
+                map.insert(key, (signature, fresh.clone()));
+            }
+            fresh
+        };
+        if llm_tokens.is_empty() {
+            return;
+        }
+        let mut seen: std::collections::HashSet<Vec<u8>> = tokens.iter().cloned().collect();
+        let mut added = 0usize;
+        for token in llm_tokens {
+            if seen.insert(token.clone()) {
+                tokens.push(token);
+                added += 1;
+            }
+        }
+        if added == 0 {
+            return;
+        }
+        if let Err(e) = std::fs::write(dict_path, hf_engine::dict::render_dict(&tokens)) {
+            tracing::warn!("failed to write augmented dictionary: {e}");
+        } else {
+            tracing::info!("merged {added} LLM-proposed dictionary token(s) for '{target}'");
         }
     }
 
