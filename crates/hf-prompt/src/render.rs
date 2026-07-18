@@ -268,6 +268,30 @@ pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
     )
 }
 
+/// Render the prompt for LLM-proposed fuzzing dictionary tokens: format
+/// keywords, protocol markers, and magic strings the target compares against
+/// that a purely lexical scan of the source might miss. The response is expected
+/// in AFL++/libFuzzer dictionary format (one `"token"` per line) so it merges
+/// directly with the statically-extracted dictionary.
+#[must_use]
+pub fn render_dictionary_prompt(symbol: &str, source_excerpt: &str) -> String {
+    format!(
+        "You are the fuzzing-dictionary author for hobot_fuzz.\n\
+         Propose dictionary tokens that help a coverage-guided fuzzer get past \
+         shallow keyword/magic-value gates in the target `{symbol}` below: format \
+         markers (e.g. \"IHDR\", \"GET \", \"\\x89PNG\"), protocol keywords, and \
+         magic byte/number sequences the code compares against. Prefer the exact \
+         bytes the code checks. Skip generic English words and anything longer than \
+         ~32 bytes.\n\
+         Output ONLY AFL++/libFuzzer dictionary lines, one per line, each a \
+         double-quoted token with non-printable bytes escaped as \\xNN (e.g. \
+         \"IHDR\" or \"\\x89PNG\"). No prose, no code fences, no names or levels.\n\
+         \n\
+         Source excerpt:\n\
+         {source_excerpt}"
+    )
+}
+
 fn engine_entry_point(engine: EngineKind) -> &'static str {
     match engine {
         EngineKind::Honggfuzz => {
@@ -321,6 +345,20 @@ mod tests {
             reachable_functions: vec!["decode".to_owned()],
             accumulated_complexity: 12,
         }
+    }
+
+    #[test]
+    fn dictionary_prompt_names_target_and_requests_afl_format() {
+        let prompt = render_dictionary_prompt("parse_png", "if (memcmp(p, \"\\x89PNG\", 4)) {}");
+        assert!(prompt.contains("parse_png"), "must name the target");
+        assert!(
+            prompt.contains("dictionary lines"),
+            "must request AFL dict format"
+        );
+        assert!(
+            prompt.contains("\\x89PNG"),
+            "must include the source excerpt"
+        );
     }
 
     #[test]
