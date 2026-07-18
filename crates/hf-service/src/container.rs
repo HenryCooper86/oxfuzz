@@ -6670,22 +6670,12 @@ impl ServiceContainer {
             )));
         }
 
-        // Build a dictionary from the target sources and point the engine at it.
-        // A dictionary of the literals the target compares against is one of the
-        // cheapest coverage multipliers; absent literals just yield no flag.
-        let dict_name = "fuzzer.dict".to_owned();
-        let extra_args = if let Some(dict_path) = build_workspace_dictionary(&workspace, &dict_name)
-        {
-            // Augment the statically-extracted dictionary with LLM-proposed
-            // tokens (format keywords / magic values a lexical scan may miss).
-            // Cached per source version, provider-gated, best-effort: a failure
-            // leaves the static dictionary in place.
-            self.augment_dictionary_llm(project, target, &workspace, &dict_path)
-                .await;
-            hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
-        } else {
-            Vec::new()
-        };
+        // Build a dictionary from the target sources (statically extracted, then
+        // LLM-augmented) and point the engine at it -- one of the cheapest
+        // coverage multipliers; absent literals just yield no flag.
+        let extra_args = self
+            .build_run_dictionary_args(project, target, &workspace, engine)
+            .await;
 
         let mut run_cfg = FuzzRunConfig {
             // Link the run to the target's compiled harness so the target-scoped
@@ -7792,6 +7782,28 @@ impl ServiceContainer {
                 None
             }
         }
+    }
+
+    /// Build the engine dictionary flags for a run: extract the static
+    /// dictionary from the target sources, augment it with LLM-proposed tokens,
+    /// and return the engine-specific `-dict`/`-x`/`-w` args (empty when no
+    /// dictionary was built).
+    async fn build_run_dictionary_args(
+        &self,
+        project: &Path,
+        target: &str,
+        workspace: &Path,
+        engine: EngineKind,
+    ) -> Vec<String> {
+        let dict_name = "fuzzer.dict";
+        let Some(dict_path) = build_workspace_dictionary(workspace, dict_name) else {
+            return Vec::new();
+        };
+        // Best-effort, provider-gated, cached per source version; a failure
+        // leaves the static dictionary in place.
+        self.augment_dictionary_llm(project, target, workspace, &dict_path)
+            .await;
+        hf_engine::dict::dict_run_args(engine, &format!("/work/{dict_name}"))
     }
 
     /// Merge LLM-proposed dictionary tokens into the static dictionary at
