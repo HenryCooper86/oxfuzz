@@ -2406,6 +2406,12 @@ pub struct ServiceContainer {
             std::collections::HashMap<hf_core::types::SessionId, Arc<tokio::sync::Mutex<()>>>,
         >,
     >,
+    /// Late-bound link to the campaign scheduler, shared across clones of this
+    /// container so any operation in this process (scheduled or interactive)
+    /// can emit scheduler events (crash found, run terminated). Set by
+    /// `CampaignScheduler::try_start` via [`Self::bind_scheduler_events`].
+    scheduler_events:
+        Arc<std::sync::Mutex<Option<std::sync::Weak<hf_scheduler::SchedulerManager>>>>,
     /// Keeps the periodic provider health-check task alive; when the last
     /// clone of the container drops, the guard cancels and aborts the loop.
     /// `None` for containers built via [`Self::new`] (tests, stubs).
@@ -2649,6 +2655,7 @@ impl ServiceContainer {
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scheduler_events: Arc::new(std::sync::Mutex::new(None)),
             _health_task: None,
         }
     }
@@ -4539,6 +4546,7 @@ impl ServiceContainer {
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scheduler_events: Arc::new(std::sync::Mutex::new(None)),
             _health_task: Some(health_task),
         }
     }
@@ -4555,6 +4563,38 @@ impl ServiceContainer {
     #[must_use]
     pub fn store(&self) -> Option<&Arc<Store>> {
         self.store.as_ref()
+    }
+
+    /// Late-bind the campaign scheduler so service operations emit scheduler
+    /// events (crash found, run terminated) into its event bridge. Called by
+    /// `CampaignScheduler::try_start`; the slot is shared across clones of
+    /// this container, so one bind covers every surface built from it.
+    pub(crate) fn bind_scheduler_events(&self, manager: &Arc<hf_scheduler::SchedulerManager>) {
+        if let Ok(mut slot) = self.scheduler_events.lock() {
+            *slot = Some(Arc::downgrade(manager));
+        }
+    }
+
+    /// Emit a scheduler event through the bound campaign scheduler, if any.
+    ///
+    /// Best-effort by design: a container without a scheduler (one-shot CLI
+    /// invocations) or a stopped scheduler simply drops the event, and neither
+    /// case may fail the operation that produced it.
+    async fn emit_scheduler_event(&self, event_type: &str, payload: serde_json::Value) {
+        let manager = self
+            .scheduler_events
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade));
+        if let Some(manager) = manager {
+            manager
+                .emit_event(hf_scheduler::IncomingEvent {
+                    event_type: event_type.to_owned(),
+                    payload: Some(payload),
+                    timestamp: Utc::now(),
+                })
+                .await;
+        }
     }
 
     /// Runtime adapter used by service-owned optional subsystems.
@@ -6215,7 +6255,70 @@ impl ServiceContainer {
             .await
     }
 
+    /// Run a fuzzer to termination and notify event-driven schedules about the
+    /// outcome: `run.completed` on success (cancellation included), `run.failed`
+    /// when a started run terminates with a failure. Errors before the run
+    /// becomes durable are rejections, not run failures, and emit nothing.
     async fn run_fuzzer_with_started(
+        &self,
+        project: &Path,
+        target: &str,
+        resolved: crate::config::ResolvedFuzzingRun,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+        on_started: &(dyn Fn(Uuid) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        let engine = resolved.engine;
+        // Capture the run id once the run is durable so a failure event can
+        // name it.
+        let started_run = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured = std::sync::Arc::clone(&started_run);
+        let tracked_started = move |run_id: Uuid| {
+            if let Ok(mut slot) = captured.lock() {
+                *slot = Some(run_id);
+            }
+            on_started(run_id);
+        };
+        let result = self
+            .run_fuzzer_with_started_inner(project, target, resolved, on_progress, &tracked_started)
+            .await;
+        match &result {
+            Ok(summary) => {
+                self.emit_scheduler_event(
+                    crate::scheduler::EVENT_RUN_COMPLETED,
+                    serde_json::json!({
+                        "project": project.display().to_string(),
+                        "target": target,
+                        "run_id": summary.run_id.to_string(),
+                        "engine": engine.as_str(),
+                        "edges": summary.edges,
+                        "execs": summary.execs,
+                        "crashes": summary.crashes,
+                        "termination": summary.termination,
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                let run_id = started_run.lock().ok().and_then(|slot| *slot);
+                if let Some(run_id) = run_id {
+                    self.emit_scheduler_event(
+                        crate::scheduler::EVENT_RUN_FAILED,
+                        serde_json::json!({
+                            "project": project.display().to_string(),
+                            "target": target,
+                            "run_id": run_id.to_string(),
+                            "engine": engine.as_str(),
+                            "error": error.to_string(),
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+        result
+    }
+
+    async fn run_fuzzer_with_started_inner(
         &self,
         project: &Path,
         target: &str,
@@ -7075,6 +7178,20 @@ impl ServiceContainer {
                 .upsert_crashes(&deduped)
                 .await
                 .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
+        }
+        // Triage completed with classified crashes: fire event-driven
+        // schedules listening for `crash.found`.
+        if !deduped.is_empty() {
+            self.emit_scheduler_event(
+                crate::scheduler::EVENT_CRASH_FOUND,
+                serde_json::json!({
+                    "project": project.display().to_string(),
+                    "target": target,
+                    "run_id": run_id.to_string(),
+                    "crashes": deduped.len(),
+                }),
+            )
+            .await;
         }
         Ok(deduped)
     }

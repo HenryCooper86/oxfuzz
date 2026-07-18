@@ -131,6 +131,39 @@ occurrences, so month boundaries and daylight-saving transitions are not
 approximated as fixed UTC intervals. Legacy unknown zones remain fail-safe UTC
 with an operator warning.
 
+## Parameter resolution and event triggers
+
+Before every dispatch the manager resolves the schedule's `parameter_values`
+through `hf-scheduler::params`: schema defaults (none today -- an empty object)
+-> static schedule overrides -> trigger-time expressions. Supported
+expressions: `{{ trigger.time }}`, `{{ trigger.type }}`,
+`{{ execution.sequence }}`, and `{{ event.payload.<field> }}`. An expression
+that cannot resolve (unknown name, missing event field) **fails the dispatch**:
+a `Failed` execution is recorded with the reason and the fire cursor advances,
+so a broken template is loud once per fire instead of silently leaking a raw
+`{{ ... }}` string into a campaign.
+
+Event-driven schedules (`TriggerConfig::Event`) fire when the service emits a
+matching event, not on the evaluation tick. The events the service genuinely
+has today:
+
+| event type | emitted at | payload fields |
+|------------|-----------|----------------|
+| `crash.found` | triage completion with classified crashes (`triage_run_record_inner`) | `project`, `target`, `run_id`, `crashes` |
+| `run.completed` | fuzz-run termination, success or cancellation (`run_fuzzer_with_started`) | `project`, `target`, `run_id`, `engine`, `edges`, `execs`, `crashes`, `termination` |
+| `run.failed` | a *started* fuzz run terminating with a failure | `project`, `target`, `run_id`, `engine`, `error` |
+
+`ServiceContainer` holds a late-bound, clone-shared `Weak<SchedulerManager>`
+slot that `CampaignScheduler::try_start` binds; every surface built from that
+container (scheduled or interactive) emits through `SchedulerManager::
+emit_event` -> `EventBridge` -> the normal trigger queue, so event fires get
+`last_fire`, history, and policy enforcement exactly like cron fires. Errors
+before a run becomes durable are rejections and emit nothing. An optional
+payload `filter` (glob on a payload field, e.g. `payload.target` = `parse_*`)
+and `debounce_secs` narrow and collapse fires. Creation goes through
+`parse_trigger("event", "<type>")`; unknown event types are rejected so a typo
+can never arm a schedule that can never fire.
+
 ## Layering (AGENTS.md 2.9 -- all logic in hf-service)
 
 | Layer | Location |

@@ -58,11 +58,25 @@ impl EventBridge {
             if let TriggerConfig::Event {
                 event_type,
                 debounce_secs,
+                filter,
             } = &schedule.trigger
             {
                 // Check event type.
                 if event_type != &event.event_type {
                     continue;
+                }
+
+                // Check the optional payload filter (glob on a payload field).
+                if let Some(filter) = filter {
+                    if !filter.matches(event.payload.as_ref()) {
+                        debug!(
+                            schedule_id = %schedule.id,
+                            field = %filter.field,
+                            pattern = %filter.pattern,
+                            "Event filtered out"
+                        );
+                        continue;
+                    }
                 }
 
                 // Apply debounce.
@@ -81,12 +95,14 @@ impl EventBridge {
                     }
                 }
 
-                // Match! Enqueue trigger.
+                // Match! Enqueue trigger, carrying the event payload so
+                // `{{ event.payload.* }}` expressions resolve at dispatch.
                 let trigger = FiredTrigger {
                     schedule_id: schedule.id.clone(),
                     fired_at: event.timestamp,
                     trigger_type: TriggerType::Event,
                     is_recovery: false,
+                    event_payload: event.payload.clone(),
                 };
 
                 if tx.send(trigger).await.is_ok() {
@@ -120,6 +136,7 @@ mod tests {
             TriggerConfig::Event {
                 event_type: event_type.to_string(),
                 debounce_secs: debounce,
+                filter: None,
             },
             "wf",
         )
@@ -223,5 +240,52 @@ mod tests {
 
         let matched = bridge.process_event(&event, &store, &tx).await;
         assert!(matched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_event_bridge_honors_payload_filter() {
+        let mut bridge = EventBridge::new();
+        let mut store = ScheduleStore::new();
+        store.register(Schedule::new(
+            "s1",
+            "s1",
+            TriggerConfig::Event {
+                event_type: "crash.found".into(),
+                debounce_secs: 0,
+                filter: Some(crate::event::EventFilter {
+                    field: "payload.target".into(),
+                    pattern: "parse_*".into(),
+                }),
+            },
+            "wf",
+        ));
+
+        let (tx, mut rx) = trigger_queue();
+        let non_matching = IncomingEvent {
+            event_type: "crash.found".into(),
+            payload: Some(serde_json::json!({"target": "render_frame"})),
+            timestamp: Utc::now(),
+        };
+        assert!(bridge
+            .process_event(&non_matching, &store, &tx)
+            .await
+            .is_empty());
+
+        let matching = IncomingEvent {
+            event_type: "crash.found".into(),
+            payload: Some(serde_json::json!({"target": "parse_input"})),
+            timestamp: Utc::now(),
+        };
+        assert_eq!(
+            bridge.process_event(&matching, &store, &tx).await,
+            vec!["s1"]
+        );
+
+        // The fired trigger carries the payload for parameter resolution.
+        let trigger = rx.recv().await.unwrap();
+        assert_eq!(
+            trigger.event_payload,
+            Some(serde_json::json!({"target": "parse_input"}))
+        );
     }
 }
