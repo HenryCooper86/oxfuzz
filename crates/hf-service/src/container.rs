@@ -1799,6 +1799,17 @@ fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathB
 
 /// Read the current harness source from a target workspace, trying the known
 /// per-language harness filenames. Returns `None` when none exists yet.
+/// The source filename used inside a reproduction bundle for a language.
+fn harness_bundle_filename(lang: TargetLanguage) -> &'static str {
+    match lang {
+        TargetLanguage::C => "harness.c",
+        TargetLanguage::Cpp => "harness.cc",
+        TargetLanguage::Rust => "harness.rs",
+        TargetLanguage::Go => "harness.go",
+        TargetLanguage::Python => "harness.py",
+    }
+}
+
 fn read_current_harness_source(workspace: &Path) -> Option<String> {
     let canonical = workspace.join("harness.source");
     if is_regular_file(&canonical) {
@@ -7618,6 +7629,74 @@ impl ServiceContainer {
     ) -> Option<hf_coverage::CoverageSummary> {
         let json = self.coverage_export_json_cached(project, target).await?;
         hf_coverage::parse_llvm_cov_summary(&json)
+    }
+
+    /// Assemble a self-contained reproduction bundle for `crash` into `dest`:
+    /// the current harness source, the crash input bytes, and a `REPRODUCE.md`
+    /// manifest carrying the exact build and run steps. A maintainer can then
+    /// reproduce the finding with only the target toolchain -- no `hobot_fuzz`
+    /// install (VISION reproducibility). Returns the bundle directory.
+    ///
+    /// # Errors
+    /// Returns a validation error if the harness or crash input is missing (or
+    /// the input is not a regular file -- symlinks are refused, never followed),
+    /// or an internal error if the bundle cannot be written.
+    pub async fn export_repro_bundle(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        crash: &hf_core::crash::Crash,
+        dest: &Path,
+    ) -> Result<PathBuf, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let workspace = workspace_dir(&project_root, target);
+        let harness_source = read_current_harness_source(&workspace).ok_or_else(|| {
+            ClassifiedError::Validation(format!("no harness source for '{target}' to bundle"))
+        })?;
+        // Copy the crash input by value; refuse a symlinked input rather than
+        // following it out of the workspace into an unrelated file.
+        if !is_regular_file(&crash.input_path) {
+            return Err(ClassifiedError::Validation(format!(
+                "crash input {} is missing or not a regular file",
+                crash.input_path.display()
+            )));
+        }
+        let input = std::fs::read(&crash.input_path).map_err(|e| {
+            ClassifiedError::Validation(format!(
+                "read crash input {}: {e}",
+                crash.input_path.display()
+            ))
+        })?;
+        let harness_filename = harness_bundle_filename(lang).to_owned();
+        let build = hf_harness::build_command(engine, lang, "fuzz_bin");
+        let build_command = format!(
+            "{} {} {} -o {}",
+            build.compiler,
+            build.args.join(" "),
+            harness_filename,
+            build.output.display()
+        );
+        let manifest = crate::repro::ReproManifest {
+            project: project_root.to_string_lossy().into_owned(),
+            target: target.to_owned(),
+            language: format!("{lang:?}"),
+            engine: engine.as_str().to_owned(),
+            // Harnesses build with ASan by default (see `build_command`).
+            sanitizer: "address".to_owned(),
+            build_command,
+            harness_filename,
+            input_filename: "crash_input".to_owned(),
+            binary_name: "fuzz_bin".to_owned(),
+            crash_kind: format!("{:?}", crash.kind),
+            crash_summary: crash.summary.clone(),
+            stack_signature: crash.stack_signature.clone(),
+            minimized: crash.minimized,
+        };
+        crate::repro::write_repro_bundle(dest, &manifest, &harness_source, &input)
+            .map_err(|e| ClassifiedError::Internal(format!("write repro bundle: {e}")))
     }
 
     /// Persisted crashes for the most recent matching run (empty without a
