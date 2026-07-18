@@ -197,8 +197,17 @@ pub fn docker_daemon_ready() -> bool {
 /// Whether the sandbox image is loaded locally.
 #[must_use]
 pub fn sandbox_image_present() -> bool {
+    image_present(SANDBOX_IMAGE)
+}
+
+/// Whether a specific Docker image is loaded locally. Bounded like the other
+/// Docker probes so a wedged daemon surfaces as "not present" rather than an
+/// unbounded hang. `image` is passed as a separate argv (never a shell), and
+/// callers pass a validated pinned reference.
+#[must_use]
+pub fn image_present(image: &str) -> bool {
     run_bounded(
-        std::process::Command::new(docker_bin()).args(["image", "inspect", SANDBOX_IMAGE]),
+        std::process::Command::new(docker_bin()).args(["image", "inspect", image]),
         DOCKER_PROBE_TIMEOUT,
     )
     .is_some_and(|o| o.status.success())
