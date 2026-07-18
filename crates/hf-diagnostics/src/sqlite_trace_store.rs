@@ -134,15 +134,32 @@ impl TraceRow {
     fn into_trace(self) -> Result<Trace, TraceStoreError> {
         let id = Uuid::parse_str(&self.id)
             .map_err(|e| storage_err(format!("decode diag_traces.id {:?}: {e}", self.id)))?;
-        let session_id = Uuid::parse_str(&self.session_id).unwrap_or_default();
+        let session_id = Uuid::parse_str(&self.session_id).map_err(|e| {
+            storage_err(format!(
+                "decode diag_traces.session_id {:?}: {e}",
+                self.session_id
+            ))
+        })?;
         let started_at: DateTime<Utc> = self.started_at.parse().map_err(|e| {
             storage_err(format!(
                 "decode diag_traces.started_at {:?}: {e}",
                 self.started_at
             ))
         })?;
-        let completed_at: Option<DateTime<Utc>> =
-            self.completed_at.as_deref().and_then(|s| s.parse().ok());
+        // A genuine NULL stays None, but a present-but-corrupt timestamp is a hard
+        // error (matches `started_at`): silently dropping it would yield a
+        // "completed" trace with no completion time and a None duration.
+        let completed_at: Option<DateTime<Utc>> = self
+            .completed_at
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| {
+                storage_err(format!(
+                    "decode diag_traces.completed_at {:?}: {e}",
+                    self.completed_at
+                ))
+            })?;
         let metadata: serde_json::Value = self
             .metadata
             .as_deref()
@@ -224,8 +241,20 @@ impl ObsRow {
                 self.started_at
             ))
         })?;
-        let completed_at: Option<DateTime<Utc>> =
-            self.completed_at.as_deref().and_then(|s| s.parse().ok());
+        // Present-but-corrupt timestamp is a hard error (matches `started_at`); a
+        // silently-dropped `completed_at` yields a None `duration_ms()` that
+        // undercounts LLM-wait accounting instead of failing the read.
+        let completed_at: Option<DateTime<Utc>> = self
+            .completed_at
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|e| {
+                storage_err(format!(
+                    "decode diag_observations.completed_at {:?}: {e}",
+                    self.completed_at
+                ))
+            })?;
         let input: serde_json::Value = self
             .input
             .as_deref()

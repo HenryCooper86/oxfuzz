@@ -414,9 +414,13 @@ impl LlmProvider for OllamaProvider {
                                         ..Default::default()
                                     };
                                     // If any tool call was emitted, report ToolUse
-                                    // (mirrors the non-stream path); otherwise Stop.
+                                    // (mirrors the non-stream path); otherwise map
+                                    // done_reason so a truncated ("length") reply is
+                                    // distinguishable from a natural stop.
                                     let finish_reason = if *tool_index > 0 {
                                         FinishReason::ToolUse
+                                    } else if chunk.done_reason.as_deref() == Some("length") {
+                                        FinishReason::Length
                                     } else {
                                         FinishReason::Stop
                                     };
@@ -542,6 +546,11 @@ struct OllamaStreamChunk {
     model: Option<String>,
     message: OllamaStreamMessage,
     done: bool,
+    /// Why generation stopped (`"length"` on a token/context cap). Mapped to
+    /// `FinishReason::Length` like the non-streaming path so a caller can tell a
+    /// truncated reply from a natural stop.
+    #[serde(default)]
+    done_reason: Option<String>,
     prompt_eval_count: Option<u32>,
     eval_count: Option<u32>,
 }

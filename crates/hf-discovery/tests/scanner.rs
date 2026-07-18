@@ -492,3 +492,29 @@ async fn discover_python_finds_defs_and_methods() {
         .expect("parse_packet should be discovered");
     assert_eq!(parse.kind, TargetKind::Parser);
 }
+
+/// A directory whose name carries a source-file extension (legal on disk, e.g.
+/// `pkg.go/`) must not abort discovery: the extension filter alone would let it
+/// through to `read_to_string`, which fails with "is a directory". The scan
+/// must skip it and still return the real candidate.
+#[tokio::test]
+async fn directory_named_like_source_file_does_not_abort_scan() {
+    let project = tempfile::tempdir().unwrap();
+    // A directory that looks like a Go source file.
+    std::fs::create_dir(project.path().join("pkg.go")).unwrap();
+    // A real Go source file with an exported, parameter-bearing function.
+    std::fs::write(
+        project.path().join("decode.go"),
+        "package main\n\nfunc DecodeFrame(data []byte) int { return len(data) }\n",
+    )
+    .unwrap();
+
+    let inv = hf_discovery::discover(project.path(), TargetLanguage::Go)
+        .await
+        .expect("discovery must not abort on a directory named like a source file");
+    assert!(
+        inv.candidates.iter().any(|c| c.symbol == "DecodeFrame"),
+        "the real candidate must survive; got {:?}",
+        inv.candidates.iter().map(|c| &c.symbol).collect::<Vec<_>>()
+    );
+}
