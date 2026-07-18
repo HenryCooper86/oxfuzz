@@ -701,14 +701,22 @@ async fn over_budget_history_is_compacted_before_the_turn() {
         ],
         None,
     );
-    // ~14 messages of 30k chars each => well over the 96k-token budget.
-    let big = "x".repeat(30_000);
+    // ~14 messages of 30k chars each => well over the 96k-token budget. The
+    // per-message fill varies at nearly every character position so the
+    // prune-before-compact step finds no repeated-content candidates: this
+    // exercises the path where pruning is insufficient and compaction must
+    // still fire as the last resort.
+    let fill = |seed: usize| -> String {
+        (0..30_000)
+            .map(|j| char::from(b'a' + u8::try_from((seed * 31 + j * 7) % 26).unwrap_or(0)))
+            .collect()
+    };
     let history: Vec<hf_core::types::Message> = (0..14)
         .map(|i| {
             if i % 2 == 0 {
-                hf_core::types::Message::user(big.clone())
+                hf_core::types::Message::user(fill(i))
             } else {
-                hf_core::types::Message::assistant(big.clone())
+                hf_core::types::Message::assistant(fill(i))
             }
         })
         .collect();
@@ -721,5 +729,76 @@ async fn over_budget_history_is_compacted_before_the_turn() {
     assert_eq!(
         answer, "answered after compaction",
         "compaction did not run before the turn"
+    );
+}
+
+#[tokio::test]
+async fn pruning_defers_compaction_for_tool_result_heavy_history() {
+    // Measurement for the prune-before-compact seam: a long conversation whose
+    // bulk is dead, failed tool branches must be pruned (zero model cost) so
+    // the conversation fits the budget and compaction never fires. Proof:
+    // the turn's answer comes from the FIRST scripted reply and the pool sees
+    // exactly one request. On the old compact-first path the first reply would
+    // be consumed as the compaction summary and the answer would fall through
+    // to the pool's "(exhausted)" fallback from a second request.
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"final":"answered without compaction"}"#,
+    ]));
+    let captured = Arc::clone(&pool);
+    let provider: Arc<dyn ProviderPool> = pool;
+    let agent = Agent::new(TestBackend::new(Some(provider)), None);
+
+    let mut history = vec![hf_core::types::Message::user("u".repeat(1_000))];
+    // 7 dead branches: an assistant step plus a big failed tool result each
+    // (~15k tokens per pair, ~105k tokens total => over the 96k budget).
+    for i in 0..7 {
+        history.push(hf_core::types::Message::assistant(format!(
+            "{{\"thought\":\"attempt {i}\",\"tool\":\"discover\",\"args\":{{\"lang\":\"c\"}}}}"
+        )));
+        history.push(hf_core::types::Message::new(
+            hf_core::types::Role::Tool,
+            format!(
+                "result of discover: {{\"error\": \"dead-payload-{i}\", \"detail\": \"{}\"}}",
+                "d".repeat(60_000)
+            ),
+        ));
+    }
+    // The most recent assistant+tool pair is healthy; the pruner must keep it.
+    history.push(hf_core::types::Message::assistant(
+        "{\"thought\":\"retry worked\",\"tool\":\"discover\",\"args\":{\"lang\":\"c\"}}",
+    ));
+    history.push(hf_core::types::Message::new(
+        hf_core::types::Role::Tool,
+        "result of discover: {\"targets\": [\"parse_entry\"]}",
+    ));
+
+    let sink = CollectingSink::new();
+    let answer = agent
+        .run_turn(history, "what did we find?", &sink)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        answer, "answered without compaction",
+        "compaction fired even though pruning fit the conversation into budget"
+    );
+    let requests = captured.requests.lock().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "a compaction summarize call must not have reached the pool"
+    );
+    let sent = &requests[0].messages;
+    assert!(
+        !sent.iter().any(|m| m.content.contains("dead-payload")),
+        "pruned failed tool branches leaked into the provider request"
+    );
+    assert!(
+        sent.iter().any(|m| m.content.contains("parse_entry")),
+        "the most recent healthy tool result must survive pruning"
+    );
+    assert!(
+        hf_context::total_tokens(sent) < 20_000,
+        "pruning must observably shrink the request (was ~108k tokens pre-prune)"
     );
 }
