@@ -741,4 +741,33 @@ mod tests {
         assert!(reopened.interrupted().is_empty());
         assert!(reopened.durability_error().is_some());
     }
+
+    #[test]
+    fn replayed_run_events_leave_the_original_runs_recovery_state_untouched() {
+        // `ServiceContainer::replay_run` re-executes through the normal run
+        // path, so a replay only ever opens/closes its own new run id. Pin the
+        // contract that this event shape cannot close, dismiss, or otherwise
+        // disturb the original run's recovery state -- here the original is an
+        // interrupted run that must stay recoverable.
+        let dir = tempfile::tempdir().unwrap();
+        let wal = dir.path().join("run_journal.jsonl");
+        let journal = RunJournal::open(wal.clone());
+        let original = Uuid::new_v4();
+        journal.open_run(original, Path::new("/p"), "t", EngineKind::LibFuzzer);
+        // The replayed run is journaled exactly like any fresh run.
+        let replayed = Uuid::new_v4();
+        journal.open_run(replayed, Path::new("/p"), "t", EngineKind::LibFuzzer);
+        journal.note(
+            replayed,
+            "replay",
+            &format!("replays run {original} with seed 7"),
+        );
+        journal.close_run(replayed);
+        drop(journal);
+
+        let reopened = RunJournal::open(wal);
+        let interrupted = reopened.interrupted();
+        assert_eq!(interrupted.len(), 1, "only the original run is interrupted");
+        assert_eq!(interrupted[0].run_id, original.to_string());
+    }
 }

@@ -59,6 +59,11 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, _out: &st
     if duration > 0 {
         args.push(format!("-max_total_time={duration}"));
     }
+    // Trailing fuzzer args reach libFuzzer verbatim, so the recorded seed is
+    // forwarded the same way (`-seed=N`; omitted when none was recorded).
+    if let Some(seed) = cfg.seed {
+        args.push(format!("-seed={seed}"));
+    }
     if !cfg.env.is_empty() {
         let mut env_prefix = vec!["env".to_owned()];
         for (k, v) in &cfg.env {

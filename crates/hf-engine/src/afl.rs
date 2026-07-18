@@ -66,6 +66,11 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
         args.push("-V".to_owned());
         args.push(duration.to_string());
     }
+    // `afl-fuzz -s <seed>` pins the RNG seed (there is no AFL_SEED env var).
+    if let Some(seed) = cfg.seed {
+        args.push("-s".to_owned());
+        args.push(seed.to_string());
+    }
     // Env vars as AFL_ prefixed options are set by the runtime; we pass them
     // as `--env` equivalents via the command environment. Here we emit them
     // as a leading `env` command so the docker exec applies them.
