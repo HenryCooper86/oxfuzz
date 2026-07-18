@@ -699,6 +699,16 @@ struct RunArtifacts {
     binary_sha256: String,
 }
 
+/// Provenance of a replayed run: the original run it re-executes and the exact
+/// RNG seed that run recorded. Threaded from `replay_run` into the normal run
+/// path so the replayed run's persisted config pins the same seed and links
+/// back to the original run.
+#[derive(Clone, Copy)]
+struct ReplayProvenance {
+    original_run_id: Uuid,
+    seed: u64,
+}
+
 /// Compute a full SHA-256 digest without loading a potentially large binary in
 /// memory.
 fn sha256_file(path: &Path) -> Result<String, ClassifiedError> {
@@ -1612,6 +1622,48 @@ fn stored_project_matches(stored: &Path, canonical: &Path) -> bool {
 
 fn project_lookup_identity(project: &Path) -> PathBuf {
     std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
+}
+
+/// Select the candidate referenced by `target` from `candidates`.
+///
+/// `target` is either a plain symbol or a file-qualified `file::symbol` (the
+/// file relative to the project root, matching `TargetCandidate::relative_file`).
+/// A plain symbol matching zero candidates yields `Ok(None)` (the caller
+/// reports "not found"); exactly one yields that candidate; more than one is a
+/// `Validation` error listing the file-qualified forms so the user can
+/// disambiguate. When no plain match exists and the string carries a `::`
+/// qualifier, the part before the last `::` is matched exactly against each
+/// candidate's root-relative file. The plain match is tried first so a symbol
+/// that itself contains `::` (C++-style) still resolves.
+fn select_target_candidate<'c>(
+    candidates: &'c [TargetCandidate],
+    target: &str,
+) -> Result<Option<&'c TargetCandidate>, ClassifiedError> {
+    let mut plain = candidates.iter().filter(|c| c.symbol == target);
+    if let Some(first) = plain.next() {
+        if plain.next().is_some() {
+            let mut qualified: Vec<String> = candidates
+                .iter()
+                .filter(|c| c.symbol == target)
+                .map(|c| format!("{}::{}", c.relative_file(), c.symbol))
+                .collect();
+            qualified.sort();
+            qualified.dedup();
+            return Err(ClassifiedError::Validation(format!(
+                "target '{target}' is ambiguous; qualify it with the defining file: {}",
+                qualified.join(", ")
+            )));
+        }
+        return Ok(Some(first));
+    }
+    if let Some((file, symbol)) = target.rsplit_once("::") {
+        if !file.is_empty() && !symbol.is_empty() {
+            return Ok(candidates
+                .iter()
+                .find(|c| c.symbol == symbol && c.relative_file() == file));
+        }
+    }
+    Ok(None)
 }
 
 /// A per-project workspace directory name: the human-readable basename plus a
@@ -4949,10 +5001,7 @@ impl ServiceContainer {
         self.authorize_recorded(Action::DraftHarness, "harness_draft", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
-        let candidate = inv
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
@@ -5000,19 +5049,19 @@ impl ServiceContainer {
         let project = canonical_project_root(project)?;
         if let Some(store) = &self.store {
             let targets = store.list_all_targets().await?;
-            if let Some(candidate) = targets.iter().find(|candidate| {
-                stored_project_matches(&candidate.project_root, &project)
-                    && candidate.symbol == target
-                    && candidate.language == lang
-            }) {
+            let project_targets: Vec<TargetCandidate> = targets
+                .into_iter()
+                .filter(|candidate| {
+                    stored_project_matches(&candidate.project_root, &project)
+                        && candidate.language == lang
+                })
+                .collect();
+            if let Some(candidate) = select_target_candidate(&project_targets, target)? {
                 return Ok(candidate.id);
             }
         }
-        self.discover(&project, lang)
-            .await?
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let inventory = self.discover(&project, lang).await?;
+        select_target_candidate(&inventory.candidates, target)?
             .map(|c| c.id)
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))
     }
@@ -5101,10 +5150,11 @@ impl ServiceContainer {
         let project = canonical_project_root(project)?;
         if let Some(store) = &self.store {
             let targets = store.list_all_targets().await?;
-            if let Some(candidate) = targets.iter().find(|candidate| {
-                stored_project_matches(&candidate.project_root, &project)
-                    && candidate.symbol == target
-            }) {
+            let project_targets: Vec<TargetCandidate> = targets
+                .into_iter()
+                .filter(|candidate| stored_project_matches(&candidate.project_root, &project))
+                .collect();
+            if let Some(candidate) = select_target_candidate(&project_targets, target)? {
                 return Ok(Some(candidate.clone()));
             }
         }
@@ -5117,12 +5167,9 @@ impl ServiceContainer {
         ] {
             match self.discover(&project, language).await {
                 Ok(inventory) => {
-                    if let Some(candidate) = inventory
-                        .candidates
-                        .into_iter()
-                        .find(|candidate| candidate.symbol == target)
+                    if let Some(candidate) = select_target_candidate(&inventory.candidates, target)?
                     {
-                        return Ok(Some(candidate));
+                        return Ok(Some(candidate.clone()));
                     }
                 }
                 Err(ClassifiedError::Validation(message))
@@ -5392,10 +5439,7 @@ impl ServiceContainer {
         self.authorize_recorded(Action::CompileHarness, "harness_generate", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
-        let candidate = inv
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
@@ -5541,10 +5585,7 @@ impl ServiceContainer {
         self.authorize_recorded(Action::CompileHarness, "harness_refine", Some(project))
             .await?;
         let inv = self.discover(project, lang).await?;
-        let candidate = inv
-            .candidates
-            .iter()
-            .find(|c| c.symbol == target)
+        let candidate = select_target_candidate(&inv.candidates, target)?
             .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))?
             .clone();
 
@@ -5666,7 +5707,7 @@ impl ServiceContainer {
         while iterations < cap {
             iterations += 1;
             let summary = self
-                .run_fuzzer_with_started(project, &target, resolved, &noop, &|_| {})
+                .run_fuzzer_with_started(project, &target, resolved, &noop, &|_| {}, None)
                 .await?;
             termination = summary.termination;
             edges = edges.max(summary.edges);
@@ -5830,7 +5871,7 @@ impl ServiceContainer {
 
         // Allocate the run identity before execution so its immutable inputs and
         // every finding are owned by one durable evidence directory.
-        let smoke_config = FuzzRunConfig {
+        let mut smoke_config = FuzzRunConfig {
             harness_id: harness.id,
             engine: resolved.engine,
             duration: Some(std::time::Duration::from_secs(resolved.duration_secs)),
@@ -5840,13 +5881,19 @@ impl ServiceContainer {
             sanitizer: harness.sanitizer,
             env: Vec::new(),
             extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
         };
         let mut smoke_record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
-            Some(smoke_config.clone()),
+            None,
             Utc::now(),
         );
+        // Persist the deterministic seed with the run config so the smoke run
+        // is reproducible, exactly like a campaign run.
+        smoke_config.seed = Some(hf_engine::seed::derive_run_seed(smoke_record.id));
+        smoke_record.config = Some(smoke_config.clone());
         smoke_record.kind = RunKind::Smoke;
         smoke_record.context_rev = Some(run_context_digest(&workspace)?);
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
@@ -6125,7 +6172,7 @@ impl ServiceContainer {
         let mut datas: Vec<Vec<u8>> = Vec::new();
         if let Some(pool) = self.provider_pool() {
             if let Ok(inv) = self.discover(project, lang).await {
-                if let Some(candidate) = inv.candidates.iter().find(|c| c.symbol == target) {
+                if let Ok(Some(candidate)) = select_target_candidate(&inv.candidates, target) {
                     let provider = LlmProviderBridge::new(pool)
                         .with_diagnostics(Arc::clone(&self.diagnostics), "seed_gen");
                     match hf_harness::generate_seeds(candidate, count, Box::new(provider)).await {
@@ -6252,6 +6299,7 @@ impl ServiceContainer {
                         resolved,
                         &progress_sink,
                         &started_sink,
+                        None,
                     )
                     .await;
                 match result {
@@ -6408,8 +6456,100 @@ impl ServiceContainer {
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
     ) -> Result<RunSummary, ClassifiedError> {
         let resolved = resolve_fuzzing_run(engine, duration_secs)?;
-        self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {})
+        self.run_fuzzer_with_started(project, target, resolved, on_progress, &|_| {}, None)
             .await
+    }
+
+    /// Re-execute a recorded run with its exact engine, duration, resource
+    /// limits, and RNG seed.
+    ///
+    /// The original run's persisted config supplies every reproducibility
+    /// input; when it predates recorded seeds, the seed is re-derived from the
+    /// original run id exactly as the original run path would have derived it.
+    /// The replay launches through the normal run path (same authorization,
+    /// sandboxing, corpus merge, and WAL journaling), so the replayed run is
+    /// persisted as its own new campaign row whose config links back to the
+    /// original via `replay_of` and pins the same `seed`. The corpus and
+    /// promoted harness are intentionally taken from the target's current
+    /// state: replay pins the RNG seed, not the (deliberately evolving)
+    /// shared corpus. The original run's row and journal state are untouched.
+    ///
+    /// # Errors
+    /// Returns `ClassifiedError` if the run or its harness/target is unknown,
+    /// the run has no recorded config, or the replayed run itself fails.
+    pub async fn replay_run(
+        &self,
+        run_id: Uuid,
+        on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
+    ) -> Result<RunSummary, ClassifiedError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
+        })?;
+        let original = store
+            .get_run(run_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .ok_or_else(|| ClassifiedError::Validation(format!("run not found: {run_id}")))?;
+        let config = original.config.clone().ok_or_else(|| {
+            ClassifiedError::Validation(format!("run {run_id} has no recorded config to replay"))
+        })?;
+        let project = canonical_project_root(Path::new(&original.project_root))?;
+        let harness = store
+            .get_harness(config.harness_id)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "run {run_id} references a harness that no longer exists"
+                ))
+            })?;
+        let target = store
+            .list_targets(&original.project_root)
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .into_iter()
+            .find(|candidate| candidate.id == harness.target_id)
+            .map(|candidate| candidate.symbol)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "run {run_id} references a target that no longer exists"
+                ))
+            })?;
+
+        // A config persisted before seeds were recorded replays with the seed
+        // the original run would have derived from its own id.
+        let seed = config
+            .seed
+            .unwrap_or_else(|| hf_engine::seed::derive_run_seed(run_id));
+        // Replay the recorded campaign parameters verbatim rather than
+        // re-resolving them against the current operator policy: the point of
+        // a replay is to reproduce the original run, not a policy-clamped one.
+        // Authorization still happens on the normal run path.
+        let resolved = crate::config::ResolvedFuzzingRun {
+            engine: original.engine,
+            duration_secs: config.duration.map_or(3600, |d| d.as_secs()),
+            max_mem_mb: config.max_mem_mb,
+            max_cpus: config.max_cpus,
+        };
+        let journal = Arc::clone(&self.run_journal);
+        self.run_fuzzer_with_started(
+            project.as_path(),
+            &target,
+            resolved,
+            on_progress,
+            &move |replayed_run_id| {
+                journal.note(
+                    replayed_run_id,
+                    "replay",
+                    &format!("replays run {run_id} with seed {seed}"),
+                );
+            },
+            Some(ReplayProvenance {
+                original_run_id: run_id,
+                seed,
+            }),
+        )
+        .await
     }
 
     /// Run a fuzzer to termination and notify event-driven schedules about the
@@ -6423,6 +6563,7 @@ impl ServiceContainer {
         resolved: crate::config::ResolvedFuzzingRun,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
+        replay: Option<ReplayProvenance>,
     ) -> Result<RunSummary, ClassifiedError> {
         let engine = resolved.engine;
         // Capture the run id once the run is durable so a failure event can
@@ -6436,7 +6577,14 @@ impl ServiceContainer {
             on_started(run_id);
         };
         let result = self
-            .run_fuzzer_with_started_inner(project, target, resolved, on_progress, &tracked_started)
+            .run_fuzzer_with_started_inner(
+                project,
+                target,
+                resolved,
+                on_progress,
+                &tracked_started,
+                replay,
+            )
             .await;
         match &result {
             Ok(summary) => {
@@ -6482,6 +6630,7 @@ impl ServiceContainer {
         resolved: crate::config::ResolvedFuzzingRun,
         on_progress: &(dyn Fn(FuzzProgress) + Send + Sync),
         on_started: &(dyn Fn(Uuid) + Send + Sync),
+        replay: Option<ReplayProvenance>,
     ) -> Result<RunSummary, ClassifiedError> {
         const MAX_RAW_COVERAGE_SAMPLES: usize = 10_000;
         let _workspace_operation = self.acquire_workspace_operation().await?;
@@ -6538,7 +6687,7 @@ impl ServiceContainer {
             Vec::new()
         };
 
-        let run_cfg = FuzzRunConfig {
+        let mut run_cfg = FuzzRunConfig {
             // Link the run to the target's compiled harness so the target-scoped
             // workbench dashboard can attribute it. A throwaway id here would
             // leave every run unattributable (dashboard shows zero runs).
@@ -6551,6 +6700,8 @@ impl ServiceContainer {
             sanitizer: hf_core::target::Sanitizer::Address,
             env: Vec::new(),
             extra_args,
+            seed: None,
+            replay_of: None,
         };
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("fuzz runs require the persistent service store".to_owned())
@@ -6558,9 +6709,21 @@ impl ServiceContainer {
         let mut run_record = RunRecord::new(
             project.to_string_lossy().to_string(),
             engine,
-            Some(run_cfg.clone()),
+            None,
             Utc::now(),
         );
+        // Every run pins its RNG seed in the persisted config. A replay
+        // re-executes with the original run's seed and links back to it; a
+        // fresh run derives its seed deterministically from its own id, so
+        // every run is reproducible by default.
+        match replay {
+            Some(provenance) => {
+                run_cfg.seed = Some(provenance.seed);
+                run_cfg.replay_of = Some(provenance.original_run_id);
+            }
+            None => run_cfg.seed = Some(hf_engine::seed::derive_run_seed(run_record.id)),
+        }
+        run_record.config = Some(run_cfg.clone());
         run_record.context_rev = Some(run_context_digest(&workspace)?);
         let artifacts = stage_run_artifacts(&workspace, run_record.id, &qualified.source, &binary)?;
         if let Err(error) = verify_staged_qualification(&qualified, &artifacts) {
@@ -9911,6 +10074,109 @@ mod casrep_path_tests {
 }
 
 #[cfg(test)]
+mod target_resolution_tests {
+    use super::select_target_candidate;
+    use hf_core::error::ClassifiedError;
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use std::path::PathBuf;
+
+    fn candidate(file: &str, symbol: &str) -> TargetCandidate {
+        TargetCandidate {
+            id: uuid::Uuid::new_v4(),
+            project_root: PathBuf::from("/proj"),
+            language: TargetLanguage::C,
+            symbol: symbol.to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from(file),
+                line: 1,
+                col: 1,
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            fit_score: 0.5,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        }
+    }
+
+    #[test]
+    fn unique_plain_symbol_resolves() {
+        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
+        let found = select_target_candidate(&candidates, "parse_opts").unwrap();
+        assert_eq!(found.map(|c| c.id), Some(candidates[0].id));
+    }
+
+    #[test]
+    fn unknown_plain_symbol_is_not_found() {
+        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
+        assert!(select_target_candidate(&candidates, "missing")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn ambiguous_plain_symbol_errors_with_file_qualified_forms() {
+        let candidates = vec![
+            candidate("/proj/src/a.c", "parse_opts"),
+            candidate("/proj/src/b.c", "parse_opts"),
+            candidate("/proj/src/c.c", "unique_fn"),
+        ];
+        let Err(ClassifiedError::Validation(message)) =
+            select_target_candidate(&candidates, "parse_opts")
+        else {
+            panic!("an ambiguous symbol must be a validation error");
+        };
+        assert!(
+            message.contains("src/a.c::parse_opts"),
+            "lists the src/a.c qualifier: {message}"
+        );
+        assert!(
+            message.contains("src/b.c::parse_opts"),
+            "lists the src/b.c qualifier: {message}"
+        );
+        assert!(
+            !message.contains("unique_fn"),
+            "unrelated symbols are not listed: {message}"
+        );
+    }
+
+    #[test]
+    fn file_qualified_symbol_resolves_exactly() {
+        let candidates = vec![
+            candidate("/proj/src/a.c", "parse_opts"),
+            candidate("/proj/src/b.c", "parse_opts"),
+        ];
+        let found = select_target_candidate(&candidates, "src/b.c::parse_opts").unwrap();
+        assert_eq!(found.map(|c| c.id), Some(candidates[1].id));
+    }
+
+    #[test]
+    fn file_qualified_symbol_with_unknown_file_is_not_found() {
+        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
+        assert!(
+            select_target_candidate(&candidates, "src/missing.c::parse_opts")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn symbol_containing_colons_prefers_the_plain_match() {
+        // A symbol that itself contains `::` (C++-style) still resolves as a
+        // plain symbol; the qualifier split is only a fallback.
+        let candidates = vec![candidate("/proj/src/ns.c", "ns::func")];
+        let found = select_target_candidate(&candidates, "ns::func").unwrap();
+        assert_eq!(found.map(|c| c.id), Some(candidates[0].id));
+    }
+}
+
+#[cfg(test)]
 mod coverage_feedback_tests {
     use super::{CoverageFeedback, FuzzProgress};
     use hf_coverage::{StagnationPolicy, StagnationProposal};
@@ -10947,6 +11213,8 @@ mod auto_revert_tests {
             sanitizer: Sanitizer::Address,
             env: vec![("MODE".to_owned(), "strict".to_owned())],
             extra_args: vec!["-dict=/work/parser.dict".to_owned()],
+            seed: None,
+            replay_of: None,
         }
     }
 

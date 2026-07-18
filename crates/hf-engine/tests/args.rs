@@ -17,6 +17,8 @@ fn cfg(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
         sanitizer: Sanitizer::Address,
         env: Vec::new(),
         extra_args: Vec::new(),
+        seed: None,
+        replay_of: None,
     }
 }
 

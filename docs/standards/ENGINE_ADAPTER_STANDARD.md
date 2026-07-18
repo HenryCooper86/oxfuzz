@@ -41,7 +41,25 @@ Each adapter translates `FuzzRunConfig` into the engine's CLI. Resource limits
 (memory, CPU, duration) are enforced by `hf-runtime`, not duplicated by the
 engine where possible.
 
-### 3.1 AFL++ File-Input Contract
+### 3.1 Deterministic Seeds
+
+Every persisted run records a deterministic `FuzzRunConfig.seed` (derived from
+the run id by default, so every run is reproducible) and may be re-executed
+through `ServiceContainer::replay_run`. An adapter MUST translate a recorded
+seed into its engine's genuine fixed-seed knob -- and MUST NOT invent a flag
+the engine does not have:
+
+| Engine | Seed knob | Form |
+| --- | --- | --- |
+| AFL++ (>= 2.53c) | `afl-fuzz -s <seed>` | CLI flag before `--` |
+| libFuzzer | `-seed=N` (`0`/absent = random) | CLI flag |
+| ClusterFuzzLite | forwarded to libFuzzer as `-seed=N` | trailing fuzzer arg |
+| honggfuzz | none (RNG is seeded from arc4random//dev/urandom) | emit nothing |
+
+A honggfuzz run with a recorded seed is therefore not RNG-deterministic; that
+is an engine limitation, not a license to fabricate flags.
+
+### 3.2 AFL++ File-Input Contract
 
 The supported AFL++ harness is the generated `LLVMFuzzerTestOneInput` target
 linked with AFL++'s libFuzzer-compatible driver. Input is always represented as

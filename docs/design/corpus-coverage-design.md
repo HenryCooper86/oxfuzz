@@ -72,6 +72,49 @@ Engine discoveries are normalized before the retained merge:
 Crash artifacts and engine bookkeeping are excluded by `grow`; they remain in
 the run-owned output tree for crash ingestion and evidence retention.
 
+### 3.2 One canonical corpus per target, shared across engines
+
+A target has exactly one retained corpus: `<workspace>/corpus`, where the
+workspace is scoped per project and target but never per engine. Every engine
+run for the target -- AFL++, honggfuzz, libFuzzer -- seeds from that single
+root and feeds it, so findings compound across engines:
+
+1. **Seed**: `hf-service` `snapshot`s the canonical root into the run-owned,
+  disposable `runs/<run_id>/corpus` before sandbox execution. The canonical
+  root itself is mounted read-only and is immutable while the engine runs.
+2. **Grow + merge**: after the sandbox exits, engine discoveries are
+  normalized (`grow` for AFL++/honggfuzz output; libFuzzer writes in place)
+  and `merge_snapshot` hash-deduplicates the run snapshot back into the
+  canonical root.
+3. **Absorb**: crash reproducers surfaced by triage are `absorb`ed into the
+  same canonical root, closing the run -> triage -> corpus loop for every
+  engine.
+
+Run state stays per-run: `runs/<run_id>/{corpus,out}` and the engine queue are
+disposable evidence owned by that run id. Only the retained seed corpus is
+shared. Persisted corpus rows reconcile exactly against the canonical survivor
+set after every mutation (`replace_corpus_entries` with the exact `list`
+output of the root).
+
+**Transition**: there is none -- this layout predates the cross-engine
+guarantee and no engine-scoped corpus location ever existed on disk, so no
+legacy per-engine corpus needs reconciliation and nothing is destroyed. The
+integration test `hf-service/tests/corpus_sharing.rs` pins the property: two
+engines seed from one root, absorbed crash survivors from one engine's run
+feed the next engine's run, pre-existing content is never lost, and persisted
+rows match the survivor set.
+
+### 3.3 Deterministic run seeds and replay
+
+Reproducibility is a run property layered on top of the shared corpus: every
+persisted run config records a `seed` (`u64`, derived deterministically from
+the run id when not supplied), and `ServiceContainer::replay_run` re-executes
+a run through the normal run path with that exact seed, persisting a new row
+whose config links back via `replay_of`. Seed flags per engine are specified
+in `docs/standards/ENGINE_ADAPTER_STANDARD.md` section 3.1. Replay pins the
+RNG seed, not the corpus: the run still seeds from the canonical root's
+current state, which may have grown since the original run.
+
 Coverage-guided minimization is an execution workflow, not a direct corpus
 filesystem operation. The service accepts only the exact promoted libFuzzer
 harness revision, verifies its persisted smoke evidence, and requires the
