@@ -361,6 +361,29 @@ execution start.
 Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 `idx_auto_revert_events_project(project_root)`.
 
+### `guardrail_decisions`
+
+Durable audit trail of guardrail authorization decisions. Every authorizing
+service entry point appends one row per authorization: the policy outcome, and
+the human approval outcome where the gate was consulted. Recording is
+best-effort (a storage failure is logged and never changes the authorization
+outcome), and the service prunes the table to a bounded newest window on write.
+It is deliberately not cleared by `clear_knowledge`/`delete_project`: an
+authorization audit trail must survive project data cleanup.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | UUID |
+| `decided_at` | `TEXT NOT NULL` | RFC 3339 |
+| `action` | `TEXT NOT NULL` | action kind: discover/draft_harness/compile_harness/run_harness/run_fuzzer/automotive_offline/automotive_virtual_can/automotive_physical_bench/triage/corpus_op/chat |
+| `risk_tier` | `TEXT NOT NULL` | low/medium/high/critical |
+| `decision` | `TEXT NOT NULL` | allowed/denied/approved/denied_by_operator |
+| `origin` | `TEXT NOT NULL` | service entry point that authorized |
+| `project` | `TEXT` | nullable project root |
+| `detail` | `TEXT` | nullable policy reason (bounded length) |
+
+Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
+
 ## 6. Migration inventory
 
 | migration | schema effect |
@@ -382,6 +405,7 @@ Indexes: `idx_auto_revert_events_ts(ts DESC)`,
 | `0015_automotive_state_corpus.sql` | creates protocol-state corpus promotion evidence |
 | `0016_targets_unique.sql` | collapses duplicate targets and adds `UNIQUE(project_root, symbol)` |
 | `0017_automotive_consumed_approvals.sql` | creates the single-use physical-bench approval ledger |
+| `0018_guardrail_decisions.sql` | creates the guardrail authorization audit trail |
 
 ## 7. Read failure contract
 
