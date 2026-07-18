@@ -45,6 +45,9 @@ describe("fuzzing settings", () => {
       .toEqual(["libfuzzer", "afl++", "syzkaller"]);
     expect(enabledEngineOptions(settings, { language: "rust" }).map((item) => item.value))
       .toEqual(["libfuzzer"]);
+    // Go/Python are discoverable but have no harness-building engine yet.
+    expect(enabledEngineOptions(settings, { language: "go" })).toEqual([]);
+    expect(enabledEngineOptions(settings, { language: "python" })).toEqual([]);
   });
 
   it("keeps every fuzzing action disabled until a validated policy exists", () => {
