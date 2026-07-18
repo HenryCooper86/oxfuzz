@@ -667,6 +667,17 @@ impl ServiceContainer {
                 "automotive operations require durable evidence storage".to_owned(),
             )
         })?;
+        // Fail fast with an actionable message when the sidecar image has not
+        // been built, instead of a raw Docker "no such image" from the sandbox --
+        // and, crucially, BEFORE authorizing or claiming a single-use
+        // physical-bench approval, so a missing image never burns an approval.
+        if !self
+            .runtime_adapter()
+            .image_present(&settings.sidecar_image)
+            .await
+        {
+            return Err(missing_sidecar_image_error(&settings.sidecar_image));
+        }
         self.authorize_recorded(
             action_for(&prepared, &settings),
             "automotive_operation",
@@ -1834,6 +1845,16 @@ fn read_input(
     })
 }
 
+/// The actionable error returned when the automotive sidecar image is not
+/// available locally: it names the missing image and how to build it.
+fn missing_sidecar_image_error(image: &str) -> ClassifiedError {
+    ClassifiedError::Sandbox(format!(
+        "automotive sidecar image '{image}' is not available. Build it with \
+         ./scripts/build-scapy-sidecar.sh and ensure Docker is running, then retry \
+         (or set automotive.sidecar_image to an already-built image)."
+    ))
+}
+
 fn stage_input(directory: &Path, input: &PreparedInput) -> Result<(), ClassifiedError> {
     let destination = directory.join(&input.artifact.artifact_id);
     let mut file = std::fs::OpenOptions::new()
@@ -2530,15 +2551,24 @@ mod tests {
         response: Mutex<Option<ResponseEnvelope>>,
         output_artifacts: Vec<(String, Vec<u8>)>,
         exit_code: i32,
+        /// When set, `image_present` reports the sidecar image as absent, so the
+        /// automotive guard fails fast before any sandbox run.
+        image_missing: bool,
     }
 
     impl RecordingRuntime {
         fn with_response(response: &ResponseEnvelope) -> Self {
             Self {
-                calls: Mutex::new(Vec::new()),
                 response: Mutex::new(Some(response.clone())),
-                output_artifacts: Vec::new(),
-                exit_code: 0,
+                ..Self::default()
+            }
+        }
+
+        /// A runtime that reports the sidecar image as not built.
+        fn with_missing_image() -> Self {
+            Self {
+                image_missing: true,
+                ..Self::default()
             }
         }
 
@@ -2548,19 +2578,17 @@ mod tests {
             bytes: &[u8],
         ) -> Self {
             Self {
-                calls: Mutex::new(Vec::new()),
                 response: Mutex::new(Some(response.clone())),
                 output_artifacts: vec![(artifact.artifact_id.clone(), bytes.to_vec())],
-                exit_code: 0,
+                ..Self::default()
             }
         }
 
         fn with_response_and_exit(response: &ResponseEnvelope, exit_code: i32) -> Self {
             Self {
-                calls: Mutex::new(Vec::new()),
                 response: Mutex::new(Some(response.clone())),
-                output_artifacts: Vec::new(),
                 exit_code,
+                ..Self::default()
             }
         }
 
@@ -2620,6 +2648,10 @@ mod tests {
 
     #[async_trait]
     impl RuntimeAdapter for RecordingRuntime {
+        async fn image_present(&self, _image: &str) -> bool {
+            !self.image_missing
+        }
+
         async fn run_command(
             &self,
             _cmd: &[String],
@@ -2960,6 +2992,57 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn missing_sidecar_image_error_is_actionable() {
+        let msg = super::missing_sidecar_image_error("hobot/scapy-automotive:2.7.0").to_string();
+        assert!(
+            msg.contains("hobot/scapy-automotive:2.7.0"),
+            "names the image: {msg}"
+        );
+        assert!(
+            msg.contains("build-scapy-sidecar.sh"),
+            "points at the build script: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_sidecar_image_fails_fast_before_running_the_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, capture) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        // The runtime reports the sidecar image as absent; its run methods panic
+        // if reached, proving the guard fails before any sandbox run.
+        let (service, _store) = service(
+            Arc::new(RecordingRuntime::with_missing_image()),
+            temp.path(),
+        )
+        .await;
+        let request = AutomotiveOperationRequest {
+            project_root: project,
+            command: AutomotiveCommand::AnalyzeCapture {
+                protocol: AutomotiveProtocol::Uds,
+                capture_path: capture,
+            },
+            approval: None,
+        };
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        // The operation must error before the sandbox is invoked (the mock's run
+        // methods panic if reached), with the actionable build message.
+        let msg = service
+            .execute_automotive_with_context(request, settings, &workspace)
+            .await
+            .expect_err("a missing sidecar image must be an error")
+            .to_string();
+        assert!(
+            msg.contains("build-scapy-sidecar.sh"),
+            "actionable message: {msg}"
+        );
     }
 
     #[tokio::test]
