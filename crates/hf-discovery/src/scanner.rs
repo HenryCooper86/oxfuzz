@@ -105,13 +105,9 @@ fn deterministic_target_id(candidate: &TargetCandidate) -> Uuid {
 
 /// File extensions considered per language.
 fn exts_for(lang: TargetLanguage) -> &'static [&'static str] {
-    match lang {
-        TargetLanguage::C => &["c", "h"],
-        TargetLanguage::Cpp => &["cc", "cpp", "cxx", "hpp", "hh"],
-        TargetLanguage::Rust => &["rs"],
-        TargetLanguage::Go => &["go"],
-        TargetLanguage::Python => &["py"],
-    }
+    // Source of truth lives on `TargetLanguage` (hf-core), so adding a language
+    // does not require editing this crate's dispatch.
+    lang.extensions()
 }
 
 type ScanResult = (
