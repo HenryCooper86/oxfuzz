@@ -101,6 +101,30 @@ async fn discover_returns_json() {
 }
 
 #[tokio::test]
+async fn policy_decisions_returns_a_json_array() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/policy/decisions?limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(
+        json.is_array(),
+        "policy decisions should return an array, got {json}"
+    );
+}
+
+#[tokio::test]
 async fn corpus_list_returns_json() {
     allow_open_dev_mode();
     let app = hf_web::router::build();

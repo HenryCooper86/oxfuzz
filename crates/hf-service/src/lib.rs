@@ -62,7 +62,7 @@ pub use container::{
 };
 pub use defectdojo::{DefectDojoConfig, PushOutcome};
 pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
-pub use hf_storage::{AutoRevertEvent, ProjectAutoRevert};
+pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
 pub use report_store::ReportDraft;

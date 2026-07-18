@@ -43,6 +43,17 @@ fn default_container(
     (container, gate)
 }
 
+/// Attach a temporary persistent store, so decision recording is exercised
+/// end to end through the public service API.
+async fn with_temp_store(container: ServiceContainer) -> (ServiceContainer, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let container = container
+        .with_store_path(dir.path().join("decisions.db"))
+        .await
+        .unwrap();
+    (container, dir)
+}
+
 /// A container on a policy that denies every action at or above Low risk, so
 /// any authorized operation is blocked outright before it executes.
 fn strict_container(
@@ -343,4 +354,60 @@ async fn strict_policy_denies_chat_send() {
     let error = container.chat_send("hello").await.unwrap_err();
 
     assert_guardrail_denied(&error, "chat turn");
+}
+
+#[tokio::test]
+async fn default_policy_records_an_allowed_decision() {
+    let (container, _gate) = default_container(None);
+    let (container, _dir) = with_temp_store(container).await;
+    let project = fixture_project();
+
+    container
+        .discover(project.path(), TargetLanguage::C)
+        .await
+        .unwrap();
+
+    let rows = container.policy_decisions(10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.action, "discover");
+    assert_eq!(row.risk_tier, "low");
+    assert_eq!(row.decision, "allowed");
+    assert_eq!(row.origin, "discover");
+    assert_eq!(
+        row.project.as_deref(),
+        Some(project.path().to_string_lossy().as_ref())
+    );
+}
+
+#[tokio::test]
+async fn strict_policy_records_the_denial_and_the_operation_still_fails() {
+    let (container, _gate) = strict_container(None);
+    let (container, _dir) = with_temp_store(container).await;
+    let project = fixture_project();
+
+    let error = container
+        .discover(project.path(), TargetLanguage::C)
+        .await
+        .unwrap_err();
+
+    assert_guardrail_denied(&error, "discover targets");
+    let rows = container.policy_decisions(10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, "denied");
+    assert_eq!(rows[0].action, "discover");
+}
+
+#[tokio::test]
+async fn chat_send_succeeds_when_the_decision_store_is_broken() {
+    let (container, _gate) = default_container(Some(Arc::new(ChatPool)));
+    let (container, _dir) = with_temp_store(container).await;
+    container.store().unwrap().pool().close().await;
+
+    let reply = container.chat_send("hello").await.unwrap();
+
+    assert_eq!(
+        reply, "ok",
+        "a broken decision store must not change the outcome"
+    );
 }

@@ -16,8 +16,8 @@ pub use checkpoint_store::SqliteChatCheckpointStore;
 pub use session_store::SqliteSessionStore;
 pub use store::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError,
-    Store,
+    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, ProjectAutoRevert, RunKind, RunRecord,
+    RunStatus, StorageError, Store,
 };
 pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;

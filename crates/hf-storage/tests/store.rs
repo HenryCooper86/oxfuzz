@@ -12,8 +12,8 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError,
-    Store,
+    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, ProjectAutoRevert, RunKind, RunRecord,
+    RunStatus, StorageError, Store,
 };
 use uuid::Uuid;
 
@@ -1714,4 +1714,64 @@ async fn run_harness_source_roundtrips() {
         store.run_harness_source(id).await.unwrap().as_deref(),
         Some("int LLVMFuzzerTestOneInput(){return 0;}")
     );
+}
+
+fn guardrail_decision(id: &str, decided_at: chrono::DateTime<Utc>) -> GuardrailDecisionRecord {
+    GuardrailDecisionRecord {
+        id: id.to_owned(),
+        decided_at,
+        action: "discover".to_owned(),
+        risk_tier: "low".to_owned(),
+        decision: "allowed".to_owned(),
+        origin: "discover".to_owned(),
+        project: Some("/proj".to_owned()),
+        detail: None,
+    }
+}
+
+#[tokio::test]
+async fn guardrail_decision_round_trips_newest_first_and_bounded() {
+    let (store, _dir) = temp_store().await;
+    let base = Utc::now();
+    let older = guardrail_decision(
+        "00000000-0000-0000-0000-000000000001",
+        base - chrono::Duration::seconds(10),
+    );
+    let mut newer = guardrail_decision("00000000-0000-0000-0000-000000000002", base);
+    newer.action = "run_fuzzer".to_owned();
+    newer.risk_tier = "high".to_owned();
+    newer.decision = "denied".to_owned();
+    newer.origin = "run_fuzzer".to_owned();
+    newer.project = None;
+    newer.detail = Some("High-risk action 'run libfuzzer for 60s' is denied by policy".to_owned());
+
+    store.record_guardrail_decision(&older).await.unwrap();
+    store.record_guardrail_decision(&newer).await.unwrap();
+
+    let all = store.list_guardrail_decisions(100).await.unwrap();
+    assert_eq!(all, vec![newer.clone(), older.clone()]);
+
+    let bounded = store.list_guardrail_decisions(1).await.unwrap();
+    assert_eq!(bounded, vec![newer]);
+}
+
+#[tokio::test]
+async fn prune_guardrail_decisions_keeps_the_newest_window() {
+    let (store, _dir) = temp_store().await;
+    let base = Utc::now();
+    for n in 0..5 {
+        let record = guardrail_decision(
+            &format!("00000000-0000-0000-0000-00000000000{n}"),
+            base - chrono::Duration::seconds(n),
+        );
+        store.record_guardrail_decision(&record).await.unwrap();
+    }
+
+    let pruned = store.prune_guardrail_decisions(2).await.unwrap();
+    assert_eq!(pruned, 3);
+
+    let kept = store.list_guardrail_decisions(100).await.unwrap();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[0].id, "00000000-0000-0000-0000-000000000000");
+    assert_eq!(kept[1].id, "00000000-0000-0000-0000-000000000001");
 }
