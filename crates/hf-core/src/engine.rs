@@ -163,6 +163,15 @@ pub struct FuzzRunConfig {
     pub sanitizer: Sanitizer,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
+    /// Deterministic RNG seed recorded for reproducibility and run replay.
+    /// Engines with a fixed-seed knob receive it (`afl-fuzz -s`, libFuzzer
+    /// `-seed=`); engines without one (honggfuzz) ignore it. `None` on rows
+    /// persisted before seeds were recorded.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The run this run replays, when launched through `replay_run`.
+    #[serde(default)]
+    pub replay_of: Option<Uuid>,
 }
 
 /// A progress event streamed from a running fuzzer.

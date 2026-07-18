@@ -135,6 +135,8 @@ async fn fixture(name: &str) -> Fixture {
             sanitizer: Sanitizer::Address,
             env: Vec::new(),
             extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
         }),
         chrono::Utc::now(),
     );
