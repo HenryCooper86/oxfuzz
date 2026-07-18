@@ -35,6 +35,16 @@ struct KnowledgeRuntimeConfig {
     retrieval_strategy: String,
     bm25_weight: f64,
     vector_weight: f64,
+    // Embedding pipeline. Off by default: BM25-only retrieval is the guaranteed
+    // offline behaviour. When enabled, chunks and queries are embedded via an
+    // OpenAI-compatible endpoint (configurable base URL covers OpenAI/Azure/
+    // Ollama) so "hybrid"/"semantic" strategies run real cosine.
+    embedding_enabled: bool,
+    embedding_model: String,
+    embedding_dimensions: usize,
+    embedding_base_url: String,
+    embedding_api_key_env: String,
+    embedding_max_tokens: u32,
 }
 
 impl Default for KnowledgeRuntimeConfig {
@@ -46,6 +56,12 @@ impl Default for KnowledgeRuntimeConfig {
             retrieval_strategy: defaults.retrieval_strategy,
             bm25_weight: defaults.bm25_weight,
             vector_weight: defaults.vector_weight,
+            embedding_enabled: defaults.embedding_enabled,
+            embedding_model: defaults.embedding_model,
+            embedding_dimensions: defaults.embedding_dimensions,
+            embedding_base_url: defaults.embedding_base_url,
+            embedding_api_key_env: defaults.embedding_api_key_env,
+            embedding_max_tokens: defaults.embedding_max_tokens,
         }
     }
 }
@@ -58,6 +74,12 @@ impl KnowledgeRuntimeConfig {
             retrieval_strategy: self.retrieval_strategy.clone(),
             bm25_weight: self.bm25_weight,
             vector_weight: self.vector_weight,
+            embedding_enabled: self.embedding_enabled,
+            embedding_model: self.embedding_model.clone(),
+            embedding_dimensions: self.embedding_dimensions,
+            embedding_base_url: self.embedding_base_url.clone(),
+            embedding_api_key_env: self.embedding_api_key_env.clone(),
+            embedding_max_tokens: self.embedding_max_tokens,
             ..Default::default()
         }
     }
@@ -73,14 +95,30 @@ impl KnowledgeRuntimeConfig {
                 "knowledge.min_similarity_threshold must be finite and within 0..=1".to_owned(),
             );
         }
-        if !matches!(
-            self.retrieval_strategy.trim().to_ascii_lowercase().as_str(),
-            "hybrid" | "keyword"
-        ) {
-            return Err(
-                "knowledge.retrieval_strategy must be hybrid or keyword; semantic requires an embedding pipeline"
-                    .to_owned(),
-            );
+        let strategy = self.retrieval_strategy.trim().to_ascii_lowercase();
+        match strategy.as_str() {
+            "hybrid" | "keyword" => {}
+            "semantic" if self.embedding_enabled => {}
+            "semantic" => {
+                return Err(
+                    "knowledge.retrieval_strategy = semantic requires knowledge.embedding_enabled = true"
+                        .to_owned(),
+                );
+            }
+            _ => {
+                return Err(
+                    "knowledge.retrieval_strategy must be hybrid, keyword, or semantic".to_owned(),
+                );
+            }
+        }
+        if self.embedding_enabled {
+            if self.embedding_dimensions == 0 {
+                return Err("knowledge.embedding_dimensions must be greater than zero".to_owned());
+            }
+            if self.embedding_model.trim().is_empty() {
+                return Err("knowledge.embedding_model must not be empty".to_owned());
+            }
+            validate_http_url(&self.embedding_base_url, "knowledge.embedding_base_url")?;
         }
         for (name, value) in [
             ("bm25_weight", self.bm25_weight),
@@ -3417,6 +3455,16 @@ default_duration_secs = 22
                 "invalid runtime config was accepted: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn semantic_strategy_is_accepted_once_embedding_is_enabled() {
+        // The gate lifts only when the embedding pipeline is turned on.
+        let raw = "[knowledge]\nretrieval_strategy = \"semantic\"\nembedding_enabled = true\n";
+        let parsed =
+            parse_hobot_fuzz_runtime_config(raw).expect("semantic + embedding_enabled must parse");
+        assert_eq!(parsed.knowledge.retrieval_strategy, "semantic");
+        assert!(parsed.knowledge.embedding_enabled);
     }
 
     #[test]
