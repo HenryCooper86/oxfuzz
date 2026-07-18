@@ -33,6 +33,7 @@ pub mod sarif;
 pub mod scheduler;
 pub mod system;
 mod syzkaller;
+pub mod verification;
 pub mod workbench;
 
 pub use hf_agent::{
