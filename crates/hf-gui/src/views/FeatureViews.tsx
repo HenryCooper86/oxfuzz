@@ -839,18 +839,58 @@ interface KnowledgeStats {
   files: number;
   chunks: number;
 }
+// Read-only index status from `knowledge_stats` (never triggers a reindex).
+interface KnowledgeIndexStatus {
+  indexed: boolean;
+  files: number;
+  chunks: number;
+  documents: number;
+  indexed_at: string | null;
+  retrieval_strategy: string;
+  chunk_max_tokens: number;
+}
 
 // BM25 search over the active project's source, backed by hf-knowledge.
 function KnowledgeBaseSearch() {
   const { t } = useI18n();
   const { activeProject } = useProject();
-  const [stats, setStats] = useState<KnowledgeStats | null>(null);
+  // The status is keyed by project so a slow reply for a project the user has
+  // already navigated away from cannot be rendered (same pattern as the
+  // Automation view's schedulable-target load).
+  const [status, setStatus] = useState<{ project: string; value: KnowledgeIndexStatus } | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<KnowledgeHit[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const current = activeProject && status?.project === activeProject ? status.value : null;
+  const indexed = !!current?.indexed;
+
+  // Load the index status for the active project so the card shows the real
+  // index size/config on first render instead of only after a manual reindex.
+  useEffect(() => {
+    if (!activeProject) return undefined;
+    let cancelled = false;
+    getTransport()
+      .invoke<KnowledgeIndexStatus>("knowledge_stats", { project: activeProject })
+      .then((value) => !cancelled && setStatus({ project: activeProject, value }))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject]);
+
+  async function refreshStatus() {
+    if (!activeProject) return;
+    try {
+      const value = await getTransport().invoke<KnowledgeIndexStatus>("knowledge_stats", { project: activeProject });
+      setStatus({ project: activeProject, value });
+    } catch {
+      /* a missing status only hides the stats line; index/search report their own errors */
+    }
+  }
 
   // Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
   // sandbox and add it to this project's knowledge base.
@@ -862,7 +902,8 @@ function KnowledgeBaseSearch() {
     setHits(null);
     setError(null);
     try {
-      setStats(await getTransport().invoke<KnowledgeStats>("knowledge_ingest", { project: activeProject, file }));
+      await getTransport().invoke<KnowledgeStats>("knowledge_ingest", { project: activeProject, file });
+      await refreshStatus();
     } catch (e) {
       // Previously swallowed -- an ingest failure (missing markitdown, bad path
       // in browser mode, etc.) looked identical to "nothing happened".
@@ -878,9 +919,9 @@ function KnowledgeBaseSearch() {
     setHits(null);
     setError(null);
     try {
-      setStats(await getTransport().invoke<KnowledgeStats>("knowledge_index", { project: activeProject }));
+      await getTransport().invoke<KnowledgeStats>("knowledge_index", { project: activeProject });
+      await refreshStatus();
     } catch (e) {
-      setStats(null);
       setError(t("knowledge.indexFailed", { error: String(e) }));
     } finally {
       setIndexing(false);
@@ -888,7 +929,7 @@ function KnowledgeBaseSearch() {
   }
 
   async function search() {
-    if (!activeProject || !query.trim() || !stats) return;
+    if (!activeProject || !query.trim() || !indexed) return;
     setSearching(true);
     setError(null);
     try {
@@ -907,9 +948,11 @@ function KnowledgeBaseSearch() {
         <div className="flex items-center gap-2">
           <Database size={14} style={{ color: "var(--accent)" }} />
           <span className="text-sm font-medium">{t("knowledge.baseTitle")}</span>
-          {stats && (
+          {current && (
             <span className="text-xs text-text-muted">
-              {t("knowledge.indexStats", { files: stats.files, chunks: stats.chunks })}
+              {current.indexed
+                ? t("knowledge.indexStats", { files: current.files, chunks: current.chunks })
+                : t("knowledge.notIndexed")}
             </span>
           )}
         </div>
@@ -936,6 +979,13 @@ function KnowledgeBaseSearch() {
       <p className="text-xs text-text-muted">
         {t("knowledge.baseHelp")}
       </p>
+      {current && (
+        <p className="text-xs text-text-muted">
+          {t("knowledge.configSummary", { strategy: current.retrieval_strategy, tokens: current.chunk_max_tokens })}
+          {current.documents > 0 && ` · ${t("knowledge.docsCount", { n: current.documents })}`}
+          {current.indexed_at && ` · ${t("knowledge.lastIndexed", { time: new Date(current.indexed_at).toLocaleString() })}`}
+        </p>
+      )}
       {!activeProject && (
         <p className="text-xs" style={{ color: "var(--warning, #d9a441)" }}>
           {t("knowledge.selectProjectFirst")}
@@ -954,13 +1004,13 @@ function KnowledgeBaseSearch() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void search()}
-          placeholder={stats ? t("knowledge.searchPlaceholder") : t("knowledge.searchPlaceholderNoIndex")}
-          disabled={!stats}
+          placeholder={indexed ? t("knowledge.searchPlaceholder") : t("knowledge.searchPlaceholderNoIndex")}
+          disabled={!indexed}
           className="flex-1 disabled:opacity-55"
         />
         <button
           onClick={search}
-          disabled={searching || !stats || !query.trim()}
+          disabled={searching || !indexed || !query.trim()}
           className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-55"
           style={{ background: "var(--accent)", color: "var(--accent-contrast)" }}
         >

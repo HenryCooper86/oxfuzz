@@ -1169,6 +1169,14 @@ pub fn knowledge_index(project: String) -> Result<hf_service::knowledge::Knowled
     hf_service::knowledge::index_project(std::path::Path::new(&project)).map_err(|e| e.to_string())
 }
 
+/// Read-only status of a project's knowledge base (no reindex): index size and
+/// build time, ingested-document count, and the active retrieval config.
+#[tauri::command]
+#[must_use]
+pub fn knowledge_stats(project: String) -> hf_service::knowledge::KnowledgeIndexStatus {
+    hf_service::knowledge::stats_project(std::path::Path::new(&project))
+}
+
 /// Convert a document (PDF/Office/HTML/...) to Markdown via markitdown in the
 /// sandbox and index it into the project knowledge base.
 #[tauri::command]
