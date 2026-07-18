@@ -5,6 +5,19 @@
 //! This crate owns loop mechanics but has no dependency on `hf-service`, which
 //! keeps orchestration dependencies pointing inward. Progress is streamed to
 //! an [`EventSink`] so presentation layers can render it live.
+//!
+//! Context budget order per turn (pillar 2.4, token efficiency): prune dead
+//! tool-call branches from the assembled conversation (zero model cost), then
+//! compact via LLM summary only when pruning alone cannot fit the budget, then
+//! trim to the budget before every model call. `hf-context`'s
+//! `ContextWindowGuard` is deliberately not wired here: it evaluates the
+//! provider-pipeline's categorized `AssembledContext`, while this loop carries
+//! a flat `Vec<Message>` budget -- the seams do not meet without a parallel
+//! accounting layer. `hf-context`'s `WorkingMemory` is deliberately not wired
+//! either: per-turn scratch (tool outcomes) already lives in `messages` at
+//! full fidelity and flows through prune/compact, so injecting a second copy
+//! would spend tokens twice; run/target identifiers exist only in `hf-service`
+//! (session/request layer), not at this port.
 
 mod agent_tools;
 mod definition;
@@ -225,6 +238,12 @@ impl Agent {
         messages.push(Message::system(self.system_prompt()));
         messages.extend(history);
         messages.push(Message::user(user_message.to_owned()));
+
+        // Prune dead tool-call branches (failed, empty, or repeated) before
+        // falling back to LLM compaction: pruning costs no model call, so
+        // compaction is the last resort when pruning alone cannot fit the
+        // budget.
+        Self::prune_over_budget(&mut messages);
 
         // Summarize older turns into memory when the conversation is over budget,
         // so long sessions retain earlier context instead of losing it to plain
@@ -489,6 +508,38 @@ impl Agent {
         match run.await {
             Ok(answer) => answer,
             Err(e) => agent_tools::error_json(format!("delegated agent '{agent_id}' failed: {e}")),
+        }
+    }
+
+    /// Prune dead tool-call branches (failed, empty, or repeated) from the
+    /// assembled conversation via `hf-context`'s intra-turn pruner -- the only
+    /// pruner operating on an in-memory `Vec<Message>`, which is the shape this
+    /// loop has (the store-backed `PruningEngine`/`ProgressivePruning` need a
+    /// `ChatMessageStore` and a subagent delegator this layer does not have).
+    /// Runs before [`Self::maybe_compact`] because it costs no model call;
+    /// compaction stays the last resort when pruning alone cannot fit the
+    /// budget. Gated on the same budget check as compaction, so under-budget
+    /// conversations pass through byte-identical. Best-effort: the pruner only
+    /// rewrites `messages` in place and cannot fail the turn.
+    fn prune_over_budget(messages: &mut Vec<Message>) {
+        if hf_context::total_tokens(messages) <= hf_context::DEFAULT_BUDGET_TOKENS {
+            return;
+        }
+        // The budget check above (not loop depth) is the trigger here, so the
+        // pruner's iteration gate is disabled; its token threshold still keeps
+        // tiny cleanups from rewriting history.
+        let config = hf_context::pruning::config::IntraTurnPruningConfig {
+            min_iteration: 0,
+            ..hf_context::pruning::config::IntraTurnPruningConfig::default()
+        };
+        let pruner = hf_context::pruning::IntraTurnPruner::from_config(&config);
+        let report = pruner.prune_working_history(messages, 0);
+        if !report.skipped {
+            tracing::debug!(
+                messages_removed = report.messages_removed,
+                tokens_saved = report.tokens_saved,
+                "pruned dead tool-call branches before compaction"
+            );
         }
     }
 
