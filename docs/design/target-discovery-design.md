@@ -31,8 +31,9 @@ pub struct TargetCandidate {
 1. **Resolve** -- canonicalize the existing project root so relative paths and
    symlink aliases have one persistence and workspace identity.
 2. **Index** -- walk project with `ignore`; parse C/C++ with Tree-sitter and
-   conservatively scan public Rust functions lexically. Walk, read, and parse
-   failures are surfaced rather than converted into a successful partial scan.
+   conservatively scan public Rust functions and exported Go/Python functions
+   lexically. Walk, read, and parse failures are surfaced rather than
+   converted into a successful partial scan.
 3. **Filter** -- drop symbols that are trivially not fuzzable (pure
    formatting, no input).
 4. **Enrich** -- compute complexity, detect input surface, infer sanitizers
@@ -63,8 +64,29 @@ letting the later definition overwrite the earlier one.
 | --- | --- | --- |
 | C/C++ | Tree-sitter (C/C++ grammar) | `fuzz_*.c` with `LLVMFuzzerTestOneInput` |
 | Rust | conservative lexical scanner | `cargo-fuzz` target |
-| Go | planned | planned native fuzz target |
-| Python | planned | planned Atheris target |
+| Go | conservative lexical scanner | planned native fuzz target |
+| Python | conservative lexical scanner | planned Atheris target |
+
+The lexical scanners (Rust, Go, Python) vendor no grammar, so they match
+declaration lines and balanced delimiter/indentation blocks instead of
+parsing. They are intentionally conservative: a missed multi-line signature
+is a lost candidate, never a wrong one. Shared rules: only parameter-bearing,
+non-test entry points qualify (a zero-parameter function has no untrusted
+input to feed), complexity is the same 1-plus-control-flow-keywords estimate
+as the C scanner, and no call edges are extracted, so candidates flow into
+ranking without reachability annotation. Language-specific rules:
+
+- **Go** -- only exported (capitalized) package-level functions and methods;
+  `main`/`init` (unexported) and `Test*`/`Benchmark*` are skipped, as are
+  `_test.go` files and `vendor/` (third-party code is not the project's fuzz
+  surface). Methods are named `Receiver.Method` so same-named methods of
+  different types do not collide in the name-keyed inventory.
+- **Python** -- top-level `def`s and direct class methods, including `async`
+  and decorated definitions; `self`/`cls` are excluded from the parameter
+  count; underscore-privates, dunders, `test_*`, and closures nested inside
+  another `def` are skipped (a nested closure is not importable from a
+  harness). Methods are named `Class.method`. Body complexity uses an
+  indentation-aware end-of-block instead of balanced braces.
 
 ## 6. Open Questions
 
