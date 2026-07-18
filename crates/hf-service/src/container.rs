@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use chrono::Utc;
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
-use hf_core::harness::{Harness, HarnessDraft, HarnessStatus, SmokeRunSummary};
+use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
 use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
 use hf_core::target::{Sanitizer, TargetCandidate, TargetInventory, TargetLanguage};
@@ -5826,7 +5826,7 @@ impl ServiceContainer {
         target: &str,
         engine: EngineKind,
         lang: TargetLanguage,
-    ) -> Result<SmokeRunSummary, ClassifiedError> {
+    ) -> Result<crate::verification::SmokeOutcome, ClassifiedError> {
         let resolved = resolve_internal_run(engine, SMOKE_FUZZ_SECS)?;
         if !engine.supports_language(lang) {
             return Err(ClassifiedError::Validation(format!(
@@ -6022,7 +6022,12 @@ impl ServiceContainer {
         // cleanly-completed smoke run is not reconciled to Failed on restart.
         self.run_journal.close_run(smoke_record.id);
         persisted_run.disarm();
-        Ok(summary)
+        // Deterministic self-verification (grok-build lesson L2): pair the summary
+        // with a verdict so every presentation layer surfaces a hollow pass -- a
+        // harness that compiled and "passed" yet never drove the target -- instead
+        // of re-deriving that judgment. Observation only; it changes no control flow.
+        let verdict = crate::verification::assess_harness_smoke(&summary, smoked.status);
+        Ok(crate::verification::SmokeOutcome { summary, verdict })
     }
 
     /// Promote the active harness after a clean persisted smoke run. Calling

@@ -114,7 +114,7 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
         )
         .await
         .expect("the fixed 60-second smoke budget clamps to the 30-second policy ceiling");
-    assert_eq!(clamped.duration_secs, 30);
+    assert_eq!(clamped.summary.duration_secs, 30);
 
     {
         let calls = runtime.calls.lock().unwrap();
@@ -133,7 +133,7 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
     }
 
     write_policy(120, 3584, 4);
-    let summary = container
+    let outcome = container
         .harness_smoke(
             &project,
             "parse_policy",
@@ -142,7 +142,7 @@ async fn smoke_budget_clamps_to_the_operator_ceiling_and_drives_runtime_and_pers
         )
         .await
         .unwrap();
-    assert_eq!(summary.duration_secs, 60);
+    assert_eq!(outcome.summary.duration_secs, 60);
 
     {
         let calls = runtime.calls.lock().unwrap();

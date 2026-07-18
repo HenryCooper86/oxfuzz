@@ -9,7 +9,7 @@ import { Button, Input, Select, ViewHeader, EmptyState } from "../components/ui"
 import { SandboxBanner } from "../components/SandboxBanner";
 import {
   Crosshair, FolderOpen, Loader2, FileCode, Terminal, Database,
-  CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare,
+  CheckCircle2, XCircle, ArrowRight, Sparkles, Archive, GitCompare, AlertTriangle,
 } from "lucide-react";
 import { lineDiff } from "../lib/diff";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
@@ -29,12 +29,20 @@ interface CompileResult {
   message: string;
 }
 
+/** Deterministic self-verification verdict attached to a smoke result. */
+interface HarnessVerdict {
+  level: "pass" | "suspect" | "fail";
+  reasons: string[];
+}
+
 interface SmokeResult {
   status: string;
   duration_secs: number;
   execs_per_sec: number;
   crashes: number;
   passed: boolean;
+  /** Present when the service ran its verification pass; absent on local errors. */
+  verdict?: HarnessVerdict;
   error?: string;
 }
 
@@ -562,19 +570,31 @@ export function HarnessView({
             disabled={!fuzzingSettings || (compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
           >
             {smokeResult && (
-              <div className="mt-2 flex items-center gap-2 text-xs">
-                {smokeResult.passed ? (
-                  <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
-                ) : (
-                  <XCircle size={14} style={{ color: "var(--error)" }} />
+              <div className="mt-2 text-xs">
+                <div className="flex items-center gap-2">
+                  {smokeResult.passed ? (
+                    <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
+                  ) : (
+                    <XCircle size={14} style={{ color: "var(--error)" }} />
+                  )}
+                  <span style={{ color: smokeResult.passed ? "var(--success)" : "var(--error)" }}>
+                    {smokeResult.error
+                      ? t("harness.smokeFailed", { error: smokeResult.error })
+                      : smokeResult.passed
+                      ? t("harness.smokeClean", { rate: Math.round(smokeResult.execs_per_sec).toLocaleString() })
+                      : t("harness.smokeCrashes", { n: smokeResult.crashes })}
+                  </span>
+                </div>
+                {/* A "suspect" verdict is the hollow pass: the smoke reported
+                    passed=true yet a signal (near-zero execs) says the harness
+                    never drove the target. Surface it so a hollow pass is not
+                    approved for a full campaign on the strength of the green check. */}
+                {smokeResult.verdict?.level === "suspect" && (
+                  <div className="mt-1 flex items-start gap-2" style={{ color: "var(--warning)" }}>
+                    <AlertTriangle size={14} style={{ marginTop: 1, flexShrink: 0 }} />
+                    <span>{smokeResult.verdict.reasons.join("; ")}</span>
+                  </div>
                 )}
-                <span style={{ color: smokeResult.passed ? "var(--success)" : "var(--error)" }}>
-                  {smokeResult.error
-                    ? t("harness.smokeFailed", { error: smokeResult.error })
-                    : smokeResult.passed
-                    ? t("harness.smokeClean", { rate: Math.round(smokeResult.execs_per_sec).toLocaleString() })
-                    : t("harness.smokeCrashes", { n: smokeResult.crashes })}
-                </span>
               </div>
             )}
           </Step>

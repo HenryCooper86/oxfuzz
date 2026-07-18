@@ -286,7 +286,7 @@ async fn discover_harness_run_triage_end_to_end() {
         )
         .await
         .unwrap();
-    assert!(smoke.passed);
+    assert!(smoke.summary.passed);
 
     let promoted = container
         .harness_promote(&project, "parse_value", EngineKind::LibFuzzer)
