@@ -17,6 +17,7 @@ chrono-tz = { workspace = true }
 croner = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+globset = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

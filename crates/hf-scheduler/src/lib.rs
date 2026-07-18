@@ -33,12 +33,14 @@ pub mod trigger;
 pub use config::{ConcurrencyPolicy, MissedPolicy, SchedulerConfig};
 pub use cron::CronSchedule;
 pub use dispatcher::{DispatchError, DispatchResult, WorkflowDispatcher};
-pub use event::EventSchedule;
+pub use event::{EventFilter, EventSchedule};
+pub use event_bridge::{EventBridge, IncomingEvent};
 pub use executor::{
     ExecutionStatus, ExecutionStore, ScheduleContext, ScheduleExecution, ScheduleExecutor,
 };
 pub use interval::IntervalSchedule;
 pub use manager::{PersistenceError, SchedulerManager, SchedulerPersistence};
 pub use onetime::OneTimeSchedule;
+pub use params::{resolve_parameters, ResolutionContext, ResolveError};
 pub use store::{Schedule, SchedulePolicies, ScheduleStore, TriggerConfig};
 pub use trigger::{FiredTrigger, TriggerType};
