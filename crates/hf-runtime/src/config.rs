@@ -5,6 +5,7 @@ use hf_core::runtime::ResourceLimits;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// The sandbox image used for all isolated builds and fuzz runs.
 ///
@@ -131,44 +132,92 @@ pub fn resolve_bin(name: &str) -> String {
     name.to_owned()
 }
 
+/// Cap for one Docker probe command. A wedged daemon (e.g. Docker Desktop
+/// stuck starting) makes `docker` invocations block indefinitely; without a
+/// bound, every readiness probe -- and any UI or test polling it -- would hang
+/// with it. Ten seconds is generous for a local daemon round-trip.
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `cmd` to completion, returning its output, or `None` when it cannot be
+/// spawned or exceeds `timeout` (the child is killed and reaped). Readiness
+/// probes use this so a wedged daemon surfaces as "not ready" instead of an
+/// unbounded hang.
+fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // The process exited; draining the small probe stdout cannot
+                // block (probes emit a few lines at most, so the pipe buffer
+                // never fills while we poll).
+                let mut stdout = Vec::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    let _ = pipe.read_to_end(&mut stdout);
+                }
+                let status = child.wait().ok()?;
+                return Some(std::process::Output {
+                    status,
+                    stdout,
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            // Past the deadline, or the wait itself failed: kill and reap.
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// Whether the Docker daemon is actually reachable. `docker info` only
 /// succeeds when a daemon is up, so this is a true readiness check (unlike
-/// `docker --version`, which only proves the CLI exists).
+/// `docker --version`, which only proves the CLI exists). Bounded by
+/// [`DOCKER_PROBE_TIMEOUT`]: a wedged daemon reports not-ready.
 #[must_use]
 pub fn docker_daemon_ready() -> bool {
-    std::process::Command::new(docker_bin())
-        .args(["info", "--format", "{{.ServerVersion}}"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    run_bounded(
+        std::process::Command::new(docker_bin()).args(["info", "--format", "{{.ServerVersion}}"]),
+        DOCKER_PROBE_TIMEOUT,
+    )
+    .is_some_and(|o| o.status.success())
 }
 
 /// Whether the sandbox image is loaded locally.
 #[must_use]
 pub fn sandbox_image_present() -> bool {
-    std::process::Command::new(docker_bin())
-        .args(["image", "inspect", SANDBOX_IMAGE])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    run_bounded(
+        std::process::Command::new(docker_bin()).args(["image", "inspect", SANDBOX_IMAGE]),
+        DOCKER_PROBE_TIMEOUT,
+    )
+    .is_some_and(|o| o.status.success())
 }
 
 /// The architecture the loaded sandbox image was built for ("amd64"/"arm64"),
 /// or `None` when the image is absent.
 #[must_use]
 pub fn sandbox_image_arch() -> Option<String> {
-    let out = std::process::Command::new(docker_bin())
-        .args([
+    let out = run_bounded(
+        std::process::Command::new(docker_bin()).args([
             "image",
             "inspect",
             "--format",
             "{{.Architecture}}",
             SANDBOX_IMAGE,
-        ])
-        .output()
-        .ok()?;
+        ]),
+        DOCKER_PROBE_TIMEOUT,
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -205,10 +254,16 @@ impl SandboxEngines {
 /// The `docker image inspect --format {{.Id}}` of the loaded sandbox image, used
 /// to invalidate the engine-probe cache when the image is rebuilt.
 fn sandbox_image_id() -> Option<String> {
-    let out = std::process::Command::new(docker_bin())
-        .args(["image", "inspect", "--format", "{{.Id}}", SANDBOX_IMAGE])
-        .output()
-        .ok()?;
+    let out = run_bounded(
+        std::process::Command::new(docker_bin()).args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            SANDBOX_IMAGE,
+        ]),
+        DOCKER_PROBE_TIMEOUT,
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -238,8 +293,8 @@ fn engines_from_probe_output(found: &str) -> SandboxEngines {
 /// Run a one-shot container that reports which engine binaries exist in the
 /// image. All-false if the run fails.
 fn probe_sandbox_engines() -> SandboxEngines {
-    let out = std::process::Command::new(docker_bin())
-        .args([
+    let out = run_bounded(
+        std::process::Command::new(docker_bin()).args([
             "run",
             "--rm",
             "--entrypoint",
@@ -248,10 +303,11 @@ fn probe_sandbox_engines() -> SandboxEngines {
             "-c",
             "for b in clang afl-fuzz honggfuzz syz-manager python3; do \
              command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
-        ])
-        .output();
+        ]),
+        DOCKER_PROBE_TIMEOUT,
+    );
     match out {
-        Ok(out) if out.status.success() => {
+        Some(out) if out.status.success() => {
             engines_from_probe_output(&String::from_utf8_lossy(&out.stdout))
         }
         _ => SandboxEngines::default(),
@@ -356,8 +412,53 @@ pub fn can_run_platform(platform: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{engines_from_probe_output, SandboxEngines, SANDBOX_IMAGE};
+    use super::{engines_from_probe_output, run_bounded, SandboxEngines, SANDBOX_IMAGE};
     use hf_core::engine::EngineKind;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn run_bounded_captures_stdout_and_success() {
+        let out = run_bounded(
+            std::process::Command::new("/bin/sh").args(["-c", "echo ready"]),
+            Duration::from_secs(5),
+        )
+        .expect("fast command completes");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ready");
+    }
+
+    #[test]
+    fn run_bounded_reports_a_failing_exit() {
+        let out = run_bounded(
+            std::process::Command::new("/bin/sh").args(["-c", "exit 1"]),
+            Duration::from_secs(5),
+        )
+        .expect("failed command still returns its output");
+        assert!(!out.status.success());
+    }
+
+    #[test]
+    fn run_bounded_kills_a_wedged_command_instead_of_hanging() {
+        let start = Instant::now();
+        let out = run_bounded(
+            std::process::Command::new("/bin/sleep").arg("30"),
+            Duration::from_millis(200),
+        );
+        assert!(out.is_none(), "a wedged command yields no output");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the probe returns promptly after the timeout, not after the command"
+        );
+    }
+
+    #[test]
+    fn run_bounded_missing_binary_is_none() {
+        assert!(run_bounded(
+            &mut std::process::Command::new("definitely-not-a-real-binary-hf"),
+            Duration::from_secs(1),
+        )
+        .is_none());
+    }
 
     #[test]
     fn probe_output_maps_present_binaries_to_engines() {
