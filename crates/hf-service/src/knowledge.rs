@@ -31,6 +31,12 @@ use serde::Serialize;
 struct ProjectIndex {
     retriever: HybridRetriever<AutoTokenizer>,
     originals: HashMap<String, String>,
+    /// Source-file count at index time, reported by [`stats_project`].
+    files: usize,
+    /// Chunk count at index time.
+    chunks: usize,
+    /// When this index was built.
+    indexed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Process-global per-project index cache.
@@ -49,6 +55,28 @@ const KNOWLEDGE_EXTS: &[&str] = &[
 pub struct KnowledgeStats {
     pub files: usize,
     pub chunks: usize,
+}
+
+/// Read-only status of a project's knowledge base: whether this process holds
+/// an in-memory index, its size and build time, the ingested documents on
+/// disk, and the retrieval config a (re)index applies. Powers the Knowledge
+/// view's management card without triggering a reindex.
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeIndexStatus {
+    /// Whether this process has indexed the project.
+    pub indexed: bool,
+    /// Source files in the current index (0 when not indexed).
+    pub files: usize,
+    /// Chunks in the current index (0 when not indexed).
+    pub chunks: usize,
+    /// Ingested documents on disk (picked up by the next reindex).
+    pub documents: usize,
+    /// RFC3339 build time of the current index, when one exists.
+    pub indexed_at: Option<String>,
+    /// Retrieval strategy a (re)index applies ("hybrid" or "keyword").
+    pub retrieval_strategy: String,
+    /// Token budget per indexed chunk (L2).
+    pub chunk_max_tokens: u32,
 }
 
 /// A single search hit from the project knowledge base.
@@ -171,6 +199,9 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
     let index = Arc::new(ProjectIndex {
         retriever,
         originals,
+        files,
+        chunks,
+        indexed_at: chrono::Utc::now(),
     });
     let key = project.to_string_lossy().to_string();
     if let Ok(mut map) = cache().lock() {
@@ -261,6 +292,42 @@ fn index_docs_dir(
 pub fn is_indexed(project: &Path) -> bool {
     let key = project.to_string_lossy().to_string();
     cache().lock().is_ok_and(|m| m.contains_key(&key))
+}
+
+/// Read-only status of a project's knowledge base. Never builds an index: an
+/// unindexed project reports `indexed: false` with zero counts plus the config
+/// a future `index_project` would apply.
+#[must_use]
+pub fn stats_project(project: &Path) -> KnowledgeIndexStatus {
+    let key = project.to_string_lossy().to_string();
+    let cached = cache().lock().ok().and_then(|m| m.get(&key).cloned());
+    let config = crate::config::effective_knowledge_config();
+    KnowledgeIndexStatus {
+        indexed: cached.is_some(),
+        files: cached.as_ref().map_or(0, |i| i.files),
+        chunks: cached.as_ref().map_or(0, |i| i.chunks),
+        documents: count_docs(project),
+        indexed_at: cached.as_ref().map(|i| i.indexed_at.to_rfc3339()),
+        retrieval_strategy: config.retrieval_strategy,
+        chunk_max_tokens: config.l2_max_tokens,
+    }
+}
+
+/// Number of ingested Markdown/text documents on disk for a project.
+fn count_docs(project: &Path) -> usize {
+    std::fs::read_dir(docs_dir(project)).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|e| {
+                let path = e.path();
+                path.is_file()
+                    && matches!(
+                        path.extension().and_then(|x| x.to_str()),
+                        Some("md" | "txt")
+                    )
+            })
+            .count()
+    })
 }
 
 /// Search a project, building the index first if this process has not indexed
@@ -463,6 +530,59 @@ mod tests {
     fn search_unindexed_project_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(search_project(dir.path(), "anything", 10).is_empty());
+    }
+
+    #[test]
+    fn stats_unindexed_project_reports_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let status = stats_project(dir.path());
+
+        assert!(!status.indexed);
+        assert_eq!(status.files, 0);
+        assert_eq!(status.chunks, 0);
+        assert_eq!(status.indexed_at, None);
+    }
+
+    #[test]
+    fn stats_after_index_reports_counts_time_and_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("chunk.c"),
+            "int copy_chunk(const unsigned char *data, unsigned long len) { return 0; }",
+        )
+        .unwrap();
+        let indexed = index_project(dir.path()).unwrap();
+
+        let status = stats_project(dir.path());
+
+        assert!(status.indexed);
+        assert_eq!(status.files, indexed.files);
+        assert_eq!(status.chunks, indexed.chunks);
+        assert!(
+            status.indexed_at.is_some(),
+            "an index build records its time"
+        );
+        assert!(
+            !status.retrieval_strategy.is_empty(),
+            "config summary carries the active strategy"
+        );
+        assert!(status.chunk_max_tokens > 0);
+    }
+
+    #[test]
+    fn stats_counts_ingested_documents_on_disk() {
+        // A unique tempdir project gives a unique (and isolated) docs dir.
+        let dir = tempfile::tempdir().unwrap();
+        let docs = docs_dir(dir.path());
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("spec.md"), "# Spec\nBody.").unwrap();
+
+        let status = stats_project(dir.path());
+
+        assert_eq!(status.documents, 1);
+
+        let _ = std::fs::remove_dir_all(&docs);
     }
 
     #[test]

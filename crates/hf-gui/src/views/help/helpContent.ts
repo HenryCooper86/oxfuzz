@@ -510,17 +510,17 @@ occurs.
 or a single target), a trigger (interval / cron / once / event), a per-run
 duration, and a budget (max runs or minutes), then **Schedule** it. Pause,
 resume, or delete campaigns, and set the max number that run concurrently. An
-`event` campaign fires when the service emits the chosen event:
-`crash.found` (triage classified new crashes), `run.completed`, or
-`run.failed` (a started fuzz run terminated).
+\`event\` campaign fires when the service emits the chosen event:
+\`crash.found\` (triage classified new crashes), \`run.completed\`, or
+\`run.failed\` (a started fuzz run terminated).
 
 **Preconditions (important):** only targets with a **promoted (approved)
 harness** are schedulable. If a project has none, the form explains this and the
 **Schedule** button stays disabled. Give the campaign an absolute project folder
 -- it owns its path independently of the project you have open. Intervals must be
 at least 10 seconds; cron needs five fields; "once" needs an RFC3339 timestamp.
-Event triggers are created through the CLI or API (`--trigger-kind event
---trigger-value crash.found`).
+Event triggers are created through the CLI or API (\`--trigger-kind event
+\`--trigger-value crash.found\`).
 
 **Heads-up:** when a scheduled campaign finds crashes, the app raises a toast
 notification wherever you are.
