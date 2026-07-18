@@ -28,9 +28,12 @@ pub struct ReportDraft {
 
 /// Return every saved report draft, newest first.
 ///
+/// A single unreadable or undecodable draft file is logged and skipped rather
+/// than failing the whole listing, so one corrupt/partially-written file cannot
+/// hide every valid draft.
+///
 /// # Errors
-/// Returns a storage error when the report directory cannot be read or a draft
-/// file cannot be decoded.
+/// Returns a storage error when the report directory itself cannot be read.
 pub fn list_report_drafts() -> Result<Vec<ReportDraft>, ClassifiedError> {
     let dir = ensure_reports_dir()?;
     let mut drafts = Vec::new();
@@ -40,10 +43,19 @@ pub fn list_report_drafts() -> Result<Vec<ReportDraft>, ClassifiedError> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| storage_err(&e))?;
-        let draft: ReportDraft = serde_json::from_str(&text)
-            .map_err(|e| ClassifiedError::Storage(format!("decode report draft: {e}")))?;
-        drafts.push(draft);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping unreadable report draft");
+                continue;
+            }
+        };
+        match serde_json::from_str::<ReportDraft>(&text) {
+            Ok(draft) => drafts.push(draft),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping undecodable report draft");
+            }
+        }
     }
     drafts.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(drafts)

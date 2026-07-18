@@ -127,6 +127,12 @@ fn scan_lexical(
     let mut candidates = Vec::new();
     for entry in walker {
         let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        // A directory whose name looks like a source file (e.g. `pkg.go/`) has a
+        // matching extension; without this guard `read_to_string` would fail with
+        // "is a directory" and the `?` below would abort the entire scan.
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
         let path = entry.path();
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             continue;
@@ -134,9 +140,15 @@ fn scan_lexical(
         if !exts.contains(&ext) || skip_file(path) {
             continue;
         }
-        let src = std::fs::read_to_string(path).map_err(|error| {
-            ClassifiedError::Internal(format!("read {}: {error}", path.display()))
-        })?;
+        // A single unreadable or non-UTF-8 source file must not lose every
+        // candidate found so far -- skip it and continue the pass.
+        let src = match std::fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "skipping unreadable source file");
+                continue;
+            }
+        };
         extract(&src, path, &mut candidates);
     }
     Ok((candidates, std::collections::HashMap::new()))
@@ -774,8 +786,17 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         if !exts.contains(&ext) {
             continue;
         }
-        let src = std::fs::read_to_string(path)
-            .map_err(|e| ClassifiedError::Internal(format!("read {}: {e}", path.display())))?;
+        // Non-UTF-8 or unreadable sources are common in the wild (Latin-1
+        // comments, permission gaps); skip the file rather than aborting the
+        // whole project scan. tree-sitter requires `&str`, so a genuinely
+        // non-UTF-8 file can only be skipped here regardless.
+        let src = match std::fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping unreadable source file");
+                continue;
+            }
+        };
         let tree = parser.parse(&src, None).ok_or_else(|| {
             ClassifiedError::Internal(format!("parse {}: parser returned no tree", path.display()))
         })?;
