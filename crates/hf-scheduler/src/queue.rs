@@ -39,6 +39,7 @@ mod tests {
             fired_at: Utc::now(),
             trigger_type: TriggerType::Interval,
             is_recovery: false,
+            event_payload: None,
         };
 
         tx.send(trigger.clone()).await.unwrap();

@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{ConcurrencyPolicy, MissedPolicy, SchedulerConfig};
 use crate::dispatcher::WorkflowDispatcher;
+use crate::event_bridge::{EventBridge, IncomingEvent};
 use crate::executor::{ExecutionStatus, ExecutionStore, ScheduleExecution, ScheduleExecutor};
 use crate::queue::{trigger_queue, TriggerReceiver, TriggerSender};
 use crate::recovery;
@@ -116,6 +117,9 @@ pub struct SchedulerManager {
     /// Bounded global execution permits. Acquiring before receiving more work
     /// keeps the recovery channel itself as the bounded backlog.
     execution_slots: Arc<Semaphore>,
+    /// Matches incoming events against event-driven schedules (debounce state
+    /// included). Events arrive via [`SchedulerManager::emit_event`].
+    event_bridge: Mutex<EventBridge>,
     /// Backfill and explicit queue policies serialize on a per-schedule lock.
     serial_locks: SerialLocks,
     /// Every dispatched workflow task is retained until reaped or stopped.
@@ -137,6 +141,7 @@ impl SchedulerManager {
             dispatcher: Arc::new(Mutex::new(None)),
             persistence: Arc::new(Mutex::new(None)),
             execution_slots,
+            event_bridge: Mutex::new(EventBridge::new()),
             serial_locks: Arc::new(Mutex::new(HashMap::new())),
             dispatch_tasks: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -241,6 +246,28 @@ impl SchedulerManager {
             .expect("scheduler runtime lock poisoned")
             .trigger_tx
             .clone()
+    }
+
+    /// Feed an external event into the scheduler.
+    ///
+    /// The event is matched synchronously against every enabled event-driven
+    /// schedule (event type, optional payload filter, debounce); matching
+    /// schedules are fired through the same trigger queue and executor loop a
+    /// cron fire uses, so `last_fire` and execution history behave identically.
+    ///
+    /// Returns the IDs of the schedules that fired. Events emitted while the
+    /// scheduler is not running are dropped (nothing can consume them).
+    pub async fn emit_event(&self, event: IncomingEvent) -> Vec<String> {
+        let Some(tx) = self.trigger_sender() else {
+            debug!(
+                event_type = %event.event_type,
+                "Event dropped: scheduler is not running"
+            );
+            return Vec::new();
+        };
+        let store = self.store.lock().await;
+        let mut bridge = self.event_bridge.lock().await;
+        bridge.process_event(&event, &store, &tx).await
     }
 
     /// Inject the workflow dispatcher used to run real executions.
@@ -589,6 +616,53 @@ impl SchedulerManager {
         Self::persist_record(persistence, &record).await;
     }
 
+    /// Record a trigger whose dispatch failed before the workflow could start
+    /// (currently: parameter resolution errors). The failure is visible in
+    /// execution history and the fire cursor advances, so a permanently broken
+    /// schedule fails once per fire instead of hot-looping on every tick.
+    async fn record_dispatch_failure(
+        fired: &FiredTrigger,
+        schedule: &Schedule,
+        message: String,
+        store: &Arc<Mutex<ScheduleStore>>,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        persistence: Option<&Arc<dyn SchedulerPersistence>>,
+    ) {
+        let now = Utc::now();
+        let record = ScheduleExecution {
+            execution_id: format!("exec-{}-{}", schedule.id, uuid::Uuid::new_v4()),
+            schedule_id: schedule.id.clone(),
+            triggered_at: fired.fired_at,
+            started_at: None,
+            completed_at: Some(now),
+            status: ExecutionStatus::Failed,
+            workflow_execution_id: None,
+            request_summary: serde_json::json!({
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "workflow_id": schedule.workflow_id,
+                "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
+                "parameter_values": schedule.parameter_values,
+                "trigger_time": fired.fired_at.to_rfc3339(),
+            }),
+            response_summary: serde_json::json!({
+                "status": "failed",
+                "error": message,
+            }),
+            error_message: Some(message),
+        };
+        execution_store.lock().await.record(record.clone());
+        let updated_schedule = {
+            let mut schedules = store.lock().await;
+            schedules.update_last_fire(&schedule.id, fired.fired_at.max(now));
+            schedules.get(&schedule.id).cloned()
+        };
+        if let Some(updated_schedule) = &updated_schedule {
+            Self::persist_schedule(persistence, updated_schedule).await;
+        }
+        Self::persist_record(persistence, &record).await;
+    }
+
     /// Handle a single fired trigger.
     ///
     /// When a `WorkflowDispatcher` is available, creates a `Running` execution
@@ -704,6 +778,38 @@ impl SchedulerManager {
                 | ConcurrencyPolicy::SkipIfRunning => {}
             }
 
+            // Resolve parameters through the documented chain (defaults ->
+            // static schedule overrides -> trigger-time expressions) before
+            // anything is recorded or dispatched. A template that cannot
+            // resolve fails the dispatch visibly instead of leaking a raw
+            // `{{ ... }}` string into the workflow.
+            let sequence = executor.lock().await.next_sequence_for(&schedule.id);
+            let context = crate::params::ResolutionContext {
+                trigger_time: fired.fired_at,
+                trigger_type: fired.trigger_type,
+                execution_sequence: sequence,
+                event_payload: fired.event_payload.clone(),
+            };
+            let parameter_values = match crate::params::resolve_parameters(
+                &serde_json::json!({}),
+                &schedule.parameter_values,
+                &context,
+            ) {
+                Ok(values) => values,
+                Err(error) => {
+                    Self::record_dispatch_failure(
+                        &fired,
+                        &schedule,
+                        format!("parameter resolution failed: {error}"),
+                        store,
+                        execution_store,
+                        persistence.as_ref(),
+                    )
+                    .await;
+                    return;
+                }
+            };
+
             // Reserve the execution before spawning so the rolling-hour policy
             // cannot over-admit while tasks wait for dispatch capacity.
             let execution_id = format!("exec-{}-{}", schedule.id, uuid::Uuid::new_v4());
@@ -713,7 +819,8 @@ impl SchedulerManager {
                 "schedule_name": schedule.name,
                 "workflow_id": schedule.workflow_id,
                 "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
-                "parameter_values": schedule.parameter_values,
+                "parameter_values": parameter_values,
+                "execution_sequence": sequence,
                 "trigger_time": fired.fired_at.to_rfc3339(),
             });
 
@@ -750,7 +857,6 @@ impl SchedulerManager {
 
             // Spawn real execution without blocking the trigger loop.
             let workflow_id = schedule.workflow_id.clone();
-            let parameter_values = schedule.parameter_values.clone();
             let exec_store_clone = Arc::clone(execution_store);
             let exec_id_clone = execution_id.clone();
             let persistence_clone = persistence.clone();
@@ -1509,6 +1615,7 @@ mod tests {
                 fired_at: Utc::now(),
                 trigger_type: crate::trigger::TriggerType::Interval,
                 is_recovery: false,
+                event_payload: None,
             })
             .await
             .expect("trigger accepted");
@@ -1710,6 +1817,340 @@ mod tests {
         assert!(history
             .iter()
             .any(|execution| execution.status == ExecutionStatus::Completed));
+    }
+
+    /// Captures the exact parameter values handed to the workflow.
+    #[derive(Default)]
+    struct ParamRecordingDispatcher {
+        received: AsyncMutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowDispatcher for ParamRecordingDispatcher {
+        async fn dispatch(
+            &self,
+            _workflow_id: &str,
+            parameter_values: serde_json::Value,
+        ) -> Result<DispatchResult, DispatchError> {
+            self.received.lock().await.push(parameter_values);
+            Ok(DispatchResult {
+                success: true,
+                summary: "ok".to_owned(),
+                output: serde_json::Value::Null,
+                duration_ms: 1,
+                error: None,
+            })
+        }
+    }
+
+    async fn wait_for_params(dispatcher: &ParamRecordingDispatcher, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if dispatcher.received.lock().await.len() >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatcher did not receive the expected parameters");
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolves_trigger_context_expressions() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(
+            Schedule::new(
+                "params",
+                "params",
+                TriggerConfig::Interval {
+                    interval_secs: 3600,
+                },
+                "wf",
+            )
+            .with_params(serde_json::json!({
+                "static": "keep",
+                "fired_at": "{{ trigger.time }}",
+                "kind": "{{ trigger.type }}",
+                "seq": "{{ execution.sequence }}",
+            })),
+        )
+        .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "params").await;
+        wait_for_params(&dispatcher, 1).await;
+        mgr.stop().await;
+
+        let received = dispatcher.received.lock().await;
+        let params = &received[0];
+        assert_eq!(params["static"], "keep");
+        assert_eq!(params["kind"], "interval");
+        assert_eq!(params["seq"], 1, "first dispatched execution is sequence 1");
+        assert!(
+            params["fired_at"]
+                .as_str()
+                .is_some_and(|stamp| stamp.contains('T')),
+            "trigger.time must resolve to an RFC3339 timestamp, got {params}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_expression_fails_dispatch_visibly() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(
+            Schedule::new(
+                "bad-params",
+                "bad params",
+                TriggerConfig::Interval {
+                    interval_secs: 3600,
+                },
+                "wf",
+            )
+            .with_params(serde_json::json!({
+                "x": "{{ bogus.expr }}",
+            })),
+        )
+        .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        send_now(&mgr, "bad-params").await;
+        wait_for_history(&mgr, "bad-params", 1).await;
+        mgr.stop().await;
+
+        assert!(
+            dispatcher.received.lock().await.is_empty(),
+            "a workflow must never receive raw template strings"
+        );
+        let history = mgr.execution_history("bad-params").await;
+        assert_eq!(history[0].status, ExecutionStatus::Failed);
+        assert!(
+            history[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("unknown parameter expression")),
+            "resolution failure must be visible in history: {history:?}"
+        );
+        // The fire cursor advances so a permanently broken schedule cannot
+        // re-fire and fail on every single tick.
+        assert!(mgr
+            .get_schedule("bad-params")
+            .await
+            .and_then(|schedule| schedule.last_fire)
+            .is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Event trigger tests
+    // -----------------------------------------------------------------------
+
+    fn event_schedule(
+        id: &str,
+        event_type: &str,
+        debounce: u64,
+        filter: Option<crate::event::EventFilter>,
+    ) -> Schedule {
+        Schedule::new(
+            id,
+            id,
+            TriggerConfig::Event {
+                event_type: event_type.to_owned(),
+                debounce_secs: debounce,
+                filter,
+            },
+            "wf",
+        )
+    }
+
+    fn incoming(
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> crate::event_bridge::IncomingEvent {
+        crate::event_bridge::IncomingEvent {
+            event_type: event_type.to_owned(),
+            payload: Some(payload),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_schedule_fires_on_matching_event() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        let persistence = Arc::new(RecordingPersistence::default());
+        let persistence_trait: Arc<dyn SchedulerPersistence> = persistence.clone();
+        mgr.set_persistence(persistence_trait).await;
+        mgr.register(
+            event_schedule("on-crash", "crash.found", 0, None).with_params(serde_json::json!({
+                "target": "{{ event.payload.target }}",
+                "kind": "{{ trigger.type }}",
+            })),
+        )
+        .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        let matched = mgr
+            .emit_event(incoming(
+                "crash.found",
+                serde_json::json!({"target": "parse_input", "crashes": 2}),
+            ))
+            .await;
+        assert_eq!(matched, vec!["on-crash".to_owned()]);
+
+        wait_for_params(&dispatcher, 1).await;
+        mgr.stop().await;
+
+        // The event payload resolved the schedule's parameter expressions.
+        let received = dispatcher.received.lock().await;
+        assert_eq!(received[0]["target"], "parse_input");
+        assert_eq!(received[0]["kind"], "event");
+        drop(received);
+
+        // last_fire and execution history are recorded exactly like a cron fire.
+        assert!(mgr
+            .get_schedule("on-crash")
+            .await
+            .and_then(|schedule| schedule.last_fire)
+            .is_some());
+        let history = mgr.execution_history("on-crash").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, ExecutionStatus::Completed);
+        assert!(persistence
+            .last_fire_updates
+            .lock()
+            .await
+            .iter()
+            .any(|(id, _)| id == "on-crash"));
+        assert!(persistence
+            .recorded
+            .lock()
+            .await
+            .iter()
+            .any(|execution| execution.schedule_id == "on-crash"));
+    }
+
+    #[tokio::test]
+    async fn non_matching_event_does_not_fire() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(event_schedule("on-crash", "crash.found", 0, None))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        let matched = mgr
+            .emit_event(incoming(
+                "run.failed",
+                serde_json::json!({"target": "parse_input"}),
+            ))
+            .await;
+        assert!(matched.is_empty());
+
+        // Give the executor loop a chance to (wrongly) dispatch, then assert.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mgr.stop().await;
+        assert!(dispatcher.received.lock().await.is_empty());
+        assert!(mgr.execution_history("on-crash").await.is_empty());
+        assert!(mgr
+            .get_schedule("on-crash")
+            .await
+            .and_then(|schedule| schedule.last_fire)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn event_filter_is_honored_end_to_end() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(
+            event_schedule(
+                "on-parse-crash",
+                "crash.found",
+                0,
+                Some(crate::event::EventFilter {
+                    field: "payload.target".to_owned(),
+                    pattern: "parse_*".to_owned(),
+                }),
+            )
+            .with_params(serde_json::json!({"target": "{{ event.payload.target }}"})),
+        )
+        .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        let filtered_out = mgr
+            .emit_event(incoming(
+                "crash.found",
+                serde_json::json!({"target": "render_frame"}),
+            ))
+            .await;
+        assert!(filtered_out.is_empty());
+
+        let matched = mgr
+            .emit_event(incoming(
+                "crash.found",
+                serde_json::json!({"target": "parse_input"}),
+            ))
+            .await;
+        assert_eq!(matched, vec!["on-parse-crash".to_owned()]);
+
+        wait_for_params(&dispatcher, 1).await;
+        mgr.stop().await;
+        let received = dispatcher.received.lock().await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0]["target"], "parse_input");
+    }
+
+    #[tokio::test]
+    async fn event_debounce_collapses_rapid_events_through_the_manager() {
+        let mgr = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(ParamRecordingDispatcher::default());
+        let dispatcher_trait: Arc<dyn WorkflowDispatcher> = dispatcher.clone();
+        mgr.set_dispatcher(dispatcher_trait).await;
+        mgr.register(event_schedule("debounced", "crash.found", 60, None))
+            .await;
+        mgr.start(Duration::from_mins(1)).await;
+
+        let first = mgr
+            .emit_event(incoming("crash.found", serde_json::json!({"target": "t"})))
+            .await;
+        let second = mgr
+            .emit_event(incoming("crash.found", serde_json::json!({"target": "t"})))
+            .await;
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "second event inside the window debounces"
+        );
+
+        wait_for_params(&dispatcher, 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mgr.stop().await;
+        assert_eq!(dispatcher.received.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn events_emitted_before_start_are_dropped_safely() {
+        let mgr = SchedulerManager::with_defaults();
+        mgr.register(event_schedule("quiet", "crash.found", 0, None))
+            .await;
+
+        // No trigger channel exists until `start`; the event is dropped, not fired.
+        let matched = mgr
+            .emit_event(incoming("crash.found", serde_json::json!({"target": "t"})))
+            .await;
+        assert!(matched.is_empty());
+        assert_eq!(mgr.execution_count().await, 0);
     }
 
     struct DropSignal(Arc<AtomicBool>);
