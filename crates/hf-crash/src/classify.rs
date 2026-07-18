@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 #[must_use]
 pub fn classify(log: &str) -> (CrashKind, String, String) {
     let kind = detect_kind(log);
-    let frames = extract_top_frames(log, 3);
+    let frames = extract_frames(log, 3);
     let sig = if frames.is_empty() {
         String::new()
     } else {
@@ -54,6 +54,11 @@ pub fn looks_like_crash(log: &str) -> bool {
         || l.contains("segv on")
         || l.contains("==error")
         || l.contains("== error")
+        // Go panic / Rust panic / Python (Atheris) uncaught exception.
+        || l.contains("panic:")
+        || l.contains("panicked at")
+        || l.contains("traceback (most recent call last)")
+        || l.contains("uncaught python exception")
 }
 
 fn detect_kind(log: &str) -> CrashKind {
@@ -64,6 +69,13 @@ fn detect_kind(log: &str) -> CrashKind {
     // "alarm" elsewhere in the log must not reclassify an ASan/SEGV crash.
     if reports_timeout(&lower) {
         return CrashKind::Timeout;
+    }
+    // A managed-runtime fault (Go panic, Rust panic, or an uncaught Python
+    // exception under Atheris) is checked before the native sanitizer/signal
+    // classes: a Go nil-pointer panic mentions "SIGSEGV" but is a runtime panic,
+    // not a native SEGV.
+    if reports_panic(&lower) {
+        return CrashKind::Panic;
     }
     if lower.contains("addresssanitizer") || lower.contains("asan") {
         CrashKind::Asan
@@ -95,6 +107,74 @@ fn reports_timeout(lower: &str) -> bool {
             || ((line.contains("summary:") || line.contains("error:"))
                 && line.contains("timeout after"))
     })
+}
+
+/// Whether the log reports a managed-runtime fault: a Go `panic:` line, a Rust
+/// `panicked at`, or a Python/Atheris uncaught exception. Distinct from a native
+/// abort so a Go/Python crash is not misfiled as `Abort`/`Segv`/`Other`.
+fn reports_panic(lower: &str) -> bool {
+    lower.lines().any(|raw| {
+        let line = raw.trim_start();
+        line.starts_with("panic:")
+            || line.contains("panicked at")
+            || line.contains("uncaught python exception")
+            || line.starts_with("traceback (most recent call last)")
+    })
+}
+
+/// Pick the frame extractor matching the log's runtime: Go stack traces and
+/// Python tracebacks use their own frame formats (not sanitizer `#N` frames), so
+/// without language-aware extraction they would yield an empty signature and
+/// every distinct Go/Python crash would route through dedup's "keep all" path.
+fn extract_frames(log: &str, n: usize) -> Vec<String> {
+    let lower = log.to_ascii_lowercase();
+    if lower.contains("goroutine ") && lower.contains("panic:") {
+        return extract_go_frames(log, n);
+    }
+    if lower.contains("traceback (most recent call last)") {
+        return extract_python_frames(log, n);
+    }
+    extract_top_frames(log, n)
+}
+
+/// Extract the top `n` Go stack frames as `pkg.Func` names. Go prints a function
+/// line (`main.Fuzz(0x...)`) followed by an indented `\t/file.go:line +0xNN`; the
+/// function names are ASLR-independent, so hashing them gives a stable signature.
+fn extract_go_frames(log: &str, n: usize) -> Vec<String> {
+    let mut frames = Vec::new();
+    for line in log.lines() {
+        if line.starts_with('\t') || line.starts_with(' ') {
+            continue;
+        }
+        let trimmed = line.trim_end();
+        if let Some(open) = trimmed.find('(') {
+            let name = &trimmed[..open];
+            if !name.is_empty() && name.contains('.') && !name.contains(' ') {
+                frames.push(name.to_owned());
+                if frames.len() >= n {
+                    break;
+                }
+            }
+        }
+    }
+    frames
+}
+
+/// Extract the deepest `n` Python traceback frames (`func (path:line)`). A
+/// traceback is most-recent-call-last, so the deepest frames sit closest to the
+/// raise site and best identify the bug; paths/lines are ASLR-independent.
+fn extract_python_frames(log: &str, n: usize) -> Vec<String> {
+    let mut frames: Vec<String> = Vec::new();
+    for line in log.lines() {
+        let trimmed = line.trim();
+        // `File "path", line N, in func`
+        if let Some(rest) = trimmed.strip_prefix("File ") {
+            frames.push(rest.replace('"', ""));
+        }
+    }
+    frames.reverse();
+    frames.truncate(n);
+    frames
 }
 
 fn extract_top_frames(log: &str, n: usize) -> Vec<String> {
@@ -144,6 +224,20 @@ fn strip_leading_frame_address(frame: &str) -> String {
 }
 
 fn extract_summary(log: &str, kind: CrashKind) -> String {
+    if kind == CrashKind::Panic {
+        // A Go panic leads with `panic: <message>`; a Python traceback ends with
+        // the exception line (`ExcType: <message>`), which is the last non-empty
+        // line. Prefer these over a generic "error"-bearing line.
+        for line in log.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("panic:") {
+                return trimmed.to_owned();
+            }
+        }
+        if let Some(last) = log.lines().map(str::trim).rev().find(|t| !t.is_empty()) {
+            return last.to_owned();
+        }
+    }
     for line in log.lines() {
         let lower = line.to_ascii_lowercase();
         if lower.contains("error") || lower.contains("asan") || lower.contains("ubsan") {
@@ -260,6 +354,64 @@ mod tests {
             kept.len(),
             2,
             "distinct frameless crashes must not be collapsed by dedup"
+        );
+    }
+
+    #[test]
+    fn go_panic_classifies_and_signs_stably_across_addresses() {
+        let run_a = "panic: runtime error: index out of range [5] with length 3\n\n\
+                     goroutine 17 [running]:\n\
+                     main.parseHeader(0xc0000b4000, 0x3)\n\t/src/parse.go:42 +0x1d\n\
+                     main.FuzzParse(0xc0000a2000)\n\t/src/harness.go:10 +0x40\n";
+        let run_b = "panic: runtime error: index out of range [5] with length 3\n\n\
+                     goroutine 42 [running]:\n\
+                     main.parseHeader(0xdeadbeef0000, 0x3)\n\t/src/parse.go:42 +0x99\n\
+                     main.FuzzParse(0xcafebabe0000)\n\t/src/harness.go:10 +0xaa\n";
+        let (kind, sig_a, summary) = classify(run_a);
+        let (_, sig_b, _) = classify(run_b);
+        assert_eq!(
+            kind,
+            CrashKind::Panic,
+            "a Go panic is a managed-runtime fault"
+        );
+        assert!(!sig_a.is_empty(), "Go frames must yield a signature");
+        assert_eq!(
+            sig_a, sig_b,
+            "func-name signature is stable across addresses"
+        );
+        assert!(
+            summary.starts_with("panic:"),
+            "summary is the panic line: {summary}"
+        );
+    }
+
+    #[test]
+    fn python_traceback_classifies_and_signs() {
+        let log = " === Uncaught Python exception: ===\n\
+                    ValueError: invalid literal\n\
+                    Traceback (most recent call last):\n\
+                    \x20 File \"/src/harness.py\", line 12, in TestOneInput\n\
+                    \x20   parse(data)\n\
+                    \x20 File \"/src/parser.py\", line 88, in parse\n\
+                    \x20   raise ValueError(\"invalid literal\")\n\
+                    ValueError: invalid literal\n";
+        let (kind, sig, summary) = classify(log);
+        assert_eq!(
+            kind,
+            CrashKind::Panic,
+            "an uncaught Python exception is a Panic"
+        );
+        assert!(
+            !sig.is_empty(),
+            "Python traceback frames must yield a signature"
+        );
+        assert_eq!(
+            summary, "ValueError: invalid literal",
+            "summary is the exception line"
+        );
+        assert!(
+            looks_like_crash(log),
+            "a Python traceback still reads as a crash"
         );
     }
 
