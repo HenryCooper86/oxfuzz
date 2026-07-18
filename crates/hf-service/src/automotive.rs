@@ -3012,8 +3012,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (project, capture) = project_fixture(temp.path());
         let workspace = temp.path().join("workspace");
-        // The runtime reports the sidecar image as absent; its run methods panic
-        // if reached, proving the guard fails before any sandbox run.
+        // The runtime reports the sidecar image as absent and carries no scripted
+        // response, so had the guard not fired the sandbox run would surface a
+        // different parse error -- the actionable build message below is therefore
+        // proof the guard failed fast before any sandbox run.
         let (service, _store) = service(
             Arc::new(RecordingRuntime::with_missing_image()),
             temp.path(),
@@ -3032,8 +3034,8 @@ mod tests {
             ..AutomotiveSettings::default()
         };
 
-        // The operation must error before the sandbox is invoked (the mock's run
-        // methods panic if reached), with the actionable build message.
+        // The operation must error with the actionable build message, which only
+        // the pre-sandbox guard produces.
         let msg = service
             .execute_automotive_with_context(request, settings, &workspace)
             .await
@@ -3042,6 +3044,90 @@ mod tests {
         assert!(
             msg.contains("build-scapy-sidecar.sh"),
             "actionable message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_sidecar_image_does_not_burn_a_physical_bench_approval() {
+        // The headline guarantee: the image-present probe runs BEFORE the
+        // single-use physical-bench approval is claimed, so a missing sidecar
+        // image fails the operation without spending the operator's one-shot
+        // approval. A later attempt with the image built must still be able to
+        // spend that same approval. Both attempts share one evidence store; if the
+        // guard fired after the claim (or not at all), the first attempt would burn
+        // the approval and the second would be rejected as already used.
+        let temp = tempfile::tempdir().unwrap();
+        let (project, _) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        let transcript = Sha256Digest::parse("ef".repeat(32)).unwrap();
+        let response = ResponseEnvelope::success(
+            "request-placeholder",
+            AutomotiveResult::Replay(ReplayResult {
+                protocol: AutomotiveProtocol::Uds,
+                mode: AutomotiveMode::PhysicalBench,
+                planned_events: 1,
+                executed_events: 1,
+                transcript_hash: transcript.clone(),
+                state_signatures: Vec::new(),
+                completed: true,
+            }),
+            Some(transcript),
+        );
+        let mut settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+        enable_physical_bench(&mut settings);
+        let plan = uds_replay_plan(AutomotiveMode::PhysicalBench);
+        let limits = operation_limits(&settings).unwrap();
+        let approval_id = "approval-image-guard".to_owned();
+        let make_request = || {
+            let approval = AutomotiveApprovalEvidence {
+                approval_id: approval_id.clone(),
+                approved_by: "desktop-operator".to_owned(),
+                approved_at: chrono::Utc::now(),
+                scope_sha256: approval_scope_hash("can0", &plan, &settings.physical_bench, &limits)
+                    .unwrap(),
+            };
+            AutomotiveOperationRequest {
+                project_root: project.clone(),
+                command: AutomotiveCommand::ExecuteReplay {
+                    mode: ModeConfig::PhysicalBench {
+                        interface: "can0".to_owned(),
+                        approval_id: approval_id.clone(),
+                    },
+                    plan: plan.clone(),
+                },
+                approval: Some(approval),
+            }
+        };
+
+        // First attempt: the sidecar image is not built. The operation fails with
+        // the actionable message before the approval can be claimed.
+        let missing = Arc::new(RecordingRuntime::with_missing_image());
+        let (svc_missing, _) = service(Arc::clone(&missing), temp.path()).await;
+        let err = svc_missing
+            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .await
+            .expect_err("a missing sidecar image must fail the operation");
+        assert!(
+            err.to_string().contains("build-scapy-sidecar.sh"),
+            "actionable message: {err}"
+        );
+
+        // Second attempt against the SAME evidence store, now with the image built:
+        // the approval was never spent, so this transmission is authorized and
+        // fires exactly once.
+        let ready = Arc::new(RecordingRuntime::with_response(&response));
+        let (svc_ready, _) = service(Arc::clone(&ready), temp.path()).await;
+        svc_ready
+            .execute_automotive_with_context(make_request(), settings.clone(), &workspace)
+            .await
+            .expect("the unspent approval authorizes the replay once the image exists");
+        assert_eq!(
+            ready.calls().len(),
+            1,
+            "the transmission fired on the still-valid approval"
         );
     }
 
