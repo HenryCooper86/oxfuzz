@@ -198,6 +198,17 @@ pub trait RuntimeAdapter: Send + Sync {
         limits: &ResourceLimits,
     ) -> Result<CommandResult, ClassifiedError>;
 
+    /// Whether `image` is available to run (loaded locally).
+    ///
+    /// Defaults to `true` so adapters without an image concept (native/stub) and
+    /// test doubles never block execution. The Docker adapter overrides this to
+    /// actually check, letting callers fail fast with an actionable message when
+    /// an optional image (e.g. the automotive sidecar) has not been built, rather
+    /// than surfacing a raw "no such image" from the run.
+    async fn image_present(&self, _image: &str) -> bool {
+        true
+    }
+
     /// Run a non-streaming command with an explicit sandbox mount/profile.
     /// Adapters without specialized profile support may delegate to
     /// [`run_command`](Self::run_command).
