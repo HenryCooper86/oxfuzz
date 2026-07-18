@@ -8,7 +8,9 @@ use hf_core::coverage::CoverageReport;
 use uuid::Uuid;
 
 mod summary;
-pub use summary::{parse_llvm_cov_summary, CoverageSummary};
+pub use summary::{
+    parse_llvm_cov_summary, parse_llvm_cov_uncovered, CoverageSummary, UncoveredRegion,
+};
 
 /// A proposal when coverage stagnates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
