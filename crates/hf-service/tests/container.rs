@@ -149,6 +149,8 @@ fn stored_run(
             sanitizer: hf_core::target::Sanitizer::Address,
             env: Vec::new(),
             extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
         }),
         started_at,
     );

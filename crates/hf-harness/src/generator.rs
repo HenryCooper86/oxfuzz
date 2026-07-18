@@ -833,6 +833,8 @@ fn smoke_cfg(harness: &Harness) -> hf_core::engine::FuzzRunConfig {
         sanitizer: harness.sanitizer,
         env: Vec::new(),
         extra_args: Vec::new(),
+        seed: None,
+        replay_of: None,
     }
 }
 
@@ -1540,6 +1542,8 @@ Iterations : 12345
             sanitizer: hf_core::target::Sanitizer::Address,
             env: Vec::new(),
             extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
         }
     }
 

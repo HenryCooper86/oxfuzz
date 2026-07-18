@@ -15,6 +15,11 @@ pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str
     if duration > 0 {
         args.push(format!("-max_total_time={duration}"));
     }
+    // `-seed=N` pins the RNG seed; libFuzzer's default (-seed=0) is "generate
+    // a random seed", so the flag is emitted only when a seed was recorded.
+    if let Some(seed) = cfg.seed {
+        args.push(format!("-seed={seed}"));
+    }
     // Leak detection is left at libFuzzer's default (on). Memory leaks are a bug
     // class the triage pipeline explicitly ingests (`leak-*` artifacts), and the
     // smoke step also runs with leak detection on, so a run must match. A caller
