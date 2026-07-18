@@ -1270,6 +1270,11 @@ async fn cmd_campaign(
         outcome.crashes,
         outcome.termination
     );
+    if let Some(refine) = &outcome.refine {
+        // A coverage plateau proposed a targeted refined harness. It is only
+        // Compiled (never promoted/auto-run); the operator reviews and promotes.
+        println!("  coverage-plateau refine: {}", refine.note);
+    }
     Ok(())
 }
 
