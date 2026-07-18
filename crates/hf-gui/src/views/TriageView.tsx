@@ -5,7 +5,7 @@ import { usePipeline } from "../providers/pipeline";
 import { useRunOutput } from "../providers/runOutput";
 import type { Crash } from "../types";
 import { Button, ViewHeader, SeverityBadge } from "../components/ui";
-import { Bug, ChevronRight, FileText, Share2 } from "lucide-react";
+import { Bug, ChevronRight, Download, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
 import { useI18n } from "../i18nContext";
 
@@ -145,6 +145,33 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     [activeProject, lastTarget, reportMd, browserDownload, t],
   );
 
+  // Export a self-contained reproduction bundle (harness + crash input +
+  // REPRODUCE.md) for a crash. Desktop-only (a native folder picker); web users
+  // use the `hobot-fuzz repro` CLI. The run context lacks the harness language,
+  // so this assumes C -- power users pass `--lang` on the CLI.
+  const exportRepro = useCallback(
+    async (crashId?: string) => {
+      setReportMsg(null);
+      if (!isTauriEnvironment()) {
+        setReportMsg(t("triage.exportDesktopOnly", { format: "Repro bundle" }));
+        return;
+      }
+      try {
+        const saved = await getTransport().invoke<string | null>("export_repro", {
+          project: activeProject || ".",
+          target: lastTarget,
+          engine: lastEngine || "libfuzzer",
+          lang: "c",
+          crash: crashId,
+        });
+        if (saved) setReportMsg(t("triage.reproSaved", { path: saved }));
+      } catch (e) {
+        setReportMsg(t("triage.exportFailed", { error: String(e) }));
+      }
+    },
+    [activeProject, lastTarget, lastEngine, t],
+  );
+
   // Push the triaged crashes to DefectDojo as findings (import/reimport-scan).
   const pushToDefectDojo = useCallback(async () => {
     setReportMsg(null);
@@ -223,6 +250,17 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             >
               {!pushing && <Share2 size={14} />}
               {pushing ? t("triage.pushing") : t("triage.pushToDefectDojo")}
+            </Button>
+          )}
+          {crashes.length > 0 && isTauriEnvironment() && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void exportRepro(selected !== null ? crashes[selected]?.id : undefined)}
+              title={t("triage.downloadRepro")}
+            >
+              <Download size={14} />
+              {t("triage.downloadRepro")}
             </Button>
           )}
           <Button
