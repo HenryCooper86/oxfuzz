@@ -1108,21 +1108,27 @@ impl Store {
         discovered_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let project = t.project_root.to_string_lossy().to_string();
-        // Identity is (project, symbol), not the scanner's fresh UUID. Preserve
-        // the first persisted id so rediscovery cannot orphan harness, corpus,
-        // and crash rows that reference the target.
+        // Identity is (project, symbol, file), not the scanner's fresh UUID.
+        // Preserve the first persisted id so rediscovery cannot orphan harness,
+        // corpus, and crash rows that reference the target. The file component
+        // is the candidate's root-relative path, matching the migration 0019
+        // backfill, so a rescan re-homes onto the legacy row of the same
+        // definition while a same-named function in another file gets its own
+        // row.
         //
         // The read (stable id), duplicate-collapse, and write run in a single
         // transaction so two concurrent discover/save_inventory operations on
         // the same project cannot both observe "no existing row" and each insert
-        // a distinct id; the unique index on (project_root, symbol) is the
+        // a distinct id; the unique index on (project_root, symbol, file) is the
         // backstop that rejects a duplicate even if the ordering ever slips.
+        let file = t.relative_file();
         let mut tx = self.pool.begin().await?;
         let stable_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM targets WHERE project_root = ?1 AND symbol = ?2 LIMIT 1",
+            "SELECT id FROM targets WHERE project_root = ?1 AND symbol = ?2 AND file = ?3 LIMIT 1",
         )
         .bind(&project)
         .bind(&t.symbol)
+        .bind(&file)
         .fetch_optional(&mut *tx)
         .await?;
         let mut persisted = t.clone();
@@ -1133,19 +1139,23 @@ impl Store {
         }
         // Collapse any legacy duplicates without deleting the stable parent row
         // referenced by harness/corpus/crash records.
-        sqlx::query("DELETE FROM targets WHERE project_root = ?1 AND symbol = ?2 AND id <> ?3")
-            .bind(&project)
-            .bind(&persisted.symbol)
-            .bind(persisted.id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM targets WHERE project_root = ?1 AND symbol = ?2 AND file = ?3 AND id <> ?4",
+        )
+        .bind(&project)
+        .bind(&persisted.symbol)
+        .bind(&file)
+        .bind(persisted.id.to_string())
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO targets
-                (id, project_root, symbol, language, fit_score, rationale, discovered_at, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, project_root, symbol, file, language, fit_score, rationale, discovered_at, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 project_root = excluded.project_root,
                 symbol = excluded.symbol,
+                file = excluded.file,
                 language = excluded.language,
                 fit_score = excluded.fit_score,
                 rationale = excluded.rationale,
@@ -1155,6 +1165,7 @@ impl Store {
         .bind(persisted.id.to_string())
         .bind(&project)
         .bind(&persisted.symbol)
+        .bind(&file)
         .bind(enum_str(&persisted.language))
         .bind(persisted.fit_score)
         .bind(&persisted.rationale)

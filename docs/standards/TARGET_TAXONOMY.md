@@ -53,7 +53,24 @@ Tree-sitter node counts (branches + loops + operators).
 A 0.0..=1.0 score combining: input surface, complexity, sanitizer
 applicability, absence of existing harness, and LLM rationale.
 
-## 7. Automotive Protocol Targets
+## 7. Persistence Identity
+
+A target's persistence identity is `(project_root, file, symbol)`, where
+`file` is the defining file relative to the canonical project root
+(`TargetCandidate::relative_file`, absolute-path fallback outside the root).
+The scanner derives the deterministic id as a UUIDv5 over that key, and
+`hf-storage` enforces it with the unique index
+`idx_targets_project_symbol_file`. Two same-named functions in different
+files of one project are therefore distinct targets with independent
+harness/corpus/crash linkage; rediscovery of one definition re-homes onto its
+existing row, keeping the first persisted id.
+
+Wherever a target is named as a string (CLI, REST, GUI), it may carry a
+`file::symbol` qualifier (e.g. `src/a.c::parse_opts`). A plain symbol that
+matches more than one definition is rejected as ambiguous, with the
+file-qualified forms listed.
+
+## 8. Automotive Protocol Targets
 
 Automotive protocol work is not represented as a new `TargetLanguage` or
 source `TargetKind`. The optional `hf-automotive` contract identifies a

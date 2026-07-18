@@ -28,7 +28,7 @@ async fn candidates_carry_their_project_root() {
         .await
         .expect("discover should succeed");
     // Every candidate must know which project it belongs to, so persistence can
-    // dedup by (project, symbol) and reports can attribute targets.
+    // dedup by (project, symbol, file) and reports can attribute targets.
     assert!(
         inv.project_root == canonical
             && inv
@@ -114,7 +114,7 @@ async fn candidate_ids_are_stable_across_discovery_passes() {
     // Persistence (harnesses, corpus, crashes, run linkage) is keyed on the
     // target id. If a symbol got a fresh random id on every discovery pass, all
     // of that stored state would be orphaned the next time discovery ran. The id
-    // must therefore be deterministic per (project_root, symbol).
+    // must therefore be deterministic per (project_root, file, symbol).
     let root = fixture_root();
     let first = hf_discovery::discover(&root, TargetLanguage::C)
         .await
