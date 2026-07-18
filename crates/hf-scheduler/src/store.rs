@@ -22,6 +22,10 @@ pub enum TriggerConfig {
         event_type: String,
         #[serde(default)]
         debounce_secs: u64,
+        /// Optional glob filter on a payload field; absent in schedules
+        /// persisted before filters existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<crate::event::EventFilter>,
     },
     /// One-time execution at a specific time.
     OneTime { at: DateTime<Utc> },
@@ -317,6 +321,47 @@ mod tests {
         let json = serde_json::to_string(&cron).unwrap();
         let deserialized: TriggerConfig = serde_json::from_str(&json).unwrap();
         assert!(matches!(deserialized, TriggerConfig::Cron { .. }));
+    }
+
+    #[test]
+    fn event_trigger_with_filter_round_trips() {
+        let trigger = TriggerConfig::Event {
+            event_type: "crash.found".into(),
+            debounce_secs: 5,
+            filter: Some(crate::event::EventFilter {
+                field: "payload.target".into(),
+                pattern: "parse_*".into(),
+            }),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let deserialized: TriggerConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            deserialized,
+            TriggerConfig::Event {
+                debounce_secs: 5,
+                filter: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn event_trigger_persisted_before_filters_still_loads() {
+        // Schedules written before payload filters existed carry no `filter` key.
+        let legacy = serde_json::json!({
+            "type": "event",
+            "event_type": "crash.found",
+            "debounce_secs": 2,
+        });
+        let deserialized: TriggerConfig = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            deserialized,
+            TriggerConfig::Event {
+                event_type,
+                debounce_secs: 2,
+                filter: None,
+            } if event_type == "crash.found"
+        ));
     }
 
     #[test]

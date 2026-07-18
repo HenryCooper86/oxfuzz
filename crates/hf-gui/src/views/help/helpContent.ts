@@ -503,18 +503,24 @@ const SCREEN_AUTOMATION = `
 # Automation
 
 **Purpose:** schedule headless background fuzzing campaigns that rotate through a
-project's targets on an interval, a cron schedule, or once.
+project's targets on an interval, a cron schedule, once, or when a fuzzing event
+occurs.
 
 **What you can do:** choose a project folder, pick a scope (all promoted targets
-or a single target), a trigger (interval / cron / once), a per-run duration, and
-a budget (max runs or minutes), then **Schedule** it. Pause, resume, or delete
-campaigns, and set the max number that run concurrently.
+or a single target), a trigger (interval / cron / once / event), a per-run
+duration, and a budget (max runs or minutes), then **Schedule** it. Pause,
+resume, or delete campaigns, and set the max number that run concurrently. An
+`event` campaign fires when the service emits the chosen event:
+`crash.found` (triage classified new crashes), `run.completed`, or
+`run.failed` (a started fuzz run terminated).
 
 **Preconditions (important):** only targets with a **promoted (approved)
 harness** are schedulable. If a project has none, the form explains this and the
 **Schedule** button stays disabled. Give the campaign an absolute project folder
 -- it owns its path independently of the project you have open. Intervals must be
 at least 10 seconds; cron needs five fields; "once" needs an RFC3339 timestamp.
+Event triggers are created through the CLI or API (`--trigger-kind event
+--trigger-value crash.found`).
 
 **Heads-up:** when a scheduled campaign finds crashes, the app raises a toast
 notification wherever you are.
