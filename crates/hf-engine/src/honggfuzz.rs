@@ -5,6 +5,10 @@
 use hf_core::engine::FuzzRunConfig;
 
 /// Construct the `honggfuzz` argument list for a fuzz run.
+///
+/// honggfuzz has no user-specified RNG seed (its RNG is seeded from
+/// arc4random//dev/urandom with no flag or env override), so a recorded
+/// `cfg.seed` is deliberately not translated into an invented flag here.
 #[must_use]
 pub fn build_run_args(cfg: &FuzzRunConfig, binary: &str, corpus: &str, out: &str) -> Vec<String> {
     let duration = cfg.duration.map_or(0, |d| d.as_secs());

@@ -355,6 +355,8 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         sanitizer: harness.sanitizer,
         env: Vec::new(),
         extra_args: Vec::new(),
+        seed: None,
+        replay_of: None,
     };
     let workspace = tempfile::tempdir().expect("temp workspace");
 
