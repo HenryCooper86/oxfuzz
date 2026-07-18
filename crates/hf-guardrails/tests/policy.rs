@@ -77,6 +77,71 @@ fn automotive_labels_distinguish_offline_virtual_and_physical_access() {
 }
 
 #[test]
+fn action_kinds_are_stable_snake_case_audit_labels() {
+    assert_eq!(Action::Discover.kind(), "discover");
+    assert_eq!(Action::DraftHarness.kind(), "draft_harness");
+    assert_eq!(Action::CompileHarness.kind(), "compile_harness");
+    assert_eq!(Action::RunHarness.kind(), "run_harness");
+    assert_eq!(run_fuzzer().kind(), "run_fuzzer");
+    assert_eq!(
+        Action::AutomotiveOffline {
+            operation: "analyze_pcap".to_owned(),
+        }
+        .kind(),
+        "automotive_offline"
+    );
+    assert_eq!(
+        Action::AutomotiveVirtualCan {
+            protocol: "uds".to_owned(),
+            duration_secs: 5,
+        }
+        .kind(),
+        "automotive_virtual_can"
+    );
+    assert_eq!(
+        Action::AutomotivePhysicalBench {
+            interface: "can0".to_owned(),
+            protocol: "uds".to_owned(),
+            duration_secs: 5,
+        }
+        .kind(),
+        "automotive_physical_bench"
+    );
+    assert_eq!(Action::Triage.kind(), "triage");
+    assert_eq!(Action::CorpusOp.kind(), "corpus_op");
+    assert_eq!(Action::Chat.kind(), "chat");
+    assert_eq!(
+        Action::ShellExec {
+            command: "id".to_owned(),
+        }
+        .kind(),
+        "shell_exec"
+    );
+    assert_eq!(
+        Action::WriteHostFile {
+            path: "/etc/passwd".to_owned(),
+        }
+        .kind(),
+        "write_host_file"
+    );
+    assert_eq!(
+        Action::AgentTool {
+            name: "run_fuzzer".to_owned(),
+        }
+        .kind(),
+        "agent_tool"
+    );
+}
+
+#[test]
+fn risk_tier_names_are_stable_lowercase_audit_labels() {
+    assert_eq!(RiskTier::Low.as_str(), "low");
+    assert_eq!(RiskTier::Medium.as_str(), "medium");
+    assert_eq!(RiskTier::High.as_str(), "high");
+    assert_eq!(RiskTier::Critical.as_str(), "critical");
+}
+
+#[test]
 fn default_policy_allows_low_requires_high_denies_critical() {
     let p = GuardrailPolicy::default();
     assert_eq!(p.evaluate(&Action::Discover), Decision::Allow);
