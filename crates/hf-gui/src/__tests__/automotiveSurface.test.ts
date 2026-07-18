@@ -20,6 +20,16 @@ describe("automotive surface boundaries", () => {
     );
   });
 
+  it("gates the automotive nav entry behind the enabled subsystem, like DefectDojo", () => {
+    const sidebar = source("../components/Sidebar.tsx");
+    // The automotive entry must be conditional on the subsystem being enabled --
+    // a permanent slot is noise for the many projects that never touch a bus.
+    // It mirrors the DefectDojo gate and lives under the Integrations group.
+    expect(sidebar).toContain("useAutomotive");
+    expect(sidebar).toMatch(/automotiveOn\s*&&/);
+    expect(sidebar).toContain('t("sidebar.integrations")');
+  });
+
   it("keeps virtual replay in a confirmed sandbox workflow and physical execution absent", () => {
     const workspace = source("../views/AutomotiveView.tsx");
     const replay = source("../components/AutomotiveReplayWorkspace.tsx");

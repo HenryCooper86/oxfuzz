@@ -45,6 +45,9 @@ const en: Dict = {
   "sidebar.targets": "Recent",
   "sidebar.pipeline": "Pipeline",
   "sidebar.library": "Library",
+  "sidebar.results": "Results",
+  "sidebar.aiSystem": "AI System",
+  "sidebar.integrations": "Integrations",
   "sidebar.noTargets": "No projects yet. Add a project folder to start fuzzing.",
   "sidebar.removeTarget": "Remove from recents (keeps data)",
 
@@ -196,6 +199,9 @@ const zh: Dict = {
   "sidebar.targets": "最近",
   "sidebar.pipeline": "流程",
   "sidebar.library": "资源库",
+  "sidebar.results": "结果",
+  "sidebar.aiSystem": "AI 系统",
+  "sidebar.integrations": "集成",
   "sidebar.noTargets": "暂无项目。添加一个项目文件夹以开始模糊测试。",
   "sidebar.removeTarget": "从最近列表中移除（保留数据）",
 
