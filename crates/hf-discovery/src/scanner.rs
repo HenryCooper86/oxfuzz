@@ -35,18 +35,19 @@ pub async fn discover(
         TargetLanguage::Python => scan_python(&project_root)?,
     };
     // Stamp the project root onto every candidate so downstream consumers
-    // (persistence dedup keyed on (project, symbol), reports, ranking) can tell
-    // which project a target belongs to. The scanner builds candidates without
-    // it, so set it once here in the single discovery entry point.
+    // (persistence dedup keyed on (project, symbol, file), reports, ranking)
+    // can tell which project a target belongs to. The scanner builds
+    // candidates without it, so set it once here in the single discovery
+    // entry point.
     //
-    // Also derive a deterministic id from (project_root, symbol). Storage
-    // identity is (project, symbol); a random per-pass id would orphan every
-    // harness/corpus/crash/run stored against the target the next time
-    // discovery ran. A UUIDv5 over the identity key keeps the id stable across
-    // passes and processes while distinct symbols still get distinct ids.
+    // Also derive a deterministic id from (project_root, relative_file,
+    // symbol). A random per-pass id would orphan every harness/corpus/crash/run
+    // stored against the target the next time discovery ran. A UUIDv5 over
+    // the identity key keeps the id stable across passes and processes while
+    // distinct definitions still get distinct ids.
     for c in &mut candidates {
         c.project_root.clone_from(&project_root);
-        c.id = deterministic_target_id(&project_root, &c.symbol);
+        c.id = deterministic_target_id(c);
     }
     Ok(TargetInventory {
         project_root,
@@ -84,15 +85,21 @@ const TARGET_ID_NAMESPACE: Uuid = Uuid::from_bytes([
 ]);
 
 /// Derive a deterministic target id from the persistence identity
-/// `(project_root, symbol)`. Same identity always yields the same id.
+/// `(project_root, relative_file, symbol)`. Same identity always yields the
+/// same id.
 ///
-/// Known limitation: identity is deliberately name-based (stable across
-/// scans), so two same-named functions in different files of one project
-/// share a single persistence identity. The scanner mitigates this for
-/// analysis by merging their call-graph edges and keeping the maximum
-/// complexity (see `extract_functions`), but they remain one persisted target.
-fn deterministic_target_id(project_root: &Path, symbol: &str) -> Uuid {
-    let key = format!("{}::{}", project_root.display(), symbol);
+/// The file component is the candidate's path relative to the canonical
+/// project root, so two same-named functions in different files of one
+/// project are distinct persisted targets instead of shadowing each other.
+/// Storage re-homes onto the row matching the same key
+/// (`Store::upsert_target`), so rediscovery keeps the first persisted id.
+fn deterministic_target_id(candidate: &TargetCandidate) -> Uuid {
+    let key = format!(
+        "{}::{}::{}",
+        candidate.project_root.display(),
+        candidate.relative_file(),
+        candidate.symbol
+    );
     Uuid::new_v5(&TARGET_ID_NAMESPACE, key.as_bytes())
 }
 
@@ -1351,5 +1358,55 @@ mod tests {
         // so its `if x` must not leak into branchy's score.
         assert_eq!(branchy.complexity, 5);
         assert_eq!(other.complexity, 2);
+    }
+
+    #[tokio::test]
+    async fn same_named_functions_in_different_files_get_distinct_stable_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/a.c"),
+            "int parse_opts(const char *s) { return s[0]; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/b.c"),
+            "int parse_opts(const char *s) { return s[1]; }\n",
+        )
+        .unwrap();
+
+        let inventory = super::discover(dir.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+        let parse_opts: Vec<&TargetCandidate> = inventory
+            .candidates
+            .iter()
+            .filter(|c| c.symbol == "parse_opts")
+            .collect();
+        assert_eq!(
+            parse_opts.len(),
+            2,
+            "each file's definition is its own candidate"
+        );
+        assert_ne!(
+            parse_opts[0].id, parse_opts[1].id,
+            "persistence identity is file-scoped"
+        );
+
+        // A rescan derives the same id for the same (file, symbol), so
+        // storage can re-home onto the already-persisted row.
+        let rescan = super::discover(dir.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+        let mut ids: Vec<_> = parse_opts.iter().map(|c| c.id).collect();
+        let mut rescan_ids: Vec<_> = rescan
+            .candidates
+            .iter()
+            .filter(|c| c.symbol == "parse_opts")
+            .map(|c| c.id)
+            .collect();
+        ids.sort();
+        rescan_ids.sort();
+        assert_eq!(ids, rescan_ids, "ids are deterministic across scans");
     }
 }

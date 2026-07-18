@@ -84,6 +84,8 @@ fn sample_run(project: &str, harness_id: Uuid) -> RunRecord {
             sanitizer: Sanitizer::Address,
             env: Vec::new(),
             extra_args: Vec::new(),
+            seed: None,
+            replay_of: None,
         }),
         Utc::now(),
     );
