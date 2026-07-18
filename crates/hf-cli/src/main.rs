@@ -72,18 +72,23 @@ enum Commands {
     Run {
         /// Project root path.
         project: PathBuf,
-        /// Target symbol.
-        #[arg(long)]
-        target: String,
-        /// Fuzzing engine.
-        #[arg(long)]
-        engine: String,
+        /// Target symbol. Required unless `--replay` is given (the recorded
+        /// run carries its target).
+        #[arg(long, required_unless_present = "replay")]
+        target: Option<String>,
+        /// Fuzzing engine. Required unless `--replay` is given.
+        #[arg(long, required_unless_present = "replay")]
+        engine: Option<String>,
         /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Duration (e.g. 60m).
         #[arg(long)]
         duration: Option<String>,
+        /// Replay a persisted run with its recorded engine, duration, and
+        /// deterministic seed.
+        #[arg(long)]
+        replay: Option<String>,
     },
     /// Run an approved campaign: discover -> require promoted harness -> seed
     /// -> run -> triage, end to end.
@@ -933,52 +938,76 @@ async fn qualify_harness(
 
 async fn cmd_run(
     project: PathBuf,
-    target: &str,
-    engine: &str,
+    target: Option<&str>,
+    engine: Option<&str>,
     lang: &str,
     duration: Option<&str>,
+    replay: Option<&str>,
 ) -> anyhow::Result<()> {
-    let engine_kind = parse_engine(engine)?;
-    // `run` drives the already-built harness, which carries its own language, so
-    // the value is not threaded further. Still validate it (like triage/ci) so an
-    // invalid `--lang` is rejected up front rather than silently ignored.
-    parse_lang(lang)?;
-    let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
     let container = std::sync::Arc::new(ServiceContainer::bootstrap().await);
-    // Ensure a seed corpus exists before running. A failure here is not fatal
-    // (the engine can still run on an empty corpus) but must not be silent.
-    if let Err(e) = container.generate_seeds(&project, target).await {
-        eprintln!("warning: could not generate seed corpus: {e}");
-    }
-
-    println!("\n--- Running {engine} for {duration_secs}s (live, Ctrl-C to stop) ---");
-    // Run on a task so a Ctrl-C can cancel it cooperatively: the run keeps
-    // executing long enough to tear down the sandbox cleanly and return its
-    // partial results, rather than being dropped mid-flight.
-    let mut handle = {
-        let container = std::sync::Arc::clone(&container);
-        let project = project.clone();
-        let target = target.to_owned();
-        tokio::spawn(async move {
-            let on_progress = |p: FuzzProgress| match p {
-                FuzzProgress::LogLine(line) => println!("  {line}"),
-                FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
-                _ => {}
-            };
-            container
-                .run_fuzzer(&project, &target, engine_kind, duration_secs, &on_progress)
-                .await
-        })
+    let on_progress = |p: FuzzProgress| match p {
+        FuzzProgress::LogLine(line) => println!("  {line}"),
+        FuzzProgress::CrashesFound(_) => println!("  >> crash found"),
+        _ => {}
     };
 
-    let summary = tokio::select! {
-        res = &mut handle => res?,
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("\n--- Ctrl-C received: cancelling run ---");
-            container.cancel_all_runs();
-            handle.await?
+    let summary = if let Some(run_id) = replay {
+        // Replay pins the recorded engine/duration/seed; target/engine/duration
+        // flags are intentionally not required in this mode.
+        let run_id = uuid::Uuid::parse_str(run_id)
+            .map_err(|e| anyhow::anyhow!("invalid --replay run id {run_id:?}: {e}"))?;
+        println!("\n--- Replaying run {run_id} (live, Ctrl-C to stop) ---");
+        let mut handle = {
+            let container = std::sync::Arc::clone(&container);
+            tokio::spawn(async move { container.replay_run(run_id, &on_progress).await })
+        };
+        tokio::select! {
+            res = &mut handle => res?,
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\n--- Ctrl-C received: cancelling run ---");
+                container.cancel_all_runs();
+                handle.await?
+            }
+        }?
+    } else {
+        let (Some(target), Some(engine)) = (target, engine) else {
+            anyhow::bail!("--target and --engine are required unless --replay is given");
+        };
+        let engine_kind = parse_engine(engine)?;
+        // `run` drives the already-built harness, which carries its own language, so
+        // the value is not threaded further. Still validate it (like triage/ci) so an
+        // invalid `--lang` is rejected up front rather than silently ignored.
+        parse_lang(lang)?;
+        let duration_secs = duration.map(parse_duration).transpose()?.unwrap_or(3600);
+        // Ensure a seed corpus exists before running. A failure here is not fatal
+        // (the engine can still run on an empty corpus) but must not be silent.
+        if let Err(e) = container.generate_seeds(&project, target).await {
+            eprintln!("warning: could not generate seed corpus: {e}");
         }
-    }?;
+
+        println!("\n--- Running {engine} for {duration_secs}s (live, Ctrl-C to stop) ---");
+        // Run on a task so a Ctrl-C can cancel it cooperatively: the run keeps
+        // executing long enough to tear down the sandbox cleanly and return its
+        // partial results, rather than being dropped mid-flight.
+        let mut handle = {
+            let container = std::sync::Arc::clone(&container);
+            let project = project.clone();
+            let target = target.to_owned();
+            tokio::spawn(async move {
+                container
+                    .run_fuzzer(&project, &target, engine_kind, duration_secs, &on_progress)
+                    .await
+            })
+        };
+        tokio::select! {
+            res = &mut handle => res?,
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\n--- Ctrl-C received: cancelling run ---");
+                container.cancel_all_runs();
+                handle.await?
+            }
+        }?
+    };
     println!("\n--- Run summary ---");
     println!("  execs/sec: {:.0}", summary.execs);
     println!("  crashes detected: {}", summary.crashes);
@@ -1516,7 +1545,18 @@ async fn main() -> anyhow::Result<()> {
             engine,
             lang,
             duration,
-        } => cmd_run(project, &target, &engine, &lang, duration.as_deref()).await?,
+            replay,
+        } => {
+            cmd_run(
+                project,
+                target.as_deref(),
+                engine.as_deref(),
+                &lang,
+                duration.as_deref(),
+                replay.as_deref(),
+            )
+            .await?;
+        }
         Commands::Campaign {
             project,
             target,
