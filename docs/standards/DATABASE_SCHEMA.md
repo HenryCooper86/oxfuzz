@@ -118,8 +118,14 @@ Cleared for a project by `delete_project` and globally by `clear_knowledge`.
 | `rationale` | `TEXT NOT NULL` |
 | `discovered_at` | `TEXT NOT NULL` |
 | `data_json` | `TEXT NOT NULL` |
+| `file` | `TEXT NOT NULL DEFAULT ''` |
 
-Index: `idx_targets_project(project_root)`.
+Indexes: `idx_targets_project(project_root)`; unique
+`idx_targets_project_symbol_file(project_root, symbol, file)`. The `file`
+column is the defining file relative to `project_root` (added and backfilled
+from `data_json` by migration 0019); the triple is the persistence identity of
+a target. Legacy rows whose file could not be backfilled keep `''` and remain
+valid.
 
 ### `harnesses`
 
@@ -406,6 +412,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0016_targets_unique.sql` | collapses duplicate targets and adds `UNIQUE(project_root, symbol)` |
 | `0017_automotive_consumed_approvals.sql` | creates the single-use physical-bench approval ledger |
 | `0018_guardrail_decisions.sql` | creates the guardrail authorization audit trail |
+| `0019_targets_file_scoped_identity.sql` | adds and backfills `targets.file`; replaces the unique index with `UNIQUE(project_root, symbol, file)` |
 
 ## 7. Read failure contract
 
