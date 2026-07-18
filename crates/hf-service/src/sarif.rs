@@ -159,6 +159,7 @@ pub fn cwe_for(crash: &Crash) -> Cwe {
         CrashKind::Segv => cwe("CWE-476", "NULL Pointer Dereference"),
         CrashKind::Abort => cwe("CWE-617", "Reachable Assertion"),
         CrashKind::Timeout => cwe("CWE-834", "Excessive Iteration"),
+        CrashKind::Panic => cwe("CWE-248", "Uncaught Exception"),
         CrashKind::Other => cwe("CWE-noinfo", "Uncategorized Crash"),
     }
 }
@@ -177,7 +178,7 @@ pub fn security_severity(crash: &Crash) -> f64 {
     }
     match crash.kind {
         CrashKind::Asan | CrashKind::Segv => 6.0,
-        CrashKind::Ubsan | CrashKind::Other => 5.0,
+        CrashKind::Ubsan | CrashKind::Other | CrashKind::Panic => 5.0,
         CrashKind::Abort => 4.0,
         CrashKind::Timeout => 3.0,
     }

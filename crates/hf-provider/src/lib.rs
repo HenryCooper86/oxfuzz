@@ -13,6 +13,7 @@
 //!   [`OllamaProvider`] / [`AzureOpenAiProvider`] — LLM backends
 
 pub mod config;
+pub mod embedding;
 pub mod error;
 pub mod error_classifier;
 pub mod freeze;
@@ -31,6 +32,7 @@ mod tool_call_accumulator;
 pub use config::{
     drain_config_load_errors, HttpProtocol, ProviderConfig, ProviderPoolConfig, ProxySpec,
 };
+pub use embedding::OpenAiEmbedding;
 pub use error::ProviderPoolError;
 pub use error_classifier::{classify, classify_provider_error, StandardError};
 pub use freeze::FreezeManager;

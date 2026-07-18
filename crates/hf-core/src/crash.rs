@@ -14,6 +14,10 @@ pub enum CrashKind {
     Segv,
     Abort,
     Timeout,
+    /// A managed-runtime fault: a Go panic or an uncaught Python exception
+    /// (Atheris). Distinct from a C `Abort` (SIGABRT/assertion) so reports and
+    /// severity reflect a language-runtime crash rather than a native abort.
+    Panic,
     Other,
 }
 
