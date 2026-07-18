@@ -217,6 +217,27 @@ impl CampaignStateStore {
         Ok(result)
     }
 
+    /// Advance the target-rotation cursor by one without charging fuzz progress.
+    ///
+    /// Used on a failed or unrunnable fire (build failure, unparseable engine)
+    /// so a target that cannot run yields to the next target on the following
+    /// fire instead of pinning the cursor forever and starving the rotation.
+    /// Unlike [`Self::record_success`], it leaves `runs_done`/`secs_done` intact
+    /// so the budget only ever counts real work.
+    ///
+    /// # Errors
+    /// Returns an error without changing in-memory state if persistence fails.
+    pub fn advance_cursor(&self, id: &str) -> Result<CampaignRuntimeState, StateFileError> {
+        let mut guard = self.lock();
+        let mut candidate = guard.clone();
+        let state = candidate.states.entry(id.to_owned()).or_default();
+        state.cursor = state.cursor.wrapping_add(1);
+        let result = *state;
+        atomic_write_json(&self.path, &candidate)?;
+        *guard = candidate;
+        Ok(result)
+    }
+
     /// Record one completed fuzz run using an explicit second count.
     ///
     /// This compatibility helper fails fast on persistence errors. New campaign
@@ -475,5 +496,28 @@ mod tests {
         assert_eq!(state.cursor, 1, "one campaign fire advances one target");
         assert_eq!(state.runs_done, 3, "all successful fuzz iterations count");
         assert_eq!(state.secs_done, 17, "charge measured wall-clock work");
+    }
+
+    #[test]
+    fn advance_cursor_rotates_without_charging_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CampaignStateStore::try_load(dir.path().join("state.json")).unwrap();
+
+        // A failing target must yield to the next on the following fire, but a
+        // failed fire performs no real fuzz work, so nothing is charged.
+        let state = store.advance_cursor("campaign").unwrap();
+        assert_eq!(
+            state.cursor, 1,
+            "a failed fire still rotates to the next target"
+        );
+        assert_eq!(state.runs_done, 0, "a failed fire charges no iterations");
+        assert_eq!(
+            state.secs_done, 0,
+            "a failed fire charges no wall-clock time"
+        );
+
+        // The advance persists across reload.
+        let reloaded = CampaignStateStore::try_load(dir.path().join("state.json")).unwrap();
+        assert_eq!(reloaded.snapshot("campaign").cursor, 1);
     }
 }

@@ -262,6 +262,7 @@ pub struct ChatStreamChunk {
     /// Incremental reasoning/thinking content delta.
     pub delta_reasoning_content: Option<String>,
     /// Incremental tool call delta.
+    #[serde(default)]
     pub delta_tool_calls: Vec<crate::types::ToolCallRequest>,
     /// Present only in the final chunk.
     pub usage: Option<TokenUsage>,

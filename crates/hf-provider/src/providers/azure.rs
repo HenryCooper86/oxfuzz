@@ -818,6 +818,18 @@ impl LlmProvider for AzureOpenAiProvider {
 
                             match serde_json::from_str::<AzureStreamChunk>(trimmed) {
                                 Ok(chunk) => {
+                                    if let Some(err) = &chunk.error {
+                                        // Mid-stream error frame: fail the stream
+                                        // so the pool can freeze/fail over instead
+                                        // of returning a truncated success.
+                                        state.done = true;
+                                        return Some((
+                                            Err(crate::error_classifier::stream_error_to_provider_error(
+                                                "azure", err,
+                                            )),
+                                            composite,
+                                        ));
+                                    }
                                     let mut events = map_to_inter_events(&chunk, tool_acc);
                                     if events.is_empty() {
                                         continue;
@@ -1085,6 +1097,11 @@ struct AzureStreamChunk {
     #[serde(default)]
     choices: Vec<AzureStreamChoice>,
     usage: Option<AzureUsage>,
+    /// A mid-stream error object (e.g. an Azure content-filter block delivered
+    /// at HTTP 200). Without this field it parses into an empty chunk and is
+    /// swallowed as a clean end of stream (no freeze, no failover).
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
