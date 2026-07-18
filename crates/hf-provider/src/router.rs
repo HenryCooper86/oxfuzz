@@ -163,6 +163,30 @@ impl TagBasedRouter {
             });
         }
 
+        // Step 1b: Soft tier preference. Narrow to providers carrying all of the
+        // preferred tags, but only when at least one does -- otherwise keep the
+        // full set, so an untagged deployment behaves exactly as before.
+        let candidates: Vec<usize> = if route.preferred_tags.is_empty() {
+            candidates
+        } else {
+            let preferred: Vec<usize> = candidates
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let meta = providers[i].provider.metadata();
+                    route
+                        .preferred_tags
+                        .iter()
+                        .all(|tag| meta.tags.contains(tag))
+                })
+                .collect();
+            if preferred.is_empty() {
+                candidates
+            } else {
+                preferred
+            }
+        };
+
         // Step 2: Prefer exact model match if specified.
         if let Some(ref preferred) = route.preferred_model {
             for &idx in &candidates {
@@ -343,6 +367,27 @@ mod tests {
 
         let idx = router.select(&providers, &route).unwrap();
         assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn preferred_tags_narrow_when_matched_and_fall_back_when_not() {
+        let router = TagBasedRouter::with_strategy(SelectionStrategy::Priority);
+        let providers = vec![
+            make_routable("fast1", "gpt-3.5", vec!["fast"]),
+            make_routable("smart1", "gpt-4", vec!["reasoning"]),
+        ];
+
+        // A matched soft preference narrows selection to the reasoning provider.
+        let prefer_reasoning = RouteRequest::preferring_tags(vec!["reasoning".into()]);
+        assert_eq!(router.select(&providers, &prefer_reasoning).unwrap(), 1);
+
+        // A soft preference no provider carries must NOT fail -- it falls back to
+        // the full candidate set, so an untagged deployment is unaffected.
+        let prefer_missing = RouteRequest::preferring_tags(vec!["gpu".into()]);
+        assert!(
+            router.select(&providers, &prefer_missing).is_ok(),
+            "an unmatched soft preference must fall back, not error"
+        );
     }
 
     #[test]

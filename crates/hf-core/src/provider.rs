@@ -427,6 +427,12 @@ pub trait LlmProvider: Send + Sync {
 pub struct RouteRequest {
     /// Required tags the provider must have.
     pub required_tags: Vec<String>,
+    /// Soft-preferred tags: when at least one otherwise-eligible provider carries
+    /// all of them, selection narrows to those; when none do, they are ignored
+    /// and routing falls back to the full candidate set. Used for task-tiered
+    /// routing (e.g. prefer a `reasoning` model for harness authoring) without
+    /// breaking setups whose providers are not tagged that way.
+    pub preferred_tags: Vec<String>,
     /// Preferred provider by ID (exact match, highest priority).
     pub preferred_provider_id: Option<ProviderId>,
     /// Preferred model (exact match, optional).
@@ -441,6 +447,16 @@ impl RouteRequest {
     pub fn with_tags(tags: &[&str]) -> Self {
         Self {
             required_tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Route that softly prefers providers carrying all of `tags`, falling back
+    /// to any eligible provider when none match.
+    #[must_use]
+    pub fn preferring_tags(tags: Vec<String>) -> Self {
+        Self {
+            preferred_tags: tags,
             ..Self::default()
         }
     }
