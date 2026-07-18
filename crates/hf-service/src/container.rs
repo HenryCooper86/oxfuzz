@@ -7845,6 +7845,10 @@ impl ServiceContainer {
             test_title,
             reimport: cfg.reimport,
             auto_create: cfg.auto_create,
+            // This push carries only the latest run's crashes, not the target's
+            // complete crash history, so it must not close still-open findings a
+            // shorter/non-deterministic run happened not to rediscover.
+            close_old_findings: false,
         };
         client.import(&import, &findings).await
     }
@@ -8905,7 +8909,15 @@ pub fn provider_pool_from_env() -> Option<Arc<dyn ProviderPool>> {
 pub fn provider_pool_from_config() -> Option<Arc<dyn ProviderPool>> {
     let path = crate::init::config_dir().join("providers.toml");
     let text = std::fs::read_to_string(&path).ok()?;
-    let cfg: hf_provider::ProviderPoolConfig = toml::from_str(&text).ok()?;
+    let cfg: hf_provider::ProviderPoolConfig = match toml::from_str(&text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // A typo'd providers.toml previously disabled the LLM silently,
+            // indistinguishable from "no config". Surface the parse error.
+            tracing::warn!("failed to parse {}: {e}", path.display());
+            return None;
+        }
+    };
     if !cfg.providers.iter().any(|p| p.enabled) {
         return None;
     }

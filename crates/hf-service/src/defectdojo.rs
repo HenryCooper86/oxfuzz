@@ -370,6 +370,11 @@ pub struct ImportTarget {
     pub test_title: Option<String>,
     pub reimport: bool,
     pub auto_create: bool,
+    /// Whether a reimport should close findings absent from this upload. Only
+    /// safe when the upload is the target's *complete* current crash set; a
+    /// partial (single-run) push must leave it `false` so it does not close
+    /// still-open bugs the run merely failed to rediscover.
+    pub close_old_findings: bool,
 }
 
 /// The result of a successful push, surfaced to the presentation layers.
@@ -513,8 +518,17 @@ impl DefectDojoClient {
             form = form.text("product_type_name", target.product_type_name.clone());
         }
         if target.reimport {
-            // Close crashes that no longer reproduce so the engagement stays honest.
-            form = form.text("close_old_findings", "true");
+            // Only close absent findings when the caller pushed the target's
+            // complete current crash set; a partial single-run push must not
+            // close still-open bugs it merely did not rediscover.
+            form = form.text(
+                "close_old_findings",
+                if target.close_old_findings {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
         }
         if let Some(t) = &target.test_title {
             form = form.text("test_title", t.clone());

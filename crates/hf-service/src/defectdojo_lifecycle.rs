@@ -418,14 +418,23 @@ pub async fn stop() -> Result<DefectDojoStatus, ClassifiedError> {
     })?;
     let args = compose_args(&spec, &["stop"]);
     let spec_dir = spec.dir.clone();
-    tokio::task::spawn_blocking(move || {
-        let _ = Command::new(hf_runtime::docker_bin())
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(hf_runtime::docker_bin())
             .args(&args)
             .current_dir(&spec_dir)
-            .output();
+            .output()
     })
     .await
+    .map_err(|e| ClassifiedError::Internal(format!("docker compose stop: {e}")))?
     .map_err(|e| ClassifiedError::Internal(format!("docker compose stop: {e}")))?;
+    if !output.status.success() {
+        // A failed stop was previously swallowed and reported as success.
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(ClassifiedError::Internal(format!(
+            "docker compose stop failed: {}",
+            err.trim()
+        )));
+    }
     Ok(status_of(&cfg).await)
 }
 

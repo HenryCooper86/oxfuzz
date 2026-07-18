@@ -20,6 +20,11 @@ use uuid::Uuid;
 /// A trace store the recorder writes to (in-memory or `SQLite`-backed).
 pub type SharedTraceStore = Arc<dyn TraceStore>;
 
+/// Max trace ids bound per `IN (...)` observation query, kept under the
+/// conservative 999-variable `SQLite` limit so a heavy session's cost summary
+/// does not fail the read.
+const TRACE_ID_CHUNK: usize = 900;
+
 /// Per-model cost/usage rollup.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ModelCost {
@@ -120,7 +125,14 @@ impl DiagnosticsRecorder {
             .list_traces_by_session(&self.session_id.to_string(), 100_000)
             .await?;
         let trace_ids = traces.iter().map(|trace| trace.id).collect::<Vec<_>>();
-        let observations = self.store.get_observations_by_trace_ids(&trace_ids).await?;
+        // `get_observations_by_trace_ids` binds one SQL variable per id; a heavy
+        // session can exceed SQLite's variable limit (999 on older builds), so
+        // fetch in bounded batches and merge rather than failing the read for the
+        // most cost-relevant sessions.
+        let mut observations = Vec::new();
+        for batch in trace_ids.chunks(TRACE_ID_CHUNK) {
+            observations.extend(self.store.get_observations_by_trace_ids(batch).await?);
+        }
         let mut total = CostSummary::default();
         let mut by_model: HashMap<String, ModelCost> = HashMap::new();
         for obs in observations
