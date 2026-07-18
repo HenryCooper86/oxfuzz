@@ -114,6 +114,23 @@ pub struct TargetCandidate {
     pub accumulated_complexity: u32,
 }
 
+impl TargetCandidate {
+    /// The defining file relative to the canonical project root, falling back
+    /// to the stored path verbatim when it lies outside the root (or is
+    /// already relative). This is the file component of the persistence
+    /// identity `(project_root, file, symbol)` and of the `file::symbol`
+    /// qualifier accepted by target resolution.
+    #[must_use]
+    pub fn relative_file(&self) -> String {
+        self.location
+            .file
+            .strip_prefix(&self.project_root)
+            .unwrap_or(&self.location.file)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 /// A ranked inventory of fuzzing targets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetInventory {
@@ -141,7 +158,49 @@ impl TargetInventory {
 
 #[cfg(test)]
 mod tests {
-    use super::TargetLanguage;
+    use super::{InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage};
+    use std::path::PathBuf;
+
+    fn candidate(project_root: &str, file: &str) -> TargetCandidate {
+        TargetCandidate {
+            id: uuid::Uuid::new_v4(),
+            project_root: PathBuf::from(project_root),
+            language: TargetLanguage::C,
+            symbol: "parse_opts".to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from(file),
+                line: 1,
+                col: 1,
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            fit_score: 0.5,
+            sanitizers: Vec::new(),
+            rationale: String::new(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 0,
+        }
+    }
+
+    #[test]
+    fn relative_file_strips_the_project_root_prefix() {
+        let c = candidate("/proj", "/proj/src/a.c");
+        assert_eq!(c.relative_file(), "src/a.c");
+    }
+
+    #[test]
+    fn relative_file_falls_back_to_the_absolute_path_outside_the_root() {
+        let c = candidate("/proj", "/elsewhere/a.c");
+        assert_eq!(c.relative_file(), "/elsewhere/a.c");
+    }
+
+    #[test]
+    fn relative_file_keeps_an_already_relative_path() {
+        let c = candidate("/proj", "src/a.c");
+        assert_eq!(c.relative_file(), "src/a.c");
+    }
 
     #[test]
     fn test_target_language_serde_roundtrip() {
