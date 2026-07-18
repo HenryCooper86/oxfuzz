@@ -551,6 +551,51 @@ async fn knowledge_search_unindexed_returns_empty_array() {
 }
 
 #[tokio::test]
+async fn knowledge_stats_unindexed_reports_not_indexed() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/knowledge/stats?project=.")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["indexed"], false);
+    assert_eq!(json["files"], 0);
+    assert_eq!(json["chunks"], 0);
+    assert!(json["documents"].is_number());
+    assert!(
+        json["retrieval_strategy"].is_string(),
+        "config summary carries the active strategy"
+    );
+    assert!(json["chunk_max_tokens"].is_number());
+}
+
+#[tokio::test]
+async fn knowledge_stats_rejects_a_path_outside_the_allowlist() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/knowledge/stats?project=/etc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn workbench_dashboard_without_db_returns_empty_summary() {
     let (status, json) = post_json(
         "/workbench/dashboard",
