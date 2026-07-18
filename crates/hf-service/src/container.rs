@@ -2090,6 +2090,57 @@ fn summary_cache() -> &'static SummaryCache {
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Cache value: the signature the frontier was computed for + the regions.
+type UncoveredCache =
+    std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<hf_coverage::UncoveredRegion>)>>;
+
+/// Process-global cache of uncovered-frontier region sets, keyed by
+/// `project::target`, invalidated by the same corpus+harness signature.
+fn uncovered_cache() -> &'static UncoveredCache {
+    static CACHE: std::sync::OnceLock<UncoveredCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Build the uncovered-frontier lines for the refine prompt: the target's
+/// reachable functions that `llvm-cov` shows as unreached, each annotated with
+/// its `file:line:col` location, deduplicated to the first location per
+/// function. Falls back to the full frontier when none of the reachable names
+/// match the frontier (e.g. llvm-cov name mangling on C++/Rust), so refinement
+/// is never left blind while still carrying locations.
+fn frontier_refine_lines(
+    reachable: &[String],
+    frontier: &[hf_coverage::UncoveredRegion],
+) -> Vec<String> {
+    let format_region = |region: &hf_coverage::UncoveredRegion| {
+        if region.file.is_empty() {
+            region.function.clone()
+        } else {
+            format!(
+                "{} ({}:{}:{})",
+                region.function, region.file, region.line, region.col
+            )
+        }
+    };
+    let reachable_set: std::collections::HashSet<&str> =
+        reachable.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
+    let targeted: Vec<String> = frontier
+        .iter()
+        .filter(|region| reachable_set.contains(region.function.as_str()))
+        .filter(|region| seen.insert(region.function.clone()))
+        .map(&format_region)
+        .collect();
+    if !targeted.is_empty() {
+        return targeted;
+    }
+    let mut seen = std::collections::HashSet::new();
+    frontier
+        .iter()
+        .filter(|region| seen.insert(region.function.clone()))
+        .map(format_region)
+        .collect()
+}
+
 /// A cheap fingerprint of the inputs that affect coverage: stable corpus file
 /// metadata plus the canonical active harness source. Changes when a run grows
 /// the corpus or a successful build commits a new harness, invalidating caches.
@@ -5477,18 +5528,28 @@ impl ServiceContainer {
             ))
         })?;
 
-        // Which reachable functions has coverage not reached yet?
-        let covered: std::collections::HashSet<String> = self
-            .coverage_functions(project, target)
-            .await
-            .into_iter()
-            .collect();
-        let uncovered: Vec<String> = candidate
-            .reachable_functions
-            .iter()
-            .filter(|f| !covered.contains(*f))
-            .cloned()
-            .collect();
+        // Prefer the dynamic llvm-cov frontier (uncovered code with file:line
+        // locations) so the refine prompt points the LLM at concrete gaps. Fall
+        // back to the static reachable-minus-covered names when no source
+        // coverage frontier is available (non-C targets, tooling missing) --
+        // both accessors early-return without running the pipeline for a
+        // non-C target, so the fallback costs nothing extra.
+        let frontier = self.coverage_uncovered(project, target).await;
+        let uncovered: Vec<String> = if frontier.is_empty() {
+            let covered: std::collections::HashSet<String> = self
+                .coverage_functions(project, target)
+                .await
+                .into_iter()
+                .collect();
+            candidate
+                .reachable_functions
+                .iter()
+                .filter(|f| !covered.contains(*f))
+                .cloned()
+                .collect()
+        } else {
+            frontier_refine_lines(&candidate.reachable_functions, &frontier)
+        };
 
         let pool = self.provider_pool().ok_or_else(|| {
             ClassifiedError::Provider("no LLM provider configured for refinement".to_owned())
@@ -5573,6 +5634,7 @@ impl ServiceContainer {
         let mut iterations = 0usize;
         let mut auto_reverts = 0usize;
         let mut termination = hf_core::runtime::CommandTermination::Completed;
+        let mut last_stagnation: Option<hf_coverage::StagnationProposal> = None;
         let cap = max_iterations.max(1);
         while iterations < cap {
             iterations += 1;
@@ -5581,6 +5643,7 @@ impl ServiceContainer {
                 .await?;
             termination = summary.termination;
             edges = edges.max(summary.edges);
+            last_stagnation = summary.stagnation.clone();
             // A refine step between iterations can regress coverage; the policy
             // (armed via config) then restores the last-good harness, or, in
             // notify-only mode, flags it. Count either so history shows it.
@@ -5604,6 +5667,23 @@ impl ServiceContainer {
             }
         }
 
+        // Coverage-driven loop: if the campaign plateaued on coverage without
+        // finding a crash, PROPOSE a targeted refined harness aimed at the
+        // uncovered frontier. HITL (AGENTS.md 2.12): the proposal is left
+        // `Compiled`, never promoted or auto-run, and it is only attempted when
+        // the compile action is already policy-allowed -- otherwise the plateau
+        // is surfaced for a human to trigger refinement through the normal
+        // approval path, so the campaign never blocks here.
+        let refine = if crashes == 0
+            && termination != hf_core::runtime::CommandTermination::Cancelled
+            && last_stagnation == Some(hf_coverage::StagnationProposal::NewHarness)
+        {
+            self.propose_refine_on_plateau(project, &target, engine, lang)
+                .await
+        } else {
+            None
+        };
+
         Ok(CampaignOutcome {
             target,
             harness_status: harness.status,
@@ -5612,7 +5692,57 @@ impl ServiceContainer {
             iterations,
             auto_reverts,
             termination,
+            refine,
         })
+    }
+
+    /// Draft a targeted refined harness in response to a coverage plateau, as a
+    /// proposal only. Returns `None` (no proposal) when refinement is not
+    /// applicable: no LLM provider, no uncovered frontier (non-C target or full
+    /// coverage), or the compile action is not already policy-allowed (so we
+    /// never block a headless campaign on an approval prompt, nor compile
+    /// without an Allow decision). The refined harness stays `Compiled`; the
+    /// existing promotion gate keeps it from being auto-run.
+    async fn propose_refine_on_plateau(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+    ) -> Option<RefineProposal> {
+        self.provider_pool()?;
+        if !matches!(
+            self.guardrails.policy().evaluate(&Action::CompileHarness),
+            Decision::Allow
+        ) {
+            return None;
+        }
+        // Populate the frontier cache once; `harness_refine` reuses it (same
+        // signature) rather than re-running the expensive coverage pipeline.
+        let frontier_locations = self.coverage_uncovered(project, target).await.len();
+        if frontier_locations == 0 {
+            return None;
+        }
+        // Two corrective passes is enough for a targeted re-draft; keep it small
+        // so a plateau does not turn into a long repair loop.
+        match self.harness_refine(project, target, engine, lang, 2).await {
+            Ok(outcome) => Some(RefineProposal {
+                frontier_locations,
+                compiled: outcome.status == HarnessStatus::Compiled,
+                note: format!(
+                    "coverage plateaued; proposed a refined harness for {frontier_locations} \
+                     uncovered location(s), left Compiled for human review"
+                ),
+            }),
+            Err(error) => {
+                tracing::warn!(%error, "coverage-plateau refine proposal failed");
+                Some(RefineProposal {
+                    frontier_locations,
+                    compiled: false,
+                    note: format!("coverage plateaued; refine proposal failed: {error}"),
+                })
+            }
+        }
     }
 
     /// Run a short smoke fuzz (60 seconds, clamped to the configured campaign
@@ -7455,6 +7585,87 @@ impl ServiceContainer {
         }
     }
 
+    /// Run the C source-coverage pipeline (build with instrumentation -> replay
+    /// the corpus -> `llvm-cov export`) in the sandbox for an already-resolved
+    /// `workspace`, returning the raw export JSON. `None` when the pipeline does
+    /// not complete cleanly (so the caller does not cache a transient failure).
+    /// The caller holds the workspace-operation guard and has verified a harness
+    /// exists.
+    async fn run_coverage_export(&self, workspace: &Path) -> Option<String> {
+        let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
+             -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
+             && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \
+             llvm-profdata merge -sparse cov.profraw -o cov.profdata 2>/dev/null \
+             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata 2>/dev/null";
+        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
+        let limits = hf_core::runtime::ResourceLimits {
+            max_mem_mb: 4096,
+            max_cpus: 2,
+            max_duration_secs: 180,
+            env: std::collections::HashMap::new(),
+            ptrace: false,
+        };
+        match self.runtime.run_command(&cmd, workspace, &limits).await {
+            Ok(result)
+                if result.termination == hf_core::runtime::CommandTermination::Completed
+                    && result.exit_code == 0 =>
+            {
+                Some(result.stdout)
+            }
+            Ok(result) => {
+                tracing::warn!(
+                    termination = ?result.termination,
+                    exit_code = result.exit_code,
+                    "coverage collection did not complete cleanly; not caching so it retries"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!("coverage collection failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// The uncovered frontier for a target: the `file:line` locations the
+    /// current corpus has not reached, extracted from the same `llvm-cov export`
+    /// the covered-set overlay uses. Drives targeted harness refinement
+    /// ([`Self::harness_refine`]). Empty when no C harness was built or the
+    /// coverage tooling is unavailable. Cached per target by the corpus+harness
+    /// signature, like [`Self::coverage_functions`].
+    pub async fn coverage_uncovered(
+        &self,
+        project: &Path,
+        target: &str,
+    ) -> Vec<hf_coverage::UncoveredRegion> {
+        let Ok(_workspace_operation) = self.acquire_workspace_operation().await else {
+            return Vec::new();
+        };
+        let workspace = workspace_dir(project, target);
+        if !workspace.join("harness.c").exists() {
+            return Vec::new();
+        }
+        let cache_key = format!("{}::{target}", project.display());
+        let signature = coverage_signature(&workspace);
+        if let Some((cached_sig, cached)) = uncovered_cache()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&cache_key).cloned())
+        {
+            if cached_sig == signature {
+                return cached;
+            }
+        }
+        let Some(json) = self.run_coverage_export(&workspace).await else {
+            return Vec::new();
+        };
+        let frontier = hf_coverage::parse_llvm_cov_uncovered(&json);
+        if let Ok(mut map) = uncovered_cache().lock() {
+            map.insert(cache_key, (signature, frontier.clone()));
+        }
+        frontier
+    }
+
     /// Line/region/function coverage totals for a fuzz run.
     ///
     /// Complements [`Self::coverage_functions`] (which names covered functions
@@ -8760,6 +8971,27 @@ pub struct CampaignOutcome {
     pub auto_reverts: usize,
     /// Why the final campaign iteration stopped.
     pub termination: hf_core::runtime::CommandTermination,
+    /// When the campaign plateaued on coverage without finding a crash, the
+    /// result of the automatic targeted-refinement *proposal*. The refined
+    /// harness is left `Compiled` (never promoted or auto-run), preserving the
+    /// human promotion gate. `None` when no plateau was detected or refinement
+    /// was not attempted (no provider, non-C target, or the compile action
+    /// requires approval).
+    #[serde(default)]
+    pub refine: Option<RefineProposal>,
+}
+
+/// Outcome of an automatic coverage-plateau refinement proposal (HITL-safe:
+/// the refined harness is only compiled, never promoted or executed).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefineProposal {
+    /// Uncovered frontier locations that drove the refinement.
+    pub frontier_locations: usize,
+    /// Whether a refined harness compiled successfully (still only `Compiled`,
+    /// awaiting human review and promotion).
+    pub compiled: bool,
+    /// A short human-readable note for the run log.
+    pub note: String,
 }
 
 /// Outcome of replaying one stored crash input against the current harness.
@@ -9684,6 +9916,46 @@ mod coverage_tests {
         // A new corpus file -> different signature (cache invalidated).
         std::fs::write(ws.join("corpus/b"), "2").unwrap();
         assert_ne!(sig1, coverage_signature(ws));
+    }
+
+    fn region(function: &str, file: &str, line: u32) -> hf_coverage::UncoveredRegion {
+        hf_coverage::UncoveredRegion {
+            function: function.to_owned(),
+            file: file.to_owned(),
+            line,
+            col: 1,
+        }
+    }
+
+    #[test]
+    fn frontier_refine_lines_targets_reachable_functions_with_locations() {
+        use super::frontier_refine_lines;
+        let reachable = vec!["parse_header".to_owned(), "decode_body".to_owned()];
+        let frontier = vec![
+            region("parse_header", "parser.c", 42),
+            // A second region of the same function collapses to the first line.
+            region("parse_header", "parser.c", 51),
+            // Not reachable -> excluded when a reachable match exists.
+            region("internal_helper", "util.c", 9),
+        ];
+        let lines = frontier_refine_lines(&reachable, &frontier);
+        assert_eq!(lines, vec!["parse_header (parser.c:42:1)".to_owned()]);
+    }
+
+    #[test]
+    fn frontier_refine_lines_falls_back_to_full_frontier_when_no_reachable_match() {
+        use super::frontier_refine_lines;
+        // llvm-cov names (mangled) do not intersect the scanner's plain names.
+        let reachable = vec!["parse_header".to_owned()];
+        let frontier = vec![
+            region("_Z6mangledv", "parser.cc", 7),
+            region("", "", 0), // empty file -> bare function name
+        ];
+        let lines = frontier_refine_lines(&reachable, &frontier);
+        assert_eq!(
+            lines,
+            vec!["_Z6mangledv (parser.cc:7:1)".to_owned(), String::new()]
+        );
     }
 }
 
