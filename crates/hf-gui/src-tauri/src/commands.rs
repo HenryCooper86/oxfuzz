@@ -303,11 +303,14 @@ pub async fn harness_smoke(
         // A smoke run that surfaced crashes is a failure, not a pass: report it
         // as such so the UI (which keys its done/error state on this string)
         // does not render a crashing harness as qualified.
-        "status": if smoke.passed { "SmokePassed" } else { "SmokeFailed" },
-        "duration_secs": smoke.duration_secs,
-        "execs_per_sec": smoke.execs_per_sec,
-        "crashes": smoke.crashes,
-        "passed": smoke.passed,
+        "status": if smoke.summary.passed { "SmokePassed" } else { "SmokeFailed" },
+        "duration_secs": smoke.summary.duration_secs,
+        "execs_per_sec": smoke.summary.execs_per_sec,
+        "crashes": smoke.summary.crashes,
+        "passed": smoke.summary.passed,
+        // Deterministic self-verification verdict (grok-build L2): lets the UI
+        // warn on a hollow pass instead of treating every "passed" as qualified.
+        "verdict": smoke.verdict,
     }))
 }
 
