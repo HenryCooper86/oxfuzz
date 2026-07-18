@@ -7699,6 +7699,43 @@ impl ServiceContainer {
             .map_err(|e| ClassifiedError::Internal(format!("write repro bundle: {e}")))
     }
 
+    /// Export a reproduction bundle for a crash from the target's most recent
+    /// run. Selects the crash whose id starts with `crash_id` when given, else
+    /// the first crash of the run. Returns the bundle directory.
+    ///
+    /// # Errors
+    /// Returns a validation error when the latest run has no crashes, no crash
+    /// matches `crash_id`, or the harness/input cannot be read; an internal
+    /// error when the bundle cannot be written.
+    pub async fn export_repro_bundle_for_latest(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        crash_id: Option<&str>,
+        dest: &Path,
+    ) -> Result<PathBuf, ClassifiedError> {
+        let crashes = self.crashes_for_latest_run(project, Some(target)).await?;
+        let crash = match crash_id {
+            Some(id) => crashes
+                .iter()
+                .find(|crash| crash.id.to_string().starts_with(id))
+                .ok_or_else(|| {
+                    ClassifiedError::Validation(format!(
+                        "no crash matching id '{id}' in the latest run for '{target}'"
+                    ))
+                })?,
+            None => crashes.first().ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "the latest run for '{target}' has no crashes to bundle"
+                ))
+            })?,
+        };
+        self.export_repro_bundle(project, target, engine, lang, crash, dest)
+            .await
+    }
+
     /// Persisted crashes for the most recent matching run (empty without a
     /// store or matching runs). `target = None` selects project-wide history.
     async fn crashes_for_latest_run(

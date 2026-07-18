@@ -168,6 +168,27 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Export a self-contained reproduction bundle (harness + crash input +
+    /// REPRODUCE.md) for a crash from the target's latest run.
+    Repro {
+        /// Project root path.
+        project: PathBuf,
+        /// Target symbol.
+        #[arg(long)]
+        target: String,
+        /// Fuzzing engine. Defaults to libfuzzer.
+        #[arg(long, default_value = "libfuzzer")]
+        engine: String,
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
+        #[arg(long, default_value = "c")]
+        lang: String,
+        /// Crash id (or unique prefix) to bundle; defaults to the first crash.
+        #[arg(long)]
+        crash: Option<String>,
+        /// Output directory for the bundle.
+        #[arg(long, default_value = "hobot_fuzz_repro")]
+        out: PathBuf,
+    },
     /// Push the latest run's triaged crashes to `DefectDojo` as findings.
     Defectdojo {
         /// Project root path.
@@ -1170,6 +1191,25 @@ async fn cmd_sarif(
     Ok(())
 }
 
+async fn cmd_repro(
+    project: PathBuf,
+    target: &str,
+    engine: &str,
+    lang: &str,
+    crash: Option<&str>,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let engine = parse_engine(engine)?;
+    let lang = parse_lang(lang)?;
+    let container = ServiceContainer::bootstrap().await;
+    let dir = container
+        .export_repro_bundle_for_latest(&project, target, engine, lang, crash, out)
+        .await?;
+    println!("Reproduction bundle written to {}", dir.display());
+    println!("  Build and reproduce: see {}/REPRODUCE.md", dir.display());
+    Ok(())
+}
+
 async fn cmd_defectdojo(
     project: PathBuf,
     target: Option<&str>,
@@ -1566,6 +1606,14 @@ async fn main() -> anyhow::Result<()> {
             target,
             out,
         } => cmd_sarif(project, &target, out.as_deref()).await?,
+        Commands::Repro {
+            project,
+            target,
+            engine,
+            lang,
+            crash,
+            out,
+        } => cmd_repro(project, &target, &engine, &lang, crash.as_deref(), &out).await?,
         Commands::Defectdojo {
             project,
             target,
