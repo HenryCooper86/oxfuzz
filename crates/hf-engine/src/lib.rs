@@ -15,6 +15,7 @@ pub mod libfuzzer;
 pub mod progress;
 pub mod registry;
 pub mod runner;
+pub mod seed;
 pub mod showmap;
 pub mod syzkaller;
 
