@@ -23,6 +23,31 @@ fn cfg(engine: EngineKind, duration_secs: u64) -> FuzzRunConfig {
 }
 
 #[test]
+fn libfuzzer_enables_value_profile_comparison_feedback() {
+    let c = cfg(EngineKind::LibFuzzer, 3600);
+    let args =
+        hf_engine::libfuzzer::build_run_args(&c, "/work/fuzz_bin", "/work/corpus", "/work/out");
+    let joined = args.join(" ");
+    assert!(
+        joined.contains("-use_value_profile=1"),
+        "libFuzzer must enable value-profile comparison feedback: {joined}"
+    );
+    // Overridable: a caller's extra_args wins (libFuzzer takes the last one).
+    let off = FuzzRunConfig {
+        extra_args: vec!["-use_value_profile=0".to_owned()],
+        ..cfg(EngineKind::LibFuzzer, 3600)
+    };
+    let off_args =
+        hf_engine::libfuzzer::build_run_args(&off, "/work/fuzz_bin", "/work/corpus", "/work/out");
+    let default_at = off_args.iter().position(|a| a == "-use_value_profile=1");
+    let override_at = off_args.iter().position(|a| a == "-use_value_profile=0");
+    assert!(
+        matches!((default_at, override_at), (Some(d), Some(o)) if d < o),
+        "an override must appear after the default so it wins: {off_args:?}"
+    );
+}
+
+#[test]
 fn libfuzzer_args_have_max_total_time() {
     let c = cfg(EngineKind::LibFuzzer, 3600);
     let args =

@@ -28,6 +28,7 @@ pub mod recovery;
 pub mod report;
 pub mod report_export;
 pub mod report_store;
+pub mod repro;
 pub mod sarif;
 pub mod scheduler;
 pub mod system;

@@ -1851,6 +1851,17 @@ fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathB
 
 /// Read the current harness source from a target workspace, trying the known
 /// per-language harness filenames. Returns `None` when none exists yet.
+/// The source filename used inside a reproduction bundle for a language.
+fn harness_bundle_filename(lang: TargetLanguage) -> &'static str {
+    match lang {
+        TargetLanguage::C => "harness.c",
+        TargetLanguage::Cpp => "harness.cc",
+        TargetLanguage::Rust => "harness.rs",
+        TargetLanguage::Go => "harness.go",
+        TargetLanguage::Python => "harness.py",
+    }
+}
+
 fn read_current_harness_source(workspace: &Path) -> Option<String> {
     let canonical = workspace.join("harness.source");
     if is_regular_file(&canonical) {
@@ -2121,35 +2132,17 @@ mod crash_input_boundary_tests {
     }
 }
 
-/// Cache value: the signature the covered set was computed for + the set.
-type CoverageCache = std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<String>)>>;
+/// Cache value: the signature the export was computed for + the raw
+/// `llvm-cov export` JSON.
+type ExportCache = std::sync::Mutex<std::collections::HashMap<String, (u64, String)>>;
 
-/// Process-global cache of covered-function sets, keyed by `project::target`,
-/// each tagged with the corpus+harness signature it was computed for.
-fn coverage_cache() -> &'static CoverageCache {
-    static CACHE: std::sync::OnceLock<CoverageCache> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Cache value: the signature the summary was computed for + the summary.
-type SummaryCache =
-    std::sync::Mutex<std::collections::HashMap<String, (u64, hf_coverage::CoverageSummary)>>;
-
-/// Process-global cache of line/region coverage summaries, keyed by
-/// `project::target`, invalidated by the same corpus+harness signature.
-fn summary_cache() -> &'static SummaryCache {
-    static CACHE: std::sync::OnceLock<SummaryCache> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Cache value: the signature the frontier was computed for + the regions.
-type UncoveredCache =
-    std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<hf_coverage::UncoveredRegion>)>>;
-
-/// Process-global cache of uncovered-frontier region sets, keyed by
-/// `project::target`, invalidated by the same corpus+harness signature.
-fn uncovered_cache() -> &'static UncoveredCache {
-    static CACHE: std::sync::OnceLock<UncoveredCache> = std::sync::OnceLock::new();
+/// Process-global cache of raw `llvm-cov export` JSON, keyed by `project::target`
+/// and tagged with the corpus+harness signature it was computed for. The
+/// covered-set, summary, and frontier accessors all parse from this single
+/// cached export, so the expensive (~180s) coverage pipeline runs at most once
+/// per signature instead of once per accessor.
+fn export_cache() -> &'static ExportCache {
+    static CACHE: std::sync::OnceLock<ExportCache> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -7680,78 +7673,47 @@ impl ServiceContainer {
         Ok(results)
     }
 
-    /// Functions covered by a fuzz run, for the call-tree coverage overlay.
-    ///
-    /// Builds a source-based-coverage harness from the workspace sources,
-    /// replays the accumulated corpus through it in the sandbox, and exports
-    /// per-function execution counts with `llvm-cov` -- engine-agnostic, since
-    /// it compiles its own coverage binary rather than reusing the run's. Empty
-    /// when no harness was built or coverage tooling is unavailable. Results are
-    /// cached per target, keyed by a corpus+harness signature so they refresh
-    /// automatically when a run grows the corpus or the harness is rebuilt.
-    pub async fn coverage_functions(&self, project: &Path, target: &str) -> Vec<String> {
-        let Ok(_workspace_operation) = self.acquire_workspace_operation().await else {
-            return Vec::new();
-        };
+    /// Fetch the raw `llvm-cov export` JSON for a target, cached per target by
+    /// the corpus+harness signature. The covered-set, summary, and frontier
+    /// accessors all parse from this one cached export, so the expensive (~180s)
+    /// coverage pipeline runs at most once per signature rather than once per
+    /// accessor. `None` when no C harness was built or the pipeline did not
+    /// complete cleanly (a transient failure is not cached, so it retries).
+    async fn coverage_export_json_cached(&self, project: &Path, target: &str) -> Option<String> {
+        let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
         let workspace = workspace_dir(project, target);
         if !workspace.join("harness.c").exists() {
-            return Vec::new();
+            return None;
         }
         let cache_key = format!("{}::{target}", project.display());
         let signature = coverage_signature(&workspace);
-        if let Some((cached_sig, cached)) = coverage_cache()
+        if let Some((cached_sig, cached)) = export_cache()
             .lock()
             .ok()
             .and_then(|map| map.get(&cache_key).cloned())
         {
             if cached_sig == signature {
-                return cached;
+                return Some(cached);
             }
         }
-        // One sandbox shell pipeline: coverage build -> replay corpus -> export.
-        let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
-             -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
-             && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \
-             llvm-profdata merge -sparse cov.profraw -o cov.profdata 2>/dev/null \
-             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata 2>/dev/null";
-        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
-        let limits = hf_core::runtime::ResourceLimits {
-            max_mem_mb: 4096,
-            max_cpus: 2,
-            max_duration_secs: 180,
-            env: std::collections::HashMap::new(),
-            ptrace: false,
-        };
-        match self.runtime.run_command(&cmd, &workspace, &limits).await {
-            // Cache successful runs (even empty -- the signature invalidates them
-            // when the corpus changes); do not cache infra failures, so they
-            // retry. The pipeline can finish (Completed) yet exit non-zero when
-            // the coverage build itself fails (clang error, transient OOM);
-            // caching that empty result would wrongly pin "0 functions covered"
-            // until the corpus changes, so the exit code is checked too.
-            Ok(result)
-                if result.termination == hf_core::runtime::CommandTermination::Completed
-                    && result.exit_code == 0 =>
-            {
-                let covered = parse_covered_functions(&result.stdout);
-                if let Ok(mut map) = coverage_cache().lock() {
-                    map.insert(cache_key, (signature, covered.clone()));
-                }
-                covered
-            }
-            Ok(result) => {
-                tracing::warn!(
-                    termination = ?result.termination,
-                    exit_code = result.exit_code,
-                    "coverage collection did not complete cleanly; not caching so it retries"
-                );
-                Vec::new()
-            }
-            Err(e) => {
-                tracing::warn!("coverage collection failed: {e}");
-                Vec::new()
-            }
+        let json = self.run_coverage_export(&workspace).await?;
+        if let Ok(mut map) = export_cache().lock() {
+            map.insert(cache_key, (signature, json.clone()));
         }
+        Some(json)
+    }
+
+    /// Functions covered by a fuzz run, for the call-tree coverage overlay.
+    ///
+    /// Parses the shared cached `llvm-cov export` for per-function execution
+    /// counts -- engine-agnostic, since the export comes from a purpose-built
+    /// coverage binary rather than the run's. Empty when no harness was built or
+    /// coverage tooling is unavailable.
+    pub async fn coverage_functions(&self, project: &Path, target: &str) -> Vec<String> {
+        self.coverage_export_json_cached(project, target)
+            .await
+            .map(|json| parse_covered_functions(&json))
+            .unwrap_or_default()
     }
 
     /// Run the C source-coverage pipeline (build with instrumentation -> replay
@@ -7759,7 +7721,8 @@ impl ServiceContainer {
     /// `workspace`, returning the raw export JSON. `None` when the pipeline does
     /// not complete cleanly (so the caller does not cache a transient failure).
     /// The caller holds the workspace-operation guard and has verified a harness
-    /// exists.
+    /// exists. Prefer [`Self::coverage_export_json_cached`], which adds the
+    /// guard, harness check, and per-signature cache.
     async fn run_coverage_export(&self, workspace: &Path) -> Option<String> {
         let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
              -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
@@ -7807,32 +7770,10 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Vec<hf_coverage::UncoveredRegion> {
-        let Ok(_workspace_operation) = self.acquire_workspace_operation().await else {
-            return Vec::new();
-        };
-        let workspace = workspace_dir(project, target);
-        if !workspace.join("harness.c").exists() {
-            return Vec::new();
-        }
-        let cache_key = format!("{}::{target}", project.display());
-        let signature = coverage_signature(&workspace);
-        if let Some((cached_sig, cached)) = uncovered_cache()
-            .lock()
-            .ok()
-            .and_then(|map| map.get(&cache_key).cloned())
-        {
-            if cached_sig == signature {
-                return cached;
-            }
-        }
-        let Some(json) = self.run_coverage_export(&workspace).await else {
-            return Vec::new();
-        };
-        let frontier = hf_coverage::parse_llvm_cov_uncovered(&json);
-        if let Ok(mut map) = uncovered_cache().lock() {
-            map.insert(cache_key, (signature, frontier.clone()));
-        }
-        frontier
+        self.coverage_export_json_cached(project, target)
+            .await
+            .map(|json| hf_coverage::parse_llvm_cov_uncovered(&json))
+            .unwrap_or_default()
     }
 
     /// Line/region/function coverage totals for a fuzz run.
@@ -7849,52 +7790,76 @@ impl ServiceContainer {
         project: &Path,
         target: &str,
     ) -> Option<hf_coverage::CoverageSummary> {
-        let _workspace_operation = self.acquire_workspace_operation().await.ok()?;
-        let workspace = workspace_dir(project, target);
-        if !workspace.join("harness.c").exists() {
-            return None;
+        let json = self.coverage_export_json_cached(project, target).await?;
+        hf_coverage::parse_llvm_cov_summary(&json)
+    }
+
+    /// Assemble a self-contained reproduction bundle for `crash` into `dest`:
+    /// the current harness source, the crash input bytes, and a `REPRODUCE.md`
+    /// manifest carrying the exact build and run steps. A maintainer can then
+    /// reproduce the finding with only the target toolchain -- no `hobot_fuzz`
+    /// install (VISION reproducibility). Returns the bundle directory.
+    ///
+    /// # Errors
+    /// Returns a validation error if the harness or crash input is missing (or
+    /// the input is not a regular file -- symlinks are refused, never followed),
+    /// or an internal error if the bundle cannot be written.
+    pub async fn export_repro_bundle(
+        &self,
+        project: &Path,
+        target: &str,
+        engine: EngineKind,
+        lang: TargetLanguage,
+        crash: &hf_core::crash::Crash,
+        dest: &Path,
+    ) -> Result<PathBuf, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let project_root = canonical_project_root(project)?;
+        let workspace = workspace_dir(&project_root, target);
+        let harness_source = read_current_harness_source(&workspace).ok_or_else(|| {
+            ClassifiedError::Validation(format!("no harness source for '{target}' to bundle"))
+        })?;
+        // Copy the crash input by value; refuse a symlinked input rather than
+        // following it out of the workspace into an unrelated file.
+        if !is_regular_file(&crash.input_path) {
+            return Err(ClassifiedError::Validation(format!(
+                "crash input {} is missing or not a regular file",
+                crash.input_path.display()
+            )));
         }
-        let cache_key = format!("{}::{target}", project.display());
-        let signature = coverage_signature(&workspace);
-        if let Some((cached_sig, cached)) = summary_cache()
-            .lock()
-            .ok()
-            .and_then(|map| map.get(&cache_key).copied())
-        {
-            if cached_sig == signature {
-                return Some(cached);
-            }
-        }
-        let pipeline = "clang -g -O1 -fsanitize=fuzzer -fprofile-instr-generate \
-             -fcoverage-mapping *.c -o fuzz_cov 2>/dev/null \
-             && LLVM_PROFILE_FILE=cov.profraw ./fuzz_cov -runs=0 corpus 2>/dev/null; \
-             llvm-profdata merge -sparse cov.profraw -o cov.profdata 2>/dev/null \
-             && llvm-cov export ./fuzz_cov -instr-profile=cov.profdata 2>/dev/null";
-        let cmd = vec!["sh".to_owned(), "-c".to_owned(), pipeline.to_owned()];
-        let limits = hf_core::runtime::ResourceLimits {
-            max_mem_mb: 4096,
-            max_cpus: 2,
-            max_duration_secs: 180,
-            env: std::collections::HashMap::new(),
-            ptrace: false,
+        let input = std::fs::read(&crash.input_path).map_err(|e| {
+            ClassifiedError::Validation(format!(
+                "read crash input {}: {e}",
+                crash.input_path.display()
+            ))
+        })?;
+        let harness_filename = harness_bundle_filename(lang).to_owned();
+        let build = hf_harness::build_command(engine, lang, "fuzz_bin");
+        let build_command = format!(
+            "{} {} {} -o {}",
+            build.compiler,
+            build.args.join(" "),
+            harness_filename,
+            build.output.display()
+        );
+        let manifest = crate::repro::ReproManifest {
+            project: project_root.to_string_lossy().into_owned(),
+            target: target.to_owned(),
+            language: format!("{lang:?}"),
+            engine: engine.as_str().to_owned(),
+            // Harnesses build with ASan by default (see `build_command`).
+            sanitizer: "address".to_owned(),
+            build_command,
+            harness_filename,
+            input_filename: "crash_input".to_owned(),
+            binary_name: "fuzz_bin".to_owned(),
+            crash_kind: format!("{:?}", crash.kind),
+            crash_summary: crash.summary.clone(),
+            stack_signature: crash.stack_signature.clone(),
+            minimized: crash.minimized,
         };
-        match self.runtime.run_command(&cmd, &workspace, &limits).await {
-            Ok(result) if result.termination == hf_core::runtime::CommandTermination::Completed => {
-                let summary = hf_coverage::parse_llvm_cov_summary(&result.stdout)?;
-                if let Ok(mut map) = summary_cache().lock() {
-                    map.insert(cache_key, (signature, summary));
-                }
-                Some(summary)
-            }
-            Ok(result) => {
-                tracing::warn!(termination = ?result.termination, "coverage summary was force-stopped");
-                None
-            }
-            Err(e) => {
-                tracing::warn!("coverage summary collection failed: {e}");
-                None
-            }
-        }
+        crate::repro::write_repro_bundle(dest, &manifest, &harness_source, &input)
+            .map_err(|e| ClassifiedError::Internal(format!("write repro bundle: {e}")))
     }
 
     /// Persisted crashes for the most recent matching run (empty without a
@@ -9594,6 +9559,29 @@ struct LlmProviderBridge {
     /// When set, each completion is recorded as a cost/trace diagnostic under
     /// the given operation label.
     diag: Option<(Arc<crate::diagnostics::DiagnosticsRecorder>, String)>,
+    /// Task-tiered routing: soft-preferred provider tags derived from the task
+    /// label. Empty (no preference) unless a task tier is set.
+    route: hf_core::provider::RouteRequest,
+}
+
+/// Map a task label to soft-preferred provider tags so, in a tagged deployment,
+/// authoring/triage work routes to a `reasoning`-tagged model and mechanical
+/// work to a `fast` one. Untagged deployments are unaffected (the preference is
+/// soft -- see [`RouteRequest::preferred_tags`]).
+fn preferred_tags_for_task(task: &str) -> Vec<String> {
+    let task = task.to_ascii_lowercase();
+    if task.contains("harness")
+        || task.contains("refine")
+        || task.contains("triage")
+        || task.contains("report")
+        || task.contains("chat")
+    {
+        vec!["reasoning".to_owned()]
+    } else if task.contains("seed") || task.contains("rank") {
+        vec!["fast".to_owned()]
+    } else {
+        Vec::new()
+    }
 }
 
 impl LlmProviderBridge {
@@ -9617,15 +9605,18 @@ impl LlmProviderBridge {
             pool,
             meta,
             diag: None,
+            route: hf_core::provider::RouteRequest::default(),
         }
     }
 
-    /// Record completions through this bridge as diagnostics under `op`.
+    /// Record completions through this bridge as diagnostics under `op`, and
+    /// derive task-tiered routing from the same label.
     fn with_diagnostics(
         mut self,
         recorder: Arc<crate::diagnostics::DiagnosticsRecorder>,
         op: &str,
     ) -> Self {
+        self.route = hf_core::provider::RouteRequest::preferring_tags(preferred_tags_for_task(op));
         self.diag = Some((recorder, op.to_owned()));
         self
     }
@@ -9637,10 +9628,7 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
         &self,
         request: &hf_core::provider::ChatRequest,
     ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
-        let response = self
-            .pool
-            .chat_completion(request, &hf_core::provider::RouteRequest::default())
-            .await?;
+        let response = self.pool.chat_completion(request, &self.route).await?;
         if let Some((recorder, op)) = &self.diag {
             recorder.record(op, &response.model, &response.usage).await;
         }
@@ -9651,9 +9639,7 @@ impl hf_core::provider::LlmProvider for LlmProviderBridge {
         &self,
         request: &hf_core::provider::ChatRequest,
     ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
-        self.pool
-            .chat_completion_stream(request, &hf_core::provider::RouteRequest::default())
-            .await
+        self.pool.chat_completion_stream(request, &self.route).await
     }
 
     fn metadata(&self) -> &hf_core::provider::ProviderMetadata {
