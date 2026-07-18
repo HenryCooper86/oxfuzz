@@ -7,7 +7,9 @@
 mod tui;
 
 use clap::{Parser, Subcommand};
-use hf_service::{EngineKind, FuzzProgress, ServiceContainer, SessionId, TargetLanguage};
+use hf_service::{
+    EngineKind, FuzzProgress, ServiceContainer, SessionId, TargetLanguage, VerdictLevel,
+};
 use std::path::PathBuf;
 
 /// AI fuzzing agent.
@@ -944,8 +946,20 @@ async fn qualify_harness(
         .await?;
     println!(
         "smoke: execs/sec={:.0} crashes={} passed={}",
-        smoke.execs_per_sec, smoke.crashes, smoke.passed
+        smoke.summary.execs_per_sec, smoke.summary.crashes, smoke.summary.passed
     );
+    // Surface the deterministic verdict so a hollow pass -- compiled and "passed"
+    // yet never actually exercising the target -- is not silently promoted.
+    match smoke.verdict.level {
+        VerdictLevel::Pass => {}
+        VerdictLevel::Suspect => println!(
+            "  SUSPECT (verify before promoting): {}",
+            smoke.verdict.reasons.join("; ")
+        ),
+        VerdictLevel::Fail => {
+            println!("  FAIL: {}", smoke.verdict.reasons.join("; "));
+        }
+    }
     if promote {
         let harness = container.harness_promote(project, target, engine).await?;
         println!("promotion: {:?} ({})", harness.status, harness.id);
