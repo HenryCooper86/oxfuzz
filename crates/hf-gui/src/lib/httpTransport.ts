@@ -137,6 +137,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   knowledge_index: { method: "POST", path: "/knowledge/index" },
   knowledge_ingest: { method: "POST", path: "/knowledge/ingest" },
   knowledge_search: { method: "POST", path: "/knowledge/search" },
+  knowledge_stats: { method: "GET", path: "/knowledge/stats" },
 };
 
 // Tauri (desktop) converts JS camelCase arg keys to snake_case Rust params, so

@@ -425,6 +425,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/knowledge/index", post(knowledge_index))
         .route("/knowledge/ingest", post(knowledge_ingest))
         .route("/knowledge/search", post(knowledge_search))
+        .route("/knowledge/stats", get(knowledge_stats))
         // Campaign scheduling.
         .route("/schedule", get(schedule_list).post(schedule_create))
         .route("/schedule/history", get(schedule_history))
@@ -1779,6 +1780,17 @@ async fn chat_branches(
 #[derive(Debug, Deserialize)]
 struct ProjectRequest {
     project: String,
+}
+
+/// Read-only index status (no reindex): size, build time, ingested-document
+/// count, and the active retrieval config. A GET, unlike the other knowledge
+/// endpoints, because it has no side effects.
+async fn knowledge_stats(
+    State(state): State<AppState>,
+    axum::extract::Query(req): axum::extract::Query<ProjectRequest>,
+) -> ApiResult<hf_service::knowledge::KnowledgeIndexStatus> {
+    let project = approved_project(&state, std::path::Path::new(&req.project))?;
+    Ok(Json(hf_service::knowledge::stats_project(&project)))
 }
 
 async fn knowledge_index(
