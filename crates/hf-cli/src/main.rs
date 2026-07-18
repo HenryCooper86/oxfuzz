@@ -32,7 +32,7 @@ enum Commands {
     Discover {
         /// Project root path.
         project: PathBuf,
-        /// Target language (c, cpp, rust).
+        /// Target language (c, cpp, rust, go, python).
         #[arg(long)]
         lang: String,
         /// Enable LLM-assisted ranking (requires `HF_PROVIDER_API_KEY`).
@@ -49,7 +49,7 @@ enum Commands {
         /// Fuzzing engine (afl++, honggfuzz, libfuzzer, clusterfuzzlite).
         #[arg(long)]
         engine: String,
-        /// Target language (c, cpp, rust). Defaults to c.
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Skip compile and smoke fuzz (draft only).
@@ -78,7 +78,7 @@ enum Commands {
         /// Fuzzing engine.
         #[arg(long)]
         engine: String,
-        /// Target language (c, cpp, rust). Defaults to c.
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Duration (e.g. 60m).
@@ -96,7 +96,7 @@ enum Commands {
         /// Fuzzing engine.
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
-        /// Target language (c, cpp, rust). Defaults to c.
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Per-iteration fuzz duration in seconds.
@@ -113,7 +113,7 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Target language (c, cpp, rust). Defaults to c.
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
     },
@@ -147,7 +147,7 @@ enum Commands {
         /// Fuzzing engine. Defaults to libfuzzer.
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
-        /// Target language (c, cpp, rust). Defaults to c.
+        /// Target language (c, cpp, rust, go, python). Defaults to c.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Fuzz duration (e.g. 120s, 5m). Defaults to 120s.
@@ -382,7 +382,7 @@ enum ScheduleOp {
         target: String,
         #[arg(long, default_value = "libfuzzer")]
         engine: String,
-        /// Target language of the promoted harness: c | cpp | rust.
+        /// Target language of the promoted harness: c | cpp | rust | go | python.
         #[arg(long, default_value = "c")]
         lang: String,
         /// Trigger kind: interval | cron | once | event.
@@ -446,13 +446,7 @@ enum PolicyOp {
 }
 
 fn parse_lang(s: &str) -> Result<TargetLanguage, anyhow::Error> {
-    let lang: TargetLanguage = s.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-    match lang {
-        TargetLanguage::C | TargetLanguage::Cpp | TargetLanguage::Rust => Ok(lang),
-        TargetLanguage::Go | TargetLanguage::Python => anyhow::bail!(
-            "target language '{s}' is planned but not available in the production discovery pipeline (expected c, cpp, or rust)"
-        ),
-    }
+    s.parse().map_err(|e: String| anyhow::anyhow!(e))
 }
 
 fn parse_engine(s: &str) -> Result<EngineKind, anyhow::Error> {
@@ -1694,12 +1688,13 @@ mod doctor_tests {
     }
 
     #[test]
-    fn cli_rejects_languages_without_a_production_discovery_pipeline() {
+    fn cli_accepts_languages_with_a_production_discovery_pipeline() {
         assert!(parse_lang("c").is_ok());
         assert!(parse_lang("cpp").is_ok());
         assert!(parse_lang("rust").is_ok());
-        assert!(parse_lang("go").is_err());
-        assert!(parse_lang("python").is_err());
+        assert!(parse_lang("go").is_ok());
+        assert!(parse_lang("python").is_ok());
+        assert!(parse_lang("cobol").is_err());
     }
 }
 

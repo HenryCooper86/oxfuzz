@@ -81,6 +81,8 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           options={[
             { value: "c", label: "C" },
             { value: "cpp", label: "C++" },
+            { value: "go", label: "Go" },
+            { value: "python", label: "Python" },
           ]}
         />
         {!embedded && (
