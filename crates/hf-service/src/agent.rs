@@ -270,12 +270,19 @@ impl ServiceContainer {
                 let smoke = self
                     .harness_smoke(project, target, engine, language)
                     .await?;
+                // Steer the orchestrator on the smoke verdict (L2 increment 3): a
+                // clean pass points at human promotion; a hollow pass (Suspect) or
+                // Fail carries the reasons back and directs a refine + re-smoke,
+                // never promotion. Advisory only -- promotion stays a human action
+                // and any refine merely PROPOSES a new revision (AGENTS.md 2.12).
+                let next = crate::verification::harness_next_step(&smoke.verdict);
                 Ok(serde_json::json!({
                     "compiled": format!("{:?}", compile.status),
                     "binary": compile.binary_name,
                     "smoke": smoke,
                     "approval_required": true,
-                    "next_action": "Ask the operator to review and explicitly promote this exact revision.",
+                    "promotion_ready": next.promotion_ready,
+                    "next_action": next.guidance,
                 })
                 .to_string())
             }
