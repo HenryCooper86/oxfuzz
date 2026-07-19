@@ -144,8 +144,8 @@ pub fn harness_next_step(verdict: &HarnessVerdict) -> HarnessNextStep {
             promotion_ready: false,
             guidance: format!(
                 "Do NOT promote this revision: the smoke verdict is not a clean pass -- {}. \
-                 Refine the harness to address this and re-run smoke qualification before \
-                 considering promotion.",
+                 Call the `refine` tool to propose a coverage-guided revision, then re-run \
+                 smoke qualification; only a clean pass is worth asking a human to promote.",
                 verdict.reasons.join("; ")
             ),
         },

@@ -132,7 +132,7 @@ fn fallback_orchestrator() -> AgentDefinition {
         system_prompt: "You are the hobot_fuzz Orchestrator, an autonomous AI fuzzing agent. \
 Discover targets, write harnesses, run fuzzers, and triage crashes by calling tools."
             .to_owned(),
-        allowed_tools: ["discover", "harness", "run", "triage", "corpus"]
+        allowed_tools: ["discover", "harness", "refine", "run", "triage", "corpus"]
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),
