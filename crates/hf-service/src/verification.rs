@@ -114,6 +114,44 @@ pub fn assess_harness_smoke(summary: &SmokeRunSummary, status: HarnessStatus) ->
     }
 }
 
+/// What the orchestrator should do next given a harness smoke verdict. Purely
+/// advisory -- it is fed back as the harness tool result so the agent refines a
+/// hollow pass instead of moving to promote it. It enforces nothing and
+/// auto-runs nothing: promotion stays an explicit human action (AGENTS.md 2.12),
+/// and a refine, if the agent chooses one, only ever PROPOSES a new revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessNextStep {
+    /// True only when the verdict clears review for human promotion. A `Suspect`
+    /// or `Fail` verdict is never promotion-ready.
+    pub promotion_ready: bool,
+    /// One-line instruction the orchestrator reads in its tool result.
+    pub guidance: String,
+}
+
+/// Derive the orchestration guidance from a smoke verdict: a `Pass` points at
+/// human promotion; a `Suspect`/`Fail` steers the agent to refine and re-smoke,
+/// carrying the verdict's reasons so the correction is actionable.
+#[must_use]
+pub fn harness_next_step(verdict: &HarnessVerdict) -> HarnessNextStep {
+    match verdict.level {
+        VerdictLevel::Pass => HarnessNextStep {
+            promotion_ready: true,
+            guidance: "Smoke qualified. Ask the operator to review and explicitly promote \
+                       this exact revision."
+                .to_owned(),
+        },
+        VerdictLevel::Suspect | VerdictLevel::Fail => HarnessNextStep {
+            promotion_ready: false,
+            guidance: format!(
+                "Do NOT promote this revision: the smoke verdict is not a clean pass -- {}. \
+                 Refine the harness to address this and re-run smoke qualification before \
+                 considering promotion.",
+                verdict.reasons.join("; ")
+            ),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +189,51 @@ mod tests {
     fn a_healthy_smoke_passes() {
         let verdict = assess_harness_smoke(&smoke(true, 5000.0, 0), HarnessStatus::SmokePassed);
         assert_eq!(verdict.level, VerdictLevel::Pass, "{verdict:?}");
+    }
+
+    #[test]
+    fn a_pass_verdict_is_promotion_ready_and_points_at_promotion() {
+        let step = harness_next_step(&HarnessVerdict {
+            level: VerdictLevel::Pass,
+            reasons: vec!["exercised the target".to_owned()],
+        });
+        assert!(step.promotion_ready, "{step:?}");
+        assert!(
+            step.guidance.to_lowercase().contains("promote"),
+            "a pass points at promotion: {step:?}"
+        );
+    }
+
+    #[test]
+    fn a_suspect_verdict_is_not_promotion_ready_and_steers_to_refine_with_reasons() {
+        let step = harness_next_step(&HarnessVerdict {
+            level: VerdictLevel::Suspect,
+            reasons: vec!["hollow pass: 0.00 execs/sec below floor".to_owned()],
+        });
+        assert!(
+            !step.promotion_ready,
+            "a hollow pass is never promotion-ready: {step:?}"
+        );
+        let lower = step.guidance.to_lowercase();
+        assert!(lower.contains("refine"), "steers to refine: {step:?}");
+        assert!(
+            lower.contains("not promote"),
+            "warns off promotion: {step:?}"
+        );
+        assert!(
+            step.guidance.contains("0.00 execs/sec"),
+            "carries the verdict reasons: {step:?}"
+        );
+    }
+
+    #[test]
+    fn a_fail_verdict_is_not_promotion_ready() {
+        let step = harness_next_step(&HarnessVerdict {
+            level: VerdictLevel::Fail,
+            reasons: vec!["smoke run reported passed=false".to_owned()],
+        });
+        assert!(!step.promotion_ready, "{step:?}");
+        assert!(step.guidance.to_lowercase().contains("refine"), "{step:?}");
     }
 
     #[test]
