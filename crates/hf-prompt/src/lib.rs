@@ -16,9 +16,10 @@ pub mod store;
 pub mod template;
 
 pub use render::{
-    render_dictionary_prompt, render_discovery_prompt, render_harness_prompt,
-    render_harness_prompt_with_context, render_harness_refine_prompt, render_harness_repair_prompt,
-    render_related_context_section, render_seed_prompt, RelatedContext, MAX_RELATED_CONTEXT_CHARS,
+    render_crash_verify_prompt, render_dictionary_prompt, render_discovery_prompt,
+    render_harness_prompt, render_harness_prompt_with_context, render_harness_refine_prompt,
+    render_harness_repair_prompt, render_related_context_section, render_seed_prompt,
+    RelatedContext, MAX_RELATED_CONTEXT_CHARS,
 };
 
 pub use agent::{build_agent_system_prompt, AgentPromptInput, AGENT_SYSTEM_PROMPT_TOKEN_BUDGET};
