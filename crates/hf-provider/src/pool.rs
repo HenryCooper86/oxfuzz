@@ -458,6 +458,28 @@ impl ProviderPoolImpl {
     }
 }
 
+/// Total attempts (initial call + retries) a single pool call makes against its
+/// selected provider on transient errors before giving up (L7).
+const MAX_IN_CALL_ATTEMPTS: usize = 3;
+/// Upper bound on any single in-call retry backoff.
+const MAX_IN_CALL_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Backoff before the `attempt`-th in-call retry: a provider-supplied
+/// `Retry-After` (rate limit) wins, otherwise exponential from a modest base,
+/// both capped at [`MAX_IN_CALL_BACKOFF`].
+fn in_call_backoff(attempt: usize, class: &error_classifier::StandardError) -> Duration {
+    if let error_classifier::StandardError::RateLimited {
+        retry_after: Some(delay),
+    } = class
+    {
+        return (*delay).min(MAX_IN_CALL_BACKOFF);
+    }
+    let shift = u32::try_from(attempt.saturating_sub(1)).unwrap_or(0).min(4);
+    Duration::from_millis(250)
+        .saturating_mul(1u32 << shift)
+        .min(MAX_IN_CALL_BACKOFF)
+}
+
 #[async_trait]
 impl ProviderPool for ProviderPoolImpl {
     #[instrument(skip(self, request), fields(tags = ?route.required_tags))]
@@ -497,26 +519,41 @@ impl ProviderPool for ProviderPoolImpl {
         let _active = ActiveRequestGuard(Arc::clone(&entry.active_requests));
         let effective_request = Self::apply_request_defaults(request, entry);
 
-        let result = entry.provider.chat_completion(&effective_request).await;
-
-        match result {
-            Ok(mut response) => {
-                let meta = entry.provider.metadata();
-                entry.metrics.record_success_with_cost(
-                    response.usage.input_tokens,
-                    response.usage.output_tokens,
-                    meta.cost_per_1k_input,
-                    meta.cost_per_1k_output,
-                );
-                response.provider_id = Some(meta.id.clone());
-                Ok(response)
+        // In-call retry (L7): a transient failure (5xx / network / rate-limit /
+        // unknown) is retried on the selected provider with backoff before the
+        // call gives up, so a single blip does not fail the whole turn. The
+        // provider is frozen (for next-call failover) only once the in-call
+        // retries are spent, or immediately for a non-transient error. Permits and
+        // the active-request guard are held across the retries -- this is one
+        // logical in-flight call.
+        let mut attempt = 0usize;
+        let error = loop {
+            match entry.provider.chat_completion(&effective_request).await {
+                Ok(mut response) => {
+                    let meta = entry.provider.metadata();
+                    entry.metrics.record_success_with_cost(
+                        response.usage.input_tokens,
+                        response.usage.output_tokens,
+                        meta.cost_per_1k_input,
+                        meta.cost_per_1k_output,
+                    );
+                    response.provider_id = Some(meta.id.clone());
+                    return Ok(response);
+                }
+                Err(e) => {
+                    attempt += 1;
+                    let class = error_classifier::classify_provider_error(&e);
+                    if class.is_transient() && attempt < MAX_IN_CALL_ATTEMPTS {
+                        tokio::time::sleep(in_call_backoff(attempt, &class)).await;
+                        continue;
+                    }
+                    break e;
+                }
             }
-            Err(e) => {
-                entry.metrics.record_error();
-                self.report_error(&entry.provider.metadata().id, &e);
-                Err(e)
-            }
-        }
+        };
+        entry.metrics.record_error();
+        self.report_error(&entry.provider.metadata().id, &error);
+        Err(error)
     }
 
     #[instrument(skip(self, request), fields(tags = ?route.required_tags))]
@@ -738,6 +775,11 @@ mod tests {
     struct MockProvider {
         meta: ProviderMetadata,
         should_fail: bool,
+        /// Number of leading calls that fail with a transient error before the
+        /// provider starts succeeding (for in-call retry tests).
+        fail_first: Arc<AtomicUsize>,
+        /// Total calls received, so a test can assert the retry count.
+        call_count: Arc<AtomicUsize>,
         recorded_request: Arc<std::sync::Mutex<Option<ChatRequest>>>,
     }
 
@@ -766,10 +808,41 @@ mod tests {
                         tool_calling_mode: ToolCallingMode::default(),
                     },
                     should_fail,
+                    fail_first: Arc::new(AtomicUsize::new(0)),
+                    call_count: Arc::new(AtomicUsize::new(0)),
                     recorded_request: Arc::clone(&recorded_request),
                 }),
                 recorded_request,
             )
+        }
+
+        /// A provider that fails transiently `fail_first` times, then succeeds.
+        /// Returns the shared call counter so a test can assert retry behavior.
+        fn flaky(
+            id: &str,
+            tags: Vec<&str>,
+            fail_first: usize,
+        ) -> (Arc<dyn LlmProvider>, Arc<AtomicUsize>) {
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let provider: Arc<dyn LlmProvider> = Arc::new(Self {
+                meta: ProviderMetadata {
+                    id: ProviderId::from_string(id),
+                    provider_type: ProviderType::OpenAi,
+                    model: "test-model".into(),
+                    tags: tags.into_iter().map(String::from).collect(),
+                    capabilities: vec![],
+                    max_concurrency: 5,
+                    context_window: 128_000,
+                    cost_per_1k_input: 0.01,
+                    cost_per_1k_output: 0.03,
+                    tool_calling_mode: ToolCallingMode::default(),
+                },
+                should_fail: false,
+                fail_first: Arc::new(AtomicUsize::new(fail_first)),
+                call_count: Arc::clone(&call_count),
+                recorded_request: Arc::new(std::sync::Mutex::new(None)),
+            });
+            (provider, call_count)
         }
 
         fn ok(id: &str, tags: Vec<&str>) -> Arc<dyn LlmProvider> {
@@ -798,10 +871,22 @@ mod tests {
             request: &ChatRequest,
         ) -> Result<ChatResponse, ProviderError> {
             *self.recorded_request.lock().expect("mock mutex poisoned") = Some(request.clone());
+            self.call_count.fetch_add(1, Ordering::Relaxed);
             if self.should_fail {
                 return Err(ProviderError::ServerError {
                     provider: self.meta.id.to_string(),
                     message: "mock failure".into(),
+                });
+            }
+            // Consume one transient failure per call until the budget is spent.
+            if self
+                .fail_first
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(ProviderError::ServerError {
+                    provider: self.meta.id.to_string(),
+                    message: "transient mock failure".into(),
                 });
             }
             Ok(ChatResponse {
@@ -935,6 +1020,78 @@ mod tests {
             response_format: None,
             image_generation_options: None,
         }
+    }
+
+    #[test]
+    fn in_call_backoff_prefers_retry_after_and_caps_growth() {
+        use crate::error_classifier::StandardError;
+        // A provider-supplied Retry-After wins outright.
+        assert_eq!(
+            in_call_backoff(
+                1,
+                &StandardError::RateLimited {
+                    retry_after: Some(Duration::from_millis(400))
+                }
+            ),
+            Duration::from_millis(400)
+        );
+        // Otherwise exponential from the base...
+        assert_eq!(
+            in_call_backoff(1, &StandardError::ServerError),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            in_call_backoff(2, &StandardError::ServerError),
+            Duration::from_millis(500)
+        );
+        // ...capped, including an over-long Retry-After.
+        assert!(in_call_backoff(20, &StandardError::ServerError) <= MAX_IN_CALL_BACKOFF);
+        assert_eq!(
+            in_call_backoff(
+                1,
+                &StandardError::RateLimited {
+                    retry_after: Some(Duration::from_secs(60))
+                }
+            ),
+            MAX_IN_CALL_BACKOFF
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_errors_are_retried_in_call_until_success() {
+        let (provider, calls) = MockProvider::flaky("p1", vec!["gen"], 2);
+        let pool = ProviderPoolImpl::from_providers(vec![provider], &test_config());
+        let route = RouteRequest {
+            required_tags: vec!["gen".into()],
+            ..Default::default()
+        };
+        let result = pool.chat_completion(&test_request(), &route).await;
+        assert!(
+            result.is_ok(),
+            "in-call retry should recover from transient blips: {result:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            3,
+            "one initial call plus two retries"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_errors_stop_at_the_attempt_budget() {
+        let (provider, calls) = MockProvider::flaky("p1", vec!["gen"], 99);
+        let pool = ProviderPoolImpl::from_providers(vec![provider], &test_config());
+        let route = RouteRequest {
+            required_tags: vec!["gen".into()],
+            ..Default::default()
+        };
+        let result = pool.chat_completion(&test_request(), &route).await;
+        assert!(result.is_err(), "exhausted retries surface the error");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            MAX_IN_CALL_ATTEMPTS,
+            "attempts are bounded"
+        );
     }
 
     #[tokio::test]
