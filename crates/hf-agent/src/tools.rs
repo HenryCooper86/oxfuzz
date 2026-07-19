@@ -8,6 +8,10 @@ pub const TOOL_SPECS: &[(&str, &str)] = &[
         "harness",
         "Draft, sandbox-compile, and smoke-test a harness for operator review",
     ),
+    (
+        "refine",
+        "Reshape the current harness toward uncovered code and recompile a proposal",
+    ),
     ("run", "Drive a fuzzing engine against a compiled harness"),
     ("triage", "Reproduce, classify, and deduplicate crashes"),
     ("corpus", "Seed, grow, prune, or list the corpus"),
@@ -22,6 +26,10 @@ const TOOL_USAGE: &[(&str, &str)] = &[
     (
         "harness",
         r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|clusterfuzzlite", "lang": "c"} -> draft, compile, and smoke-test a harness; a human must promote it"#,
+    ),
+    (
+        "refine",
+        r#"- refine {"target": "<symbol>", "engine": "libfuzzer", "lang": "c"} -> reshape the CURRENT harness toward uncovered code and recompile a proposal; then re-run smoke qualification. Use this when a smoke verdict is not a clean pass. A human still promotes."#,
     ),
     (
         "run",
@@ -54,4 +62,36 @@ pub fn catalog_for(allowed: &[String]) -> String {
         return "This agent has no tools; answer the user directly.".to_owned();
     }
     format!("Available tools (call one per step):\n{}", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refine_is_a_first_class_tool_in_the_catalog() {
+        // The orchestrator can only act on a hollow-pass verdict if `refine` is a
+        // callable tool it can both see and be permitted. Lock the roster and the
+        // per-agent usage catalog together.
+        assert!(
+            TOOL_SPECS.iter().any(|(name, _)| *name == "refine"),
+            "refine must be in the authoritative tool roster"
+        );
+        let catalog = catalog_for(&["refine".to_owned()]);
+        assert!(
+            catalog.contains("refine"),
+            "an agent allowed `refine` must see it in its usage catalog: {catalog}"
+        );
+    }
+
+    #[test]
+    fn catalog_omits_tools_an_agent_is_not_allowed() {
+        // Gating is by allow-list: a harness-only agent must not see run/triage.
+        let catalog = catalog_for(&["harness".to_owned(), "refine".to_owned()]);
+        assert!(catalog.contains("harness") && catalog.contains("refine"));
+        assert!(
+            !catalog.contains("triage"),
+            "unlisted tools stay hidden: {catalog}"
+        );
+    }
 }
