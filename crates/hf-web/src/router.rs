@@ -337,6 +337,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/seeds/generate-llm", post(generate_seeds_llm))
         .route("/corpus/{op}", post(corpus))
         .route("/triage", post(triage))
+        .route("/crash/verify", post(verify_crash))
         .route("/report", post(report))
         .route("/reports", get(list_report_drafts))
         .route("/reports/save", post(save_report_draft))
@@ -1187,6 +1188,27 @@ async fn triage(
         .await
         .map_err(classified_api_error)?;
     Ok(Json(public_value(deduped)))
+}
+
+#[derive(serde::Deserialize)]
+struct VerifyCrashRequest {
+    project: String,
+    target: String,
+    crash: hf_service::Crash,
+}
+
+/// On-demand LLM verdict for one crash (L2 4c): the caller passes a crash it
+/// already holds from a triage scan, so verifying is opt-in per crash rather than
+/// blocking the whole scan on a model call.
+async fn verify_crash(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyCrashRequest>,
+) -> ApiResult<serde_json::Value> {
+    // Require an approved project for auth parity with triage, even though the
+    // verdict is computed from the passed crash and the provider pool.
+    let _project = approved_project(&state, std::path::Path::new(&req.project))?;
+    let verdict = state.container.verify_crash(&req.target, &req.crash).await;
+    Ok(Json(public_value(verdict)))
 }
 
 async fn system_snapshot(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

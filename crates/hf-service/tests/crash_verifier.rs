@@ -95,3 +95,16 @@ async fn verify_crashes_yields_no_opinion_without_a_provider() {
         .await;
     assert_eq!(verdicts, vec![None]);
 }
+
+#[tokio::test]
+async fn verify_crash_returns_the_single_crash_verdict() {
+    // L2 4c: the on-demand per-crash wrapper returns just that crash's verdict.
+    let container =
+        ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(Arc::new(VerdictPool)));
+    let verdict = container
+        .verify_crash("parse_header", &asan_crash())
+        .await
+        .expect("a verdict for the single crash");
+    assert!(verdict.reproduces_deterministically && verdict.likely_target_bug);
+    assert_eq!(verdict.confidence, Confidence::High);
+}
