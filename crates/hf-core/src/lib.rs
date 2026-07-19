@@ -15,7 +15,6 @@
 //! | [`session`] | `SessionStore`, `TranscriptStore` | - |
 //! | [`memory`] | `MemoryClient`, `ExperienceStore` | - |
 //! | [`checkpoint`] | `CheckpointStorage` | - |
-//! | [`skill`] | `SkillRegistry` | - |
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
 //! | [`engine`] | `EngineKind`, `FuzzRunConfig`, `FuzzProgress` | ENGINE_ADAPTER_STANDARD.md |
@@ -38,7 +37,6 @@ pub mod permission_types;
 pub mod provider;
 pub mod runtime;
 pub mod session;
-pub mod skill;
 pub mod target;
 pub mod tool;
 pub mod trust;
