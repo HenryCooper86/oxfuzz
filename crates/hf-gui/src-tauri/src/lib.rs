@@ -39,7 +39,7 @@ use commands::{
     schedule_create, schedule_delete, schedule_history, schedule_history_clear, schedule_list,
     schedule_set_enabled, schedule_targets, set_automotive_settings,
     set_project_auto_revert_override, set_providers, system_snapshot, system_status_cmd, triage,
-    workbench_dashboard, write_config,
+    verify_crash, workbench_dashboard, write_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -77,6 +77,7 @@ pub fn run() {
             all_crashes,
             all_corpus,
             triage,
+            verify_crash,
             system_status_cmd,
             ensure_docker,
             app_paths,
