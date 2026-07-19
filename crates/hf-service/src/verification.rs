@@ -192,14 +192,7 @@ pub fn parse_crash_verdict(text: &str) -> Option<CrashVerdict> {
         reasons: Vec<String>,
     }
 
-    // Extract the outermost JSON object so surrounding prose or code fences do
-    // not defeat the parse.
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    let raw: Raw = serde_json::from_str(&text[start..=end]).ok()?;
+    let raw: Raw = serde_json::from_str(extract_json_object(text)?).ok()?;
     let confidence = match raw.confidence.trim().to_ascii_lowercase().as_str() {
         "high" => Confidence::High,
         "medium" | "med" => Confidence::Medium,
@@ -212,6 +205,70 @@ pub fn parse_crash_verdict(text: &str) -> Option<CrashVerdict> {
         confidence,
         reasons: raw.reasons,
     })
+}
+
+/// Extract the outermost `{...}` from an LLM response so surrounding prose or
+/// code fences do not defeat a JSON parse. Returns `None` when no brace pair is
+/// present.
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end > start).then(|| &text[start..=end])
+}
+
+/// An LLM harness verifier's opinion of whether a compiled, "passed" harness
+/// actually drives the target with the fuzz input -- the judgment the execs/sec
+/// heuristic cannot make (e.g. a harness that runs fast but ignores `data`/`size`
+/// and calls the target with a constant).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessLlmOpinion {
+    pub exercises_target: bool,
+    pub reasons: Vec<String>,
+}
+
+/// Parse an LLM response into a [`HarnessLlmOpinion`], leniently (prose/fences
+/// tolerated). Returns `None` on any malformed response so the caller keeps the
+/// deterministic verdict rather than acting on a fabricated opinion.
+#[must_use]
+pub fn parse_harness_llm_opinion(text: &str) -> Option<HarnessLlmOpinion> {
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        exercises_target: bool,
+        #[serde(default)]
+        reasons: Vec<String>,
+    }
+    let raw: Raw = serde_json::from_str(extract_json_object(text)?).ok()?;
+    Some(HarnessLlmOpinion {
+        exercises_target: raw.exercises_target,
+        reasons: raw.reasons,
+    })
+}
+
+/// Merge an LLM harness opinion into the deterministic verdict. The LLM may only
+/// add caution: it downgrades a deterministic `Pass` to `Suspect` when it judges
+/// the harness does not meaningfully exercise the target, and does nothing
+/// otherwise -- it never upgrades a `Suspect`/`Fail`, and a `Pass` it agrees with
+/// stays a `Pass`. A downgrade always carries a reason.
+#[must_use]
+pub fn merge_llm_harness_opinion(
+    deterministic: HarnessVerdict,
+    opinion: &HarnessLlmOpinion,
+) -> HarnessVerdict {
+    if deterministic.level == VerdictLevel::Pass && !opinion.exercises_target {
+        let mut reasons = opinion.reasons.clone();
+        if reasons.is_empty() {
+            reasons.push(
+                "LLM verifier judged the harness does not meaningfully exercise the target"
+                    .to_owned(),
+            );
+        }
+        return HarnessVerdict {
+            level: VerdictLevel::Suspect,
+            reasons,
+        };
+    }
+    deterministic
 }
 
 #[cfg(test)]
@@ -344,6 +401,88 @@ mod tests {
             "missing bool -> false"
         );
         assert!(verdict.reasons.is_empty(), "missing reasons -> empty");
+    }
+
+    #[test]
+    fn parses_a_harness_llm_opinion_from_prose() {
+        let text = "Assessment:\n```json\n{\"exercises_target\": false, \
+            \"reasons\": [\"ignores data/size; calls parse() with a fixed literal\"]}\n```";
+        let opinion = parse_harness_llm_opinion(text).expect("embedded JSON parses");
+        assert!(!opinion.exercises_target);
+        assert!(opinion
+            .reasons
+            .iter()
+            .any(|r| r.contains("ignores data/size")));
+        assert!(parse_harness_llm_opinion("no json here").is_none());
+    }
+
+    #[test]
+    fn llm_downgrades_a_pass_it_judges_a_hollow_harness() {
+        let deterministic = HarnessVerdict {
+            level: VerdictLevel::Pass,
+            reasons: vec!["exercised at 5000 execs/sec".to_owned()],
+        };
+        let opinion = HarnessLlmOpinion {
+            exercises_target: false,
+            reasons: vec!["harness ignores the fuzz input".to_owned()],
+        };
+        let merged = merge_llm_harness_opinion(deterministic, &opinion);
+        assert_eq!(merged.level, VerdictLevel::Suspect, "{merged:?}");
+        assert!(
+            merged
+                .reasons
+                .iter()
+                .any(|r| r.contains("ignores the fuzz input")),
+            "carries the LLM reason: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn a_downgrade_always_carries_a_reason_even_when_the_llm_gave_none() {
+        let merged = merge_llm_harness_opinion(
+            HarnessVerdict {
+                level: VerdictLevel::Pass,
+                reasons: Vec::new(),
+            },
+            &HarnessLlmOpinion {
+                exercises_target: false,
+                reasons: Vec::new(),
+            },
+        );
+        assert_eq!(merged.level, VerdictLevel::Suspect);
+        assert!(
+            !merged.reasons.is_empty(),
+            "a suspect verdict must explain itself"
+        );
+    }
+
+    #[test]
+    fn llm_never_upgrades_or_touches_a_verdict_it_agrees_with() {
+        // Agreeing with a Pass leaves it a Pass.
+        let pass = HarnessVerdict {
+            level: VerdictLevel::Pass,
+            reasons: vec!["ok".to_owned()],
+        };
+        let agree = HarnessLlmOpinion {
+            exercises_target: true,
+            reasons: Vec::new(),
+        };
+        assert_eq!(
+            merge_llm_harness_opinion(pass, &agree).level,
+            VerdictLevel::Pass
+        );
+        // The LLM never upgrades a Suspect/Fail, regardless of its opinion.
+        for level in [VerdictLevel::Suspect, VerdictLevel::Fail] {
+            let determ = HarnessVerdict {
+                level,
+                reasons: vec!["deterministic".to_owned()],
+            };
+            let optimistic = HarnessLlmOpinion {
+                exercises_target: true,
+                reasons: Vec::new(),
+            };
+            assert_eq!(merge_llm_harness_opinion(determ, &optimistic).level, level);
+        }
     }
 
     #[test]
