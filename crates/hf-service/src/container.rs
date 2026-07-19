@@ -7408,6 +7408,61 @@ impl ServiceContainer {
         verdicts
     }
 
+    /// LLM harness verifier (self-verification L2, Option B): when the
+    /// deterministic smoke verdict is a `Pass`, ask an LLM whether the harness
+    /// source actually drives the target with the fuzz input, and downgrade a
+    /// hollow pass that the execs/sec heuristic missed (a harness that runs fast
+    /// but ignores `data`/`size`).
+    ///
+    /// Cost-bounded and conservative: it runs the model only on a `Pass` (the LLM
+    /// can only add caution, so a Suspect/Fail is already at least as cautious),
+    /// one call at most, and returns the deterministic verdict unchanged when no
+    /// provider is configured or the reply is malformed. Advisory + HITL -- it
+    /// changes only the advisory verdict, never promotes anything (AGENTS.md 2.12).
+    pub async fn verify_harness_source(
+        &self,
+        target: &str,
+        harness_source: &str,
+        summary: &hf_core::harness::SmokeRunSummary,
+        deterministic: crate::verification::HarnessVerdict,
+    ) -> crate::verification::HarnessVerdict {
+        use hf_core::provider::{ChatRequest, LlmProvider as _};
+        use hf_core::types::Message;
+
+        // Cap the source so a large harness cannot blow the prompt budget.
+        const MAX_HARNESS_SOURCE_CHARS: usize = 6000;
+
+        // Only a clean Pass is worth a second look; skip the model call otherwise.
+        if deterministic.level != crate::verification::VerdictLevel::Pass {
+            return deterministic;
+        }
+        let Some(pool) = self.provider_pool() else {
+            return deterministic;
+        };
+
+        let source_excerpt: String = harness_source
+            .chars()
+            .take(MAX_HARNESS_SOURCE_CHARS)
+            .collect();
+        let prompt =
+            hf_prompt::render_harness_verify_prompt(target, &source_excerpt, summary.execs_per_sec);
+        let provider = LlmProviderBridge::new(pool)
+            .with_diagnostics(Arc::clone(&self.diagnostics), "harness_verify");
+        let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
+        match provider.chat_completion(&req).await {
+            Ok(resp) => match crate::verification::parse_harness_llm_opinion(resp.text()) {
+                Some(opinion) => {
+                    crate::verification::merge_llm_harness_opinion(deterministic, &opinion)
+                }
+                None => deterministic,
+            },
+            Err(error) => {
+                tracing::warn!("LLM harness verification for '{target}' failed: {error}");
+                deterministic
+            }
+        }
+    }
+
     async fn triage_run_record(
         &self,
         project: &Path,
