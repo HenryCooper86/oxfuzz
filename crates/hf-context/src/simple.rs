@@ -128,6 +128,37 @@ fn soft_trim_in_place(content: &mut String) {
     );
 }
 
+/// A single fresh tool result larger than this is capped to a head+tail excerpt
+/// before it enters the conversation, so no one result can blow the budget.
+pub const MAX_FRESH_TOOL_RESULT_CHARS: usize = 12_000;
+/// Chars of head and of tail kept when capping an oversized fresh tool result.
+const FRESH_TOOL_RESULT_KEEP_CHARS: usize = 4_000;
+
+/// If `content` exceeds [`MAX_FRESH_TOOL_RESULT_CHARS`], return a head+tail
+/// excerpt (with an omission marker) that bounds its context cost; otherwise
+/// `None` (keep it verbatim). This bounds a FRESH result on the iteration it
+/// arrives, complementing [`prune_tool_results_by_age`], which shrinks results
+/// only once they have aged. Disk-paging the full output for later retrieval is a
+/// deferred follow-on -- our file-inspection tools are rooted at the user's
+/// project, so there is no scratch area they can both write and read yet.
+#[must_use]
+pub fn cap_fresh_tool_result(content: &str) -> Option<String> {
+    let total = content.chars().count();
+    if total <= MAX_FRESH_TOOL_RESULT_CHARS {
+        return None;
+    }
+    let head: String = content.chars().take(FRESH_TOOL_RESULT_KEEP_CHARS).collect();
+    let tail: String = content
+        .chars()
+        .skip(total - FRESH_TOOL_RESULT_KEEP_CHARS)
+        .collect();
+    let omitted = total - FRESH_TOOL_RESULT_KEEP_CHARS * 2;
+    Some(format!(
+        "{head}\n[... {omitted} chars omitted: this tool produced a large result; only its head \
+         and tail are kept to fit context ...]\n{tail}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +205,25 @@ mod tests {
         assert_eq!(msgs[0].content, big, "system untouched");
         assert_eq!(msgs[1].content, big, "user untouched");
         assert_eq!(msgs[2].content, big, "assistant untouched");
+    }
+
+    #[test]
+    fn small_fresh_results_are_kept_verbatim() {
+        assert!(cap_fresh_tool_result("small result").is_none());
+        assert!(cap_fresh_tool_result(&"x".repeat(MAX_FRESH_TOOL_RESULT_CHARS)).is_none());
+    }
+
+    #[test]
+    fn a_large_fresh_result_is_capped_to_head_and_tail() {
+        let big = format!("HEAD{}TAIL", "x".repeat(MAX_FRESH_TOOL_RESULT_CHARS));
+        let capped = cap_fresh_tool_result(&big).expect("an over-threshold result is capped");
+        assert!(
+            capped.chars().count() < big.chars().count(),
+            "capping shrinks it"
+        );
+        assert!(capped.contains("chars omitted"), "marks the omission");
+        assert!(capped.starts_with("HEAD"), "keeps the head");
+        assert!(capped.ends_with("TAIL"), "keeps the tail");
     }
 
     #[test]

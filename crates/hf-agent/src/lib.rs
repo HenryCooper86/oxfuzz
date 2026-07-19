@@ -539,11 +539,15 @@ impl Agent {
                 return Ok(message);
             }
 
-            // Record the model's action and the tool result, then continue.
+            // Record the model's action and the tool result, then continue. Cap a
+            // single oversized result (L3 Part 2) so no one tool result can blow
+            // the budget on the iteration it arrives; the age-based prune handles
+            // it further as it ages.
+            let bounded = hf_context::cap_fresh_tool_result(&result).unwrap_or(result);
             messages.push(Message::new(Role::Assistant, content));
             messages.push(Message::new(
                 Role::Tool,
-                format!("result of {tool}: {result}"),
+                format!("result of {tool}: {bounded}"),
             ));
         }
 
