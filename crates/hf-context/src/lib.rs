@@ -15,7 +15,8 @@
 
 pub mod simple;
 pub use simple::{
-    assemble, estimate_tokens, prune_tool_results_by_age, total_tokens, DEFAULT_BUDGET_TOKENS,
+    assemble, cap_fresh_tool_result, estimate_tokens, prune_tool_results_by_age, total_tokens,
+    DEFAULT_BUDGET_TOKENS,
 };
 pub mod compaction;
 pub mod context_manager;
