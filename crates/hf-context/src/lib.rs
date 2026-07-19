@@ -14,7 +14,9 @@
 //! implemented as [`ContextProvider`] trait objects.
 
 pub mod simple;
-pub use simple::{assemble, estimate_tokens, total_tokens, DEFAULT_BUDGET_TOKENS};
+pub use simple::{
+    assemble, estimate_tokens, prune_tool_results_by_age, total_tokens, DEFAULT_BUDGET_TOKENS,
+};
 pub mod compaction;
 pub mod context_manager;
 pub mod context_status;
