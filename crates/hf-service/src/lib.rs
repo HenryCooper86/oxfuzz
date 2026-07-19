@@ -36,7 +36,7 @@ mod syzkaller;
 pub mod verification;
 pub mod workbench;
 
-pub use verification::{HarnessVerdict, SmokeOutcome, VerdictLevel};
+pub use verification::{HarnessNextStep, HarnessVerdict, SmokeOutcome, VerdictLevel};
 
 pub use hf_agent::{
     AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
