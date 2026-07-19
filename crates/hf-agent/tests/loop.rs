@@ -860,3 +860,39 @@ async fn a_queued_reminder_is_injected_into_the_running_turn() {
         "the queued reminder must appear in a model request"
     );
 }
+
+#[tokio::test]
+async fn a_completion_requirement_nudges_a_premature_final_until_the_tool_is_called() {
+    // L4: the agent must call `harness` before finishing. Its first reply tries
+    // to finish early; the loop injects the reminder and continues; it then calls
+    // harness, and only its later final answer is accepted.
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"final":"early answer"}"#,
+        r#"{"tool":"harness","args":{"target":"x"}}"#,
+        r#"{"final":"real answer"}"#,
+    ]));
+    let dyn_pool: Arc<dyn ProviderPool> = pool.clone();
+    let backend = TestBackend::with_tool_result(dyn_pool, "harness qualified".to_owned());
+    let mut def = hf_agent::AgentRegistry::builtin().default_agent();
+    def.completion_requirement = Some(hf_agent::CompletionRequirement {
+        tool: "harness".to_owned(),
+        reminder: "REMINDER: call harness before finishing".to_owned(),
+    });
+    let agent = Agent::with_definition(backend, Some(std::env::temp_dir()), def);
+
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "go", &sink).await.unwrap();
+    assert_eq!(
+        out, "real answer",
+        "must not finish before harness is called"
+    );
+
+    let requests = pool.requests.lock().await;
+    assert!(
+        requests.iter().any(|request| request
+            .messages
+            .iter()
+            .any(|m| m.content.contains("REMINDER: call harness"))),
+        "the completion reminder must have been injected"
+    );
+}

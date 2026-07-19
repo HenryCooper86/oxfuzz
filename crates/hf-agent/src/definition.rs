@@ -76,6 +76,18 @@ const fn default_user_callable() -> bool {
     true
 }
 
+/// A rule that an agent must call a specific tool before its turn may end. When a
+/// turn tries to finish without having called `tool`, the loop injects `reminder`
+/// (via the L5 system-reminder channel) and retries, up to a bounded number of
+/// attempts, before giving up and accepting the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionRequirement {
+    /// The tool that must be called before the turn ends.
+    pub tool: String,
+    /// The reminder injected when the turn tries to end without having called it.
+    pub reminder: String,
+}
+
 /// A complete agent: identity, the system prompt that defines its behavior, the
 /// tools it may call, and its model-routing and iteration limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +135,10 @@ pub struct AgentDefinition {
     /// Provenance. Set by the registry on load; never read from the file.
     #[serde(default, skip_serializing)]
     pub trust_tier: TrustTier,
+    /// Optional rule requiring a specific tool be called before the turn may end
+    /// (L4). Absent for most agents; the loop enforces it only when present.
+    #[serde(default)]
+    pub completion_requirement: Option<CompletionRequirement>,
 }
 
 impl AgentDefinition {
