@@ -108,6 +108,11 @@ pub struct Agent {
     /// and may delegate to specialists (depth 1); specialists cannot delegate
     /// further, which bounds fan-out and prevents delegation cycles.
     delegation_depth: usize,
+    /// Synthetic system-reminders queued (possibly from another task) while a
+    /// turn is running; drained into the conversation at the top of each
+    /// iteration (L5). The injection channel for background-task notices, todo
+    /// nudges, and user interjections.
+    reminders: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Maximum delegation depth: the orchestrator (0) may spawn specialists (1);
@@ -172,6 +177,7 @@ impl Agent {
             max_iterations,
             registry: OnceCell::new(),
             delegation_depth: 0,
+            reminders: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -186,6 +192,27 @@ impl Agent {
     #[must_use]
     pub fn definition(&self) -> &AgentDefinition {
         &self.definition
+    }
+
+    /// A cloneable handle for injecting synthetic system-reminders into a running
+    /// turn (L5). Whatever is pushed before the next iteration is read by the
+    /// following model call, so another task can steer the loop mid-turn --
+    /// e.g. surface a finished background run, nudge toward pending work, or relay
+    /// a user interjection -- without interrupting generation.
+    #[must_use]
+    pub fn reminder_handle(&self) -> ReminderHandle {
+        ReminderHandle(Arc::clone(&self.reminders))
+    }
+
+    /// Drain any queued reminders into the conversation as injected user turns the
+    /// next model call will read.
+    fn drain_reminders(&self, messages: &mut Vec<Message>) {
+        let drained = self
+            .reminders
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default();
+        messages.extend(reminder_messages(drained));
     }
 
     /// Override the maximum number of reason/act iterations per turn.
@@ -264,6 +291,11 @@ impl Agent {
         let mut loop_guard = LoopGuard::with_defaults();
 
         for _ in 0..self.max_iterations {
+            // Pick up any synthetic system-reminders queued mid-turn (L5) so the
+            // model call below reads them: the channel for background-task notices,
+            // todo nudges, and user interjections. Injected as user turns, so they
+            // survive the age-based prune (which only shrinks tool results).
+            self.drain_reminders(&mut messages);
             // Cheaply shrink stale tool output (fuzzer logs, coverage/crash dumps)
             // in place before the budget cut (L3): the newest results stay intact,
             // older ones are soft-trimmed, and the oldest are cleared -- so aged
@@ -630,6 +662,33 @@ fn safe_compaction_tail_start(messages: &[Message], retain: usize) -> Option<usi
     (nominal..messages.len()).find(|&i| matches!(messages[i].role, Role::User))
 }
 
+/// Convert queued reminder texts into conversation messages the next model call
+/// reads. Each is a user-role `[system-reminder]` block so it is unmistakably
+/// injected context, not the assistant's own prior output.
+fn reminder_messages(reminders: Vec<String>) -> Vec<Message> {
+    reminders
+        .into_iter()
+        .map(|reminder| Message::new(Role::User, format!("[system-reminder]\n{reminder}")))
+        .collect()
+}
+
+/// A cloneable handle for injecting synthetic system-reminders into a running
+/// [`Agent`] turn (see [`Agent::reminder_handle`]). Cheap to clone and `Send` +
+/// `Sync`, so a background task can hold one and steer the loop mid-turn.
+#[derive(Clone)]
+pub struct ReminderHandle(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl ReminderHandle {
+    /// Queue a reminder for the running turn to pick up at its next iteration. A
+    /// poisoned lock silently drops the reminder rather than panicking the caller
+    /// -- steering is best-effort and must never take down the turn.
+    pub fn push(&self, reminder: impl Into<String>) {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.push(reminder.into());
+        }
+    }
+}
+
 /// Parse a model reply into a [`Step`], tolerating code fences, surrounding
 /// prose, and trailing junk (e.g. a stray extra `}` some models emit).
 fn parse_step(content: &str) -> Option<Step> {
@@ -766,5 +825,32 @@ mod compaction_boundary_tests {
         // all assistant/tool -- which the assembler strips. Signal "skip".
         let msgs = vec![Message::user("q"), a("a1"), t("r1"), a("a2"), t("r2")];
         assert_eq!(safe_compaction_tail_start(&msgs, 2), None);
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::reminder_messages;
+    use hf_core::types::Role;
+
+    #[test]
+    fn reminders_become_marked_user_turns() {
+        let msgs = reminder_messages(vec!["run 42 finished".to_owned(), "corpus grew".to_owned()]);
+        assert_eq!(msgs.len(), 2);
+        for message in &msgs {
+            assert_eq!(message.role, Role::User, "injected as a user turn");
+            assert!(
+                message.content.contains("[system-reminder]"),
+                "clearly marked injected context: {}",
+                message.content
+            );
+        }
+        assert!(msgs[0].content.contains("run 42 finished"));
+        assert!(msgs[1].content.contains("corpus grew"));
+    }
+
+    #[test]
+    fn no_reminders_yields_no_messages() {
+        assert!(reminder_messages(Vec::new()).is_empty());
     }
 }
