@@ -75,9 +75,122 @@ pub fn assemble(messages: &[Message], max_tokens: usize) -> Vec<Message> {
         .collect()
 }
 
+/// Tool results within this many of the newest are kept in full.
+pub const KEEP_RECENT_TOOL_RESULTS: usize = 3;
+/// Tool results older than this (counting newest-first) are hard-cleared; those
+/// between the two thresholds are soft-trimmed to a head+tail excerpt.
+pub const HARD_CLEAR_TOOL_RESULTS_AFTER: usize = 10;
+
+/// Chars of head and of tail kept when a tool result is soft-trimmed.
+const SOFT_TRIM_KEEP_CHARS: usize = 500;
+/// Placeholder a hard-cleared tool result is replaced with.
+const HARD_CLEAR_PLACEHOLDER: &str = "[tool result omitted -- superseded by newer output]";
+
+/// Cheaply shrink old tool-result messages in place, with NO model call: the
+/// newest [`KEEP_RECENT_TOOL_RESULTS`] are left intact, the next band is
+/// soft-trimmed to a head+tail excerpt, and anything older than
+/// [`HARD_CLEAR_TOOL_RESULTS_AFTER`] is replaced with a short placeholder.
+///
+/// Recency is counted over tool results newest-first (one per `ReAct` iteration),
+/// not user turns, so a single long agent turn still sheds its stale, high-volume
+/// output (fuzzer logs, coverage/crash dumps) while its recent results stay
+/// intact. Runs before the expensive LLM compaction and is idempotent -- an
+/// already-trimmed result is under the threshold and a cleared one is skipped.
+pub fn prune_tool_results_by_age(messages: &mut [Message]) {
+    let mut rank = 0usize;
+    for message in messages.iter_mut().rev() {
+        if message.role != Role::Tool {
+            continue;
+        }
+        if rank >= HARD_CLEAR_TOOL_RESULTS_AFTER {
+            if message.content != HARD_CLEAR_PLACEHOLDER {
+                HARD_CLEAR_PLACEHOLDER.clone_into(&mut message.content);
+            }
+        } else if rank >= KEEP_RECENT_TOOL_RESULTS {
+            soft_trim_in_place(&mut message.content);
+        }
+        rank += 1;
+    }
+}
+
+fn soft_trim_in_place(content: &mut String) {
+    let total = content.chars().count();
+    // Leave short results alone; this also makes the trim idempotent (a trimmed
+    // result is already under the threshold).
+    if total <= SOFT_TRIM_KEEP_CHARS * 2 + 80 {
+        return;
+    }
+    let head: String = content.chars().take(SOFT_TRIM_KEEP_CHARS).collect();
+    let tail: String = content.chars().skip(total - SOFT_TRIM_KEEP_CHARS).collect();
+    let dropped = total - SOFT_TRIM_KEEP_CHARS * 2;
+    *content = format!(
+        "{head}\n[... {dropped} chars trimmed to fit context; oldest output first ...]\n{tail}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool(content: &str) -> Message {
+        Message::new(Role::Tool, content.to_owned())
+    }
+
+    #[test]
+    fn keeps_recent_tool_results_then_trims_then_clears_older_ones() {
+        let big = "x".repeat(4000);
+        let mut msgs = vec![Message::system("s"), Message::user("go")];
+        for _ in 0..12 {
+            msgs.push(Message::new(Role::Assistant, "call".to_owned()));
+            msgs.push(tool(&big));
+        }
+        prune_tool_results_by_age(&mut msgs);
+
+        let tools: Vec<&Message> = msgs.iter().filter(|m| m.role == Role::Tool).collect();
+        // tools[11] is newest (rank 0); tools[0] is oldest (rank 11).
+        assert_eq!(tools[11].content, big, "newest kept full");
+        assert_eq!(tools[9].content, big, "rank 2 kept full");
+        assert!(
+            tools[8].content.contains("chars trimmed"),
+            "rank 3 soft-trimmed"
+        );
+        assert!(tools[8].content.len() < big.len(), "soft-trim shrank it");
+        assert!(tools[1].content.contains("omitted"), "rank 10 hard-cleared");
+        assert!(tools[0].content.contains("omitted"), "oldest hard-cleared");
+    }
+
+    #[test]
+    fn non_tool_messages_are_never_touched() {
+        let big = "y".repeat(4000);
+        let mut msgs = vec![
+            Message::system(big.clone()),
+            Message::user(big.clone()),
+            Message::new(Role::Assistant, big.clone()),
+        ];
+        for _ in 0..12 {
+            msgs.push(tool("t"));
+        }
+        prune_tool_results_by_age(&mut msgs);
+        assert_eq!(msgs[0].content, big, "system untouched");
+        assert_eq!(msgs[1].content, big, "user untouched");
+        assert_eq!(msgs[2].content, big, "assistant untouched");
+    }
+
+    #[test]
+    fn pruning_is_idempotent() {
+        let big = "z".repeat(8000);
+        let mut once = vec![Message::user("go")];
+        for _ in 0..12 {
+            once.push(tool(&big));
+        }
+        let mut twice = once.clone();
+        prune_tool_results_by_age(&mut once);
+        prune_tool_results_by_age(&mut twice);
+        prune_tool_results_by_age(&mut twice);
+        let once_c: Vec<&str> = once.iter().map(|m| m.content.as_str()).collect();
+        let twice_c: Vec<&str> = twice.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(once_c, twice_c, "a second pass changes nothing");
+    }
 
     #[test]
     fn assemble_keeps_a_contiguous_newest_window() {

@@ -264,6 +264,12 @@ impl Agent {
         let mut loop_guard = LoopGuard::with_defaults();
 
         for _ in 0..self.max_iterations {
+            // Cheaply shrink stale tool output (fuzzer logs, coverage/crash dumps)
+            // in place before the budget cut (L3): the newest results stay intact,
+            // older ones are soft-trimmed, and the oldest are cleared -- so aged
+            // high-volume output stops crowding out live context, with no model
+            // call. Persists across iterations as results age.
+            hf_context::prune_tool_results_by_age(&mut messages);
             // Trim history to the context budget before each call so long
             // multi-turn conversations don't overflow the model window.
             let mut trimmed = hf_context::assemble(&messages, hf_context::DEFAULT_BUDGET_TOKENS);
