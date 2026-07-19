@@ -836,3 +836,27 @@ async fn pruning_defers_compaction_for_tool_result_heavy_history() {
         "pruning must observably shrink the request (was ~108k tokens pre-prune)"
     );
 }
+
+#[tokio::test]
+async fn a_queued_reminder_is_injected_into_the_running_turn() {
+    // L5: a reminder pushed via the handle before the turn must reach the model
+    // on the next iteration -- the channel for background-task notices, todo
+    // nudges, and user interjections.
+    let pool = Arc::new(ScriptedPool::new(vec![r#"{"final":"done"}"#]));
+    let dyn_pool: Arc<dyn ProviderPool> = pool.clone();
+    let agent = Agent::new(TestBackend::new(Some(dyn_pool)), None);
+    agent.reminder_handle().push("BACKGROUND: run 42 finished");
+
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "hi", &sink).await.unwrap();
+    assert_eq!(out, "done");
+
+    let requests = pool.requests.lock().await;
+    assert!(
+        requests.iter().any(|request| request
+            .messages
+            .iter()
+            .any(|m| m.content.contains("BACKGROUND: run 42 finished"))),
+        "the queued reminder must appear in a model request"
+    );
+}
