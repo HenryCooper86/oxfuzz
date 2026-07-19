@@ -43,6 +43,7 @@ pub use verification::{
 pub use hf_agent::{
     AgentDefinition, AgentEvent, AgentRegistry, CollectingSink, EventSink, NullSink, TOOL_SPECS,
 };
+pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
 pub use hf_core::provider::ProviderStatus;
