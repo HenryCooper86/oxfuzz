@@ -574,8 +574,16 @@ impl Agent {
         };
 
         // Split: [system] [middle .. to summarize] [recent tail].
+        // Snap the tail boundary forward to the next user turn (L6): our per-call
+        // assembler drops leading non-user messages (to avoid orphaning a tool
+        // result from a summarized tool call), so a tail that began mid-exchange
+        // would be silently dropped -- losing context that was neither summarized
+        // nor kept. A user boundary also never splits an assistant tool call from
+        // its result. With no user turn to anchor the tail, skip compaction.
         let system = messages.first().cloned();
-        let tail_start = messages.len() - COMPACTION_RETAIN;
+        let Some(tail_start) = safe_compaction_tail_start(messages, COMPACTION_RETAIN) else {
+            return;
+        };
         let middle: Vec<String> = messages[1..tail_start]
             .iter()
             .map(|m| format!("{:?}: {}", m.role, m.content))
@@ -608,6 +616,18 @@ impl Agent {
         rebuilt.extend_from_slice(&messages[tail_start..]);
         *messages = rebuilt;
     }
+}
+
+/// The compaction tail boundary, snapped forward to the next user turn at or
+/// after the nominal `len - retain` split. Anchoring the retained tail on a user
+/// message keeps the per-call assembler from dropping it (it drops leading
+/// non-user messages), and the summary/tail boundary never splits an assistant
+/// tool call from its result. Returns `None` when no user turn exists at or after
+/// the nominal split, so the caller can skip compaction rather than emit a
+/// user-less tail.
+fn safe_compaction_tail_start(messages: &[Message], retain: usize) -> Option<usize> {
+    let nominal = messages.len().saturating_sub(retain);
+    (nominal..messages.len()).find(|&i| matches!(messages[i].role, Role::User))
 }
 
 /// Parse a model reply into a [`Step`], tolerating code fences, surrounding
@@ -695,4 +715,56 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod compaction_boundary_tests {
+    use super::safe_compaction_tail_start;
+    use hf_core::types::{Message, Role};
+
+    fn a(text: &str) -> Message {
+        Message::new(Role::Assistant, text.to_owned())
+    }
+    fn t(text: &str) -> Message {
+        Message::new(Role::Tool, text.to_owned())
+    }
+
+    #[test]
+    fn snaps_forward_past_a_mid_exchange_split_to_the_next_user_turn() {
+        // Nominal split (len 8 - retain 3 = index 5) lands on a tool result mid
+        // exchange; the boundary snaps forward to the user turn at index 6 so the
+        // retained tail begins with a user message the assembler will keep.
+        let msgs = vec![
+            Message::system("s"),
+            Message::user("q1"),
+            a("a1"),
+            t("r1"),
+            a("a2"),
+            t("r2"),
+            Message::user("q2"),
+            a("a3"),
+        ];
+        assert_eq!(safe_compaction_tail_start(&msgs, 3), Some(6));
+    }
+
+    #[test]
+    fn keeps_the_nominal_split_when_it_already_lands_on_a_user_turn() {
+        let msgs = vec![
+            Message::system("s"),
+            Message::user("q1"),
+            a("a1"),
+            Message::user("q2"),
+            a("a2"),
+        ];
+        // len 5 - retain 2 = index 3, which is user("q2"): no snap needed.
+        assert_eq!(safe_compaction_tail_start(&msgs, 2), Some(3));
+    }
+
+    #[test]
+    fn is_none_when_no_user_turn_anchors_the_tail() {
+        // The only user turn is before the nominal split, so the tail would be
+        // all assistant/tool -- which the assembler strips. Signal "skip".
+        let msgs = vec![Message::user("q"), a("a1"), t("r1"), a("a2"), t("r2")];
+        assert_eq!(safe_compaction_tail_start(&msgs, 2), None);
+    }
 }
