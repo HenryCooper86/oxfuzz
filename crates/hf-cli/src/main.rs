@@ -1064,9 +1064,13 @@ async fn cmd_triage(project: PathBuf, target: &str, lang: &str) -> anyhow::Resul
         return Ok(());
     }
     println!("{} unique crash(es) after dedup.", crashes.len());
+    // Advisory per-crash LLM verdict (best-effort: None when no provider is
+    // configured; the verdict never reclassifies a crash, only informs review).
+    let verdicts = container.verify_crashes(target, &crashes).await;
     let reports: Vec<serde_json::Value> = crashes
         .iter()
-        .map(|c| {
+        .zip(verdicts)
+        .map(|(c, verdict)| {
             serde_json::json!({
                 "id": c.id,
                 "kind": format!("{:?}", c.kind),
@@ -1074,6 +1078,7 @@ async fn cmd_triage(project: PathBuf, target: &str, lang: &str) -> anyhow::Resul
                 "stack_signature": c.stack_signature,
                 "input_path": c.input_path,
                 "minimized": c.minimized,
+                "verdict": verdict,
             })
         })
         .collect();
