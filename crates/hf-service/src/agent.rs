@@ -286,6 +286,44 @@ impl ServiceContainer {
                 })
                 .to_string())
             }
+            "refine" => {
+                // Close the L2 loop (increment 3b): reshape the CURRENT harness
+                // toward uncovered code and recompile a PROPOSAL. It returns a
+                // compiled-but-unqualified revision -- never promoted -- so the
+                // orchestrator must still re-smoke it and a human must promote
+                // (AGENTS.md 2.12). This acts on the not-promotion-ready guidance
+                // that `harness` emits on a hollow pass.
+                let target = arg_str(args, "target")?;
+                let language = parse_language(arg_str(args, "lang").unwrap_or("c"))?;
+                let requested_engine = args
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .map(parse_engine)
+                    .transpose()?;
+                let engine = crate::config::resolve_harness_engine(requested_engine, language)
+                    .map_err(ClassifiedError::Validation)?;
+                // Bound the coverage-guided repair passes; default modestly and
+                // floor at 1 so a refine always attempts at least one repair.
+                let max_repairs = args
+                    .get("max_repairs")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(2)
+                    .max(1);
+                let outcome = self
+                    .harness_refine(project, target, engine, language, max_repairs)
+                    .await?;
+                Ok(serde_json::json!({
+                    "refined": format!("{:?}", outcome.status),
+                    "binary": outcome.binary_name,
+                    "repairs_used": outcome.repairs_used,
+                    "promotion_ready": false,
+                    "next_action": "This is a PROPOSED revision: recompiled but not yet \
+                        qualified. Re-run smoke qualification (the `harness` flow's smoke step) \
+                        on it, and a human must promote it before any campaign.",
+                })
+                .to_string())
+            }
             "run" => {
                 let target = arg_str(args, "target")?;
                 let requested_engine = args
