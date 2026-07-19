@@ -448,6 +448,40 @@ async fn tool_call_then_final() {
 }
 
 #[tokio::test]
+async fn a_malformed_tool_call_is_rejected_by_schema_validation_before_dispatch() {
+    // `harness` requires `target` (L1). A call missing it must be rejected with a
+    // structured "invalid arguments" error the model can correct -- and must NOT
+    // reach the dispatcher, which would otherwise surface "unknown tool".
+    let agent = agent_with(
+        vec![
+            r#"{"thought":"make a harness","tool":"harness","args":{}}"#,
+            r#"{"thought":"done","final":"ok"}"#,
+        ],
+        Some(std::env::temp_dir()),
+    );
+    let sink = CollectingSink::new();
+    let out = agent.run_turn(vec![], "harness it", &sink).await.unwrap();
+    assert_eq!(out, "ok");
+
+    let events = sink.events().await;
+    let summary = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult { name, summary } if name == "harness" => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("a harness tool result was emitted");
+    assert!(
+        summary.contains("invalid arguments"),
+        "rejected by schema validation: {summary}"
+    );
+    assert!(
+        !summary.contains("unknown tool"),
+        "validation must fire before dispatch: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn prompt_protocol_tool_results_are_valid_provider_messages() {
     use hf_core::provider::ToolCallingMode;
     use hf_core::types::Role;

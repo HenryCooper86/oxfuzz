@@ -417,6 +417,12 @@ impl Agent {
                     "tool '{tool}' is not permitted for the {} agent",
                     self.definition.name
                 ))
+            } else if let Err(err) = tools::validate_tool_args(&tool, &args) {
+                // Schema-validate the call before dispatch (L1): a hallucinated or
+                // wrong-typed argument is rejected with a structured, correctable
+                // message rather than being silently mis-parsed or defaulted by the
+                // dispatcher's ad-hoc arg extraction.
+                agent_tools::error_json(format!("invalid arguments for tool '{tool}': {err}"))
             } else {
                 match self.project.as_deref() {
                     Some(project) => {

@@ -64,9 +64,89 @@ pub fn catalog_for(allowed: &[String]) -> String {
     format!("Available tools (call one per step):\n{}", lines.join("\n"))
 }
 
+/// The JSON Schema for a fuzzing tool's arguments, or `None` for a tool without
+/// one. Kept alongside the model-facing catalog (`TOOL_USAGE`) so the advertised
+/// argument shape and the validated shape cannot drift.
+#[must_use]
+pub fn fuzzing_tool_schema(name: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    // Schemas mirror the dispatcher's argument handling: `target` is required
+    // wherever dispatch reads it as mandatory; `engine`/`lang` are optional
+    // strings; the numeric args are integers. Types are constrained (not values)
+    // so the dispatcher's own parsers still own enum errors, and unknown
+    // properties are tolerated (the dispatcher ignores them).
+    let schema = match name {
+        "discover" => json!({
+            "type": "object",
+            "properties": { "lang": { "type": "string" } },
+        }),
+        "harness" => json!({
+            "type": "object",
+            "required": ["target"],
+            "properties": {
+                "target": { "type": "string" },
+                "engine": { "type": "string" },
+                "lang": { "type": "string" },
+            },
+        }),
+        "refine" => json!({
+            "type": "object",
+            "required": ["target"],
+            "properties": {
+                "target": { "type": "string" },
+                "engine": { "type": "string" },
+                "lang": { "type": "string" },
+                "max_repairs": { "type": "integer", "minimum": 1 },
+            },
+        }),
+        "run" => json!({
+            "type": "object",
+            "required": ["target"],
+            "properties": {
+                "target": { "type": "string" },
+                "engine": { "type": "string" },
+                "duration_secs": { "type": "integer", "minimum": 1 },
+            },
+        }),
+        "triage" => json!({
+            "type": "object",
+            "required": ["target"],
+            "properties": { "target": { "type": "string" } },
+        }),
+        "corpus" => json!({
+            "type": "object",
+            "required": ["target"],
+            "properties": {
+                "target": { "type": "string" },
+                "op": { "type": "string" },
+            },
+        }),
+        _ => return None,
+    };
+    Some(schema)
+}
+
+/// Validate a tool call's arguments against its schema (L1). Tools without a
+/// schema -- delegate, inspection reads, or an unknown name -- validate
+/// vacuously. On mismatch the error is a structured message the model can read
+/// and correct, so a hallucinated or wrong-typed argument is rejected instead of
+/// being silently mis-parsed or defaulted by the dispatcher.
+///
+/// # Errors
+/// Returns the schema-validation error message when `args` does not conform.
+pub fn validate_tool_args(name: &str, args: &serde_json::Value) -> Result<(), String> {
+    let Some(schema) = fuzzing_tool_schema(name) else {
+        return Ok(());
+    };
+    hf_tools::JsonSchemaValidator::new()
+        .validate(&schema, args)
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn refine_is_a_first_class_tool_in_the_catalog() {
@@ -82,6 +162,43 @@ mod tests {
             catalog.contains("refine"),
             "an agent allowed `refine` must see it in its usage catalog: {catalog}"
         );
+    }
+
+    #[test]
+    fn schema_requires_target_for_the_tools_that_need_it() {
+        for tool in ["harness", "run", "triage", "corpus", "refine"] {
+            let missing = validate_tool_args(tool, &json!({}));
+            assert!(
+                missing.is_err(),
+                "{tool} must require `target`: {missing:?}"
+            );
+            let ok = validate_tool_args(tool, &json!({ "target": "parse" }));
+            assert!(ok.is_ok(), "{tool} accepts a valid target: {ok:?}");
+        }
+    }
+
+    #[test]
+    fn schema_rejects_wrong_types_instead_of_silently_mis_parsing() {
+        // Today these are swallowed by as_str()/as_u64() and silently defaulted.
+        assert!(validate_tool_args("harness", &json!({"target": "p", "engine": 7})).is_err());
+        assert!(validate_tool_args("run", &json!({"target": "p", "duration_secs": "60"})).is_err());
+        assert!(validate_tool_args("discover", &json!({"lang": 5})).is_err());
+    }
+
+    #[test]
+    fn schema_accepts_valid_args_and_leaves_unschemaed_tools_alone() {
+        assert!(validate_tool_args(
+            "harness",
+            &json!({"target": "p", "engine": "libfuzzer", "lang": "c"})
+        )
+        .is_ok());
+        assert!(validate_tool_args("run", &json!({"target": "p", "duration_secs": 60})).is_ok());
+        assert!(
+            validate_tool_args("discover", &json!({})).is_ok(),
+            "discover has no required args"
+        );
+        // A tool with no schema (unknown, delegate, or an inspection read) is vacuous.
+        assert!(validate_tool_args("nonexistent", &json!({})).is_ok());
     }
 
     #[test]
