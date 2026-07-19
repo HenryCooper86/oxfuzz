@@ -50,6 +50,7 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   corpus_grow: { method: "POST", path: "/corpus/grow" },
   corpus_prune: { method: "POST", path: "/corpus/prune" },
   triage: { method: "POST", path: "/triage" },
+  verify_crash: { method: "POST", path: "/crash/verify" },
   generate_report: { method: "POST", path: "/report" },
   list_report_drafts: { method: "GET", path: "/reports" },
   save_report_draft: { method: "POST", path: "/reports/save" },

@@ -3,7 +3,7 @@ import { getTransport, isTauriEnvironment, emitDataChanged } from "../lib";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { useRunOutput } from "../providers/runOutput";
-import type { Crash } from "../types";
+import type { Crash, CrashVerdict } from "../types";
 import { Button, ViewHeader, SeverityBadge } from "../components/ui";
 import { Bug, ChevronRight, Download, FileText, Share2 } from "lucide-react";
 import { PathActions } from "../components/PathActions";
@@ -33,6 +33,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   const [reportMsg, setReportMsg] = useState<string | null>(null);
   const [reportMd, setReportMd] = useState<string | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
+  // On-demand LLM crash verdicts (L2 4c), keyed by crash id: "loading" while a
+  // verdict is being fetched, "none" when verified with no provider configured,
+  // or the verdict itself. Opt-in per crash so a scan is never blocked on it.
+  const [verdicts, setVerdicts] = useState<Record<string, CrashVerdict | "loading" | "none">>({});
   // Export formats this host supports (md/html always; pdf/docx need pandoc).
   const [formats, setFormats] = useState<string[]>(["md", "html"]);
 
@@ -68,6 +72,23 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       setLoading(false);
     }
   }, [activeProject, lastTarget, markDone, markSkipped]);
+
+  const verifyCrash = useCallback(
+    async (crash: Crash) => {
+      setVerdicts((v) => ({ ...v, [crash.id]: "loading" }));
+      try {
+        const verdict = await getTransport().invoke<CrashVerdict | null>("verify_crash", {
+          project: activeProject || ".",
+          target: lastTarget,
+          crash,
+        });
+        setVerdicts((v) => ({ ...v, [crash.id]: verdict ?? "none" }));
+      } catch {
+        setVerdicts((v) => ({ ...v, [crash.id]: "none" }));
+      }
+    },
+    [activeProject, lastTarget],
+  );
 
   const reportArgs = useCallback(
     () => ({ project: activeProject || ".", target: lastTarget }),
@@ -373,7 +394,11 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
           {/* Detail panel */}
           {selected !== null && crashes[selected] && (
             <div className="surface-card flex-1" style={{ padding: "var(--space-md)" }}>
-              <CrashDetail crash={crashes[selected]} />
+              <CrashDetail
+                crash={crashes[selected]}
+                verdict={verdicts[crashes[selected].id]}
+                onVerify={() => verifyCrash(crashes[selected])}
+              />
             </div>
           )}
         </div>
@@ -393,7 +418,15 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
   );
 }
 
-function CrashDetail({ crash }: { crash: Crash }) {
+function CrashDetail({
+  crash,
+  verdict,
+  onVerify,
+}: {
+  crash: Crash;
+  verdict: CrashVerdict | "loading" | "none" | undefined;
+  onVerify: () => void;
+}) {
   const { t } = useI18n();
   return (
     <div className="flex flex-col gap-3">
@@ -409,6 +442,47 @@ function CrashDetail({ crash }: { crash: Crash }) {
         <PathActions path={crash.input_path} />
       </div>
       {crash.summary && <p className="text-sm text-text-secondary">{crash.summary}</p>}
+      {/* On-demand LLM crash verdict (L2 4c): opt in per crash. */}
+      <div className="border-t border-border pt-3">
+        {verdict === undefined && (
+          <Button size="sm" variant="ghost" onClick={onVerify}>
+            {t("triage.verifyCrash")}
+          </Button>
+        )}
+        {verdict === "loading" && (
+          <span className="text-xs text-text-muted">{t("triage.verifying")}</span>
+        )}
+        {verdict === "none" && (
+          <span className="text-xs text-text-muted">{t("triage.noVerdict")}</span>
+        )}
+        {verdict && verdict !== "loading" && verdict !== "none" && (
+          <div className="flex flex-col gap-1 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                style={{
+                  color: verdict.likely_target_bug ? "var(--error)" : "var(--warning)",
+                  fontWeight: 600,
+                }}
+              >
+                {verdict.likely_target_bug ? t("triage.likelyTargetBug") : t("triage.likelyArtifact")}
+              </span>
+              <span className="text-text-muted">
+                {t("triage.confidence", { level: verdict.confidence })}
+              </span>
+              {verdict.reproduces_deterministically && (
+                <span className="text-text-muted">· {t("triage.reproduces")}</span>
+              )}
+            </div>
+            {verdict.reasons.length > 0 && (
+              <ul className="text-text-secondary" style={{ paddingLeft: 16, listStyleType: "disc" }}>
+                {verdict.reasons.map((reason, i) => (
+                  <li key={i}>{reason}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
       {crash.casr && (
         <div className="border-t border-border pt-3">
           <div className="text-xs text-text-muted uppercase mb-2" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
