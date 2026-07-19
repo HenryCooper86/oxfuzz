@@ -7342,6 +7342,72 @@ impl ServiceContainer {
         self.triage_run_record(project, target, run).await
     }
 
+    /// LLM crash verifier (self-verification L2, increment 4): for each triaged
+    /// crash, ask the model whether it looks like a deterministically-reproducing
+    /// genuine target bug versus a harness/setup artifact, returning a verdict
+    /// aligned with `crashes` (index for index).
+    ///
+    /// Best-effort and advisory: with no provider configured it returns `None`
+    /// for every crash (no fabricated opinion), it is bounded to a fixed number
+    /// of model calls per pass, and it never reclassifies, files, or closes a
+    /// crash -- the verdict only informs a human reviewer (AGENTS.md 2.12).
+    pub async fn verify_crashes(
+        &self,
+        target: &str,
+        crashes: &[hf_core::crash::Crash],
+    ) -> Vec<Option<crate::verification::CrashVerdict>> {
+        use hf_core::provider::{ChatRequest, LlmProvider as _};
+        use hf_core::types::Message;
+
+        // Bound the model calls per triage pass so a crash flood cannot fan out
+        // into an unbounded LLM spend; extra crashes get no verdict.
+        const MAX_CRASH_VERIFICATIONS: usize = 20;
+
+        let Some(pool) = self.provider_pool() else {
+            return vec![None; crashes.len()];
+        };
+        let provider = LlmProviderBridge::new(pool)
+            .with_diagnostics(Arc::clone(&self.diagnostics), "crash_verify");
+
+        let mut verdicts = Vec::with_capacity(crashes.len());
+        for (index, crash) in crashes.iter().enumerate() {
+            if index >= MAX_CRASH_VERIFICATIONS {
+                verdicts.push(None);
+                continue;
+            }
+            let (severity, crashline, stack) = crash.casr.as_ref().map_or_else(
+                || (None, None, Vec::new()),
+                |casr| {
+                    (
+                        Some(casr.severity_short.as_str()),
+                        Some(casr.crashline.as_str()),
+                        casr.stack.clone(),
+                    )
+                },
+            );
+            let kind = format!("{:?}", crash.kind);
+            let prompt = hf_prompt::render_crash_verify_prompt(
+                target,
+                &kind,
+                &crash.summary,
+                severity,
+                crashline,
+                &stack,
+                crash.minimized,
+            );
+            let req = ChatRequest::from_messages(vec![Message::user(prompt)]);
+            let verdict = match provider.chat_completion(&req).await {
+                Ok(resp) => crate::verification::parse_crash_verdict(resp.text()),
+                Err(error) => {
+                    tracing::warn!("crash verification for a '{target}' crash failed: {error}");
+                    None
+                }
+            };
+            verdicts.push(verdict);
+        }
+        verdicts
+    }
+
     async fn triage_run_record(
         &self,
         project: &Path,
