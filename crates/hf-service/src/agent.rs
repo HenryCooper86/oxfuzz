@@ -264,22 +264,34 @@ impl ServiceContainer {
                 let draft = self
                     .harness_draft(project, target, engine, language)
                     .await?;
+                // Keep the source for the LLM verifier below; harness_compile
+                // consumes the draft's copy.
+                let source = draft.source.clone();
                 let compile = self
                     .harness_compile(draft.source, project, engine, target, language)
                     .await?;
                 let smoke = self
                     .harness_smoke(project, target, engine, language)
                     .await?;
-                // Steer the orchestrator on the smoke verdict (L2 increment 3): a
-                // clean pass points at human promotion; a hollow pass (Suspect) or
+                // LLM harness verifier (L2 Option B): on a deterministic Pass, let
+                // an LLM read the harness source + smoke result and downgrade a
+                // hollow pass the execs/sec heuristic missed (a harness that runs
+                // fast but ignores data/size). Best-effort and conservative -- it
+                // can only add caution, never promote.
+                let verdict = self
+                    .verify_harness_source(target, &source, &smoke.summary, smoke.verdict)
+                    .await;
+                // Steer the orchestrator on the (possibly LLM-refined) verdict (L2
+                // increment 3): a clean pass points at human promotion; a Suspect or
                 // Fail carries the reasons back and directs a refine + re-smoke,
                 // never promotion. Advisory only -- promotion stays a human action
                 // and any refine merely PROPOSES a new revision (AGENTS.md 2.12).
-                let next = crate::verification::harness_next_step(&smoke.verdict);
+                let next = crate::verification::harness_next_step(&verdict);
                 Ok(serde_json::json!({
                     "compiled": format!("{:?}", compile.status),
                     "binary": compile.binary_name,
-                    "smoke": smoke,
+                    "smoke": smoke.summary,
+                    "verdict": verdict,
                     "approval_required": true,
                     "promotion_ready": next.promotion_ready,
                     "next_action": next.guidance,
