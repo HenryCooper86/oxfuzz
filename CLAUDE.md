@@ -95,7 +95,7 @@ Core:                          hf-core            ← traits, types, contracts
 - `hf-guardrails` — permission model, loop detection, risk scoring (the interception layer).
 - `hf-storage` — SQLite (sqlx) persistence; schema in `docs/standards/DATABASE_SCHEMA.md`.
 - `hf-service::recovery` — bounded, synced run WAL and interrupted-run replay.
-- `hf-skills` — self-evolving skill registry; bundled skill content in `crates/hf-skills/src/builtins/*/root.md`.
+- `hf-skills` — user-editable skill registry (skills are authored by a human, not created by the agent at runtime); bundled skill content in `crates/hf-skills/src/builtins/*/root.md`.
 
 ### Safety model (non-negotiable — `AGENTS.md` §2.5, §2.12)
 
