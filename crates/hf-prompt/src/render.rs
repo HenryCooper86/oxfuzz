@@ -292,6 +292,56 @@ pub fn render_dictionary_prompt(symbol: &str, source_excerpt: &str) -> String {
     )
 }
 
+/// Render the crash-verification prompt: ask the LLM to judge whether a triaged
+/// crash is a deterministically-reproducing genuine target bug versus a harness
+/// or setup artifact. The response is parsed by
+/// `hf_service::verification::parse_crash_verdict`.
+#[must_use]
+pub fn render_crash_verify_prompt(
+    target: &str,
+    kind: &str,
+    summary: &str,
+    severity_short: Option<&str>,
+    crashline: Option<&str>,
+    stack: &[String],
+    minimized: bool,
+) -> String {
+    let severity = severity_short.unwrap_or("unknown");
+    let crashline = crashline.unwrap_or("unknown");
+    // Cap the frames so a deep stack cannot blow the prompt budget.
+    let frames = if stack.is_empty() {
+        "(no normalized stack available)".to_owned()
+    } else {
+        stack
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "You are the crash verifier for hobot_fuzz. Judge whether the crash below, found \
+         while fuzzing the target `{target}`, is a deterministically-reproducing GENUINE \
+         target bug -- versus a harness or setup artifact (the harness itself is buggy, an \
+         out-of-memory from an allocation the harness controls, a timeout with no fault, or \
+         a crash in test scaffolding rather than the target).\n\
+         Base your judgment ONLY on the evidence; if it is thin, say so and lower your \
+         confidence. This is advisory input for a human reviewer -- do not overstate.\n\
+         \n\
+         Evidence:\n\
+         - kind: {kind}\n\
+         - CASR severity: {severity}\n\
+         - crash location: {crashline}\n\
+         - minimized: {minimized}\n\
+         - summary: {summary}\n\
+         - top stack frames:\n{frames}\n\
+         \n\
+         Respond with ONLY a JSON object, no prose, no code fences:\n\
+         {{\"reproduces_deterministically\": <bool>, \"likely_target_bug\": <bool>, \
+         \"confidence\": \"low|medium|high\", \"reasons\": [\"<short reason>\"]}}"
+    )
+}
+
 fn engine_entry_point(engine: EngineKind) -> &'static str {
     match engine {
         EngineKind::Honggfuzz => {
@@ -323,6 +373,38 @@ mod tests {
         InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn crash_verify_prompt_carries_the_evidence_and_asks_for_json() {
+        let prompt = render_crash_verify_prompt(
+            "parse_header",
+            "Asan",
+            "heap-buffer-overflow reading past the input",
+            Some("heap-buffer-overflow(read)"),
+            Some("src/parse.c:42:5"),
+            &["parse_header src/parse.c:42".to_owned(), "main".to_owned()],
+            true,
+        );
+        assert!(prompt.contains("parse_header"), "names the target");
+        assert!(
+            prompt.contains("heap-buffer-overflow(read)"),
+            "includes CASR severity"
+        );
+        assert!(
+            prompt.contains("src/parse.c:42:5"),
+            "includes the crash location"
+        );
+        assert!(
+            prompt.contains("parse_header src/parse.c:42"),
+            "includes stack frames"
+        );
+        assert!(
+            prompt.contains("reproduces_deterministically")
+                && prompt.contains("likely_target_bug")
+                && prompt.contains("confidence"),
+            "asks for the verdict JSON fields"
+        );
+    }
 
     fn sample_target() -> TargetCandidate {
         TargetCandidate {
