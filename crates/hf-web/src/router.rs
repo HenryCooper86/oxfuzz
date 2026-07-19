@@ -701,11 +701,14 @@ async fn harness_smoke(
         .map_err(classified_api_error)?;
     Ok(Json(serde_json::json!({
         // Mirror the Tauri command: crashes during smoke mean it did not pass.
-        "status": if smoke.passed { "SmokePassed" } else { "SmokeFailed" },
-        "duration_secs": smoke.duration_secs,
-        "execs_per_sec": smoke.execs_per_sec,
-        "crashes": smoke.crashes,
-        "passed": smoke.passed,
+        "status": if smoke.summary.passed { "SmokePassed" } else { "SmokeFailed" },
+        "duration_secs": smoke.summary.duration_secs,
+        "execs_per_sec": smoke.summary.execs_per_sec,
+        "crashes": smoke.summary.crashes,
+        "passed": smoke.summary.passed,
+        // Deterministic self-verification verdict (grok-build L2): lets the UI
+        // warn on a hollow pass instead of treating every "passed" as qualified.
+        "verdict": smoke.verdict,
     })))
 }
 
