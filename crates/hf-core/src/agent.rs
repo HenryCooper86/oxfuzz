@@ -13,9 +13,6 @@ use std::fmt::{self, Write as _};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::provider::ResponseFormat;
-use crate::trust::TrustTier;
-
 // ---------------------------------------------------------------------------
 // Context strategy hint
 // ---------------------------------------------------------------------------
@@ -133,85 +130,6 @@ pub trait AgentDelegator: Send + Sync + fmt::Debug {
 }
 
 // ---------------------------------------------------------------------------
-// AgentRunner trait
-// ---------------------------------------------------------------------------
-
-/// Configuration for a single agent execution.
-///
-/// Built from an `AgentDefinition` and the caller's input data.
-/// Passed to [`AgentRunner::run`] to execute the agent's LLM reasoning.
-#[derive(Debug, Clone)]
-pub struct AgentRunConfig {
-    /// Agent name (for routing and logging).
-    pub agent_name: String,
-    /// The agent's system prompt (from its TOML definition).
-    pub system_prompt: String,
-    /// Structured input data from the caller.
-    pub input: serde_json::Value,
-    /// Preferred models (tried in order).
-    pub preferred_models: Vec<String>,
-    /// Fallback models if preferred are unavailable.
-    pub fallback_models: Vec<String>,
-    /// Provider routing tags (e.g. `["general"]`, `["title"]`).
-    /// Used as `required_tags` in `RouteRequest` for provider selection.
-    pub provider_tags: Vec<String>,
-    /// Ordered fallback provider tag sets used when the primary tags have no provider.
-    pub fallback_provider_tags: Vec<Vec<String>>,
-    /// Sampling temperature override (from agent definition).
-    pub temperature: Option<f64>,
-    /// Maximum tokens to generate.
-    pub max_tokens: Option<u32>,
-    /// Timeout for the entire run in seconds.
-    pub timeout_secs: u64,
-    /// Tools the agent is allowed to use (from `AgentDefinition`).
-    /// Empty = no tool calling (single-turn mode).
-    pub allowed_tools: Vec<String>,
-    /// Maximum agent loop iterations (tool-call loop limit).
-    pub max_iterations: usize,
-    /// Trust tier of the agent (for permission bypass decisions).
-    ///
-    /// When `Some(TrustTier::BuiltIn)`, the runner may auto-allow tools
-    /// listed in `allowed_tools` without consulting the global permission
-    /// policy.
-    pub trust_tier: Option<TrustTier>,
-    /// Optional pre-created trace ID from the diagnostics delegator.
-    ///
-    /// When set, the runner should forward this to the execution engine so
-    /// that per-iteration observations are recorded under this trace instead
-    /// of creating a new one.
-    pub trace_id: Option<uuid::Uuid>,
-    /// Whether to prune historical tool call pairs from `working_history`.
-    ///
-    /// This is only safe for agents whose prompt guarantees a non-empty
-    /// rolling summary in every tool-calling assistant message. Otherwise,
-    /// deleting old tool results would destroy context needed for later
-    /// iterations.
-    pub prune_tool_history: bool,
-    /// Response format for structured output (`None` = default text).
-    ///
-    /// When set, the provider enforces the response conforms to the
-    /// specified format (e.g., a JSON Schema).
-    pub response_format: Option<ResponseFormat>,
-}
-
-/// Output from a single agent execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentRunOutput {
-    /// Text output produced by the agent.
-    pub text: String,
-    /// Tokens consumed during execution (input + output combined).
-    pub tokens_used: u64,
-    /// Input tokens consumed (for diagnostics breakdown).
-    pub input_tokens: u64,
-    /// Output tokens generated (for diagnostics breakdown).
-    pub output_tokens: u64,
-    /// Model that was actually used.
-    pub model_used: String,
-    /// Wall-clock duration in milliseconds.
-    pub duration_ms: u64,
-}
-
-// ---------------------------------------------------------------------------
 // InheritedConstraints
 // ---------------------------------------------------------------------------
 
@@ -265,25 +183,6 @@ impl InheritedConstraints {
         }
         section
     }
-}
-
-/// Executes an agent's LLM reasoning given its configuration and input.
-///
-/// Implementations bridge agent definitions to actual `ProviderPool` calls.
-/// Injected into `AgentPool` at startup via dependency injection.
-///
-/// # Implementations
-///
-/// - `SingleTurnRunner` (in `y-provider`): `system_prompt` + input → single
-///   `ProviderPool::chat_completion()` call. Suitable for system agents
-///   (title-generator, compaction-summarizer, etc.).
-#[async_trait]
-pub trait AgentRunner: Send + Sync {
-    /// Run a single-turn agent: `system_prompt` + input → text output.
-    ///
-    /// The runner builds the appropriate `ChatRequest` from the config,
-    /// routes it to an available provider, and returns the result.
-    async fn run(&self, config: AgentRunConfig) -> Result<AgentRunOutput, DelegationError>;
 }
 
 #[cfg(test)]
@@ -385,54 +284,6 @@ mod tests {
         assert_eq!(parsed.output_tokens, output.output_tokens);
         assert_eq!(parsed.model_used, output.model_used);
         assert_eq!(parsed.duration_ms, output.duration_ms);
-    }
-
-    /// `AgentRunner` trait is object-safe.
-    #[test]
-    fn test_agent_runner_trait_object_safe() {
-        fn _assert_object_safe(_runner: std::sync::Arc<dyn AgentRunner>) {}
-    }
-
-    /// `AgentRunConfig` is constructible with all fields.
-    #[test]
-    fn test_agent_run_config_fields() {
-        let config = AgentRunConfig {
-            agent_name: "title-generator".to_string(),
-            system_prompt: "Generate a title.".to_string(),
-            input: serde_json::json!({"messages": ["hello"]}),
-            preferred_models: vec!["gpt-4o-mini".to_string()],
-            fallback_models: vec!["gpt-4o".to_string()],
-            provider_tags: vec!["title".to_string()],
-            fallback_provider_tags: vec![],
-            temperature: Some(0.3),
-            max_tokens: Some(30),
-            timeout_secs: 30,
-            allowed_tools: vec![],
-            max_iterations: 1,
-            trust_tier: None,
-            trace_id: None,
-            prune_tool_history: false,
-            response_format: None,
-        };
-        assert_eq!(config.agent_name, "title-generator");
-        assert_eq!(config.preferred_models.len(), 1);
-    }
-
-    /// `AgentRunOutput` serde roundtrip.
-    #[test]
-    fn test_agent_run_output_serde() {
-        let output = AgentRunOutput {
-            text: "My Title".to_string(),
-            tokens_used: 15,
-            input_tokens: 10,
-            output_tokens: 5,
-            model_used: "gpt-4o-mini".to_string(),
-            duration_ms: 200,
-        };
-        let json = serde_json::to_string(&output).unwrap();
-        let parsed: AgentRunOutput = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.text, output.text);
-        assert_eq!(parsed.model_used, output.model_used);
     }
 
     #[test]
