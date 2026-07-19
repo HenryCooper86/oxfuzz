@@ -12,7 +12,7 @@ worth fuzzing, writes fuzz harnesses, drives open-source fuzzing engines
 iterates on corpus and coverage -- all under human-in-the-loop supervision.
 
 Design pillars: async-first (P95 tool dispatch < 100ms) - model-agnostic -
-full observability - WAL-based recoverability - self-evolving skills -
+full observability - WAL-based recoverability - user-extensible skills -
 **safety-first fuzzing** (sandboxed builds and execution).
 
 ### 1.1 Workspace Crates
