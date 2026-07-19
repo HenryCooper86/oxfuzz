@@ -104,6 +104,14 @@ export interface Crash {
   casr: CasrReport | null;
 }
 
+/** On-demand LLM verdict for a triaged crash (matches hf-service CrashVerdict). */
+export interface CrashVerdict {
+  reproduces_deterministically: boolean;
+  likely_target_bug: boolean;
+  confidence: "low" | "medium" | "high";
+  reasons: string[];
+}
+
 export interface FuzzProgress {
   type: string;
   data: unknown;
