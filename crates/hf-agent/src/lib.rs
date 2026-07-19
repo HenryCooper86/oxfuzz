@@ -37,7 +37,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
-pub use definition::{AgentDefinition, AgentRole, Autonomy, TrustTier};
+pub use definition::{AgentDefinition, AgentRole, Autonomy, CompletionRequirement, TrustTier};
 pub use event::{AgentEvent, CollectingSink, EventSink, NullSink};
 pub use registry::{AgentRegistry, RegistryError, DEFAULT_AGENT_ID};
 pub use tools::{catalog_for, TOOL_SPECS};
@@ -126,6 +126,10 @@ pub const DELEGATE_TOOL: &str = "delegate";
 /// Number of most-recent messages kept verbatim when compacting a long
 /// conversation; everything older is summarized into one message.
 const COMPACTION_RETAIN: usize = 6;
+
+/// How many times a turn may be nudged back after a premature final answer when a
+/// completion requirement is unmet, before the answer is accepted anyway (L4).
+const MAX_COMPLETION_RECOVERIES: usize = 2;
 
 /// A [`CompactionLlm`](hf_context::CompactionLlm) backed by the provider pool,
 /// so the agent can summarize old turns with a real model instead of dropping
@@ -290,6 +294,12 @@ impl Agent {
         // before the full step budget is spent.
         let mut loop_guard = LoopGuard::with_defaults();
 
+        // Completion-requirement recovery (L4): if the definition requires a tool
+        // be called before the turn ends, track whether it has been, and how many
+        // times we have nudged the model back after a premature final answer.
+        let mut required_tool_called = false;
+        let mut completion_recoveries = 0usize;
+
         for _ in 0..self.max_iterations {
             // Pick up any synthetic system-reminders queued mid-turn (L5) so the
             // model call below reads them: the channel for background-task notices,
@@ -336,7 +346,18 @@ impl Agent {
             let content = resp.text().trim().to_owned();
 
             let Some(step) = parse_step(&content) else {
-                // Not a tool-protocol object: treat as the final answer.
+                // Not a tool-protocol object: treat as the final answer, unless a
+                // completion requirement is unmet -- then nudge and continue (L4).
+                if let Some(reminder) = completion_reminder(
+                    self.definition.completion_requirement.as_ref(),
+                    required_tool_called,
+                    completion_recoveries,
+                ) {
+                    completion_recoveries += 1;
+                    messages.push(Message::new(Role::Assistant, content));
+                    messages.extend(reminder_messages(vec![reminder.to_owned()]));
+                    continue;
+                }
                 sink.emit(AgentEvent::Complete {
                     content: content.clone(),
                 })
@@ -354,6 +375,17 @@ impl Agent {
             }
 
             if let Some(answer) = step.final_answer {
+                // Same completion-requirement gate for an explicit final answer.
+                if let Some(reminder) = completion_reminder(
+                    self.definition.completion_requirement.as_ref(),
+                    required_tool_called,
+                    completion_recoveries,
+                ) {
+                    completion_recoveries += 1;
+                    messages.push(Message::new(Role::Assistant, answer));
+                    messages.extend(reminder_messages(vec![reminder.to_owned()]));
+                    continue;
+                }
                 sink.emit(AgentEvent::Complete {
                     content: answer.clone(),
                 })
@@ -399,6 +431,16 @@ impl Agent {
             };
 
             let args = step.args.unwrap_or(Value::Null);
+            // Record that a completion-required tool was invoked (L4), so the turn
+            // may finish once the model has called it.
+            if self
+                .definition
+                .completion_requirement
+                .as_ref()
+                .is_some_and(|req| req.tool == tool)
+            {
+                required_tool_called = true;
+            }
             sink.emit(AgentEvent::ToolCall {
                 name: tool.clone(),
                 args: args.clone(),
@@ -662,6 +704,19 @@ fn safe_compaction_tail_start(messages: &[Message], retain: usize) -> Option<usi
     (nominal..messages.len()).find(|&i| matches!(messages[i].role, Role::User))
 }
 
+/// The reminder to inject when a turn tries to finish but its completion
+/// requirement is unmet and recovery budget remains (L4); `None` means the turn
+/// may finish (no requirement, the tool was called, or the budget is spent).
+fn completion_reminder(
+    requirement: Option<&CompletionRequirement>,
+    tool_called: bool,
+    recoveries: usize,
+) -> Option<&str> {
+    let requirement = requirement?;
+    (!tool_called && recoveries < MAX_COMPLETION_RECOVERIES)
+        .then_some(requirement.reminder.as_str())
+}
+
 /// Convert queued reminder texts into conversation messages the next model call
 /// reads. Each is a user-role `[system-reminder]` block so it is unmistakably
 /// injected context, not the assistant's own prior output.
@@ -852,5 +907,45 @@ mod reminder_tests {
     #[test]
     fn no_reminders_yields_no_messages() {
         assert!(reminder_messages(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::{completion_reminder, MAX_COMPLETION_RECOVERIES};
+    use crate::CompletionRequirement;
+
+    fn req() -> CompletionRequirement {
+        CompletionRequirement {
+            tool: "harness".to_owned(),
+            reminder: "call harness first".to_owned(),
+        }
+    }
+
+    #[test]
+    fn no_requirement_lets_the_turn_finish() {
+        assert!(completion_reminder(None, false, 0).is_none());
+    }
+
+    #[test]
+    fn a_called_requirement_lets_the_turn_finish() {
+        assert!(completion_reminder(Some(&req()), true, 0).is_none());
+    }
+
+    #[test]
+    fn an_uncalled_requirement_nudges_until_the_budget_is_spent() {
+        let r = req();
+        assert_eq!(
+            completion_reminder(Some(&r), false, 0),
+            Some("call harness first")
+        );
+        assert_eq!(
+            completion_reminder(Some(&r), false, MAX_COMPLETION_RECOVERIES - 1),
+            Some("call harness first")
+        );
+        assert!(
+            completion_reminder(Some(&r), false, MAX_COMPLETION_RECOVERIES).is_none(),
+            "budget spent -> accept the answer"
+        );
     }
 }

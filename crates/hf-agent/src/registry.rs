@@ -144,6 +144,7 @@ Discover targets, write harnesses, run fuzzers, and triage crashes by calling to
         capabilities: Vec::new(),
         user_callable: true,
         trust_tier: TrustTier::BuiltIn,
+        completion_requirement: None,
     }
 }
 
