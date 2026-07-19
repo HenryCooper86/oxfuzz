@@ -41,6 +41,18 @@ pub struct HarnessVerdict {
     pub reasons: Vec<String>,
 }
 
+/// A harness smoke result paired with its deterministic verdict -- the value
+/// `harness_smoke` returns so every presentation layer surfaces the same
+/// judgment (e.g. a "hollow pass" warning) instead of re-deriving it. The
+/// summary is `#[serde(flatten)]`ed so existing consumers that read its fields
+/// on the wire are unaffected; `verdict` is purely additive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmokeOutcome {
+    #[serde(flatten)]
+    pub summary: SmokeRunSummary,
+    pub verdict: HarnessVerdict,
+}
+
 /// Assess a harness smoke outcome from its concrete signals, cheapest checks
 /// first: never-built and self-reported failure are hard `Fail`s; a built,
 /// passed run with a contradicting signal (hollow-pass execs, or crashes at
@@ -139,6 +151,33 @@ mod tests {
     fn a_healthy_smoke_passes() {
         let verdict = assess_harness_smoke(&smoke(true, 5000.0, 0), HarnessStatus::SmokePassed);
         assert_eq!(verdict.level, VerdictLevel::Pass, "{verdict:?}");
+    }
+
+    #[test]
+    fn smoke_outcome_serializes_the_summary_flat_with_an_additive_verdict() {
+        // The wire contract the web/GUI handlers depend on: the summary fields
+        // stay at the top level (existing consumers unaffected) and `verdict` is
+        // added alongside, never nesting the summary under a new key.
+        let summary = smoke(true, 0.0, 0);
+        let outcome = SmokeOutcome {
+            verdict: assess_harness_smoke(&summary, HarnessStatus::SmokePassed),
+            summary,
+        };
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert!(
+            json.get("execs_per_sec").is_some() && json.get("passed").is_some(),
+            "summary must be flattened to the top level: {json}"
+        );
+        assert_eq!(
+            json["verdict"]["level"], "suspect",
+            "verdict is additive: {json}"
+        );
+        assert!(
+            json["verdict"]["reasons"]
+                .as_array()
+                .is_some_and(|reasons| !reasons.is_empty()),
+            "a suspect verdict carries reasons: {json}"
+        );
     }
 
     #[test]

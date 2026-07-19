@@ -132,7 +132,7 @@ async fn smoke_updates_the_compiled_revision_and_promotion_is_explicit() {
         )
         .await
         .unwrap();
-    assert!(smoke.passed);
+    assert!(smoke.summary.passed);
 
     let smoked = store.get_harness(harness_id).await.unwrap().unwrap();
     assert_eq!(smoked.status, HarnessStatus::SmokePassed);
