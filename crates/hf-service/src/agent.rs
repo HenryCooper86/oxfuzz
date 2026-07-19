@@ -354,14 +354,22 @@ impl ServiceContainer {
             "triage" => {
                 let target = arg_str(args, "target")?;
                 let crashes = self.triage(project, target).await?;
+                // LLM crash verifier (L2 increment 4): an advisory per-crash
+                // verdict on whether each looks like a deterministically-reproducing
+                // genuine target bug vs a harness/setup artifact. Best-effort -- it
+                // is `None` when no provider is configured -- and never reclassifies
+                // a crash; it only informs the orchestrator's review.
+                let verdicts = self.verify_crashes(target, &crashes).await;
                 let items: Vec<Value> = crashes
                     .iter()
-                    .map(|crash| {
+                    .zip(verdicts)
+                    .map(|(crash, verdict)| {
                         serde_json::json!({
                             "kind": format!("{:?}", crash.kind),
                             "summary": crash.summary,
                             "stack_signature": crash.stack_signature,
                             "minimized": crash.minimized,
+                            "verdict": verdict,
                         })
                     })
                     .collect();

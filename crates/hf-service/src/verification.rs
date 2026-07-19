@@ -152,6 +152,68 @@ pub fn harness_next_step(verdict: &HarnessVerdict) -> HarnessNextStep {
     }
 }
 
+/// The confidence an LLM crash verifier attaches to its judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+/// An LLM verifier's structured judgment of a triaged crash: whether it looks
+/// like a deterministically-reproducing, genuine target bug versus a harness or
+/// setup artifact. Advisory only -- it informs the human reviewer and never
+/// closes, files, or reclassifies a crash on its own (AGENTS.md 2.12).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrashVerdict {
+    pub reproduces_deterministically: bool,
+    pub likely_target_bug: bool,
+    pub confidence: Confidence,
+    pub reasons: Vec<String>,
+}
+
+/// Parse an LLM response into a [`CrashVerdict`]. The model is asked for a strict
+/// JSON object; real responses often wrap it in prose or code fences, so extract
+/// the outermost `{...}` and deserialize leniently. Returns `None` on any
+/// malformed response so the caller falls back to "no LLM opinion" rather than a
+/// fabricated verdict.
+#[must_use]
+pub fn parse_crash_verdict(text: &str) -> Option<CrashVerdict> {
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        reproduces_deterministically: bool,
+        #[serde(default)]
+        likely_target_bug: bool,
+        #[serde(default)]
+        confidence: String,
+        #[serde(default)]
+        reasons: Vec<String>,
+    }
+
+    // Extract the outermost JSON object so surrounding prose or code fences do
+    // not defeat the parse.
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let raw: Raw = serde_json::from_str(&text[start..=end]).ok()?;
+    let confidence = match raw.confidence.trim().to_ascii_lowercase().as_str() {
+        "high" => Confidence::High,
+        "medium" | "med" => Confidence::Medium,
+        // Unknown or missing confidence is conservatively the lowest.
+        _ => Confidence::Low,
+    };
+    Some(CrashVerdict {
+        reproduces_deterministically: raw.reproduces_deterministically,
+        likely_target_bug: raw.likely_target_bug,
+        confidence,
+        reasons: raw.reasons,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +296,54 @@ mod tests {
         });
         assert!(!step.promotion_ready, "{step:?}");
         assert!(step.guidance.to_lowercase().contains("refine"), "{step:?}");
+    }
+
+    #[test]
+    fn parses_a_clean_crash_verdict() {
+        let text = r#"{"reproduces_deterministically": true, "likely_target_bug": true,
+            "confidence": "high", "reasons": ["ASan heap-buffer-overflow at a concrete line"]}"#;
+        let verdict = parse_crash_verdict(text).expect("clean JSON parses");
+        assert!(verdict.reproduces_deterministically && verdict.likely_target_bug);
+        assert_eq!(verdict.confidence, Confidence::High);
+        assert!(!verdict.reasons.is_empty());
+    }
+
+    #[test]
+    fn parses_a_verdict_wrapped_in_prose_and_code_fences() {
+        // LLMs rarely return bare JSON; the parser must dig it out of prose/fences.
+        let text = "Here is my assessment:\n```json\n{\"reproduces_deterministically\": false, \
+            \"likely_target_bug\": false, \"confidence\": \"LOW\", \
+            \"reasons\": [\"timeout only, no stack\"]}\n```\nHope that helps.";
+        let verdict = parse_crash_verdict(text).expect("embedded JSON is extracted");
+        assert!(!verdict.reproduces_deterministically && !verdict.likely_target_bug);
+        assert_eq!(
+            verdict.confidence,
+            Confidence::Low,
+            "confidence is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn a_malformed_response_yields_no_verdict() {
+        // No fabricated verdict: the caller falls back to no-opinion.
+        assert!(parse_crash_verdict("I cannot determine this.").is_none());
+        assert!(parse_crash_verdict("").is_none());
+    }
+
+    #[test]
+    fn unknown_confidence_defaults_to_low_and_missing_fields_default() {
+        let text = r#"{"likely_target_bug": true, "confidence": "banana"}"#;
+        let verdict = parse_crash_verdict(text).expect("partial JSON still parses");
+        assert_eq!(
+            verdict.confidence,
+            Confidence::Low,
+            "unknown confidence -> Low"
+        );
+        assert!(
+            !verdict.reproduces_deterministically,
+            "missing bool -> false"
+        );
+        assert!(verdict.reasons.is_empty(), "missing reasons -> empty");
     }
 
     #[test]
