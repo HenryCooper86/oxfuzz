@@ -28,11 +28,12 @@ const PROVIDER_TYPES = [
   { value: "anthropic", label: "Anthropic" },
   { value: "deepseek", label: "DeepSeek" },
   { value: "gemini", label: "Gemini" },
-  { value: "ollama", label: "Ollama" },
+  { value: "ollama", label: "Ollama (local)" },
+  { value: "ollama-cloud", label: "Ollama Cloud" },
   { value: "azure", label: "Azure OpenAI" },
 ];
 
-const PROMPT_BASED = ["openai-compat", "custom", "ollama"];
+const PROMPT_BASED = ["openai-compat", "custom", "ollama", "ollama-cloud"];
 
 const BASE_URL_PLACEHOLDERS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
@@ -41,6 +42,7 @@ const BASE_URL_PLACEHOLDERS: Record<string, string> = {
   deepseek: "https://api.deepseek.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
   ollama: "http://localhost:11434",
+  "ollama-cloud": "https://ollama.com",
   azure: "https://{resource}.openai.azure.com/openai",
 };
 
