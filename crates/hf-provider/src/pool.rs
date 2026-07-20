@@ -248,6 +248,14 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
                 .or_else(|| Some("https://api.deepseek.com/v1".to_string()))
         };
 
+        // Ollama Cloud is the hosted Ollama endpoint: the same native API as the
+        // local server, but at ollama.com and authenticated with the API key.
+        let base_url_for_ollama_cloud = || {
+            cfg.base_url
+                .clone()
+                .or_else(|| Some("https://ollama.com".to_string()))
+        };
+
         // Macro to reduce per-variant boilerplate.
         macro_rules! make_provider {
             ($ty:ty, $base:expr) => {
@@ -352,6 +360,10 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
                 crate::providers::ollama::OllamaProvider,
                 cfg.base_url.clone()
             )),
+            "ollama-cloud" => Some(make_provider!(
+                crate::providers::ollama::OllamaProvider,
+                base_url_for_ollama_cloud()
+            )),
             "azure" => Some(make_azure()),
             "deepseek" => Some(make_openai(base_url_for_deepseek())),
             other => {
@@ -359,7 +371,7 @@ pub fn build_providers(config: &ProviderPoolConfig) -> Vec<Arc<dyn LlmProvider>>
                     provider_id = %cfg.id,
                     provider_type = %other,
                     "Skipping provider: unsupported type \
-                    (supported: openai, openai-compat, anthropic, gemini, ollama, azure, deepseek)"
+                    (supported: openai, openai-compat, anthropic, gemini, ollama, ollama-cloud, azure, deepseek)"
                 );
                 None
             }
