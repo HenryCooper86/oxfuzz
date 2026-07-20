@@ -13,6 +13,7 @@ const PROVIDER_GLYPHS: Record<string, LucideIcon> = {
   deepseek: Waves,
   gemini: Sparkles,
   ollama: Bot,
+  "ollama-cloud": Bot,
 };
 
 // Maps a provider_type to its brand glyph (monochrome, so it inherits the
