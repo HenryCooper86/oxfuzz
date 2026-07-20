@@ -40,7 +40,7 @@ const BASE_URL_PLACEHOLDERS: Record<string, string> = {
   anthropic: "https://api.anthropic.com/v1",
   deepseek: "https://api.deepseek.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
-  ollama: "http://localhost:11434/v1",
+  ollama: "http://localhost:11434",
   azure: "https://{resource}.openai.azure.com/openai",
 };
 
