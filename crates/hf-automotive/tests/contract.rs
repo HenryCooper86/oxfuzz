@@ -427,7 +427,7 @@ fn result_rejects_duplicate_state_signatures() {
         transcript: ArtifactRef {
             artifact_id: "transcript.json".to_owned(),
             sha256: transcript_hash.as_str().to_owned(),
-            media_type: "application/vnd.hobot-fuzz.automotive-transcript+json".to_owned(),
+            media_type: "application/vnd.oxfuzz.automotive-transcript+json".to_owned(),
             size_bytes: 128,
         },
         transcript_hash,
@@ -454,7 +454,7 @@ fn capture_analysis_requires_a_matching_canonical_transcript_artifact() {
         transcript: ArtifactRef {
             artifact_id: "transcript.json".to_owned(),
             sha256: "cd".repeat(32),
-            media_type: "application/vnd.hobot-fuzz.automotive-transcript+json".to_owned(),
+            media_type: "application/vnd.oxfuzz.automotive-transcript+json".to_owned(),
             size_bytes: 128,
         },
         transcript_hash,

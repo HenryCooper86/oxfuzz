@@ -496,7 +496,7 @@ mod tests {
         let item = &ctx.items[0];
         assert_eq!(item.category, ContextCategory::SystemPrompt);
         // Should contain identity section content.
-        assert!(item.content.contains("hobot_fuzz"));
+        assert!(item.content.contains("oxfuzz"));
         assert!(!item.content.contains("y-agent"));
         // Should contain guidelines.
         assert!(item.content.contains("Guidelines"));
@@ -803,7 +803,7 @@ mod tests {
         provider.provide(&mut ctx).await.unwrap();
 
         let content = &ctx.items[0].content;
-        assert!(content.contains("You are hobot_fuzz"));
+        assert!(content.contains("You are oxfuzz"));
         assert!(!content.contains("y-agent"));
         assert!(content.contains("Tool Usage Protocol"));
         assert!(!content.contains("Guidelines"));

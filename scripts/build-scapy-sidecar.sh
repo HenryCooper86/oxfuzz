@@ -4,10 +4,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-IMAGE="${HOBOT_SCAPY_IMAGE:-hobot/scapy-automotive:2.7.0}"
+IMAGE="${OXFUZZ_SCAPY_IMAGE:-oxfuzz/scapy-automotive:2.7.0}"
 case "$IMAGE" in
   *:latest|latest|*[$'\n\r\t ']*|'')
-    echo "HOBOT_SCAPY_IMAGE must be a non-latest pinned image reference" >&2
+    echo "OXFUZZ_SCAPY_IMAGE must be a non-latest pinned image reference" >&2
     exit 1
     ;;
 esac

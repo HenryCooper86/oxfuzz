@@ -84,7 +84,7 @@ struct Fixture {
 /// input in its evidence directory.
 async fn fixture(name: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    common::install_managed_workspace("hobot_fuzz_scheduler_events_tests");
+    common::install_managed_workspace("oxfuzz_scheduler_events_tests");
     let project = root.path().join(format!("{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&project).unwrap();
     let target = TargetCandidate {
@@ -435,7 +435,7 @@ struct CampaignFixture {
 /// (the same pipeline shape as the campaign integration tests).
 async fn campaign_fixture(name: &str) -> CampaignFixture {
     let root = tempfile::tempdir().unwrap();
-    common::install_managed_workspace("hobot_fuzz_scheduler_events_tests");
+    common::install_managed_workspace("oxfuzz_scheduler_events_tests");
     let project = root.path().join(format!("{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(

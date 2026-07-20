@@ -102,7 +102,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `hobot_fuzz_report_${(lastTarget || "target").replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
+      a.download = `oxfuzz_report_${(lastTarget || "target").replace(/[^a-zA-Z0-9_-]/g, "_")}.md`;
       a.click();
       URL.revokeObjectURL(url);
     },
@@ -168,7 +168,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
 
   // Export a self-contained reproduction bundle (harness + crash input +
   // REPRODUCE.md) for a crash. Desktop-only (a native folder picker); web users
-  // use the `hobot-fuzz repro` CLI. The run context lacks the harness language,
+  // use the `oxfuzz repro` CLI. The run context lacks the harness language,
   // so this assumes C -- power users pass `--lang` on the CLI.
   const exportRepro = useCallback(
     async (crashId?: string) => {

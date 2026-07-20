@@ -1,4 +1,4 @@
--- Initial schema for hobot_fuzz persistence.
+-- Initial schema for oxfuzz persistence.
 -- See docs/standards/DATABASE_SCHEMA.md. Forward-only.
 --
 -- Each domain table carries the queryable columns from the schema spec plus a

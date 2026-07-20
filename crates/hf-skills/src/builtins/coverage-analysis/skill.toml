@@ -2,7 +2,7 @@
 name = "coverage-analysis"
 version = "0.1.0"
 description = "Judge fuzzing progress and recommend how to push coverage deeper"
-author = "hobot_fuzz"
+author = "oxfuzz"
 source_format = "markdown"
 
 [skill.classification]

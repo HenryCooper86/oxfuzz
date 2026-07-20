@@ -473,7 +473,7 @@ interface ProjectAutoRevert {
 }
 
 // The auto-revert policy control. Edits either the GLOBAL default (backed by
-// hobot-fuzz.toml, shared with the CLI/service) or a PER-PROJECT override
+// oxfuzz.toml, shared with the CLI/service) or a PER-PROJECT override
 // (persisted in the store, keyed by project root). A project with an override
 // ignores the global policy; clearing it falls back to global.
 function AutoRevertPolicyCard({ project }: { project: string }) {
@@ -490,7 +490,7 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
   const projectName = hasProject ? project.split("/").filter(Boolean).pop() || project : "";
 
   const loadGlobal = useCallback(async () => {
-    const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
+    const raw = await getTransport().invoke<string>("read_config", { name: "oxfuzz" });
     const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
     return {
       enabled: typeof val.auto_revert_enabled === "boolean" ? val.auto_revert_enabled : false,
@@ -549,13 +549,13 @@ function AutoRevertPolicyCard({ project }: { project: string }) {
             notifyOnly: next.notifyOnly,
           });
         } else {
-          const raw = await getTransport().invoke<string>("read_config", { name: "hobot-fuzz" });
+          const raw = await getTransport().invoke<string>("read_config", { name: "oxfuzz" });
           const val = await getTransport().invoke<Record<string, unknown>>("config_toml_to_value", { content: raw });
           val.auto_revert_enabled = next.enabled;
           val.auto_revert_threshold_pct = next.threshold;
           val.auto_revert_notify_only = next.notifyOnly;
           const toml = await getTransport().invoke<string>("config_value_to_toml", { value: val });
-          await getTransport().invoke("write_config", { name: "hobot-fuzz", content: toml });
+          await getTransport().invoke("write_config", { name: "oxfuzz", content: toml });
         }
         const where = toScope === "project" ? projectName : t("runs.globalDefaultLower");
         toast({

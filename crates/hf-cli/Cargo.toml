@@ -3,14 +3,14 @@ name = "hf-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI + TUI for hobot_fuzz"
+description = "CLI + TUI for oxfuzz"
 
 [features]
 default = []
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 
 [[bin]]
-name = "hobot-fuzz"
+name = "oxfuzz"
 path = "src/main.rs"
 
 [dependencies]

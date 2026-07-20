@@ -1,4 +1,4 @@
-// Simplified Chinese (zh) in-app user documentation for the hobot_fuzz desktop app.
+// Simplified Chinese (zh) in-app user documentation for the oxfuzz desktop app.
 //
 // This mirrors helpContent.ts 1:1 in structure: identical `id` and `group`
 // identifiers for every group and section (these are stable and must not be
@@ -22,9 +22,9 @@ export const HELP_GROUPS_ZH: HelpGroup[] = [
 // --------------------------------------------------------------------------
 
 const WELCOME = `
-# 欢迎使用 hobot_fuzz
+# 欢迎使用 oxfuzz
 
-**hobot_fuzz 是一个 AI 辅助的模糊测试工作台。** 你把它指向一个代码库，它会对候选
+**oxfuzz 是一个 AI 辅助的模糊测试工作台。** 你把它指向一个代码库，它会对候选
 目标进行排名、起草并验证测试桩、在强制沙箱内运行真正的模糊测试引擎，并保留缺陷证据。
 人工批准绑定到获准进入完整测试活动的确切测试桩修订版本。
 
@@ -32,11 +32,11 @@ const WELCOME = `
 
 模糊测试会尽可能快地向程序抛出数百万个畸形和随机输入，观察是否有任何输入使其崩溃或
 行为异常。每个崩溃都是一个潜在的缺陷，往往是安全漏洞。它是发现严重缺陷最有效的方法之
-一——通常还需要大量专家工作。hobot_fuzz 使用 AI 和确定性工具来协调这项工作。
+一——通常还需要大量专家工作。oxfuzz 使用 AI 和确定性工具来协调这项工作。
 
 ## 安全模型（为什么运行它是安全的）
 
-模糊测试会运行不受信任、可能畸形的代码。hobot_fuzz 采用纵深防御，确保没有你的参与
+模糊测试会运行不受信任、可能畸形的代码。oxfuzz 采用纵深防御，确保没有你的参与
 就不会发生任何危险的事情：
 
 - **沙箱化执行。** 每次测试桩构建和模糊测试运行都发生在 Docker 沙箱内，绝不会直接在
@@ -59,7 +59,7 @@ const WELCOME = `
 const FIRST_RUN = `
 # 首次运行
 
-第一次打开 hobot_fuzz 时，你会看到一个简短的**设置向导**。你可以随时从
+第一次打开 oxfuzz 时，你会看到一个简短的**设置向导**。你可以随时从
 **设置 -> 常规 -> 运行设置向导**重新运行它。
 
 ## 你需要什么
@@ -95,7 +95,7 @@ const FIRST_RUN = `
 const PIPELINE_OVERVIEW = `
 # 模糊测试流水线
 
-hobot_fuzz 遵循一条连贯的流程。**进度**面板（右上角的**进度**开关）和**模糊测试工作
+oxfuzz 遵循一条连贯的流程。**进度**面板（右上角的**进度**开关）和**模糊测试工作
 流**界面都会跟踪它，并且它是按项目保存的，因此切换项目时会保留各自的进度。
 
 ## 四个核心阶段
@@ -145,7 +145,7 @@ const SCREEN_DASHBOARD = `
   构件）。
 - **报告** —— 撰写并保存 Markdown 报告。**生成**会根据最新测试活动数据构建草稿；
   **保存草稿**会存储它；**复制**会复制该 Markdown。
-- **复现** —— 为每个崩溃构建一条精确的 \`hobot-fuzz regress\` 命令供复制。
+- **复现** —— 为每个崩溃构建一条精确的 \`oxfuzz regress\` 命令供复制。
 - **审查** —— 等待人工处理的报告、测试桩和崩溃队列。
 - **GitLab / GitHub** —— 将崩溃变成问题草稿，然后**复制**它，或通过提供方 API 直接
   **提交**它（需要在 设置 -> 问题跟踪器 中配置仓库 + 令牌）。
@@ -278,7 +278,7 @@ const SCREEN_TRIAGE = `
 - **推送到 DefectDojo** —— 当存在崩溃且已配置 DefectDojo 时出现。
 - 将报告导出为 Markdown、HTML、PDF 或 DOCX（PDF/DOCX 需要 \`pandoc\`）。
 
-**注意事项：** 分类定级需要曾经发生过一次运行。当一次运行结束*且存在*崩溃时，hobot_fuzz
+**注意事项：** 分类定级需要曾经发生过一次运行。当一次运行结束*且存在*崩溃时，oxfuzz
 会为你**自动分类定级并自动撰写一次报告**。此处不包含 Syzkaller 内核运行——它们的崩溃位于
 Syzkaller 工作目录中——因此该按钮会被禁用并附带说明。
 
@@ -364,7 +364,7 @@ const SCREEN_RUNS = `
 
 - 选择最多两次运行进行**对比**。
 - 每次运行：切换其**覆盖率曲线**，或删除它。**清除全部**会清空历史。
-- **自动回退策略** —— 当一个新的测试桩修订版本使覆盖率下降超过某个阈值时，hobot_fuzz 可
+- **自动回退策略** —— 当一个新的测试桩修订版本使覆盖率下降超过某个阈值时，oxfuzz 可
   以自动回退（或仅标记）它。你可以将其配置为**全局**（写入主配置）或**按项目**（一个覆盖
   项），并可选择仅通知模式。测试桩修订版本的变更会标注在趋势图上，你可以在那里进行差异对
   比并回退到较早的修订版本。
@@ -415,7 +415,7 @@ const SCREEN_SKILLS = `
 const SCREEN_KNOWLEDGE = `
 # 知识库
 
-**用途：** hobot_fuzz 已学到的内容（目标、运行、崩溃），外加对你项目代码和文档的全文
+**用途：** oxfuzz 已学到的内容（目标、运行、崩溃），外加对你项目代码和文档的全文
 （BM25）搜索。
 
 **你可以做什么：**
@@ -425,7 +425,7 @@ const SCREEN_KNOWLEDGE = `
 - **清除**知识库。
 
 **前置条件：** 搜索和摄取需要一个活动项目，且在项目建立索引之前搜索处于禁用状态。需要一
-个已配置的数据库（\`HF_DB_PATH\`，由 \`hobot-fuzz init\` 创建）。
+个已配置的数据库（\`HF_DB_PATH\`，由 \`oxfuzz init\` 创建）。
 `;
 
 const SCREEN_AUTOMATION = `
@@ -478,11 +478,11 @@ const SCREEN_AUTOMOTIVE = `
 const SCREEN_DEFECTDOJO = `
 # DefectDojo
 
-**用途：** DefectDojo 是一个开源的漏洞管理平台。hobot_fuzz 可以将分类定级后的崩溃作为发
+**用途：** DefectDojo 是一个开源的漏洞管理平台。oxfuzz 可以将分类定级后的崩溃作为发
 现推送给它，并将其 Web 界面直接嵌入到应用内。
 
 **你可以做什么：** 在应用内打开它（侧边栏中的 **DefectDojo**，配置后显示）、**重新加载**
-它、**在浏览器中打开**，或者在 hobot_fuzz 管理本地实例时**启动**它。
+它、**在浏览器中打开**，或者在 oxfuzz 管理本地实例时**启动**它。
 
 **前置条件：** 仅限桌面版（Web 版本会在你的浏览器中打开 DefectDojo）。该实例启动大约需要
 一分钟；在其就绪之前，视图会显示一个加载指示器。请在**设置 -> 集成**中配置它。
@@ -578,8 +578,8 @@ const REF_TROUBLESHOOTING = `
 
 ## 知识库
 
-- **"No database configured (HF_DB_PATH). Run \`hobot-fuzz init\`"（未配置数据库
-  (HF_DB_PATH)。请运行 \`hobot-fuzz init\`）** —— 从 CLI 一次性初始化配置/数据库。
+- **"No database configured (HF_DB_PATH). Run \`oxfuzz init\`"（未配置数据库
+  (HF_DB_PATH)。请运行 \`oxfuzz init\`）** —— 从 CLI 一次性初始化配置/数据库。
 
 ## 恢复
 
@@ -590,23 +590,23 @@ const REF_TROUBLESHOOTING = `
 const REF_CLI = `
 # 命令行等价物
 
-应用所做的一切也都能通过 \`hobot-fuzz\` CLI 完成，两者共用同一个服务核心。一个完整的测试
+应用所做的一切也都能通过 \`oxfuzz\` CLI 完成，两者共用同一个服务核心。一个完整的测试
 活动：
 
 \`\`\`bash
-hobot-fuzz init                                              # 一次性配置/数据库设置
-hobot-fuzz discover /path/to/project --lang c               # 第 1 步
-hobot-fuzz harness  /path/to/project --target parse_value --engine libfuzzer   # 第 2-3 步
-hobot-fuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m   # 第 4-5 步
-hobot-fuzz triage   /path/to/project --target parse_value   # 第 6 步
-hobot-fuzz corpus   /path/to/project --target parse_value --op seed|grow|prune|list
+oxfuzz init                                              # 一次性配置/数据库设置
+oxfuzz discover /path/to/project --lang c               # 第 1 步
+oxfuzz harness  /path/to/project --target parse_value --engine libfuzzer   # 第 2-3 步
+oxfuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m   # 第 4-5 步
+oxfuzz triage   /path/to/project --target parse_value   # 第 6 步
+oxfuzz corpus   /path/to/project --target parse_value --op seed|grow|prune|list
 
 # 可选汽车协议功能：报告保留的离线/虚拟证据。
-hobot-fuzz automotive report /path/to/project --output automotive-report.html --format html
-hobot-fuzz automotive report /path/to/project --ai
+oxfuzz automotive report /path/to/project --output automotive-report.html --format html
+oxfuzz automotive report /path/to/project --ai
 \`\`\`
 
-此外还有 \`hobot-fuzz serve\`（REST + SSE API）和 \`hobot-fuzz tui\`（终端 UI）。完整的命
+此外还有 \`oxfuzz serve\`（REST + SSE API）和 \`oxfuzz tui\`（终端 UI）。完整的命
 令参考请参见项目 README。
 `;
 
@@ -616,7 +616,7 @@ const REF_GLOSSARY = `
 - **Fuzzing（模糊测试）** —— 自动向程序抛出海量畸形/随机输入，以找到使其崩溃的输入。
 - **Target（目标）** —— 你想模糊测试的一个特定函数或入口点，通常是处理不受信任输入的那种
   （解析器、解码器等）。
-- **Harness（测试桩）** —— 将模糊测试字节喂给目标的那一小段测试代码。hobot_fuzz 会为你编
+- **Harness（测试桩）** —— 将模糊测试字节喂给目标的那一小段测试代码。oxfuzz 会为你编
   写它。
 - **Fuzzing engine（模糊测试引擎）** —— 生成输入并将目标运行数百万次的工具：libFuzzer、
   AFL++、honggfuzz，外加 ClusterFuzzLite 和 Syzkaller。
@@ -629,7 +629,7 @@ const REF_GLOSSARY = `
 - **Triage（分类定级）** —— 对崩溃进行梳理：归并重复项、判断严重程度，并逐一写清楚。
 - **Sanitizer / ASan（插桩检测器）** —— 编译进目标的一种调试工具，能在细微内存缺陷（如缓
   冲区溢出）发生的那一刻就检测到它们。
-- **CASR** —— hobot_fuzz 用来评估崩溃严重程度和可利用性并对相似崩溃进行聚类的分析器。
+- **CASR** —— oxfuzz 用来评估崩溃严重程度和可利用性并对相似崩溃进行聚类的分析器。
 - **Exploitable（可利用）** —— 一种严重程度评级，意味着攻击者很可能将该崩溃转化为真正的
   安全攻破。
 - **Stack signature（堆栈签名）** —— 崩溃调用栈的指纹，用于去重实际上属于同一缺陷的崩溃。
@@ -641,7 +641,7 @@ const REF_GLOSSARY = `
 - **HITL（人工介入）** —— 由人来批准有风险的操作、而非让 AI 无人监督地执行的原则。
 - **LLM provider（LLM 提供方）** —— 为助手提供动力的 AI 服务（例如 OpenAI）；你需要提供一
   个 API 密钥。
-- **DefectDojo** —— 一个用于管理漏洞的开源平台；hobot_fuzz 可以向它推送发现。
+- **DefectDojo** —— 一个用于管理漏洞的开源平台；oxfuzz 可以向它推送发现。
 `;
 
 export const HELP_SECTIONS_ZH: HelpSection[] = [
@@ -674,6 +674,6 @@ export const HELP_SECTIONS_ZH: HelpSection[] = [
 
   { id: "shortcuts", group: "reference", title: "键盘快捷键", keywords: "热键 命令面板 cmd k ctrl", body: REF_SHORTCUTS },
   { id: "troubleshooting", group: "reference", title: "疑难解答", keywords: "错误 问题 docker 提供方 关卡 消息 修复 帮助", body: REF_TROUBLESHOOTING },
-  { id: "cli", group: "reference", title: "命令行等价物", keywords: "cli 终端 hobot-fuzz 命令 serve tui", body: REF_CLI },
+  { id: "cli", group: "reference", title: "命令行等价物", keywords: "cli 终端 oxfuzz 命令 serve tui", body: REF_CLI },
   { id: "glossary", group: "reference", title: "术语表", keywords: "定义 术语 词汇 含义", body: REF_GLOSSARY },
 ];

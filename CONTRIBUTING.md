@@ -1,6 +1,6 @@
-# Contributing to hobot_fuzz
+# Contributing to oxfuzz
 
-Thank you for helping improve hobot_fuzz. This repository treats generated
+Thank you for helping improve oxfuzz. This repository treats generated
 code, fuzzing engines, crash inputs, and external targets as untrusted. Read
 `AGENTS.md` before opening a change; its engineering and safety protocol is
 mandatory for the entire repository.

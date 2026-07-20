@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hobot_fuzz -- run quality gates in order
+# oxfuzz -- run quality gates in order
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

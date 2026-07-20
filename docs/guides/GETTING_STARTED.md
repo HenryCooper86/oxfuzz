@@ -1,6 +1,6 @@
 # Getting Started (for people who are not fuzzing engineers)
 
-This guide explains, in plain language, what hobot_fuzz is, what it does for you,
+This guide explains, in plain language, what oxfuzz is, what it does for you,
 and how to run it for the first time. You do **not** need to be a security
 researcher or know anything about "fuzzing" to follow along. Every technical
 term is explained the first time it appears, and there is a [glossary](#glossary)
@@ -24,13 +24,13 @@ Google continuously test the software the world runs on.
 The catch: fuzzing is normally **a lot of expert work**. You have to figure out
 *what* to test, write special "test driver" code by hand, configure a fuzzing
 engine, run it safely, and then make sense of the crashes. That expertise is
-exactly what hobot_fuzz automates.
+exactly what oxfuzz automates.
 
 ---
 
-## What does hobot_fuzz do for you?
+## What does oxfuzz do for you?
 
-hobot_fuzz is an **AI-assisted fuzzing workbench**. You point it at a codebase,
+oxfuzz is an **AI-assisted fuzzing workbench**. You point it at a codebase,
 and it coordinates the whole process while retaining the evidence and asking
 for your approval at the important steps:
 
@@ -66,7 +66,7 @@ the exact promoted revision.
 
 | You need | Why | Notes |
 | --- | --- | --- |
-| **The hobot_fuzz desktop app** | The friendliest way to use it | A normal macOS app window. See [Installing](#installing-the-desktop-app). |
+| **The oxfuzz desktop app** | The friendliest way to use it | A normal macOS app window. See [Installing](#installing-the-desktop-app). |
 | **An AI provider key** | The AI writes the test code and bug reports | An API key from an LLM provider (e.g. OpenAI). You paste it into Settings. |
 | **Docker** | Runs the sandbox that keeps untrusted code isolated | Install [OrbStack](https://orbstack.dev) or Docker Desktop. The app can start it for you. |
 | **A project to test** | Something to fuzz | A folder of C or C++ source code works best today. |
@@ -81,10 +81,10 @@ inside the sandbox.
 If you have a prebuilt app, just open it. To build it from source:
 
 ```bash
-git clone <your-hobot_fuzz-gitlab-remote>
-cd hobot_fuzz
+git clone <your-oxfuzz-gitlab-remote>
+cd oxfuzz
 ./scripts/build-app.sh
-open target/release/bundle/macos/hobot_fuzz.app
+open target/release/bundle/macos/oxfuzz.app
 ```
 
 The first launch builds the sandbox image, which can take a few minutes.
@@ -142,17 +142,17 @@ A finding here is a real crash the fuzzer reproduced -- a concrete lead to fix.
 
 ## Prefer the terminal? (optional)
 
-Everything above is also available as a command-line tool, `hobot-fuzz`. A full
+Everything above is also available as a command-line tool, `oxfuzz`. A full
 campaign looks like this:
 
 ```bash
-hobot-fuzz doctor
-hobot-fuzz discover /path/to/project --lang c --rank
-hobot-fuzz harness /path/to/project --target parse_value \
+oxfuzz doctor
+oxfuzz discover /path/to/project --lang c --rank
+oxfuzz harness /path/to/project --target parse_value \
   --engine libfuzzer --promote
-hobot-fuzz run /path/to/project --target parse_value \
+oxfuzz run /path/to/project --target parse_value \
   --engine libfuzzer --duration 30m
-hobot-fuzz triage /path/to/project --target parse_value
+oxfuzz triage /path/to/project --target parse_value
 ```
 
 See the [README](../../README.md#quick-start-cli) for the full command reference.
@@ -168,9 +168,9 @@ Plain-language definitions, in the order you are likely to meet them.
 - **Target** -- a specific function (or entry point) you want to fuzz, usually
   one that handles untrusted input (a parser, decoder, etc.).
 - **Harness** -- a small piece of test code that takes a chunk of fuzz bytes and
-  feeds it into the target function. hobot_fuzz writes this for you.
+  feeds it into the target function. oxfuzz writes this for you.
 - **Fuzzing engine** -- the actual tool that generates inputs and runs the target
-  millions of times. hobot_fuzz supports the standard ones: **libFuzzer**,
+  millions of times. oxfuzz supports the standard ones: **libFuzzer**,
   **AFL++**, and **honggfuzz** (plus advanced options like ClusterFuzzLite and
   Syzkaller).
 - **Corpus** -- the collection of example inputs the fuzzer keeps and mutates. A

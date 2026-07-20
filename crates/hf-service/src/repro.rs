@@ -1,7 +1,7 @@
 //! Self-contained reproduction bundles.
 //!
-//! A bundle lets a maintainer reproduce a `hobot_fuzz` finding *without* a
-//! `hobot_fuzz` install: the exact harness source, the (minimized) crash input,
+//! A bundle lets a maintainer reproduce a `oxfuzz` finding *without* a
+//! `oxfuzz` install: the exact harness source, the (minimized) crash input,
 //! and a `REPRODUCE.md` manifest with the build command and run steps. This
 //! serves the VISION reproducibility pillar and makes a finding actionable
 //! outside the tool.
@@ -56,8 +56,8 @@ pub fn render_repro_manifest(manifest: &ReproManifest) -> String {
     format!(
         "# Reproduction bundle: {target}\n\
          \n\
-         Self-contained reproducer for a crash found by hobot_fuzz. It needs only \
-         the target's toolchain -- no hobot_fuzz install.\n\
+         Self-contained reproducer for a crash found by oxfuzz. It needs only \
+         the target's toolchain -- no oxfuzz install.\n\
          \n\
          ## Finding\n\
          - Project: `{project}`\n\

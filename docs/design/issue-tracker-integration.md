@@ -10,9 +10,9 @@ manual re-entry.
 
 `workbench::gitlab_issue_export` guessed the repo by running `git -C <project>
 remote get-url origin`. When the fuzzed project is not its own git repo (e.g.
-`tests/fixtures/vuln_c` inside the hobot_fuzz checkout), `git -C` walks up to the
-enclosing repo and returns **hobot_fuzz's** remote -- so crash issues were filed
-against hobot_fuzz. There was also no GitHub support and no way to set the repo
+`tests/fixtures/vuln_c` inside the oxfuzz checkout), `git -C` walks up to the
+enclosing repo and returns **oxfuzz's** remote -- so crash issues were filed
+against oxfuzz. There was also no GitHub support and no way to set the repo
 or credentials. This integration makes all of that explicit config.
 
 ## Auth: token, not password
@@ -40,7 +40,7 @@ is kept for attribution/display only, never for authentication.
 | `repo` | GitHub `owner/repo`; GitLab `group/project` or numeric project id |
 | `api_token` / `api_token_env` | PAT direct (desktop) or via env var (CLI/CI) |
 | `username` | attribution/display only |
-| `labels` | applied to every filed issue (default hobot-fuzz/fuzzing/crash) |
+| `labels` | applied to every filed issue (default oxfuzz/fuzzing/crash) |
 | `verify_tls` | verify the server certificate |
 
 Registered in `config.rs` `CONFIG_SECTIONS` + `bundled_example`. The live

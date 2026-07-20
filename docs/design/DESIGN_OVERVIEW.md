@@ -1,10 +1,10 @@
 # Design Overview
 
-Status: **active**. Supersedes: none. Owner: hobot_fuzz core team.
+Status: **active**. Supersedes: none. Owner: oxfuzz core team.
 
 ## 1. Purpose
 
-hobot_fuzz is an AI fuzzing agent. It discovers fuzzing targets in a project,
+oxfuzz is an AI fuzzing agent. It discovers fuzzing targets in a project,
 writes harnesses, drives fuzzing engines (AFL++, honggfuzz, libFuzzer,
 oss-fuzz/ClusterFuzzLite), triages crashes, and iterates on corpus/coverage --
 all under human-in-the-loop supervision.
@@ -64,7 +64,7 @@ values. Global knowledge, session, and scheduler settings are resolved by
 settings are rejected or removed instead of being accepted as no-ops.
 
 Operator fuzzing settings are a service-owned execution policy. The validated
-`[fuzzing]` table in `hobot-fuzz.toml` defines the allowed engine set, the
+`[fuzzing]` table in `oxfuzz.toml` defines the allowed engine set, the
 default engine and duration presented to interactive clients, the maximum
 requested duration, and the memory/CPU limits recorded in each
 `FuzzRunConfig`. `hf-service` resolves that policy immediately before harness

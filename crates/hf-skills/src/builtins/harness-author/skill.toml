@@ -2,7 +2,7 @@
 name = "harness-author"
 version = "0.1.0"
 description = "Write a fuzzing harness for a target"
-author = "hobot_fuzz"
+author = "oxfuzz"
 source_format = "markdown"
 
 [skill.classification]

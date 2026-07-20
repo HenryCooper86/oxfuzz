@@ -10,7 +10,7 @@ use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
-    common::install_managed_workspace("hobot_fuzz_refine_it");
+    common::install_managed_workspace("oxfuzz_refine_it");
 }
 
 /// A runtime whose commands all succeed (exit 0). Coverage collection returns

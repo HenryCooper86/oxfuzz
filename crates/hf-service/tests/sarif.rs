@@ -87,7 +87,7 @@ fn sarif_document_is_well_formed() {
     let doc = crashes_to_sarif(&crashes, "9.9.9", std::path::Path::new("/work"));
 
     assert_eq!(doc["version"], "2.1.0");
-    assert_eq!(doc["runs"][0]["tool"]["driver"]["name"], "hobot_fuzz");
+    assert_eq!(doc["runs"][0]["tool"]["driver"]["name"], "oxfuzz");
     assert_eq!(doc["runs"][0]["tool"]["driver"]["version"], "9.9.9");
     let results = doc["runs"][0]["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);

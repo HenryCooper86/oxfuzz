@@ -11,7 +11,7 @@ return redacted transport DTOs; they do not implement fuzzing business logic.
 
 ## 2. Exposure and Authentication
 
-`hobot-fuzz serve` binds to `127.0.0.1` by default. A non-loopback bind is
+`oxfuzz serve` binds to `127.0.0.1` by default. A non-loopback bind is
 rejected before opening a socket unless a non-empty `HF_WEB_TOKEN` is configured.
 This is a startup invariant, not a warning.
 

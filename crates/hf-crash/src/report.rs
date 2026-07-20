@@ -64,7 +64,7 @@ pub async fn draft_report_with_context(
     });
     let related_block = related_context.map_or_else(String::new, |r| format!("\n{r}\n"));
     let prompt = format!(
-        "You are the triage-agent for hobot_fuzz.\n\
+        "You are the triage-agent for oxfuzz.\n\
          Your job: classify this crash, draft a bug report, and -- when source is \
          provided -- identify the root cause and propose a fix.\n\
          Output JSON with fields: title, summary, repro_steps, stack, severity_guess, \

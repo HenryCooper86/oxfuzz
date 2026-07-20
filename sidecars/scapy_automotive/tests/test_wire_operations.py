@@ -6,10 +6,10 @@ from typing import Any
 
 from test_validation import physical_config, virtual_config
 
-from hobot_scapy_automotive.artifacts import FilesystemArtifactStore
-from hobot_scapy_automotive.contract import process_request
-from hobot_scapy_automotive.hashing import sha256_bytes
-from hobot_scapy_automotive.replay import physical_replay_scope_sha256
+from oxfuzz_scapy_automotive.artifacts import FilesystemArtifactStore
+from oxfuzz_scapy_automotive.contract import process_request
+from oxfuzz_scapy_automotive.hashing import sha256_bytes
+from oxfuzz_scapy_automotive.replay import physical_replay_scope_sha256
 
 
 def operation_limits() -> dict[str, int]:
@@ -99,7 +99,7 @@ class WireOperationTests(unittest.TestCase):
             transcript_ref = analysis["result"]["data"]["transcript"]
             self.assertEqual(
                 transcript_ref["media_type"],
-                "application/vnd.hobot-fuzz.automotive-transcript+json",
+                "application/vnd.oxfuzz.automotive-transcript+json",
             )
             self.assertEqual(transcript_ref["sha256"], analysis["transcript_sha256"])
             transcript_path = outputs / transcript_ref["artifact_id"]
@@ -187,7 +187,7 @@ class WireOperationTests(unittest.TestCase):
                 inputs,
                 "transcript.json",
                 transcript_data,
-                "application/vnd.hobot-fuzz.automotive-transcript+json",
+                "application/vnd.oxfuzz.automotive-transcript+json",
             )
             replay_plan = process_request(
                 {

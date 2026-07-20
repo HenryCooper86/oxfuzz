@@ -227,7 +227,7 @@ async fn promote_for_engine(container: &ServiceContainer, project: &Path, engine
 
 #[tokio::test]
 async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
-    common::install_managed_workspace("hobot_fuzz_corpus_sharing_it");
+    common::install_managed_workspace("oxfuzz_corpus_sharing_it");
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("sharing_project");
     std::fs::create_dir_all(&project).unwrap();

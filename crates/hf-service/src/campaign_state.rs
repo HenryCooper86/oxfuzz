@@ -127,7 +127,7 @@ pub(crate) fn atomic_write_json<T: Serialize>(
     std::fs::create_dir_all(parent)
         .map_err(|error| io_error("create directory for", path, error))?;
     let mut temporary = tempfile::Builder::new()
-        .prefix(".hobot-fuzz-state-")
+        .prefix(".oxfuzz-state-")
         .tempfile_in(parent)
         .map_err(|error| io_error("create temporary", path, error))?;
     temporary

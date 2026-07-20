@@ -306,7 +306,7 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           <span>
             Press <kbd style={{ padding: "0 3px", border: "1px solid var(--border)", borderRadius: 3 }}>⌘K</kbd> to search
           </span>
-          <span>hobot_fuzz v0.1.0</span>
+          <span>oxfuzz v0.1.0</span>
         </div>
       </div>
     </nav>

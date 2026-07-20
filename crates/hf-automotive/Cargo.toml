@@ -3,7 +3,7 @@ name = "hf-automotive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Pure automotive protocol fuzzing contracts for hobot_fuzz"
+description = "Pure automotive protocol fuzzing contracts for oxfuzz"
 
 [features]
 default = []

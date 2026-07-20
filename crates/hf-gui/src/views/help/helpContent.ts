@@ -1,4 +1,4 @@
-// In-app user documentation for the hobot_fuzz desktop app.
+// In-app user documentation for the oxfuzz desktop app.
 //
 // The content is authored here as Markdown strings and rendered by HelpView
 // with the same react-markdown + remark-gfm pipeline the report preview uses,
@@ -35,9 +35,9 @@ export const HELP_GROUPS: HelpGroup[] = [
 // --------------------------------------------------------------------------
 
 const WELCOME = `
-# Welcome to hobot_fuzz
+# Welcome to oxfuzz
 
-**hobot_fuzz is an AI-assisted fuzzing workbench.** You point it at a codebase
+**oxfuzz is an AI-assisted fuzzing workbench.** You point it at a codebase
 and it ranks candidate targets, drafts and qualifies test harnesses, runs real
 fuzzing engines inside a mandatory sandbox, and retains evidence for the bugs
 it finds. Human approval is bound to the exact harness revision allowed to
@@ -48,12 +48,12 @@ enter a full campaign.
 Fuzzing throws millions of malformed and random inputs at a program as fast as
 possible, watching for any that make it crash or misbehave. Each crash is a
 potential bug, often a security vulnerability. It is one of the most effective
-ways to find serious bugs -- and normally a lot of expert work. hobot_fuzz
+ways to find serious bugs -- and normally a lot of expert work. oxfuzz
 coordinates that work with AI and deterministic tooling.
 
 ## The safety model (why this is safe to run)
 
-Fuzzing runs untrusted, possibly-malformed code. hobot_fuzz uses defense in
+Fuzzing runs untrusted, possibly-malformed code. oxfuzz uses defense in
 depth so nothing dangerous happens without you:
 
 - **Sandboxed execution.** Every harness build and fuzz run happens inside a
@@ -77,7 +77,7 @@ your first campaign. Every technical term is defined in the **Glossary**.
 const FIRST_RUN = `
 # First Run
 
-The first time you open hobot_fuzz you get a short **Setup Wizard**. You can
+The first time you open oxfuzz you get a short **Setup Wizard**. You can
 re-run it any time from **Settings -> General -> Run Setup Wizard**.
 
 ## What you need
@@ -118,7 +118,7 @@ the fuzzing engines are ready. When they are, head to **The Fuzzing Pipeline**.
 const PIPELINE_OVERVIEW = `
 # The Fuzzing Pipeline
 
-hobot_fuzz follows one connected flow. The **Progress** panel (top-right
+oxfuzz follows one connected flow. The **Progress** panel (top-right
 **Progress** toggle) and the **Fuzzing Workflow** screen both track it, and it is
 saved per project, so switching projects keeps each one's progress.
 
@@ -179,7 +179,7 @@ project at a time; with no project selected it prompts you to choose one.
 - **Reports** -- compose and save Markdown reports. **Generate** builds a draft
   from the latest campaign data; **Save draft** stores it; **Copy** copies the
   Markdown.
-- **Repro** -- builds an exact \`hobot-fuzz regress\` command per crash to copy.
+- **Repro** -- builds an exact \`oxfuzz regress\` command per crash to copy.
 - **Review** -- queues of reports, harnesses, and crashes awaiting a human.
 - **GitLab / GitHub** -- turn a crash into an issue draft, then **Copy** it or
   **File** it directly through the provider API (needs a repo + token in
@@ -333,7 +333,7 @@ and compose a report.
 - Export the report as Markdown, HTML, PDF, or DOCX (PDF/DOCX need \`pandoc\`).
 
 **Gotchas:** triage needs a run to have happened. When a run finishes *with*
-crashes, hobot_fuzz **auto-triages and auto-composes a report once** for you.
+crashes, oxfuzz **auto-triages and auto-composes a report once** for you.
 Syzkaller kernel runs are excluded here -- their crashes live in the Syzkaller
 workdir -- so the button is disabled with an explanation.
 
@@ -426,7 +426,7 @@ comparison.
 - Per run: toggle its **coverage curve**, or delete it. **Clear all** wipes the
   history.
 - **Auto-revert policy** -- when a new harness revision drops coverage past a
-  threshold, hobot_fuzz can automatically revert (or just flag) it. Configure it
+  threshold, oxfuzz can automatically revert (or just flag) it. Configure it
   **Global** (writes the main config) or **Per project** (an override), with a
   notify-only option. Harness-revision changes are marked on the trend charts,
   where you can diff and revert to an earlier revision.
@@ -484,7 +484,7 @@ tags, and a Markdown body.
 const SCREEN_KNOWLEDGE = `
 # Knowledge
 
-**Purpose:** what hobot_fuzz has learned (targets, runs, crashes) plus a
+**Purpose:** what oxfuzz has learned (targets, runs, crashes) plus a
 full-text (BM25) search over your project's code and documents.
 
 **What you can do:**
@@ -496,7 +496,7 @@ full-text (BM25) search over your project's code and documents.
 
 **Preconditions:** search and ingest need an active project, and search is
 disabled until the project has been indexed. A configured database
-(\`HF_DB_PATH\`, created by \`hobot-fuzz init\`) is required.
+(\`HF_DB_PATH\`, created by \`oxfuzz init\`) is required.
 `;
 
 const SCREEN_AUTOMATION = `
@@ -572,11 +572,11 @@ const SCREEN_DEFECTDOJO = `
 # DefectDojo
 
 **Purpose:** DefectDojo is an open-source vulnerability-management platform.
-hobot_fuzz can push triaged crashes to it as findings and embed its web UI right
+oxfuzz can push triaged crashes to it as findings and embed its web UI right
 inside the app.
 
 **What you can do:** open it in-app (**DefectDojo** in the sidebar, shown once
-configured), **Reload** it, **Open in browser**, or **Start** it when hobot_fuzz
+configured), **Reload** it, **Open in browser**, or **Start** it when oxfuzz
 manages the local instance.
 
 **Preconditions:** desktop-only (the web build opens DefectDojo in your browser).
@@ -679,7 +679,7 @@ Common messages and what they mean.
 
 ## Knowledge
 
-- **"No database configured (HF_DB_PATH). Run \`hobot-fuzz init\`"** -- initialize
+- **"No database configured (HF_DB_PATH). Run \`oxfuzz init\`"** -- initialize
   the config/database once from the CLI.
 
 ## Recovery
@@ -691,23 +691,23 @@ Common messages and what they mean.
 const REF_CLI = `
 # Command-Line Equivalent
 
-Everything the app does is also available as the \`hobot-fuzz\` CLI, over the same
+Everything the app does is also available as the \`oxfuzz\` CLI, over the same
 service core. A full campaign:
 
 \`\`\`bash
-hobot-fuzz init                                              # one-time config/db setup
-hobot-fuzz discover /path/to/project --lang c               # step 1
-hobot-fuzz harness  /path/to/project --target parse_value --engine libfuzzer   # steps 2-3
-hobot-fuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m   # steps 4-5
-hobot-fuzz triage   /path/to/project --target parse_value   # step 6
-hobot-fuzz corpus   /path/to/project --target parse_value --op seed|grow|prune|list
+oxfuzz init                                              # one-time config/db setup
+oxfuzz discover /path/to/project --lang c               # step 1
+oxfuzz harness  /path/to/project --target parse_value --engine libfuzzer   # steps 2-3
+oxfuzz run      /path/to/project --target parse_value --engine libfuzzer --duration 30m   # steps 4-5
+oxfuzz triage   /path/to/project --target parse_value   # step 6
+oxfuzz corpus   /path/to/project --target parse_value --op seed|grow|prune|list
 
 # Optional automotive feature: report retained offline/virtual evidence.
-hobot-fuzz automotive report /path/to/project --output automotive-report.html --format html
-hobot-fuzz automotive report /path/to/project --ai
+oxfuzz automotive report /path/to/project --output automotive-report.html --format html
+oxfuzz automotive report /path/to/project --ai
 \`\`\`
 
-There is also \`hobot-fuzz serve\` (REST + SSE API) and \`hobot-fuzz tui\` (a
+There is also \`oxfuzz serve\` (REST + SSE API) and \`oxfuzz tui\` (a
 terminal UI). See the project README for the full command reference.
 `;
 
@@ -719,7 +719,7 @@ const REF_GLOSSARY = `
 - **Target** -- a specific function or entry point you want to fuzz, usually one
   that handles untrusted input (a parser, decoder, etc.).
 - **Harness** -- the small piece of test code that feeds fuzz bytes into the
-  target. hobot_fuzz writes this for you.
+  target. oxfuzz writes this for you.
 - **Fuzzing engine** -- the tool that generates inputs and runs the target
   millions of times: libFuzzer, AFL++, honggfuzz, plus ClusterFuzzLite and
   Syzkaller.
@@ -733,7 +733,7 @@ const REF_GLOSSARY = `
   writing up each one.
 - **Sanitizer / ASan** -- a debugging tool compiled into the target that detects
   subtle memory bugs (like buffer overflows) the moment they happen.
-- **CASR** -- the analyzer hobot_fuzz uses to rate a crash's severity and
+- **CASR** -- the analyzer oxfuzz uses to rate a crash's severity and
   exploitability and to cluster similar crashes.
 - **Exploitable** -- a severity rating meaning an attacker could likely turn the
   crash into a real security compromise.
@@ -750,7 +750,7 @@ const REF_GLOSSARY = `
 - **LLM provider** -- the AI service (e.g. OpenAI) that powers the assistant; you
   supply an API key.
 - **DefectDojo** -- an open-source platform for managing vulnerabilities;
-  hobot_fuzz can push findings to it.
+  oxfuzz can push findings to it.
 `;
 
 export const HELP_SECTIONS: HelpSection[] = [
@@ -783,6 +783,6 @@ export const HELP_SECTIONS: HelpSection[] = [
 
   { id: "shortcuts", group: "reference", title: "Keyboard Shortcuts", keywords: "hotkeys command palette cmd k ctrl", body: REF_SHORTCUTS },
   { id: "troubleshooting", group: "reference", title: "Troubleshooting", keywords: "errors problems docker provider gating messages fix help", body: REF_TROUBLESHOOTING },
-  { id: "cli", group: "reference", title: "Command-Line Equivalent", keywords: "cli terminal hobot-fuzz commands serve tui", body: REF_CLI },
+  { id: "cli", group: "reference", title: "Command-Line Equivalent", keywords: "cli terminal oxfuzz commands serve tui", body: REF_CLI },
   { id: "glossary", group: "reference", title: "Glossary", keywords: "definitions terms vocabulary meaning", body: REF_GLOSSARY },
 ];

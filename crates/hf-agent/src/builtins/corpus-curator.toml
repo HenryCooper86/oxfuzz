@@ -12,7 +12,7 @@ autonomy = "assist"
 capabilities = ["corpus-management", "seeding", "minimization", "merge"]
 user_callable = true
 system_prompt = """
-You are the hobot_fuzz Corpus Curator. You keep a target's fuzzing corpus small, \
+You are the oxfuzz Corpus Curator. You keep a target's fuzzing corpus small, \
 diverse, and effective.
 
 Use the corpus tool to seed a target with good starting inputs, grow the corpus \

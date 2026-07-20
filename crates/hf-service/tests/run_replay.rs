@@ -179,7 +179,7 @@ impl hf_core::provider::ProviderPool for HarnessDraftPool {
 
 #[tokio::test]
 async fn run_records_a_seed_and_replay_reexecutes_with_it() {
-    common::install_managed_workspace("hobot_fuzz_run_replay_it");
+    common::install_managed_workspace("oxfuzz_run_replay_it");
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("replay_project");
     std::fs::create_dir_all(&project).unwrap();

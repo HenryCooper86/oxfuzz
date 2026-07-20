@@ -1,4 +1,4 @@
-// Integrations settings -- external systems hobot_fuzz can push findings to.
+// Integrations settings -- external systems oxfuzz can push findings to.
 //
 // Currently DefectDojo: SettingsView loads a public typed DTO and saves an
 // explicit typed patch, preserving protected values unless the operator chooses

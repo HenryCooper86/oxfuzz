@@ -22,12 +22,12 @@ pub fn install_managed_workspace(prefix: &str) -> PathBuf {
         std::fs::create_dir_all(&root).unwrap();
         let canonical = std::fs::canonicalize(&root).unwrap();
         let manifest = serde_json::json!({
-            "application": "hobot_fuzz",
+            "application": "oxfuzz",
             "version": 1,
             "canonical_root": canonical,
         });
         std::fs::write(
-            canonical.join(".hobot-fuzz-workspace.json"),
+            canonical.join(".oxfuzz-workspace.json"),
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();

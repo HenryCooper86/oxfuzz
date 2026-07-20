@@ -1,7 +1,7 @@
 import unittest
 
-from hobot_scapy_automotive.errors import SidecarError
-from hobot_scapy_automotive.mutation import generate_mutation_plan
+from oxfuzz_scapy_automotive.errors import SidecarError
+from oxfuzz_scapy_automotive.mutation import generate_mutation_plan
 
 
 class MutationPlanTests(unittest.TestCase):

@@ -11,7 +11,7 @@ desktop app. The current set was refreshed from the native macOS application on
 
    ```bash
    ./scripts/build-app.sh
-   open target/release/bundle/macos/hobot_fuzz.app
+   open target/release/bundle/macos/oxfuzz.app
    ```
 
 2. Use a deterministic fixture or a neutral demonstration project. A retained

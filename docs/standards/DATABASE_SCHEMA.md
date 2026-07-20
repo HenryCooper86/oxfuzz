@@ -5,7 +5,7 @@ Status: **implemented**. Scope: `hf-storage` and `hf-diagnostics`.
 ## 1. Storage and migration ownership
 
 SQLite is embedded through `sqlx`. `Store::connect` uses `HF_DB_PATH` when
-configured and otherwise opens `data/hobot_fuzz.db`. It creates the parent
+configured and otherwise opens `data/oxfuzz.db`. It creates the parent
 directory and database when needed, then applies the forward-only migrations
 in `crates/hf-storage/migrations/`.
 

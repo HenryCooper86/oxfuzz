@@ -40,15 +40,14 @@ pub fn config_dir() -> PathBuf {
 
 /// A writable, per-user application directory used when not running from a
 /// source checkout. Platform conventions:
-/// - macOS:   `~/Library/Application Support/hobot_fuzz`
-/// - Linux:   `$XDG_DATA_HOME/hobot_fuzz` or `~/.local/share/hobot_fuzz`
-/// - Windows: `%APPDATA%\hobot_fuzz`
+/// - macOS:   `~/Library/Application Support/oxfuzz`
+/// - Linux:   `$XDG_DATA_HOME/oxfuzz` or `~/.local/share/oxfuzz`
+/// - Windows: `%APPDATA%\oxfuzz`
 ///
 /// Falls back to a temp directory so writes always land on a writable volume.
 #[must_use]
 pub fn user_app_dir() -> PathBuf {
-    let candidate =
-        platform_user_app_dir().unwrap_or_else(|| std::env::temp_dir().join("hobot_fuzz"));
+    let candidate = platform_user_app_dir().unwrap_or_else(|| std::env::temp_dir().join("oxfuzz"));
     writable_or_temp(candidate)
 }
 
@@ -59,18 +58,18 @@ fn platform_user_app_dir() -> Option<PathBuf> {
             PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("hobot_fuzz"),
+                .join("oxfuzz"),
         );
     }
     #[cfg(target_os = "windows")]
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        return Some(PathBuf::from(appdata).join("hobot_fuzz"));
+        return Some(PathBuf::from(appdata).join("oxfuzz"));
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
             if !xdg.is_empty() {
-                return Some(PathBuf::from(xdg).join("hobot_fuzz"));
+                return Some(PathBuf::from(xdg).join("oxfuzz"));
             }
         }
         if let Some(home) = std::env::var_os("HOME") {
@@ -78,7 +77,7 @@ fn platform_user_app_dir() -> Option<PathBuf> {
                 PathBuf::from(home)
                     .join(".local")
                     .join("share")
-                    .join("hobot_fuzz"),
+                    .join("oxfuzz"),
             );
         }
     }
@@ -89,7 +88,7 @@ fn writable_or_temp(candidate: PathBuf) -> PathBuf {
     if writable_dir(&candidate) {
         candidate
     } else {
-        std::env::temp_dir().join("hobot_fuzz")
+        std::env::temp_dir().join("oxfuzz")
     }
 }
 
@@ -110,7 +109,7 @@ pub(crate) fn writable_dir(path: &Path) -> bool {
 
 /// Resolve the database path the same way [`Store::connect_from_env`] does.
 fn db_path() -> PathBuf {
-    PathBuf::from(std::env::var("HF_DB_PATH").unwrap_or_else(|_| "data/hobot_fuzz.db".to_owned()))
+    PathBuf::from(std::env::var("HF_DB_PATH").unwrap_or_else(|_| "data/oxfuzz.db".to_owned()))
 }
 
 /// Initialize a workspace: materialize any missing config files from their
@@ -182,7 +181,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let resolved = writable_or_temp(file.path().to_path_buf());
 
-        assert_eq!(resolved, std::env::temp_dir().join("hobot_fuzz"));
+        assert_eq!(resolved, std::env::temp_dir().join("oxfuzz"));
     }
 
     #[tokio::test]

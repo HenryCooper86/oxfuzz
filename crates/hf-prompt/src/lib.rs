@@ -1,6 +1,6 @@
 //! hf-prompt: canonical prompt assembly and fuzzing prompt templates.
 //!
-//! - `render`: hobot's fuzzing prompt renderers (discovery, harness, triage).
+//! - `render`: oxfuzz's fuzzing prompt renderers (discovery, harness, triage).
 //! - `agent`: the invariant, token-budgeted system prompt used by `hf-agent`.
 //! - `budget`/`builtins`/`section`/`store`/`template`: structured prompt
 //!   sections, templates, and section store (used by `hf-context`).

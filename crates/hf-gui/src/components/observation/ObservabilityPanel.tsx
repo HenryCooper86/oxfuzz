@@ -1,6 +1,6 @@
 // Observability panel -- live system state (providers, agent pool, memory).
 //
-// Ported from y-agent's panel, re-typed to hobot's `system_snapshot` command:
+// Ported from y-agent's panel, re-typed to oxfuzz's `system_snapshot` command:
 // per-provider health + usage (concurrency, requests/errors, tokens, cost),
 // the agent pool, and runtime memory counters. Polls every 5s. Rendered inside
 // the app's PanelShell (which supplies the title/close chrome).

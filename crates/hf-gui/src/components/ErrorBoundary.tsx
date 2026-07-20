@@ -22,7 +22,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     // Surface for debugging; the console is captured by the dev tooling.
-    console.error("[hobot_fuzz] view error:", error, info.componentStack);
+    console.error("[oxfuzz] view error:", error, info.componentStack);
   }
 
   componentDidUpdate(prev: Props) {

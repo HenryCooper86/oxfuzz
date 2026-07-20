@@ -32,14 +32,14 @@ describe("in-app documentation", () => {
     const projectLinks = source("../lib/projectLinks.ts");
     const messages = source("../i18n.extra.ts");
 
-    expect(projectLinks).toContain("https://gitlab-ce.orb.local/hobot/hobot_fuzz");
+    expect(projectLinks).toContain("https://gitlab-ce.orb.local/hobot/oxfuzz");
     expect(helpView).toContain('from "../lib/projectLinks"');
     expect(aboutTab).toContain('from "../../lib/projectLinks"');
     expect(helpView).toContain("Open the GitLab repository");
     expect(helpView).toContain("<Gitlab");
     expect(aboutTab).toContain("<Gitlab");
-    expect(helpView).not.toContain("github.com/hobot/hobot_fuzz");
-    expect(aboutTab).not.toContain("github.com/hobot/hobot_fuzz");
+    expect(helpView).not.toContain("github.com/hobot/oxfuzz");
+    expect(aboutTab).not.toContain("github.com/hobot/oxfuzz");
     expect(messages).toContain('"settings.about.repo": "GitLab Project"');
     expect(messages).toContain('"settings.about.repo": "GitLab 项目"');
   });

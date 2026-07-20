@@ -1,7 +1,7 @@
 # Issue-tracker integration -- file triaged crashes as GitHub or GitLab issues
-# in the FUZZED project's repository (not hobot_fuzz's own).
+# in the FUZZED project's repository (not oxfuzz's own).
 #
-# hobot_fuzz builds a crash issue (title + stack/repro + labels) and either opens
+# oxfuzz builds a crash issue (title + stack/repro + labels) and either opens
 # a prefilled "new issue" page in your browser, or -- when a token is set -- files
 # the issue directly through the provider's REST API and links you to it.
 #
@@ -37,7 +37,7 @@ api_token_env = "HF_ISSUE_TRACKER_TOKEN"
 username = ""
 
 # Labels applied to every filed issue.
-labels = ["hobot-fuzz", "fuzzing", "crash"]
+labels = ["oxfuzz", "fuzzing", "crash"]
 
 # Verify the server's TLS certificate. Set false ONLY for a self-signed cert on
 # a trusted on-prem instance.

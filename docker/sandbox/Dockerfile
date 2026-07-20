@@ -1,4 +1,4 @@
-# hobot_fuzz sandbox image
+# oxfuzz sandbox image
 #
 # Provides: clang (with libFuzzer), AFL++, honggfuzz, the syzkaller toolchain
 # (Go + qemu + syz-* binaries), and common build tools. Used by hf-runtime
@@ -10,9 +10,9 @@
 ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 FROM ${UBUNTU_IMAGE}
 
-LABEL org.opencontainers.image.title="hobot_fuzz sandbox" \
+LABEL org.opencontainers.image.title="oxfuzz sandbox" \
       org.opencontainers.image.version="0.1.0" \
-      org.opencontainers.image.source="https://github.com/hobot/hobot_fuzz"
+      org.opencontainers.image.source="https://github.com/hobot/oxfuzz"
 
 ENV DEBIAN_FRONTEND=noninteractive
 

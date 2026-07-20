@@ -52,7 +52,7 @@ impl RuntimeAdapter for SmokePolicyRuntime {
 
 fn write_policy(max_duration_secs: u64, max_mem_mb: u64, max_cpus: u32) {
     hf_service::config::write_config(
-        "hobot-fuzz",
+        "oxfuzz",
         &format!(
             r#"
 [fuzzing]

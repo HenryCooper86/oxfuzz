@@ -1,4 +1,4 @@
-//! `hf-scheduler`: scheduled workflow execution for `hobot_fuzz`.
+//! `hf-scheduler`: scheduled workflow execution for `oxfuzz`.
 //!
 //! This crate provides time-based and event-driven task scheduling:
 //!

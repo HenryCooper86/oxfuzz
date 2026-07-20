@@ -2,7 +2,7 @@
 name = "target-triage"
 version = "0.1.0"
 description = "Rank functions in a project by fuzzing fit"
-author = "hobot_fuzz"
+author = "oxfuzz"
 source_format = "markdown"
 
 [skill.classification]

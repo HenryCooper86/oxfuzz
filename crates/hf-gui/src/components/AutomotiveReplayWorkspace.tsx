@@ -100,7 +100,7 @@ export function AutomotiveReplayWorkspace({
         sourcePath,
         deterministicSeed: parsedSeed,
         mutationCount: Math.max(1, parsedMutationCount),
-        mediaType: "application/vnd.hobot-fuzz.automotive-transcript+json",
+        mediaType: "application/vnd.oxfuzz.automotive-transcript+json",
       });
       setMutationOutcome(outcome);
       toast({

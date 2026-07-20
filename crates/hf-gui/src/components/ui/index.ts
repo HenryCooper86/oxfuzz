@@ -1,4 +1,4 @@
-// UI design-system primitives for hobot_fuzz.
+// UI design-system primitives for oxfuzz.
 // Reusable components with consistent theming via CSS variables.
 
 export { Button } from "./Button";

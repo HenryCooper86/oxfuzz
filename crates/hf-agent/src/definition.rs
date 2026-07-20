@@ -62,7 +62,7 @@ pub enum Autonomy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustTier {
-    /// Ships with `hobot_fuzz`; embedded in the binary, resettable.
+    /// Ships with `oxfuzz`; embedded in the binary, resettable.
     BuiltIn,
     /// Authored or overridden by the user under `config/agents/`.
     #[default]
