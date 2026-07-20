@@ -91,7 +91,7 @@ impl OllamaProvider {
     pub fn with_headers<S: std::hash::BuildHasher>(
         id: &str,
         model: &str,
-        _api_key: String,
+        api_key: String,
         base_url: Option<String>,
         proxy_url: Option<String>,
         tags: Vec<String>,
@@ -103,12 +103,31 @@ impl OllamaProvider {
         http_protocol: HttpProtocol,
     ) -> Self {
         let base_url = normalize_base_url(base_url);
-        let custom_headers = crate::http_headers::custom_header_map(headers).unwrap_or_else(
-            |message| {
+
+        // Ollama Cloud (and any authenticated endpoint) uses a bearer token; the
+        // local server needs none. Attach `Authorization: Bearer <key>` only when
+        // a key is set, and never clobber an Authorization header the operator
+        // supplied explicitly via custom headers.
+        let mut effective_headers: std::collections::HashMap<String, String> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let has_auth = effective_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
+        // Turn the key into a bearer header value, consuming it; an empty key
+        // (local Ollama) yields no header.
+        let bearer = Some(api_key)
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| format!("Bearer {}", k.trim()));
+        if let (false, Some(value)) = (has_auth, bearer) {
+            effective_headers.insert("Authorization".to_string(), value);
+        }
+        let custom_headers = crate::http_headers::custom_header_map(&effective_headers)
+            .unwrap_or_else(|message| {
                 tracing::warn!(provider_id = %id, error = %message, "Ignoring invalid provider custom headers");
                 reqwest::header::HeaderMap::default()
-            },
-        );
+            });
 
         // Ollama is typically local, but proxy is still applied if configured.
         // Operators should set `enabled = false` in proxy config to bypass.
@@ -686,6 +705,52 @@ mod tests {
                 "base {base} should normalize to the native /api/chat endpoint",
             );
         }
+    }
+
+    #[test]
+    fn test_ollama_cloud_sets_bearer_auth_header() {
+        // Ollama Cloud (https://ollama.com) authenticates with a bearer token,
+        // unlike the keyless local server. A configured API key must ride on the
+        // Authorization header of every request.
+        let provider = OllamaProvider::new(
+            "ollama-cloud",
+            "gpt-oss:120b",
+            "sk-secret".to_string(),
+            Some("https://ollama.com".into()),
+            None,
+            vec![],
+            vec![],
+            3,
+            32_768,
+            ToolCallingMode::default(),
+        );
+        let auth = provider
+            .custom_headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(auth, Some("Bearer sk-secret"));
+        assert_eq!(provider.api_url("api/chat"), "https://ollama.com/api/chat");
+    }
+
+    #[test]
+    fn test_ollama_local_has_no_auth_header() {
+        // Local Ollama needs no key; we must not fabricate an Authorization header.
+        let provider = OllamaProvider::new(
+            "ollama-local",
+            "llama3",
+            String::new(),
+            None,
+            None,
+            vec![],
+            vec![],
+            3,
+            32_768,
+            ToolCallingMode::default(),
+        );
+        assert!(provider
+            .custom_headers
+            .get(reqwest::header::AUTHORIZATION)
+            .is_none());
     }
 
     #[test]

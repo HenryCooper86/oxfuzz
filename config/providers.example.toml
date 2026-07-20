@@ -53,3 +53,16 @@ context_window = 128000
 # max_concurrency = 3
 # context_window = 32768
 # api_key = "not-needed"
+
+# Ollama Cloud -- the hosted Ollama service. Same native API as the local
+# server, but at ollama.com and authenticated with an API key from your
+# ollama.com account. base_url defaults to https://ollama.com when omitted.
+# [[providers]]
+# id = "ollama-cloud"
+# provider_type = "ollama-cloud"
+# model = "gpt-oss:120b"
+# tags = ["cloud", "reasoning"]
+# max_concurrency = 3
+# context_window = 32768
+# base_url = "https://ollama.com"
+# api_key_env = "OLLAMA_API_KEY"
