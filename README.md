@@ -45,6 +45,7 @@ of every term. The rest of this README is the technical reference.
 - [Architecture](#architecture)
 - [Crate Map](#crate-map)
 - [Documentation](#documentation)
+- [Acknowledgements](#acknowledgements)
 - [License](#license)
 
 ---
@@ -483,6 +484,12 @@ Core:                          hf-core            <- traits, types, contracts
 - [Engineering protocol](AGENTS.md) -- TDD, risk tiers, and quality gates.
 - [Design documents](docs/design/) -- detailed subsystem designs.
 - [Engineering standards](docs/standards/) -- testing, harness, target, engine, database, and tool-call standards.
+
+---
+
+## Acknowledgements
+
+hobot_fuzz is inspired by and based on **[y-agent](https://github.com/gorgiaxx/y-agent)** by [Gorgias (gorgiaxx)](https://github.com/gorgiaxx) -- a model-agnostic Rust agent framework that turns objectives into controlled, recoverable, and observable work. Its design (agent orchestration, skills, knowledge retrieval, recovery, and multi-surface CLI/TUI/REST/desktop presentation) shaped the foundations of this project. Please visit and use his awesome project.
 
 ---
 
