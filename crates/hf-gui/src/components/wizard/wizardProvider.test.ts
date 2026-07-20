@@ -24,6 +24,15 @@ describe("resolveWizardProvider", () => {
     expect(p?.model).toBe("qwen2.5:7b");
   });
 
+  it("persists an Ollama Cloud provider at ollama.com with the API key", () => {
+    const p = resolveWizardProvider({ providerType: "ollama-cloud", apiKey: "sk-cloud", model: "", baseUrl: "" });
+    expect(p).not.toBeNull();
+    expect(p?.provider_type).toBe("ollama-cloud");
+    expect(p?.base_url).toBe("https://ollama.com");
+    expect(p?.api_key).toBe("sk-cloud");
+    expect(p?.model).toBe(WIZARD_PROVIDER_PRESETS["ollama-cloud"].model);
+  });
+
   it("keeps the selected provider type instead of guessing from the URL", () => {
     const p = resolveWizardProvider({
       providerType: "openai-compat",

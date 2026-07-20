@@ -29,6 +29,7 @@ export const WIZARD_PROVIDER_TYPES: { value: string; label: string }[] = [
   { value: "openai", label: "OpenAI" },
   { value: "openai-compat", label: "OpenAI-compatible" },
   { value: "ollama", label: "Ollama (local)" },
+  { value: "ollama-cloud", label: "Ollama Cloud" },
   { value: "anthropic", label: "Anthropic" },
   { value: "gemini", label: "Gemini" },
 ];
@@ -37,6 +38,8 @@ export const WIZARD_PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o", keyOptional: false },
   "openai-compat": { baseUrl: "", model: "", keyOptional: false },
   ollama: { baseUrl: "http://localhost:11434", model: "llama3.1:8b", keyOptional: true },
+  // Ollama Cloud: hosted at ollama.com, needs an API key (unlike local).
+  "ollama-cloud": { baseUrl: "https://ollama.com", model: "gpt-oss:120b", keyOptional: false },
   anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "", keyOptional: false },
   gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "", keyOptional: false },
 };
