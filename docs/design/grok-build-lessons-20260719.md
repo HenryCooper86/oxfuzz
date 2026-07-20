@@ -1,9 +1,9 @@
-# grok-build vs. hobot_fuzz — architecture study and actionable lessons
+# grok-build vs. oxfuzz — architecture study and actionable lessons
 
 **Date:** 2026-07-19
 **Subject:** x.AI's open-sourced `grok-build` agent harness (<https://github.com/xai-org/grok-build>)
 **Method:** Full source clone (~73 MB, ~60 workspace crates under `crates/codegen/`, pinned via a
-`SOURCE_REV` file) read directly, plus a breadth sweep. Claims about hobot_fuzz were cross-read
+`SOURCE_REV` file) read directly, plus a breadth sweep. Claims about oxfuzz were cross-read
 against our own crates.
 
 > Provenance note: this report was produced by a research subagent that cloned and read the real
@@ -140,7 +140,7 @@ budget.
 
 ## 3. Head-to-head
 
-| Dimension | grok-build | hobot_fuzz (today) |
+| Dimension | grok-build | oxfuzz (today) |
 |---|---|---|
 | **Agent loop** | ReAct + completion-recovery + goal-continuation layers; native function-calling; `turn.rs` | Single ReAct loop, `hf-agent/src/lib.rs::run_turn`, `max_iterations`; prompt-based `{thought,tool,args}` JSON protocol, hand-parsed |
 | **Tool interface** | Trait + `schemars` JSON Schema, native tool-calls, streaming, declarative `Expr` availability, self-referential descriptions | Split: fuzzing tools dispatched by ad-hoc `match` in `hf-service/src/agent.rs` (no schema validation); only 4 inspection tools use the real `hf-tools` JSON-Schema pipeline. Rich `hf-tools` framework built but largely unwired |
@@ -249,7 +249,7 @@ error-classified backoff before returning `Err`; our `error_classifier.rs` alrea
 4. **Do NOT expand our unwired framework to match grok-build's breadth.** The opposite is the lesson.
 
 ### Meta-finding worth surfacing
-hobot_fuzz carries a large amount of built, unit-tested, but unreachable framework ported from an
+oxfuzz carries a large amount of built, unit-tested, but unreachable framework ported from an
 internal template: `ContextPipeline`, `InjectTools/Memory/Bootstrap`, `ContextManager`,
 `ContextWindowGuard`, `RecallStore`, LTM/STM memory clients, `DynamicToolManager`, `ToolTaxonomy`,
 `ToolActivationSet`, `ResultFormatter`, and `hf-core` traits (`AgentRunner`, `SkillRegistry`,

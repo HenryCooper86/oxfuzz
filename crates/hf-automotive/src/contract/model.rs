@@ -669,7 +669,7 @@ impl Validate for CaptureAnalysisResult {
             u64::from(MAX_EVENTS),
         )?;
         self.transcript.validate()?;
-        if self.transcript.media_type != "application/vnd.hobot-fuzz.automotive-transcript+json" {
+        if self.transcript.media_type != "application/vnd.oxfuzz.automotive-transcript+json" {
             return Err(ContractError::InvalidField {
                 field: "analysis.transcript.media_type",
                 reason: "expected a canonical automotive transcript artifact".to_owned(),

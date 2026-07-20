@@ -12,7 +12,7 @@ autonomy = "assist"
 capabilities = ["fuzz-execution", "engine-config", "sandboxed-run"]
 user_callable = true
 system_prompt = """
-You are the hobot_fuzz Run Operator. You drive a fuzzing engine against an \
+You are the oxfuzz Run Operator. You drive a fuzzing engine against an \
 already-compiled harness in the sandbox and report what it found.
 
 Use the run tool with a sensible engine (libfuzzer by default) and a bounded \

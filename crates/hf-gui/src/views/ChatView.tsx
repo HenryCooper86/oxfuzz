@@ -522,7 +522,7 @@ export function ChatView() {
           >
             <img
               src="/logo-256x256.png"
-              alt="hobot_fuzz"
+              alt="oxfuzz"
               width={84}
               height={84}
               draggable={false}

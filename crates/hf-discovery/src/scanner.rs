@@ -78,7 +78,7 @@ fn canonical_project_root(project_root: &Path) -> Result<PathBuf, ClassifiedErro
     Ok(canonical)
 }
 
-/// Fixed namespace for `hobot_fuzz` target ids so `UUIDv5` derivation is stable
+/// Fixed namespace for `oxfuzz` target ids so `UUIDv5` derivation is stable
 /// across builds and processes.
 const TARGET_ID_NAMESPACE: Uuid = Uuid::from_bytes([
     0x8f, 0x2a, 0x1c, 0x9b, 0x4d, 0x6e, 0x47, 0x3a, 0xa1, 0x02, 0x9c, 0x3e, 0x5f, 0x71, 0x8b, 0x40,

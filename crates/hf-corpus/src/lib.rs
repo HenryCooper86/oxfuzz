@@ -437,7 +437,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), ClassifiedError> {
         )));
     }
     let mut temporary = tempfile::Builder::new()
-        .prefix(".hobot-fuzz-corpus-")
+        .prefix(".oxfuzz-corpus-")
         .tempfile_in(parent)
         .map_err(|e| ClassifiedError::Internal(format!("create corpus temp: {e}")))?;
     temporary

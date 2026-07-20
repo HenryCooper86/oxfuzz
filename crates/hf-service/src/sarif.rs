@@ -333,9 +333,9 @@ pub fn crashes_to_sarif(
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": "hobot_fuzz",
+                    "name": "oxfuzz",
                     "version": tool_version,
-                    "informationUri": "https://github.com/hobot/hobot_fuzz",
+                    "informationUri": "https://github.com/hobot/oxfuzz",
                     "rules": rules,
                 },
             },

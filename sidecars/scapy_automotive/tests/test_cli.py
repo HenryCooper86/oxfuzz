@@ -6,8 +6,8 @@ import unittest
 
 from test_validation import virtual_config
 
-from hobot_scapy_automotive.cli import run_jsonl
-from hobot_scapy_automotive.replay import UnavailableTransport
+from oxfuzz_scapy_automotive.cli import run_jsonl
+from oxfuzz_scapy_automotive.replay import UnavailableTransport
 
 
 class CliTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class CliTests(unittest.TestCase):
         )
 
         completed = subprocess.run(
-            [sys.executable, "-m", "hobot_scapy_automotive"],
+            [sys.executable, "-m", "oxfuzz_scapy_automotive"],
             input=request + "\n",
             capture_output=True,
             check=False,

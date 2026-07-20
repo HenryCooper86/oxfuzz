@@ -2,7 +2,7 @@
 name = "corpus-curation"
 version = "0.1.0"
 description = "Seed, grow, prune, and keep a fuzzing corpus healthy"
-author = "hobot_fuzz"
+author = "oxfuzz"
 source_format = "markdown"
 
 [skill.classification]

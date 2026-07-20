@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the hobot_fuzz desktop app (Tauri v2).
+# Build the oxfuzz desktop app (Tauri v2).
 #   macOS -> .app + .dmg (ad-hoc signed)
 #   Linux -> .deb / .AppImage / .rpm
 # Works on arm64 macOS, x86_64/arm64 Linux. Usage: ./scripts/build-app.sh

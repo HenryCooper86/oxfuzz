@@ -3,15 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hobot_scapy_automotive.artifacts import FilesystemArtifactStore, validate_artifact_ref
-from hobot_scapy_automotive.capabilities import capability_report
-from hobot_scapy_automotive.contract import (
+from oxfuzz_scapy_automotive.artifacts import FilesystemArtifactStore, validate_artifact_ref
+from oxfuzz_scapy_automotive.capabilities import capability_report
+from oxfuzz_scapy_automotive.contract import (
     PROTOCOLS,
     SCHEMA_VERSION,
     process_request,
 )
-from hobot_scapy_automotive.errors import SidecarError
-from hobot_scapy_automotive.hashing import sha256_bytes
+from oxfuzz_scapy_automotive.errors import SidecarError
+from oxfuzz_scapy_automotive.hashing import sha256_bytes
 
 
 class ContractTests(unittest.TestCase):

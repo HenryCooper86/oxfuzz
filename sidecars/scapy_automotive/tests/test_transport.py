@@ -4,13 +4,13 @@ from unittest.mock import MagicMock, patch
 
 from test_validation import physical_config, virtual_config
 
-from hobot_scapy_automotive.errors import SidecarError
-from hobot_scapy_automotive.replay import (
+from oxfuzz_scapy_automotive.errors import SidecarError
+from oxfuzz_scapy_automotive.replay import (
     UnavailableTransport,
     build_replay_plan,
     execute_replay_plan,
 )
-from hobot_scapy_automotive.transport import (
+from oxfuzz_scapy_automotive.transport import (
     IP_BINARY,
     MAX_RECEIVE_TIMEOUT_SECONDS,
     PythonCanTransport,
@@ -154,7 +154,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(loader_calls, [])
         self.assertEqual(runner.calls, [])
 
-    @patch("hobot_scapy_automotive.transport.subprocess.run")
+    @patch("oxfuzz_scapy_automotive.transport.subprocess.run")
     def test_default_process_runner_never_uses_a_shell(self, run: MagicMock) -> None:
         run.return_value = subprocess.CompletedProcess([], 0)
 
@@ -170,7 +170,7 @@ class TransportTests(unittest.TestCase):
             timeout=2.0,
         )
 
-    @patch("hobot_scapy_automotive.transport.subprocess.run")
+    @patch("oxfuzz_scapy_automotive.transport.subprocess.run")
     def test_default_process_runner_rejects_non_vcan_argv(self, run: MagicMock) -> None:
         for argv in (
             ("/bin/sh", "-c", "ip link set vcan0 up"),

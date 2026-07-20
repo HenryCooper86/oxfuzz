@@ -1,6 +1,6 @@
 -- Per-project override of the global auto-revert policy. A row here fully
 -- specifies the policy for one project (identified by its root path); when no
--- row exists, the project inherits the global policy from hobot-fuzz.toml.
+-- row exists, the project inherits the global policy from oxfuzz.toml.
 -- Clearing an override deletes the row (back to inherit). Forward-only.
 CREATE TABLE IF NOT EXISTS project_settings (
     project_root              TEXT PRIMARY KEY,

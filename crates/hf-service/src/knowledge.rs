@@ -261,7 +261,7 @@ fn docs_root_from(workspace_override: Option<OsString>) -> PathBuf {
     if crate::init::writable_dir(&root) {
         root
     } else {
-        std::env::temp_dir().join("hobot_fuzz").join("knowledge")
+        std::env::temp_dir().join("oxfuzz").join("knowledge")
     }
 }
 

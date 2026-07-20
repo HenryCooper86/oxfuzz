@@ -2,7 +2,7 @@
 //! issues in the *fuzzed project's* repository.
 //!
 //! The older `workbench::gitlab_issue_export` guessed the repo from the fuzzed
-//! folder's git remote, which resolves to the enclosing `hobot_fuzz` checkout
+//! folder's git remote, which resolves to the enclosing `oxfuzz` checkout
 //! when the target is not its own repo -- so crash issues landed on the wrong
 //! project. This module makes the target repo, provider, and credentials
 //! **explicit config**, so issues go where they belong.
@@ -106,7 +106,7 @@ fn default_true() -> bool {
 
 fn default_labels() -> Vec<String> {
     vec![
-        "hobot-fuzz".to_owned(),
+        "oxfuzz".to_owned(),
         "fuzzing".to_owned(),
         "crash".to_owned(),
     ]
@@ -289,7 +289,7 @@ fn api_user_endpoint(provider: Provider, web_base: &str) -> String {
 /// stack signature, which is deterministic per distinct crash.
 #[must_use]
 pub fn dedup_marker(stack_signature: &str) -> String {
-    format!("hobot-fuzz-signature:{stack_signature}")
+    format!("oxfuzz-signature:{stack_signature}")
 }
 
 /// The endpoint that searches open issues for an existing filing of a crash,
@@ -415,7 +415,7 @@ impl IssueTrackerClient {
         }
         let http = reqwest::Client::builder()
             .danger_accept_invalid_certs(!cfg.verify_tls)
-            .user_agent(concat!("hobot_fuzz/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("oxfuzz/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ClassifiedError::Internal(format!("http client: {e}")))?;
         Ok(Self {
@@ -639,12 +639,12 @@ mod tests {
     #[test]
     fn search_endpoint_and_match_dedup_by_signature() {
         let marker = dedup_marker("sig-abc");
-        assert_eq!(marker, "hobot-fuzz-signature:sig-abc");
+        assert_eq!(marker, "oxfuzz-signature:sig-abc");
 
         // GitHub search restricts to the repo/open/body and encodes the marker.
         let gh = api_search_endpoint(Provider::GitHub, "https://github.com", "acme/app", &marker);
         assert!(gh.starts_with("https://api.github.com/search/issues?q="));
-        assert!(gh.contains("hobot-fuzz-signature"));
+        assert!(gh.contains("oxfuzz-signature"));
 
         // A GitHub search response whose item body carries the marker matches.
         let github_json = serde_json::json!({

@@ -6,7 +6,7 @@ physical-bench validation remain separately approved activities**. Owner:
 
 ## 1. Goal and Current Boundary
 
-The automotive subsystem extends `hobot_fuzz` from source-coverage fuzzing to
+The automotive subsystem extends `oxfuzz` from source-coverage fuzzing to
 protocol-state exploration without weakening the existing sandbox and human
 approval boundaries. The implemented software scope includes the optional
 `hf-automotive` Rust contract, pinned Python sidecar package, service-owned

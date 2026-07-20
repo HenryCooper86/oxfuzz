@@ -18,7 +18,7 @@ function joinDisplayPath(root: string, child: string): string {
 /** Derive setup-wizard labels from the service-resolved application paths. */
 export function wizardStoragePaths(paths: WizardAppPaths): WizardStoragePaths {
   return {
-    database: joinDisplayPath(paths.data_dir, "hobot_fuzz.db"),
+    database: joinDisplayPath(paths.data_dir, "oxfuzz.db"),
     transcripts: joinDisplayPath(paths.data_dir, "transcripts"),
     workspace: paths.workspace_dir,
   };

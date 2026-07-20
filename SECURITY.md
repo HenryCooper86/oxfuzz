@@ -1,6 +1,6 @@
 # Security policy
 
-hobot_fuzz builds and runs untrusted fuzzing workloads, so security reports are
+oxfuzz builds and runs untrusted fuzzing workloads, so security reports are
 especially important. Please report suspected vulnerabilities privately.
 
 ## Supported versions
@@ -49,6 +49,6 @@ production services, public networks, physical vehicle interfaces, or third
 party data without written authorization. Stop if a test risks availability,
 privacy, or safety.
 
-Human approval in hobot_fuzz authorizes only the bounded sandboxed action shown
+Human approval in oxfuzz authorizes only the bounded sandboxed action shown
 to the operator. It does not authorize host execution or activity outside the
 approved target and environment.

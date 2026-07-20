@@ -149,7 +149,7 @@ async fn ranking_propagates_a_configured_store_write_failure() {
 
 #[tokio::test]
 async fn harness_compile_rejects_an_unknown_target_before_runtime_execution() {
-    common::install_managed_workspace("hobot_fuzz_release_identity_it");
+    common::install_managed_workspace("oxfuzz_release_identity_it");
     let project = sample_project();
     let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
 
@@ -173,7 +173,7 @@ async fn harness_compile_rejects_an_unknown_target_before_runtime_execution() {
 
 #[tokio::test]
 async fn harness_compile_does_not_activate_metadata_that_failed_to_persist() {
-    common::install_managed_workspace("hobot_fuzz_release_harness_it");
+    common::install_managed_workspace("oxfuzz_release_harness_it");
     let project = sample_project();
     let store = store_in(&project).await;
     sqlx::query("DROP TABLE harnesses")
@@ -204,7 +204,7 @@ async fn harness_compile_does_not_activate_metadata_that_failed_to_persist() {
 
 #[tokio::test]
 async fn generated_harness_propagates_a_configured_store_write_failure() {
-    common::install_managed_workspace("hobot_fuzz_release_generate_it");
+    common::install_managed_workspace("oxfuzz_release_generate_it");
     let project = sample_project();
     let store = store_in(&project).await;
     sqlx::query("DROP TABLE harnesses")
@@ -236,7 +236,7 @@ async fn generated_harness_propagates_a_configured_store_write_failure() {
 #[cfg(unix)]
 #[test]
 fn project_workspace_identity_is_canonical() {
-    common::install_managed_workspace("hobot_fuzz_release_workspace_it");
+    common::install_managed_workspace("oxfuzz_release_workspace_it");
     let project = sample_project();
     let links = tempfile::tempdir().unwrap();
     let alias = links.path().join("project-link");

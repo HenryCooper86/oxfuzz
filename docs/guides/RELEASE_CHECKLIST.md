@@ -52,8 +52,8 @@ sidecar tests/lint; and the release CLI artifact.
 ```bash
 ./scripts/build-sandbox.sh
 ./scripts/build-release.sh
-target/release/hobot-fuzz doctor
-target/release/hobot-fuzz doctor --json
+target/release/oxfuzz doctor
+target/release/oxfuzz doctor --json
 ```
 
 The doctor command must exit successfully and report the Docker daemon,
@@ -94,9 +94,9 @@ and retain the deterministic fact sheet on fallback:
 ## 4. Verify CLI behavior
 
 ```bash
-target/release/hobot-fuzz --version
-target/release/hobot-fuzz --help >/dev/null
-target/release/hobot-fuzz doctor
+target/release/oxfuzz --version
+target/release/oxfuzz --help >/dev/null
+target/release/oxfuzz doctor
 ```
 
 Use the bundled deterministic fixtures for read-only discovery and service
@@ -123,7 +123,7 @@ For a macOS candidate, retain the output from these checks:
 
 ```bash
 codesign --verify --deep --strict --verbose=2 \
-  target/release/bundle/macos/hobot_fuzz.app
+  target/release/bundle/macos/oxfuzz.app
 hdiutil verify target/release/bundle/dmg/*.dmg
 ```
 

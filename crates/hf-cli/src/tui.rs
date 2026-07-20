@@ -1,4 +1,4 @@
-//! TUI for `hobot_fuzz` using ratatui.
+//! TUI for `oxfuzz` using ratatui.
 //!
 //! A focused target-inventory browser. Long-running fuzz execution stays in the
 //! streaming CLI/GUI surfaces; this view provides accurate next commands.
@@ -207,7 +207,7 @@ impl Tui {
 
 fn run_guidance(project: &Path, symbol: &str) -> String {
     format!(
-        "Run an already promoted harness with: hobot-fuzz run {} --target {symbol} --engine libfuzzer",
+        "Run an already promoted harness with: oxfuzz run {} --target {symbol} --engine libfuzzer",
         project.display()
     )
 }
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn target_browser_guidance_does_not_invent_a_provider_requirement() {
         let guidance = run_guidance(Path::new("/tmp/project"), "parse_packet");
-        assert!(guidance.contains("hobot-fuzz run"));
+        assert!(guidance.contains("oxfuzz run"));
         assert!(guidance.contains("parse_packet"));
         assert!(!guidance.to_ascii_lowercase().contains("provider"));
     }

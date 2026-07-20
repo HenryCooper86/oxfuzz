@@ -11,7 +11,7 @@ use std::time::Duration;
 ///
 /// Single source of truth -- referenced by `hf-service`, `hf-cli`, and
 /// `hf-gui` so the tag never drifts across presentation layers.
-pub const SANDBOX_IMAGE: &str = "hobot/fuzz-sandbox:0.1.0";
+pub const SANDBOX_IMAGE: &str = "oxfuzz/fuzz-sandbox:0.1.0";
 
 /// Configuration for the production Docker sandbox runtime.
 #[derive(Debug, Clone)]
@@ -500,6 +500,6 @@ mod tests {
     #[test]
     fn production_sandbox_image_is_version_pinned() {
         assert!(!SANDBOX_IMAGE.ends_with(":latest"));
-        assert_eq!(SANDBOX_IMAGE, "hobot/fuzz-sandbox:0.1.0");
+        assert_eq!(SANDBOX_IMAGE, "oxfuzz/fuzz-sandbox:0.1.0");
     }
 }

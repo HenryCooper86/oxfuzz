@@ -1,7 +1,7 @@
 # DefectDojo integration
 #
 # Push triaged crashes to a DefectDojo instance (https://www.defectdojo.org) as
-# findings via its REST API. hobot_fuzz maps each triaged crash -- its CWE, CASR
+# findings via its REST API. oxfuzz maps each triaged crash -- its CWE, CASR
 # exploitability, stack signature, and suggested fix -- to a DefectDojo "Generic
 # Findings Import" finding and POSTs it to /api/v2/import-scan/ (or
 # /reimport-scan/ on repeat pushes, so re-found crashes update in place instead
@@ -35,11 +35,11 @@ verify_tls = true
 # DefectDojo creates them on first push if they do not already exist, so you do
 # not have to pre-provision anything. Leave product_name empty to default it to
 # the fuzzed project's name.
-product_name = "hobot_fuzz"
+product_name = "oxfuzz"
 # Product type the product is filed under. DefectDojo requires this to create a
 # brand-new product under auto_create; it is created on demand if it does not
-# already exist. Defaults to "hobot_fuzz" when blank.
-product_type_name = "hobot_fuzz"
+# already exist. Defaults to "oxfuzz" when blank.
+product_type_name = "oxfuzz"
 engagement_name = "Fuzzing"
 auto_create = true
 
@@ -52,7 +52,7 @@ reimport = true
 # ---------------------------------------------------------------------------
 # Local instance lifecycle
 # ---------------------------------------------------------------------------
-# hobot_fuzz ships no DefectDojo server. What it can do is adopt one you already
+# oxfuzz ships no DefectDojo server. What it can do is adopt one you already
 # installed with upstream's `docker compose` and start it alongside the app, so
 # the embedded DefectDojo view and the crash push are not staring at a dead port.
 # Only a local `url` (localhost / 127.0.0.1) is ever started or stopped -- a

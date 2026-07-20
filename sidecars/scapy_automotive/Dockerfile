@@ -1,6 +1,6 @@
 FROM python:3.12.9-slim-bookworm
 
-LABEL org.opencontainers.image.title="hobot_fuzz Scapy automotive sidecar"
+LABEL org.opencontainers.image.title="oxfuzz Scapy automotive sidecar"
 LABEL org.opencontainers.image.version="0.1.0"
 LABEL org.opencontainers.image.licenses="MIT AND GPL-2.0-only AND LGPL-3.0-only"
 
@@ -8,10 +8,10 @@ ARG IPROUTE2_VERSION=6.1.0-3
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    HOBOT_SCAPY_INPUT_ROOT=/workspace/input \
-    HOBOT_SCAPY_OUTPUT_ROOT=/workspace/output
+    OXFUZZ_SCAPY_INPUT_ROOT=/workspace/input \
+    OXFUZZ_SCAPY_OUTPUT_ROOT=/workspace/output
 
-WORKDIR /opt/hobot-scapy-automotive
+WORKDIR /opt/oxfuzz-scapy-automotive
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends "iproute2=${IPROUTE2_VERSION}" \
@@ -29,4 +29,4 @@ RUN python -m pip install --no-cache-dir --no-deps -r requirements-can.txt \
 
 USER 65532:65532
 
-CMD ["python3", "-m", "hobot_scapy_automotive"]
+CMD ["python3", "-m", "oxfuzz_scapy_automotive"]

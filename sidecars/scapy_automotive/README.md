@@ -1,7 +1,7 @@
-# hobot_fuzz Scapy automotive sidecar
+# oxfuzz Scapy automotive sidecar
 
 This optional Python package provides bounded automotive packet primitives for
-the Rust-first `hobot_fuzz` application. It runs as an operation-scoped JSONL
+the Rust-first `oxfuzz` application. It runs as an operation-scoped JSONL
 sidecar inside `hf-runtime`; it is not imported into the Rust process and must
 not be launched on the host for a fuzzing operation.
 
@@ -56,16 +56,16 @@ canonical transcript.
 Artifact requests contain an opaque identifier, SHA-256, and media type. The
 runtime supplies fixed sandbox roots out of band:
 
-- `HOBOT_SCAPY_INPUT_ROOT`: read-only staged inputs;
-- `HOBOT_SCAPY_OUTPUT_ROOT`: operation-scoped bounded outputs;
-- `HOBOT_SCAPY_EXECUTION_CONFIG_JSON`: optional service-approved execution
+- `OXFUZZ_SCAPY_INPUT_ROOT`: read-only staged inputs;
+- `OXFUZZ_SCAPY_OUTPUT_ROOT`: operation-scoped bounded outputs;
+- `OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON`: optional service-approved execution
   policy for the one replay operation in the container.
 
 Artifact identifiers cannot contain a directory separator. Symlinks, hash
 mismatches, unknown fields, unbounded data, and absent roots fail closed.
 
 `analyze_capture` writes an immutable canonical transcript artifact with media
-type `application/vnd.hobot-fuzz.automotive-transcript+json`. Its JSON value is
+type `application/vnd.oxfuzz.automotive-transcript+json`. Its JSON value is
 the exact Rust hash preimage `[1,"automotive-transcript",events]`, so the file's
 SHA-256, returned `transcript.sha256`, typed `transcript_hash`, and response
 `transcript_sha256` are identical. `build_replay_plan` accepts this canonical

@@ -323,7 +323,7 @@ async fn issue_export_returns_reviewable_payload() {
 
     assert!(export.title.contains("parse_packet"));
     assert!(export.description.contains("segmentation fault"));
-    assert!(export.labels.contains(&"hobot-fuzz".to_owned()));
+    assert!(export.labels.contains(&"oxfuzz".to_owned()));
     // The payload is provider-tagged (the provider-specific URL building is
     // unit-tested hermetically in issue_tracker.rs).
     assert!(
@@ -334,7 +334,7 @@ async fn issue_export_returns_reviewable_payload() {
 }
 
 fn isolate_workspace() {
-    common::install_managed_workspace("hobot_fuzz_workbench_it");
+    common::install_managed_workspace("oxfuzz_workbench_it");
 }
 
 #[tokio::test]

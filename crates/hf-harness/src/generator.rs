@@ -614,7 +614,7 @@ pub async fn smoke_fuzz_in_paths_with_config(
                     .map_err(|e| {
                         ClassifiedError::Harness(format!("smoke fuzz: cannot create seed: {e}"))
                     })?;
-                file.write_all(b"hobot_fuzz_smoke").map_err(|e| {
+                file.write_all(b"oxfuzz_smoke").map_err(|e| {
                     ClassifiedError::Harness(format!("smoke fuzz: cannot write seed: {e}"))
                 })?;
             }

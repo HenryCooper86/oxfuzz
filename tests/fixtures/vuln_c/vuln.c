@@ -1,6 +1,6 @@
 /* Deliberately vulnerable functions -- see vuln.h. Each bug is reachable from
  * a (data, len) entry point so AddressSanitizer flags it within milliseconds
- * of fuzzing. Used to verify hobot_fuzz's discover -> harness -> run -> triage
+ * of fuzzing. Used to verify oxfuzz's discover -> harness -> run -> triage
  * pipeline actually finds bugs. */
 #include "vuln.h"
 

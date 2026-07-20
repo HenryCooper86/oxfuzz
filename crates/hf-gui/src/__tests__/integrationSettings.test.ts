@@ -13,7 +13,7 @@ const dojoPublic: DefectDojoPublicConfig = {
   api_token_configured: true,
   api_token_env_configured: true,
   verify_tls: true,
-  product_name: "hobot_fuzz",
+  product_name: "oxfuzz",
   product_type_name: null,
   engagement_name: null,
   auto_create: true,
@@ -29,7 +29,7 @@ const dojoPublic: DefectDojoPublicConfig = {
 const trackerPublic: IssueTrackerPublicConfig = {
   provider: "gitlab",
   host: "https://gitlab.example.test",
-  repo: { configured: true, value: "security/hobot_fuzz" },
+  repo: { configured: true, value: "security/oxfuzz" },
   api_token_configured: true,
   api_token_env_configured: false,
   username: null,
@@ -51,7 +51,7 @@ describe("typed integration settings", () => {
     expect(tracker.repo).toMatchObject({
       configured: true,
       change: "keep",
-      current: "security/hobot_fuzz",
+      current: "security/oxfuzz",
     });
   });
 
@@ -90,7 +90,7 @@ describe("typed integration settings", () => {
     tracker.api_token_env = {
       ...tracker.api_token_env,
       change: "replace",
-      replacement: "HOBOT_GITLAB_TOKEN",
+      replacement: "OXFUZZ_GITLAB_TOKEN",
     };
     tracker.repo = { ...tracker.repo, change: "clear" };
 
@@ -107,7 +107,7 @@ describe("typed integration settings", () => {
     });
     expect(issueTrackerPatchFromDraft(tracker)).toMatchObject({
       api_token: { operation: "clear" },
-      api_token_env: { operation: "replace", value: "HOBOT_GITLAB_TOKEN" },
+      api_token_env: { operation: "replace", value: "OXFUZZ_GITLAB_TOKEN" },
       repo: { operation: "clear" },
     });
   });

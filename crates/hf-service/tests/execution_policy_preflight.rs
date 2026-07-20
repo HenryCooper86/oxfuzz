@@ -48,7 +48,7 @@ async fn disabled_auxiliary_engines_fail_before_workspace_or_runtime_activity() 
     std::env::set_var("HF_CONFIG_DIR", &config_dir);
     std::env::set_var("HF_WORKSPACE_DIR", &workspace_root);
     hf_service::config::write_config(
-        "hobot-fuzz",
+        "oxfuzz",
         r#"
 [fuzzing]
 enabled_engines = ["honggfuzz"]

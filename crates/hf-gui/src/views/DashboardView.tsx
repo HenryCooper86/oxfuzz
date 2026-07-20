@@ -784,7 +784,7 @@ function ReproCenter({
           {crashes.map((crash) => {
             const target = firstHarness?.target_symbol || crash.target_symbol;
             const command = project
-              ? `hobot-fuzz regress ${shellQuote(project)} --target ${shellQuote(target)}`
+              ? `oxfuzz regress ${shellQuote(project)} --target ${shellQuote(target)}`
               : t("dashboard.selectProjectForCommand");
             return (
               <div key={crash.crash_id} className="rounded-md border border-border" style={{ padding: "var(--space-md)", background: "var(--surface-secondary)" }}>

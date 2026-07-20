@@ -158,7 +158,7 @@ const en: Dict = {
   "settings.tab.about": "About",
 
   // AI Assistant welcome screen
-  "welcome.title": "Welcome to hobot_fuzz",
+  "welcome.title": "Welcome to oxfuzz",
   "welcome.tagline":
     "An AI fuzzing agent that discovers targets, writes harnesses, and drives fuzzing engines.",
   "welcome.pick": "Pick a project to get started, or ask the assistant below.",
@@ -312,7 +312,7 @@ const zh: Dict = {
   "settings.tab.about": "关于",
 
   // AI Assistant welcome screen
-  "welcome.title": "欢迎使用 hobot_fuzz",
+  "welcome.title": "欢迎使用 oxfuzz",
   "welcome.tagline": "一个 AI 模糊测试智能体，自动发现目标、编写测试桩并驱动模糊测试引擎。",
   "welcome.pick": "选择一个项目开始，或在下方向助手提问。",
   "welcome.chip.discover": "发现目标",

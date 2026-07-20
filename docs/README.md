@@ -1,4 +1,4 @@
-# hobot_fuzz documentation
+# oxfuzz documentation
 
 This directory contains operator guides, architecture decisions, engineering
 standards, and the screenshot evidence used by the project README. Start with

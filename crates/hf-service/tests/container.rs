@@ -70,7 +70,7 @@ fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let root = std::env::temp_dir().join(format!(
-            "hobot_fuzz_it_workspace_{}_{}",
+            "oxfuzz_it_workspace_{}_{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -78,7 +78,7 @@ fn isolate_workspace() {
         let initialized = hf_service::initialize_workspace_root()
             .expect("initialize managed integration-test workspace");
         assert_eq!(initialized, std::fs::canonicalize(&root).unwrap());
-        assert!(root.join(".hobot-fuzz-workspace.json").is_file());
+        assert!(root.join(".oxfuzz-workspace.json").is_file());
     });
 }
 

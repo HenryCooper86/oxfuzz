@@ -2,7 +2,7 @@
 //!
 //! CASR (`casr-san`/`casr-libfuzzer`/`casr-afl`) emits one JSON `.casrep` per
 //! unique crash with an exploitability classification, crash location, and a
-//! normalized stack trace. We extract the fields hobot surfaces into
+//! normalized stack trace. We extract the fields oxfuzz surfaces into
 //! [`CasrReport`]; the report contains many more fields we ignore.
 
 use hf_core::crash::{CasrReport, CrashKind, CrashSeverity};
@@ -71,7 +71,7 @@ pub fn cluster_from_path(path: &std::path::Path) -> Option<u32> {
     })
 }
 
-/// Infer hobot's [`CrashKind`] from a CASR short description.
+/// Infer oxfuzz's [`CrashKind`] from a CASR short description.
 #[must_use]
 pub fn kind_from_short(short: &str) -> CrashKind {
     let s = short.to_ascii_lowercase();

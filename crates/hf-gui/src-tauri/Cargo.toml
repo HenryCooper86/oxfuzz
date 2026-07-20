@@ -3,7 +3,7 @@ name = "hf-gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Tauri v2 desktop GUI for hobot_fuzz"
+description = "Tauri v2 desktop GUI for oxfuzz"
 
 [features]
 default = []

@@ -397,7 +397,7 @@ pub async fn issue_export(
         } else {
             // Not configured: best-effort GitLab URL from the git remote.
             let labels = vec![
-                "hobot-fuzz".to_owned(),
+                "oxfuzz".to_owned(),
                 "fuzzing".to_owned(),
                 "crash".to_owned(),
             ];
@@ -834,7 +834,7 @@ fn issue_title(crash: &Crash, target: Option<&TargetCandidate>) -> String {
     } else {
         crash.summary.clone()
     };
-    format!("[hobot_fuzz] {target_name}: {summary}")
+    format!("[oxfuzz] {target_name}: {summary}")
 }
 
 fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String {
@@ -849,7 +849,7 @@ fn issue_description(crash: &Crash, target: Option<&TargetCandidate>) -> String 
     let mut body = String::new();
     body.push_str("## Summary\n\n");
     if crash.summary.is_empty() {
-        body.push_str("Crash found by hobot_fuzz.\n\n");
+        body.push_str("Crash found by oxfuzz.\n\n");
     } else {
         body.push_str(&crash.summary);
         body.push_str("\n\n");
@@ -979,8 +979,8 @@ mod tests {
     #[test]
     fn parses_gitlab_ssh_remote() {
         assert_eq!(
-            remote_to_web_url("git@gitlab-ce.orb.local:hobot/hobot_fuzz.git"),
-            Some("https://gitlab-ce.orb.local/hobot/hobot_fuzz".to_owned())
+            remote_to_web_url("git@gitlab-ce.orb.local:hobot/oxfuzz.git"),
+            Some("https://gitlab-ce.orb.local/hobot/oxfuzz".to_owned())
         );
     }
 

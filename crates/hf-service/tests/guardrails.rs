@@ -113,7 +113,7 @@ fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let root = std::env::temp_dir().join(format!(
-            "hobot_fuzz_guardrails_it_{}_{}",
+            "oxfuzz_guardrails_it_{}_{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));

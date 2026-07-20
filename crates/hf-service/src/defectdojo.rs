@@ -1,6 +1,6 @@
 //! `DefectDojo` integration -- push triaged crashes as findings via the REST API.
 //!
-//! Maps `hobot_fuzz` [`Crash`]es to `DefectDojo`'s "Generic Findings Import" JSON
+//! Maps `oxfuzz` [`Crash`]es to `DefectDojo`'s "Generic Findings Import" JSON
 //! and POSTs them to `/api/v2/import-scan/` (or `/api/v2/reimport-scan/` on
 //! repeat pushes, so re-found crashes update in place instead of duplicating).
 //! The CWE and severity logic is reused from [`crate::sarif`] so the SARIF export
@@ -99,7 +99,7 @@ const fn default_true() -> bool {
 /// Product type used when none is configured. `DefectDojo`'s auto-create path
 /// needs a product type to file a new product under; it is created on demand if
 /// it does not already exist.
-pub const DEFAULT_PRODUCT_TYPE: &str = "hobot_fuzz";
+pub const DEFAULT_PRODUCT_TYPE: &str = "oxfuzz";
 
 impl DefectDojoConfig {
     /// The configured product type, or [`DEFAULT_PRODUCT_TYPE`] when unset/blank.
@@ -303,7 +303,7 @@ fn finding_description(crash: &Crash) -> String {
         }
     }
     if d.trim().is_empty() {
-        d = format!("{:?} crash detected by hobot_fuzz.", crash.kind);
+        d = format!("{:?} crash detected by oxfuzz.", crash.kind);
     }
     d
 }
@@ -445,7 +445,7 @@ impl DefectDojoClient {
     pub fn new(url: &str, token: &str, verify_tls: bool) -> Result<Self, ClassifiedError> {
         let http = reqwest::Client::builder()
             .danger_accept_invalid_certs(!verify_tls)
-            .user_agent(concat!("hobot_fuzz/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("oxfuzz/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ClassifiedError::Internal(format!("http client: {e}")))?;
         Ok(Self {
@@ -501,7 +501,7 @@ impl DefectDojoClient {
         let bytes = serde_json::to_vec(findings)
             .map_err(|e| ClassifiedError::Internal(format!("serialize findings: {e}")))?;
         let part = reqwest::multipart::Part::bytes(bytes)
-            .file_name("hobot_fuzz.json")
+            .file_name("oxfuzz.json")
             .mime_str("application/json")
             .map_err(|e| ClassifiedError::Internal(format!("multipart part: {e}")))?;
         let mut form = reqwest::multipart::Form::new()
@@ -594,7 +594,7 @@ mod tests {
             api_token: None,
             api_token_env: "HF_DEFECTDOJO_TOKEN".to_owned(),
             verify_tls: true,
-            product_name: Some("hobot_fuzz".to_owned()),
+            product_name: Some("oxfuzz".to_owned()),
             product_type_name: pt.map(str::to_owned),
             engagement_name: Some("Fuzzing".to_owned()),
             auto_create: true,

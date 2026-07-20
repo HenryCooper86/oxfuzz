@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "hobot_fuzz",
+  "productName": "oxfuzz",
   "version": "0.1.0",
-  "identifier": "dev.hobot.fuzz.gui",
+  "identifier": "dev.oxfuzz.gui",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "hobot_fuzz",
+        "title": "oxfuzz",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

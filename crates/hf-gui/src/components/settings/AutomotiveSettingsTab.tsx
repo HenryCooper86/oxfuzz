@@ -97,7 +97,7 @@ export function AutomotiveSettingsTab({ value, onChange }: AutomotiveSettingsTab
             value={value.sidecar_image}
             aria-invalid={!pinnedImage}
             onChange={(event) => onChange({ ...value, sidecar_image: event.target.value })}
-            placeholder="registry.example/hobot-scapy:2.7.0"
+            placeholder="registry.example/oxfuzz-scapy:2.7.0"
           />
           {!pinnedImage && (
             <div role="alert" className="mt-2 text-11px text-warning">

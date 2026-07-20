@@ -20,7 +20,7 @@ use hf_core::engine::EngineKind;
 /// A section must not be added here until service bootstrap or a service-owned
 /// integration loads and applies its typed configuration. This prevents the
 /// settings APIs from accepting files that have no runtime effect.
-pub const CONFIG_SECTIONS: &[&str] = &["hobot-fuzz", "providers", "defectdojo", "issue_tracker"];
+pub const CONFIG_SECTIONS: &[&str] = &["oxfuzz", "providers", "defectdojo", "issue_tracker"];
 
 /// Knowledge settings that the production project index currently consumes.
 ///
@@ -289,7 +289,7 @@ impl Default for AutomotiveSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            sidecar_image: "hobot/scapy-automotive:2.7.0".to_owned(),
+            sidecar_image: "oxfuzz/scapy-automotive:2.7.0".to_owned(),
             allowed_protocols: AUTOMOTIVE_PROTOCOL_IDS
                 .iter()
                 .map(ToString::to_string)
@@ -721,7 +721,7 @@ impl FuzzingSettings {
 /// Typed global settings whose values are consumed during service bootstrap.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct HobotFuzzRuntimeConfig {
+struct OxfuzzRuntimeConfig {
     coverage_stagnation_secs: u64,
     coverage_stagnation_new_harness_windows: u64,
     coverage_stagnation_stop_windows: u64,
@@ -735,7 +735,7 @@ struct HobotFuzzRuntimeConfig {
     scheduler: hf_scheduler::SchedulerConfig,
 }
 
-impl Default for HobotFuzzRuntimeConfig {
+impl Default for OxfuzzRuntimeConfig {
     fn default() -> Self {
         Self {
             coverage_stagnation_secs: DEFAULT_STAGNATION_THRESHOLD_SECS,
@@ -753,7 +753,7 @@ impl Default for HobotFuzzRuntimeConfig {
     }
 }
 
-impl HobotFuzzRuntimeConfig {
+impl OxfuzzRuntimeConfig {
     fn validate(&self) -> Result<(), String> {
         if !valid_auto_revert_threshold(self.auto_revert_threshold_pct) {
             return Err("auto_revert_threshold_pct must be within (0, 100]".to_owned());
@@ -780,20 +780,20 @@ impl HobotFuzzRuntimeConfig {
     }
 }
 
-fn parse_hobot_fuzz_runtime_config(raw: &str) -> Result<HobotFuzzRuntimeConfig, String> {
-    let config: HobotFuzzRuntimeConfig =
-        toml::from_str(raw).map_err(|error| format!("invalid hobot-fuzz config: {error}"))?;
+fn parse_oxfuzz_runtime_config(raw: &str) -> Result<OxfuzzRuntimeConfig, String> {
+    let config: OxfuzzRuntimeConfig =
+        toml::from_str(raw).map_err(|error| format!("invalid oxfuzz config: {error}"))?;
     config.validate()?;
     Ok(config)
 }
 
-fn effective_runtime_config() -> HobotFuzzRuntimeConfig {
-    let raw = read_config("hobot-fuzz").unwrap_or_default();
-    match parse_hobot_fuzz_runtime_config(&raw) {
+fn effective_runtime_config() -> OxfuzzRuntimeConfig {
+    let raw = read_config("oxfuzz").unwrap_or_default();
+    match parse_oxfuzz_runtime_config(&raw) {
         Ok(config) => config,
         Err(error) => {
-            tracing::warn!(%error, "invalid hobot-fuzz runtime config; using safe defaults");
-            HobotFuzzRuntimeConfig::default()
+            tracing::warn!(%error, "invalid oxfuzz runtime config; using safe defaults");
+            OxfuzzRuntimeConfig::default()
         }
     }
 }
@@ -826,8 +826,8 @@ pub fn effective_scheduler_config() -> hf_scheduler::SchedulerConfig {
 /// # Errors
 /// Returns an error when the global config cannot be read or validated.
 pub fn effective_fuzzing_settings() -> Result<FuzzingSettings, String> {
-    let raw = read_config("hobot-fuzz")?;
-    Ok(parse_hobot_fuzz_runtime_config(&raw)?.fuzzing)
+    let raw = read_config("oxfuzz")?;
+    Ok(parse_oxfuzz_runtime_config(&raw)?.fuzzing)
 }
 
 /// Read and validate the automotive sidecar policy for the next operation.
@@ -835,8 +835,8 @@ pub fn effective_fuzzing_settings() -> Result<FuzzingSettings, String> {
 /// # Errors
 /// Returns an error when the global config cannot be read or validated.
 pub fn effective_automotive_settings() -> Result<AutomotiveSettings, String> {
-    let raw = read_config("hobot-fuzz")?;
-    Ok(parse_hobot_fuzz_runtime_config(&raw)?.automotive)
+    let raw = read_config("oxfuzz")?;
+    Ok(parse_oxfuzz_runtime_config(&raw)?.automotive)
 }
 
 /// Resolve the next fuzz run from the current persisted operator policy.
@@ -1207,8 +1207,8 @@ impl AutomotiveConfigStore {
     /// # Errors
     /// Returns an error when the global config cannot be read or validated.
     pub fn get(&self) -> Result<AutomotiveSettings, String> {
-        let raw = read_config_from(&self.directory, "hobot-fuzz")?;
-        Ok(parse_hobot_fuzz_runtime_config(&raw)?.automotive)
+        let raw = read_config_from(&self.directory, "oxfuzz")?;
+        Ok(parse_oxfuzz_runtime_config(&raw)?.automotive)
     }
 
     /// Replace only the automotive table after validating the full global file.
@@ -1219,18 +1219,18 @@ impl AutomotiveConfigStore {
     pub fn set(&self, settings: AutomotiveSettings) -> Result<AutomotiveSettings, String> {
         settings.validate()?;
         let _transaction = lock_recover(&self.transaction_lock);
-        let raw = read_config_from(&self.directory, "hobot-fuzz")?;
-        parse_hobot_fuzz_runtime_config(&raw)?;
+        let raw = read_config_from(&self.directory, "oxfuzz")?;
+        parse_oxfuzz_runtime_config(&raw)?;
         let mut document: toml::Table =
-            toml::from_str(&raw).map_err(|error| format!("invalid hobot-fuzz config: {error}"))?;
+            toml::from_str(&raw).map_err(|error| format!("invalid oxfuzz config: {error}"))?;
         let automotive = toml::Value::try_from(&settings)
             .map_err(|error| format!("automotive settings could not be serialized: {error}"))?;
         document.insert("automotive".to_owned(), automotive);
         let content = toml::to_string_pretty(&document)
-            .map_err(|error| format!("hobot-fuzz settings could not be serialized: {error}"))?;
-        parse_hobot_fuzz_runtime_config(&content)?;
+            .map_err(|error| format!("oxfuzz settings could not be serialized: {error}"))?;
+        parse_oxfuzz_runtime_config(&content)?;
         std::fs::create_dir_all(&self.directory).map_err(|error| error.to_string())?;
-        write_private_config_file(&self.directory.join("hobot-fuzz.toml"), &content)?;
+        write_private_config_file(&self.directory.join("oxfuzz.toml"), &content)?;
         Ok(settings)
     }
 }
@@ -1817,7 +1817,7 @@ pub struct AutoRevertPolicy {
 ///
 /// Resolution order: the `HF_AUTO_REVERT` / `HF_AUTO_REVERT_THRESHOLD_PCT` /
 /// `HF_AUTO_REVERT_NOTIFY_ONLY` env overrides, then `auto_revert_enabled` /
-/// `auto_revert_threshold_pct` / `auto_revert_notify_only` in `hobot-fuzz.toml`,
+/// `auto_revert_threshold_pct` / `auto_revert_notify_only` in `oxfuzz.toml`,
 /// then off with a [`DEFAULT_AUTO_REVERT_THRESHOLD_PCT`] threshold.
 #[must_use]
 pub fn auto_revert_policy() -> AutoRevertPolicy {
@@ -1827,7 +1827,7 @@ pub fn auto_revert_policy() -> AutoRevertPolicy {
             .ok()
             .as_deref(),
         std::env::var("HF_AUTO_REVERT_NOTIFY_ONLY").ok().as_deref(),
-        read_config("hobot-fuzz").ok().as_deref(),
+        read_config("oxfuzz").ok().as_deref(),
     )
 }
 
@@ -1848,15 +1848,15 @@ fn resolve_auto_revert_policy(
     env_enabled: Option<&str>,
     env_threshold: Option<&str>,
     env_notify_only: Option<&str>,
-    hobot_toml: Option<&str>,
+    oxfuzz_toml: Option<&str>,
 ) -> AutoRevertPolicy {
     #[derive(Deserialize)]
-    struct HobotConfig {
+    struct OxfuzzConfig {
         auto_revert_enabled: Option<bool>,
         auto_revert_threshold_pct: Option<f64>,
         auto_revert_notify_only: Option<bool>,
     }
-    let parsed = hobot_toml.and_then(|raw| toml::from_str::<HobotConfig>(raw).ok());
+    let parsed = oxfuzz_toml.and_then(|raw| toml::from_str::<OxfuzzConfig>(raw).ok());
     let enabled = parse_flag(env_enabled)
         .or_else(|| parsed.as_ref().and_then(|c| c.auto_revert_enabled))
         .unwrap_or(false);
@@ -1889,30 +1889,30 @@ fn resolve_auto_revert_policy(
 /// stagnation proposal (regenerate the harness / add seeds).
 ///
 /// Resolution order: the `HF_COVERAGE_STAGNATION_SECS` env override, then
-/// `coverage_stagnation_secs` in `hobot-fuzz.toml`, then
+/// `coverage_stagnation_secs` in `oxfuzz.toml`, then
 /// [`DEFAULT_STAGNATION_THRESHOLD_SECS`]. Lower proposes sooner; set it very
 /// high to effectively silence the proposal.
 #[must_use]
 pub fn coverage_stagnation_secs() -> u64 {
     resolve_stagnation_secs(
         std::env::var("HF_COVERAGE_STAGNATION_SECS").ok().as_deref(),
-        read_config("hobot-fuzz").ok().as_deref(),
+        read_config("oxfuzz").ok().as_deref(),
     )
 }
 
 /// Pure resolver for [`coverage_stagnation_secs`], split out so the precedence
 /// (env over TOML over default) is unit-testable without touching the
 /// environment or filesystem.
-fn resolve_stagnation_secs(env: Option<&str>, hobot_toml: Option<&str>) -> u64 {
+fn resolve_stagnation_secs(env: Option<&str>, oxfuzz_toml: Option<&str>) -> u64 {
     #[derive(Deserialize)]
-    struct HobotConfig {
+    struct OxfuzzConfig {
         coverage_stagnation_secs: Option<u64>,
     }
     if let Some(v) = env.map(str::trim).and_then(|s| s.parse::<u64>().ok()) {
         return v;
     }
-    hobot_toml
-        .and_then(|raw| toml::from_str::<HobotConfig>(raw).ok())
+    oxfuzz_toml
+        .and_then(|raw| toml::from_str::<OxfuzzConfig>(raw).ok())
         .and_then(|c| c.coverage_stagnation_secs)
         .unwrap_or(DEFAULT_STAGNATION_THRESHOLD_SECS)
 }
@@ -1923,7 +1923,7 @@ fn resolve_stagnation_secs(env: Option<&str>, hobot_toml: Option<&str>) -> u64 {
 /// `HF_COVERAGE_STAGNATION_NEW_HARNESS_WINDOWS` /
 /// `HF_COVERAGE_STAGNATION_STOP_WINDOWS` env overrides, then
 /// `coverage_stagnation_secs` / `coverage_stagnation_new_harness_windows` /
-/// `coverage_stagnation_stop_windows` in `hobot-fuzz.toml`, then the defaults.
+/// `coverage_stagnation_stop_windows` in `oxfuzz.toml`, then the defaults.
 /// Window counts that violate `1 <= new_harness_windows < stop_windows` (they
 /// would make the harness tier unreachable) fall back to the default windows.
 #[must_use]
@@ -1936,7 +1936,7 @@ pub fn coverage_stagnation_policy() -> hf_coverage::StagnationPolicy {
         std::env::var("HF_COVERAGE_STAGNATION_STOP_WINDOWS")
             .ok()
             .as_deref(),
-        read_config("hobot-fuzz").ok().as_deref(),
+        read_config("oxfuzz").ok().as_deref(),
     )
 }
 
@@ -1947,14 +1947,14 @@ fn resolve_stagnation_policy(
     env_secs: Option<&str>,
     env_new_harness: Option<&str>,
     env_stop: Option<&str>,
-    hobot_toml: Option<&str>,
+    oxfuzz_toml: Option<&str>,
 ) -> hf_coverage::StagnationPolicy {
     #[derive(Deserialize)]
-    struct HobotConfig {
+    struct OxfuzzConfig {
         coverage_stagnation_new_harness_windows: Option<u64>,
         coverage_stagnation_stop_windows: Option<u64>,
     }
-    let parsed = hobot_toml.and_then(|raw| toml::from_str::<HobotConfig>(raw).ok());
+    let parsed = oxfuzz_toml.and_then(|raw| toml::from_str::<OxfuzzConfig>(raw).ok());
     let parse_windows = |env: Option<&str>, toml: Option<u64>, default: u64| {
         env.map(str::trim)
             .and_then(|s| s.parse::<u64>().ok())
@@ -1985,7 +1985,7 @@ fn resolve_stagnation_policy(
             )
         };
     hf_coverage::StagnationPolicy {
-        threshold_secs: resolve_stagnation_secs(env_secs, hobot_toml),
+        threshold_secs: resolve_stagnation_secs(env_secs, oxfuzz_toml),
         new_harness_windows,
         stop_windows,
     }
@@ -2054,7 +2054,7 @@ fn read_config_from(directory: &Path, name: &str) -> Result<String, String> {
 /// rejected by [`validated_section`]).
 fn bundled_example(section: &str) -> &'static str {
     match section {
-        "hobot-fuzz" => include_str!("../../../config/hobot-fuzz.example.toml"),
+        "oxfuzz" => include_str!("../../../config/oxfuzz.example.toml"),
         "providers" => include_str!("../../../config/providers.example.toml"),
         "defectdojo" => include_str!("../../../config/defectdojo.example.toml"),
         "issue_tracker" => include_str!("../../../config/issue_tracker.example.toml"),
@@ -2117,8 +2117,8 @@ fn strip_nulls(value: &mut serde_json::Value) {
 pub fn write_config(name: &str, content: &str) -> Result<(), String> {
     let section = validated_section(name)?;
     toml::from_str::<toml::Value>(content).map_err(|e| format!("invalid TOML: {e}"))?;
-    if section == "hobot-fuzz" {
-        parse_hobot_fuzz_runtime_config(content)?;
+    if section == "oxfuzz" {
+        parse_oxfuzz_runtime_config(content)?;
     }
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -2131,7 +2131,7 @@ fn private_temporary_file(parent: &Path, content: &str) -> Result<tempfile::Name
 
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let mut temporary = tempfile::Builder::new()
-        .prefix(".hobot-fuzz-config-")
+        .prefix(".oxfuzz-config-")
         .tempfile_in(parent)
         .map_err(|error| error.to_string())?;
     #[cfg(unix)]
@@ -2453,7 +2453,7 @@ pub fn set_providers(providers: &[ProviderConfig]) -> Result<(), String> {
     let existing = read_config("providers")?;
     let preamble = existing.find("[[providers]]").map_or_else(
         || {
-            "# hobot_fuzz -- LLM Provider Pool Configuration\n\
+            "# oxfuzz -- LLM Provider Pool Configuration\n\
              default_freeze_duration_secs = 60\n\
              max_freeze_duration_secs = 3600\n\
              health_check_interval_secs = 30\n\n"
@@ -2689,12 +2689,12 @@ max_mem_mb = 2048\n\
 network = false\n\
 tags = [\"a\", \"b\"]\n\n\
 [sandbox]\n\
-image = \"hobot\"\n\
+image = \"oxfuzz\"\n\
 cpus = 2\n";
         let value = toml_to_json(src).expect("parse");
         assert_eq!(value["max_mem_mb"], 2048);
         assert_eq!(value["network"], false);
-        assert_eq!(value["sandbox"]["image"], "hobot");
+        assert_eq!(value["sandbox"]["image"], "oxfuzz");
 
         // Re-serialize and re-parse: the structured values survive the trip.
         let back = json_to_toml(&value).expect("serialize");
@@ -3162,7 +3162,7 @@ product_name = "old-product"
 
     #[test]
     fn runtime_subsystem_config_is_deserialized_and_validated() {
-        let config = parse_hobot_fuzz_runtime_config(
+        let config = parse_oxfuzz_runtime_config(
             r#"
             coverage_stagnation_secs = 90
 
@@ -3178,7 +3178,7 @@ product_name = "old-product"
 
             [automotive]
             enabled = true
-            sidecar_image = "hobot/scapy-automotive:2.7.0"
+            sidecar_image = "oxfuzz/scapy-automotive:2.7.0"
             allowed_protocols = ["can", "iso_tp", "uds", "do_ip"]
             allowed_modes = ["offline_pcap", "virtual_can"]
             virtual_interfaces = ["vcan0"]
@@ -3250,7 +3250,7 @@ product_name = "old-product"
     #[test]
     fn stagnation_windows_parse_and_default_in_the_typed_config() {
         // Absent knobs keep the documented defaults.
-        let config = parse_hobot_fuzz_runtime_config("coverage_stagnation_secs = 90\n")
+        let config = parse_oxfuzz_runtime_config("coverage_stagnation_secs = 90\n")
             .expect("runtime config should parse");
         assert_eq!(config.coverage_stagnation_secs, 90);
         assert_eq!(
@@ -3263,7 +3263,7 @@ product_name = "old-product"
         );
 
         // Present knobs are honored.
-        let config = parse_hobot_fuzz_runtime_config(
+        let config = parse_oxfuzz_runtime_config(
             "coverage_stagnation_new_harness_windows = 3\ncoverage_stagnation_stop_windows = 8\n",
         )
         .expect("runtime config should parse");
@@ -3276,7 +3276,7 @@ product_name = "old-product"
         let settings = AutomotiveSettings::default();
 
         assert!(!settings.enabled);
-        assert_eq!(settings.sidecar_image, "hobot/scapy-automotive:2.7.0");
+        assert_eq!(settings.sidecar_image, "oxfuzz/scapy-automotive:2.7.0");
         assert!(settings
             .allowed_modes
             .iter()
@@ -3303,10 +3303,10 @@ product_name = "old-product"
             ..AutomotiveSettings::default()
         };
 
-        settings.sidecar_image = "hobot/scapy-automotive:latest".to_owned();
+        settings.sidecar_image = "oxfuzz/scapy-automotive:latest".to_owned();
         assert!(settings.validate().unwrap_err().contains("pinned"));
 
-        settings.sidecar_image = "hobot/scapy-automotive:2.7.0".to_owned();
+        settings.sidecar_image = "oxfuzz/scapy-automotive:2.7.0".to_owned();
         settings.virtual_interfaces = vec!["../can0".to_owned()];
         assert!(settings.validate().unwrap_err().contains("interface"));
 
@@ -3365,17 +3365,17 @@ product_name = "old-product"
         settings.sidecar_image = format!("@sha256:{}", "a".repeat(64));
         assert!(settings.validate().unwrap_err().contains("pinned"));
 
-        settings.sidecar_image = "hobot/scapy-automotive:2.7.0".to_owned();
+        settings.sidecar_image = "oxfuzz/scapy-automotive:2.7.0".to_owned();
         settings.validate().expect("pinned tag");
 
-        settings.sidecar_image = format!("hobot/scapy-automotive@sha256:{}", "a".repeat(64));
+        settings.sidecar_image = format!("oxfuzz/scapy-automotive@sha256:{}", "a".repeat(64));
         settings.validate().expect("pinned digest");
     }
 
     #[test]
     fn automotive_config_store_updates_only_the_typed_policy() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hobot-fuzz.toml");
+        let path = dir.path().join("oxfuzz.toml");
         std::fs::write(
             &path,
             r#"
@@ -3409,27 +3409,26 @@ default_duration_secs = 22
         let store = AutomotiveConfigStore::new(dir.path());
         let valid = AutomotiveSettings::default();
         store.set(valid.clone()).unwrap();
-        let path = dir.path().join("hobot-fuzz.toml");
+        let path = dir.path().join("oxfuzz.toml");
         let before = std::fs::read_to_string(&path).unwrap();
 
         let mut invalid = valid;
-        invalid.sidecar_image = "hobot/scapy-automotive:latest".to_owned();
+        invalid.sidecar_image = "oxfuzz/scapy-automotive:latest".to_owned();
         assert!(store.set(invalid).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), before);
     }
 
     #[test]
-    fn hobot_config_rejects_removed_session_knobs() {
-        let error = parse_hobot_fuzz_runtime_config(
-            "[session]\nmax_depth = 4\ntitle_summarize_interval = 3\n",
-        )
-        .expect_err("removed no-op session option should be rejected");
+    fn oxfuzz_config_rejects_removed_session_knobs() {
+        let error =
+            parse_oxfuzz_runtime_config("[session]\nmax_depth = 4\ntitle_summarize_interval = 3\n")
+                .expect_err("removed no-op session option should be rejected");
 
         assert!(error.contains("title_summarize_interval"));
     }
 
     #[test]
-    fn hobot_config_rejects_invalid_runtime_values() {
+    fn oxfuzz_config_rejects_invalid_runtime_values() {
         for raw in [
             "[fuzzing]\nenabled_engines = []\n",
             "[fuzzing]\nenabled_engines = [\"libfuzzer\", \"libfuzzer\"]\n",
@@ -3451,7 +3450,7 @@ default_duration_secs = 22
             "coverage_stagnation_new_harness_windows = 5\ncoverage_stagnation_stop_windows = 4\n",
         ] {
             assert!(
-                parse_hobot_fuzz_runtime_config(raw).is_err(),
+                parse_oxfuzz_runtime_config(raw).is_err(),
                 "invalid runtime config was accepted: {raw}"
             );
         }
@@ -3462,7 +3461,7 @@ default_duration_secs = 22
         // The gate lifts only when the embedding pipeline is turned on.
         let raw = "[knowledge]\nretrieval_strategy = \"semantic\"\nembedding_enabled = true\n";
         let parsed =
-            parse_hobot_fuzz_runtime_config(raw).expect("semantic + embedding_enabled must parse");
+            parse_oxfuzz_runtime_config(raw).expect("semantic + embedding_enabled must parse");
         assert_eq!(parsed.knowledge.retrieval_strategy, "semantic");
         assert!(parsed.knowledge.embedding_enabled);
     }
@@ -3584,7 +3583,7 @@ default_duration_secs = 22
     fn editable_sections_only_include_runtime_consumed_configuration() {
         assert_eq!(
             CONFIG_SECTIONS,
-            ["hobot-fuzz", "providers", "defectdojo", "issue_tracker"]
+            ["oxfuzz", "providers", "defectdojo", "issue_tracker"]
         );
 
         for retired in [
@@ -3619,8 +3618,8 @@ default_duration_secs = 22
         ];
 
         for (label, raw) in [
-            ("example", bundled_example("hobot-fuzz")),
-            ("live", include_str!("../../../config/hobot-fuzz.toml")),
+            ("example", bundled_example("oxfuzz")),
+            ("live", include_str!("../../../config/oxfuzz.toml")),
         ] {
             let value = toml_to_json(raw).expect("global template must be valid TOML");
             let mut keys = value

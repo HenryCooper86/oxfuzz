@@ -1,8 +1,8 @@
 import copy
 import unittest
 
-from hobot_scapy_automotive.errors import SidecarError
-from hobot_scapy_automotive.validation import (
+from oxfuzz_scapy_automotive.errors import SidecarError
+from oxfuzz_scapy_automotive.validation import (
     DANGEROUS_UDS_SERVICES,
     validate_operation_config,
 )

@@ -1,7 +1,7 @@
 # Fuzzing example targets
 
 A curated suite of small, self-contained C targets for exercising the full
-`hobot-fuzz` pipeline (`discover -> harness -> run -> triage`). Each example
+`oxfuzz` pipeline (`discover -> harness -> run -> triage`). Each example
 isolates one bug class and is modeled on a canonical example shipped by the
 upstream fuzzers (libFuzzer, honggfuzz, AFL++) or on the real-world parser CVE
 pattern that bug class is famous for.
@@ -38,12 +38,12 @@ directory's header (`.h`) file.
 
 ```bash
 # Discover the target (offline; uses tree-sitter, no toolchain needed).
-hobot-fuzz discover tests/fixtures/examples/libfuzzer_fuzzme --lang c
+oxfuzz discover tests/fixtures/examples/libfuzzer_fuzzme --lang c
 
 # Generate a harness, then fuzz it (requires a real engine + clang/ASan).
-hobot-fuzz harness tests/fixtures/examples/libfuzzer_fuzzme --target FuzzMe --engine libfuzzer
-hobot-fuzz run     tests/fixtures/examples/libfuzzer_fuzzme --target FuzzMe --engine libfuzzer --duration 1m
-hobot-fuzz triage  tests/fixtures/examples/libfuzzer_fuzzme --target FuzzMe
+oxfuzz harness tests/fixtures/examples/libfuzzer_fuzzme --target FuzzMe --engine libfuzzer
+oxfuzz run     tests/fixtures/examples/libfuzzer_fuzzme --target FuzzMe --engine libfuzzer --duration 1m
+oxfuzz triage  tests/fixtures/examples/libfuzzer_fuzzme --target FuzzMe
 ```
 
 Swap the directory and `--target` for any row in the table above. Every target

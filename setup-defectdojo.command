@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install and start a local DefectDojo for hobot_fuzz on Docker/OrbStack.
+# Install and start a local DefectDojo for oxfuzz on Docker/OrbStack.
 # Double-click to run; watch the output for success/failure. Idempotent -- safe
 # to re-run. See scripts/setup-defectdojo.sh for details and env overrides.
 set -uo pipefail

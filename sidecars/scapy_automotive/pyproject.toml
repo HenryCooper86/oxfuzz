@@ -3,13 +3,13 @@ requires = ["setuptools==75.8.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hobot-scapy-automotive"
+name = "oxfuzz-scapy-automotive"
 version = "0.1.0"
-description = "Optional sandboxed Scapy sidecar for hobot_fuzz automotive protocols"
+description = "Optional sandboxed Scapy sidecar for oxfuzz automotive protocols"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "hobot_fuzz contributors" }]
+authors = [{ name = "oxfuzz contributors" }]
 dependencies = ["Scapy==2.7.0"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -24,7 +24,7 @@ classifiers = [
 can = ["python-can==4.6.1"]
 
 [project.scripts]
-hobot-scapy-automotive = "hobot_scapy_automotive.cli:main"
+oxfuzz-scapy-automotive = "oxfuzz_scapy_automotive.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

@@ -14,7 +14,7 @@ backend selector. Test doubles implement `RuntimeAdapter` explicitly, but there
 is no production native-host fallback for generated or untrusted execution.
 
 The production image uses the release-version tag
-`hobot/fuzz-sandbox:0.1.0`; floating `latest` references are forbidden. Its
+`oxfuzz/fuzz-sandbox:0.1.0`; floating `latest` references are forbidden. Its
 Dockerfile pins the base-image digest, source revisions, language toolchains,
 and top-level installed tool versions. The canonical build script rejects a
 floating tag and runs a network-disabled, read-only toolchain smoke check after

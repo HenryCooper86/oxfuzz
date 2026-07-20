@@ -213,7 +213,7 @@ impl hf_core::provider::ProviderPool for HarnessDraftPool {
 
 #[tokio::test]
 async fn discover_harness_run_triage_end_to_end() {
-    common::install_managed_workspace("hobot_fuzz_e2e_pipeline_it");
+    common::install_managed_workspace("oxfuzz_e2e_pipeline_it");
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("e2e_project");
     std::fs::create_dir_all(&project).unwrap();

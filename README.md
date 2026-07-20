@@ -1,11 +1,11 @@
-# hobot_fuzz
+# oxfuzz
 
 > An AI fuzzing agent that discovers targets, writes harnesses, drives open-source fuzzing engines, and triages the crashes -- under human-in-the-loop supervision and sandboxed execution.
 
 **Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **Self-Evolving Skills**
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="hobot_fuzz Dashboard showing operational readiness, harness review, recent runs, and crash handoff" width="900">
+  <img src="docs/screenshots/hero.png" alt="oxfuzz Dashboard showing operational readiness, harness review, recent runs, and crash handoff" width="900">
 </p>
 
 ---
@@ -18,7 +18,7 @@ is a potential bug, often a security hole. Doing this by hand takes expert work:
 deciding what to test, writing test code, running it safely, and making sense of
 the crashes.
 
-**hobot_fuzz coordinates that workflow with AI and deterministic tooling.** You
+**oxfuzz coordinates that workflow with AI and deterministic tooling.** You
 point it at a codebase and it ranks candidate targets, drafts and qualifies test
 harnesses, drives a real fuzzing engine inside a mandatory sandbox, and retains
 evidence for the crashes it finds. Human approval is bound to the exact harness
@@ -72,17 +72,17 @@ of every term. The rest of this README is the technical reference.
 
 ## The Desktop App
 
-The desktop app (Tauri v2 + React 19) is the primary way to drive hobot_fuzz. It
+The desktop app (Tauri v2 + React 19) is the primary way to drive oxfuzz. It
 links the `hf-service` core directly, so the AI Assistant, discovery, fuzzing,
 and triage all run locally with the same sandboxing and guardrails as the CLI.
 
 ```bash
-./scripts/build-app.sh        # builds target/release/bundle/macos/hobot_fuzz.app + .dmg
-open target/release/bundle/macos/hobot_fuzz.app
+./scripts/build-app.sh        # builds target/release/bundle/macos/oxfuzz.app + .dmg
+open target/release/bundle/macos/oxfuzz.app
 ```
 
 On first launch a short setup wizard configures your LLM provider, checks the
-sandbox, and points hobot_fuzz at your first project. After that the left
+sandbox, and points oxfuzz at your first project. After that the left
 sidebar is your control panel. Pipeline surfaces cover the Dashboard, AI
 Assistant, guided workflow, Discover, Harness, Run, Triage, and Corpus. Library
 and operations surfaces add Projects, Artifacts, Reports, Run History, Policy
@@ -96,7 +96,7 @@ sandbox and engine readiness, retained evidence, harness promotion state,
 recent campaigns, and crash handoff. A blocked requirement stays visible
 instead of being hidden behind a generic status.
 
-**1. Discover the attack surface.** Point hobot_fuzz at a C/C++ project and it
+**1. Discover the attack surface.** Point oxfuzz at a C/C++ project and it
 scans for fuzzable functions, ranking them into a Target Inventory by fit score,
 input surface, complexity, and reachability from entry points.
 
@@ -149,7 +149,7 @@ enforced guarantees rather than switches.
 ![Fuzzing settings -- engine availability, campaign limits, and mandatory protections](docs/screenshots/settings.png)
 
 > The GUI also runs in the browser against the REST API for development:
-> `cd crates/hf-gui && npm run dev:web` (talks to `hobot-fuzz serve` over HTTP).
+> `cd crates/hf-gui && npm run dev:web` (talks to `oxfuzz serve` over HTTP).
 
 ---
 
@@ -168,10 +168,10 @@ enforced guarantees rather than switches.
 ### The CLI binary
 
 ```bash
-git clone <your-hobot_fuzz-remote>
-cd hobot_fuzz
+git clone <your-oxfuzz-remote>
+cd oxfuzz
 cargo build --release
-# Binary: target/release/hobot-fuzz
+# Binary: target/release/oxfuzz
 
 # Build and verify the versioned sandbox toolchain.
 ./scripts/build-sandbox.sh
@@ -181,13 +181,13 @@ cargo build --release
 
 ```bash
 ./scripts/build-app.sh
-# App:  target/release/bundle/macos/hobot_fuzz.app
-# DMG:  target/release/bundle/dmg/hobot_fuzz_0.1.0_aarch64.dmg
+# App:  target/release/bundle/macos/oxfuzz.app
+# DMG:  target/release/bundle/dmg/oxfuzz_0.1.0_aarch64.dmg
 ```
 
 ### DefectDojo (optional findings dashboard)
 
-hobot_fuzz adopts a local DefectDojo rather than bundling one. `scripts/setup-defectdojo.sh`
+oxfuzz adopts a local DefectDojo rather than bundling one. `scripts/setup-defectdojo.sh`
 (double-click `setup-defectdojo.command`) installs it for you: it clones
 DefectDojo's upstream compose project, pulls the released images, starts the
 stack on `http://localhost:8080`, and writes `config/defectdojo.toml`. The
@@ -199,7 +199,7 @@ environment-setup entry points (`rebuild-sandbox-image.command`,
 ./scripts/setup-defectdojo.sh        # first run pulls several GB; idempotent thereafter
 ```
 
-`scripts/health-check.sh` delegates to `hobot-fuzz doctor`, which probes the
+`scripts/health-check.sh` delegates to `oxfuzz doctor`, which probes the
 Docker daemon, sandbox image, and engine tools inside that image. Host engine
 binaries and optional integrations do not determine core readiness.
 
@@ -216,7 +216,7 @@ coverage, and release build scripts:
 ./scripts/tests/gates.sh
 ./scripts/build-sandbox.sh
 ./scripts/build-release.sh
-target/release/hobot-fuzz doctor
+target/release/oxfuzz doctor
 ./scripts/build-app.sh
 ```
 
@@ -233,8 +233,8 @@ for the full evidence, packaging, safety, and handoff gates.
 ### 1. Initialize configuration
 
 ```bash
-hobot-fuzz init
-hobot-fuzz doctor
+oxfuzz init
+oxfuzz doctor
 ```
 
 This materializes the supported `config/*.example.toml` templates and creates
@@ -244,7 +244,7 @@ does not create or modify `.env`.
 ### 2. Configure at least one LLM provider
 
 Copy `config/providers.example.toml` to `config/providers.toml` and fill it in,
-then export the matching key in the environment that launches `hobot-fuzz`:
+then export the matching key in the environment that launches `oxfuzz`:
 
 ```toml
 [[providers]]
@@ -263,16 +263,16 @@ example, `set -a; source .env; set +a` in a POSIX shell).
 
 ```bash
 # Discover and rank targets in a project
-hobot-fuzz discover /path/to/project --lang c --rank
+oxfuzz discover /path/to/project --lang c --rank
 
 # Generate a harness for a specific target
-hobot-fuzz harness /path/to/project --target parse_value --engine afl++ --promote
+oxfuzz harness /path/to/project --target parse_value --engine afl++ --promote
 
 # Run the fuzzer
-hobot-fuzz run /path/to/project --target parse_value --engine afl++ --duration 60m
+oxfuzz run /path/to/project --target parse_value --engine afl++ --duration 60m
 
 # Triage the crashes it found
-hobot-fuzz triage /path/to/project --target parse_value
+oxfuzz triage /path/to/project --target parse_value
 ```
 
 ---
@@ -328,20 +328,20 @@ application never imports Scapy or runs host Python; Scapy 2.7.0 and optional
 cargo build -p hf-cli --features automotive-scapy
 
 # Inspect policy, then explicitly enable it.
-target/debug/hobot-fuzz automotive settings
-target/debug/hobot-fuzz automotive enable
+target/debug/oxfuzz automotive settings
+target/debug/oxfuzz automotive enable
 
 # Offline capture analysis never contacts a CAN interface.
-target/debug/hobot-fuzz automotive analyze /path/to/project \
+target/debug/oxfuzz automotive analyze /path/to/project \
   --protocol uds --capture /path/to/capture.pcap
 
 # Compose a deterministic report from retained operations and protocol states.
-target/debug/hobot-fuzz automotive report /path/to/project \
+target/debug/oxfuzz automotive report /path/to/project \
   --output automotive-campaign.html --format html
 
 # Optionally append provider-neutral AI interpretation. Unknown evidence
 # citations are rejected and the deterministic report remains authoritative.
-target/debug/hobot-fuzz automotive report /path/to/project --ai
+target/debug/oxfuzz automotive report /path/to/project --ai
 ```
 
 The Automotive workspace follows a practical evidence pipeline: inspect the
@@ -374,7 +374,7 @@ Only settings consumed by the production service are exposed as editable
 configuration:
 
 - `providers.toml` -- LLM provider pool (routing tags, failover, freeze/thaw).
-- `hobot-fuzz.toml` -- enabled engines, run defaults/resource limits,
+- `oxfuzz.toml` -- enabled engines, run defaults/resource limits,
   coverage-stagnation, scheduling/session, coverage-regression policy, and the
   optional automotive sidecar policy.
 - `defectdojo.toml` -- DefectDojo connection and lifecycle settings.
@@ -489,7 +489,7 @@ Core:                          hf-core            <- traits, types, contracts
 
 ## Acknowledgements
 
-hobot_fuzz is inspired by and based on **[y-agent](https://github.com/gorgiaxx/y-agent)** by [Gorgias (gorgiaxx)](https://github.com/gorgiaxx) -- a model-agnostic Rust agent framework that turns objectives into controlled, recoverable, and observable work. Its design (agent orchestration, skills, knowledge retrieval, recovery, and multi-surface CLI/TUI/REST/desktop presentation) shaped the foundations of this project. Please visit and use his awesome project.
+oxfuzz is inspired by and based on **[y-agent](https://github.com/gorgiaxx/y-agent)** by [Gorgias (gorgiaxx)](https://github.com/gorgiaxx) -- a model-agnostic Rust agent framework that turns objectives into controlled, recoverable, and observable work. Its design (agent orchestration, skills, knowledge retrieval, recovery, and multi-surface CLI/TUI/REST/desktop presentation) shaped the foundations of this project. Please visit and use his awesome project.
 
 ---
 

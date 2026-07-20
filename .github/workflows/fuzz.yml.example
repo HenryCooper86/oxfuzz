@@ -1,7 +1,7 @@
-# hobot_fuzz PR fuzz gate (example).
+# oxfuzz PR fuzz gate (example).
 #
 # Copy to `.github/workflows/fuzz.yml` and adjust TARGET/ENGINE/DURATION.
-# On each PR it: builds hobot-fuzz + the sandbox image, drafts & compiles a
+# On each PR it: builds oxfuzz + the sandbox image, drafts & compiles a
 # harness, fuzzes the target for a short budget, triages crashes, uploads SARIF
 # to GitHub code scanning, and FAILS the check if any crash is found.
 #
@@ -37,7 +37,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.94.0
 
-      - name: Build hobot-fuzz
+      - name: Build oxfuzz
         run: cargo build --release -p hf-cli
 
       - name: Build the fuzzing sandbox image
@@ -45,9 +45,9 @@ jobs:
 
       - name: Fuzz gate
         run: |
-          ./target/release/hobot-fuzz ci "$PROJECT" \
+          ./target/release/oxfuzz ci "$PROJECT" \
             --target "$TARGET" --engine "$ENGINE" \
-            --duration "$DURATION" --sarif hobot_fuzz.sarif
+            --duration "$DURATION" --sarif oxfuzz.sarif
         # `ci` exits non-zero on any crash, failing the check. SARIF is written
         # regardless so the upload step below can run.
 
@@ -55,5 +55,5 @@ jobs:
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: hobot_fuzz.sarif
-          category: hobot_fuzz
+          sarif_file: oxfuzz.sarif
+          category: oxfuzz

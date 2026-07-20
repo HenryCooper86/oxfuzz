@@ -4,16 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`hobot_fuzz` is a Rust-first AI fuzzing agent: it discovers fuzz targets in a project, writes harnesses with an LLM, drives open-source fuzzing engines (AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller), triages crashes, and iterates on corpus/coverage — all under human-in-the-loop supervision and sandboxed execution.
+`oxfuzz` is a Rust-first AI fuzzing agent: it discovers fuzz targets in a project, writes harnesses with an LLM, drives open-source fuzzing engines (AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller), triages crashes, and iterates on corpus/coverage — all under human-in-the-loop supervision and sandboxed execution.
 
 **Read `AGENTS.md` first.** It is the mandatory engineering protocol (TDD, risk tiers, quality gates, safety rules) and overrides general habits. This file covers build/run mechanics and architecture; `AGENTS.md` covers process. Before implementing in a fuzzing-domain crate, read the matching doc in `docs/design/` and the relevant `docs/standards/` file — implementation must conform to the design.
 
 ## Build, test, lint
 
-Pinned toolchain: Rust 1.94 (`rust-toolchain.toml`). The single binary is `hobot-fuzz` (from `hf-cli`).
+Pinned toolchain: Rust 1.94 (`rust-toolchain.toml`). The single binary is `oxfuzz` (from `hf-cli`).
 
 ```bash
-cargo build --release                          # binary: target/release/hobot-fuzz
+cargo build --release                          # binary: target/release/oxfuzz
 cargo test --workspace                         # all tests
 cargo test -p hf-engine <name>                 # single crate / filtered test
 ```
@@ -39,14 +39,14 @@ cargo test [args] 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^
 ## Running the app
 
 ```bash
-hobot-fuzz init                                # generate config tree (config/*.toml, .env)
-hobot-fuzz discover <project> --lang c [--rank]
-hobot-fuzz harness <project> --target <sym> --engine afl++ [--draft-only]
-hobot-fuzz run <project> --target <sym> --engine afl++ --duration 60m
-hobot-fuzz triage <project> --target <sym>
-hobot-fuzz corpus <project> --target <sym> --op seed|grow|prune|list
-hobot-fuzz serve --port 8081                   # REST API (hf-web::build_bootstrapped)
-hobot-fuzz tui <project>                        # terminal UI
+oxfuzz init                                # generate config tree (config/*.toml, .env)
+oxfuzz discover <project> --lang c [--rank]
+oxfuzz harness <project> --target <sym> --engine afl++ [--draft-only]
+oxfuzz run <project> --target <sym> --engine afl++ --duration 60m
+oxfuzz triage <project> --target <sym>
+oxfuzz corpus <project> --target <sym> --op seed|grow|prune|list
+oxfuzz serve --port 8081                   # REST API (hf-web::build_bootstrapped)
+oxfuzz tui <project>                        # terminal UI
 ```
 
 At least one LLM provider must be configured: copy `config/providers.example.toml` to `config/providers.toml` and fill it in, plus set `HF_PROVIDER_API_KEY` (see `.env.example`). `scripts/health-check.sh` verifies engine binaries and config presence.

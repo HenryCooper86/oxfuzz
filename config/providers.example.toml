@@ -1,5 +1,5 @@
 # ==============================================================================
-# hobot_fuzz -- LLM Provider Pool Configuration
+# oxfuzz -- LLM Provider Pool Configuration
 # ==============================================================================
 
 # Freeze duration before retrying a failed provider (seconds).

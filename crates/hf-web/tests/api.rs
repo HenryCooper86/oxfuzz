@@ -359,7 +359,7 @@ async fn automotive_config_endpoint_round_trips_only_the_typed_policy() {
     allow_open_dev_mode();
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("hobot-fuzz.toml"),
+        directory.path().join("oxfuzz.toml"),
         "coverage_stagnation_secs = 77\n",
     )
     .unwrap();
@@ -405,7 +405,7 @@ async fn automotive_config_endpoint_round_trips_only_the_typed_policy() {
         .unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(saved["enabled"], true);
-    let raw = std::fs::read_to_string(directory.path().join("hobot-fuzz.toml")).unwrap();
+    let raw = std::fs::read_to_string(directory.path().join("oxfuzz.toml")).unwrap();
     assert!(raw.contains("coverage_stagnation_secs = 77"));
     assert!(raw.contains("[automotive]"));
 }

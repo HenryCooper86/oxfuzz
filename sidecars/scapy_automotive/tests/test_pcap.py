@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from hobot_scapy_automotive.errors import SidecarError
-from hobot_scapy_automotive.pcap import ScapyPcapDecoder, decode_pcap
+from oxfuzz_scapy_automotive.errors import SidecarError
+from oxfuzz_scapy_automotive.pcap import ScapyPcapDecoder, decode_pcap
 
 
 class FakeDecoder:

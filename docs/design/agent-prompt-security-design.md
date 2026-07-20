@@ -5,7 +5,7 @@ Status: **active**. Owner: `hf-prompt` and `hf-agent`.
 ## 1. Purpose
 
 The system message sent by the autonomous agent is a security boundary. Every
-provider request must carry the `hobot_fuzz` identity, the active project
+provider request must carry the `oxfuzz` identity, the active project
 boundary, the mandatory fuzzing safety rules, the selected skill playbooks,
 the executable tool catalog, and the prompt-based tool-call protocol.
 

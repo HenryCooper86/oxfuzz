@@ -1,4 +1,4 @@
-//! `hobot_fuzz` tool registry, JSON Schema validation, and execution support.
+//! `oxfuzz` tool registry, JSON Schema validation, and execution support.
 //!
 //! This crate provides the reusable tool-management infrastructure for the
 //! agent:

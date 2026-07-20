@@ -1,4 +1,4 @@
-// Shared types for hobot_fuzz GUI.
+// Shared types for oxfuzz GUI.
 
 export type ViewType =
   | "dashboard"
@@ -144,7 +144,7 @@ export interface DefectDojoStatus {
   url: string | null;
   /** Human-readable explanation of `state`, safe to render as-is. */
   message: string;
-  /** True when hobot_fuzz can start/stop this instance itself. */
+  /** True when oxfuzz can start/stop this instance itself. */
   managed: boolean;
 }
 

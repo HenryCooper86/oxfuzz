@@ -3,15 +3,15 @@ import unittest
 
 from test_validation import limits, virtual_config
 
-from hobot_scapy_automotive.errors import SidecarError
-from hobot_scapy_automotive.replay import (
+from oxfuzz_scapy_automotive.errors import SidecarError
+from oxfuzz_scapy_automotive.replay import (
     UnavailableTransport,
     _wire_uds_service,
     build_replay_plan,
     execute_replay_plan,
 )
-from hobot_scapy_automotive.responses import parse_automotive_response
-from hobot_scapy_automotive.state import state_signature
+from oxfuzz_scapy_automotive.responses import parse_automotive_response
+from oxfuzz_scapy_automotive.state import state_signature
 
 
 class FakeTransport:

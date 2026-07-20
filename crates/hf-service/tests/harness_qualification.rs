@@ -12,7 +12,7 @@ use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
-    common::install_managed_workspace("hobot_fuzz_qualification_it");
+    common::install_managed_workspace("oxfuzz_qualification_it");
 }
 
 struct QualifyingRuntime;

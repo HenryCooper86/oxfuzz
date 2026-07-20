@@ -784,7 +784,7 @@ impl ServiceContainer {
         let command = vec![
             "python3".to_owned(),
             "-m".to_owned(),
-            "hobot_scapy_automotive".to_owned(),
+            "oxfuzz_scapy_automotive".to_owned(),
         ];
         let result = self
             .runtime_adapter()
@@ -1753,7 +1753,7 @@ fn preflight(
             let prepared = read_input(
                 source_path,
                 "transcript.json",
-                "application/vnd.hobot-fuzz.automotive-transcript+json",
+                "application/vnd.oxfuzz.automotive-transcript+json",
                 settings.limits.max_input_bytes,
             )?;
             let artifact = prepared.artifact.clone();
@@ -1904,17 +1904,17 @@ fn retain_request_evidence(directory: &Path, encoded: &[u8]) -> Result<(), Class
 fn runtime_limits(settings: &AutomotiveSettings, prepared: &PreparedOperation) -> ResourceLimits {
     let mut env = HashMap::from([
         (
-            "HOBOT_SCAPY_INPUT_ROOT".to_owned(),
+            "OXFUZZ_SCAPY_INPUT_ROOT".to_owned(),
             SIDECAR_INPUT_ROOT.to_owned(),
         ),
         (
-            "HOBOT_SCAPY_OUTPUT_ROOT".to_owned(),
+            "OXFUZZ_SCAPY_OUTPUT_ROOT".to_owned(),
             SIDECAR_OUTPUT_ROOT.to_owned(),
         ),
     ]);
     if let Some(config) = &prepared.execution_config {
         env.insert(
-            "HOBOT_SCAPY_EXECUTION_CONFIG_JSON".to_owned(),
+            "OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON".to_owned(),
             config.clone(),
         );
     }
@@ -2735,7 +2735,7 @@ mod tests {
         let artifact = ArtifactRef {
             artifact_id: "canonical-transcript.json".to_owned(),
             sha256: digest.as_str().to_owned(),
-            media_type: "application/vnd.hobot-fuzz.automotive-transcript+json".to_owned(),
+            media_type: "application/vnd.oxfuzz.automotive-transcript+json".to_owned(),
             size_bytes: u64::try_from(bytes.len()).unwrap(),
         };
         (digest, artifact, bytes)
@@ -2996,9 +2996,9 @@ mod tests {
 
     #[test]
     fn missing_sidecar_image_error_is_actionable() {
-        let msg = super::missing_sidecar_image_error("hobot/scapy-automotive:2.7.0").to_string();
+        let msg = super::missing_sidecar_image_error("oxfuzz/scapy-automotive:2.7.0").to_string();
         assert!(
-            msg.contains("hobot/scapy-automotive:2.7.0"),
+            msg.contains("oxfuzz/scapy-automotive:2.7.0"),
             "names the image: {msg}"
         );
         assert!(
@@ -3184,25 +3184,30 @@ mod tests {
         let calls = runtime.calls();
         assert_eq!(calls.len(), 1);
         let (command, limits, options) = &calls[0];
-        assert_eq!(command, &["python3", "-m", "hobot_scapy_automotive"]);
+        assert_eq!(command, &["python3", "-m", "oxfuzz_scapy_automotive"]);
         assert_eq!(limits.max_mem_mb, 1024);
         assert_eq!(
-            limits.env.get("HOBOT_SCAPY_INPUT_ROOT").map(String::as_str),
+            limits
+                .env
+                .get("OXFUZZ_SCAPY_INPUT_ROOT")
+                .map(String::as_str),
             Some("/work/inputs")
         );
         assert_eq!(
             limits
                 .env
-                .get("HOBOT_SCAPY_OUTPUT_ROOT")
+                .get("OXFUZZ_SCAPY_OUTPUT_ROOT")
                 .map(String::as_str),
             Some("/work/output")
         );
-        assert!(!limits.env.contains_key("HOBOT_SCAPY_EXECUTION_CONFIG_JSON"));
+        assert!(!limits
+            .env
+            .contains_key("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON"));
         assert_eq!(options.network_mode, SandboxNetworkMode::None);
         assert!(options.capabilities.is_empty());
         assert_eq!(
             options.image.as_deref(),
-            Some("hobot/scapy-automotive:2.7.0")
+            Some("oxfuzz/scapy-automotive:2.7.0")
         );
         assert!(options.workspace_read_only);
         let input = String::from_utf8(options.stdin.clone().expect("JSONL stdin")).unwrap();
@@ -3317,7 +3322,7 @@ mod tests {
         );
         let execution = limits
             .env
-            .get("HOBOT_SCAPY_EXECUTION_CONFIG_JSON")
+            .get("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON")
             .expect("service-owned execution policy");
         assert!(execution.contains(r#""mode":"virtual_can""#));
         assert!(execution.contains(r#""interface":"vcan0""#));
@@ -3384,7 +3389,7 @@ mod tests {
         assert_eq!(options.capabilities, vec![SandboxCapability::NetRaw]);
         let execution = limits
             .env
-            .get("HOBOT_SCAPY_EXECUTION_CONFIG_JSON")
+            .get("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON")
             .expect("service-owned execution policy");
         assert!(execution.contains(r#""mode":"physical_bench""#));
         assert!(execution.contains(r#""physical_enabled":true"#));
@@ -3744,7 +3749,7 @@ mod tests {
         let transcript = ArtifactRef {
             artifact_id: "canonical-transcript.json".to_owned(),
             sha256: digest.as_str().to_owned(),
-            media_type: "application/vnd.hobot-fuzz.automotive-transcript+json".to_owned(),
+            media_type: "application/vnd.oxfuzz.automotive-transcript+json".to_owned(),
             size_bytes: u64::try_from(transcript_bytes.len()).unwrap(),
         };
         std::fs::write(temp.path().join(&transcript.artifact_id), transcript_bytes).unwrap();

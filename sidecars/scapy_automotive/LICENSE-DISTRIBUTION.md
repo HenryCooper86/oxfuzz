@@ -1,6 +1,6 @@
 # Sidecar distribution and license notice
 
-The Python source written for this `hobot_fuzz` sidecar is offered under the
+The Python source written for this `oxfuzz` sidecar is offered under the
 project's MIT license. The sidecar has a mandatory runtime dependency on
 Scapy 2.7.0, whose installed package metadata identifies it as
 GPL-2.0-only. The optional `can` extra pins python-can 4.6.1, whose installed

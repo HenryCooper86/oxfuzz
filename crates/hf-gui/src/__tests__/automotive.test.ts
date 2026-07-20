@@ -15,7 +15,7 @@ import type { Transport } from "../lib/transport";
 
 const settings: AutomotiveSettings = {
   enabled: false,
-  sidecar_image: "hobot/scapy-automotive:2.7.0",
+  sidecar_image: "oxfuzz/scapy-automotive:2.7.0",
   allowed_protocols: ["can", "uds"],
   allowed_modes: ["offline_pcap", "virtual_can"],
   virtual_interfaces: ["vcan0"],
@@ -94,7 +94,7 @@ describe("automotive frontend transport", () => {
         sourcePath: "/tmp/transcript.json",
         deterministicSeed: 7,
         mutationCount: 16,
-        mediaType: "application/vnd.hobot-fuzz.automotive-transcript+json",
+        mediaType: "application/vnd.oxfuzz.automotive-transcript+json",
       },
       transport,
     );
@@ -155,7 +155,7 @@ describe("automotive frontend transport", () => {
           sourcePath: "/tmp/transcript.json",
           deterministicSeed: 7,
           mutationCount: 16,
-          mediaType: "application/vnd.hobot-fuzz.automotive-transcript+json",
+          mediaType: "application/vnd.oxfuzz.automotive-transcript+json",
         },
       ],
       [

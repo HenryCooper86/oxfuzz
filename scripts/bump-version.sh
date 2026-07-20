@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hobot_fuzz -- bump workspace version
+# oxfuzz -- bump workspace version
 # Usage: ./scripts/bump-version.sh 0.2.0
 set -euo pipefail
 

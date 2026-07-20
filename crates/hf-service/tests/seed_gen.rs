@@ -8,7 +8,7 @@ use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
-    common::install_managed_workspace("hobot_fuzz_seedgen_it");
+    common::install_managed_workspace("oxfuzz_seedgen_it");
 }
 
 /// A pool that returns a JSON array of hex-encoded seeds for every completion.

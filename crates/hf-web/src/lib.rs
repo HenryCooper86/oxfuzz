@@ -1,4 +1,4 @@
-//! hf-web: REST API + SSE streaming for `hobot_fuzz`.
+//! hf-web: REST API + SSE streaming for `oxfuzz`.
 
 pub mod router;
 mod security;

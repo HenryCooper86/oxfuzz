@@ -1,8 +1,8 @@
-# hobot_fuzz -- Vision
+# oxfuzz -- Vision
 
 ## Project Positioning
 
-hobot_fuzz is not a generic chatbot or a replacement for OSS-Fuzz
+oxfuzz is not a generic chatbot or a replacement for OSS-Fuzz
 infrastructure. It is an **AI fuzzing agent** -- an autonomous assistant that
 collaborates with a security engineer to bring LLM-driven reasoning to the
 tedious, repetitive parts of fuzzing:
@@ -19,14 +19,14 @@ tedious, repetitive parts of fuzzing:
 ### Long-Termism
 
 LLMs will keep improving, but the **fuzzing workflow** is stable:
-identify target, build harness, run engine, triage crash. hobot_fuzz
+identify target, build harness, run engine, triage crash. oxfuzz
 encodes that workflow into a durable Rust architecture so that swapping
 the model never requires re-architecting the agent.
 
 ### Engineering Quality First
 
 We reject the common pattern of "AI wrote a harness, it compiled, ship it."
-hobot_fuzz pursues:
+oxfuzz pursues:
 
 - **Deep understanding of the target** before proposing a harness.
 - **Model-agnostic design** -- works on GPT, Claude, DeepSeek, Qwen, local
@@ -39,7 +39,7 @@ hobot_fuzz pursues:
 ### Developer, Not Beginner
 
 The target user is a security engineer or developer who understands fuzzing
-fundamentals, build systems, and sanitizers. hobot_fuzz amplifies their
+fundamentals, build systems, and sanitizers. oxfuzz amplifies their
 throughput; it does not replace their judgment.
 
 ## Target Users
@@ -117,11 +117,11 @@ Agent (autonomous, with HITL gates):
 
 ## Value Proposition
 
-hobot_fuzz does not replace the security engineer's judgment. It removes the
+oxfuzz does not replace the security engineer's judgment. It removes the
 mechanical drudgery of fuzzing -- finding targets, writing harnesses, baby-
 sitting fuzzers, triaging crashes -- so the engineer spends their time on
 verdicts and architecture instead of boilerplate.
 
 ---
 
-**hobot_fuzz: AI-assisted fuzzing for engineers who already know how to fuzz.**
+**oxfuzz: AI-assisted fuzzing for engineers who already know how to fuzz.**

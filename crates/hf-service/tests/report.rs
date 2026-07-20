@@ -188,7 +188,7 @@ fn ensure_graphs_appends_when_model_drops_them() {
     let without = "# Report\n\nSome AI prose without any charts.";
     let fixed = ensure_graphs(without, &data);
     assert!(fixed.contains("```mermaid"), "graphs guaranteed");
-    assert!(fixed.contains("Composed by hobot_fuzz"), "footer stamped");
+    assert!(fixed.contains("Composed by oxfuzz"), "footer stamped");
 
     // Model output that already has a graph -> not duplicated.
     let with = "# Report\n\n```mermaid\npie showData\n    \"X\" : 1\n```\n";

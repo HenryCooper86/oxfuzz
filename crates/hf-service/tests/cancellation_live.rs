@@ -4,7 +4,7 @@
 //! campaign through `EngineRunner` + `DockerRuntime`, cancelled mid-run via
 //! `cancel_all_runs` (what the `cancel_run` Tauri command calls). Ignored by
 //! default because it needs a running Docker daemon and the
-//! `hobot/fuzz-sandbox` image; run explicitly with:
+//! `oxfuzz/fuzz-sandbox` image; run explicitly with:
 //!
 //! ```text
 //! cargo test -p hf-service --test cancellation_live -- --ignored --nocapture
@@ -22,7 +22,7 @@ fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let root = std::env::temp_dir().join(format!(
-            "hobot_fuzz_cancel_live_workspace_{}_{}",
+            "oxfuzz_cancel_live_workspace_{}_{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -32,7 +32,7 @@ fn isolate_workspace() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker + hobot/fuzz-sandbox image"]
+#[ignore = "requires Docker + oxfuzz/fuzz-sandbox image"]
 async fn stop_button_cancels_a_real_fuzz_run() {
     isolate_workspace();
     let project = std::env::temp_dir().join("hf_cancel_live_proj");

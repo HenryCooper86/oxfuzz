@@ -119,7 +119,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         .await
         .expect("prepare harness");
     assert!(
-        workspace_root.join(".hobot-fuzz-workspace.json").is_file(),
+        workspace_root.join(".oxfuzz-workspace.json").is_file(),
         "the production initializer must claim the empty test workspace"
     );
 
@@ -174,7 +174,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
         .export_project_data(Some(&project))
         .await
         .expect("release evidence bundle");
-    assert_eq!(evidence["schema"], "hobot_fuzz.export.v2");
+    assert_eq!(evidence["schema"], "oxfuzz.export.v2");
     assert_eq!(evidence["targets"].as_array().unwrap().len(), 1);
     assert!(!evidence["harnesses"].as_array().unwrap().is_empty());
     assert!(!evidence["runs"].as_array().unwrap().is_empty());

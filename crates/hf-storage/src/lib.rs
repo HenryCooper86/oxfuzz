@@ -1,4 +1,4 @@
-//! hf-storage: `SQLite` storage and persistence for `hobot_fuzz`.
+//! hf-storage: `SQLite` storage and persistence for `oxfuzz`.
 //!
 //! Implements the schema in `docs/standards/DATABASE_SCHEMA.md` on top of
 //! `sqlx` + `SQLite`. The [`Store`] type owns a connection pool, runs

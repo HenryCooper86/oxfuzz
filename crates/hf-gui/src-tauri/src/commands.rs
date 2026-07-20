@@ -615,7 +615,7 @@ pub async fn chat_answer_permission(
     Ok(state.pending_approvals.resolve(uid, approved).await)
 }
 
-/// Everything `hobot_fuzz` has learned about your projects, read from the
+/// Everything `oxfuzz` has learned about your projects, read from the
 /// `SQLite` store: discovered targets, fuzz runs, and crashes found. Powers the
 /// Knowledge view. Returns empty lists when no database is configured.
 #[derive(Debug, Default, Serialize)]
@@ -1775,7 +1775,7 @@ pub fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 /// to the OS default browser (a full, separate browser session). Otherwise opens
 /// it in a dedicated, natively-decorated in-app window (title bar + close button;
 /// reused/focused if already open), so the user can log in and browse findings
-/// without leaving `hobot_fuzz`. The URL comes from the saved config, so callers
+/// without leaving `oxfuzz`. The URL comes from the saved config, so callers
 /// (sidebar, dashboard, settings) never pass it.
 #[tauri::command]
 pub fn open_defectdojo(
@@ -2072,7 +2072,7 @@ pub async fn export_project_data(
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("all");
-    let default_name = format!("hobot_fuzz_export_{}.json", sanitize_filename(name));
+    let default_name = format!("oxfuzz_export_{}.json", sanitize_filename(name));
     let Some(dest) = app
         .dialog()
         .file()
@@ -2117,7 +2117,7 @@ pub async fn export_report(
         "docx" | "doc" => "docx",
         other => return Err(format!("unknown report format: {other}")),
     };
-    let default_name = format!("hobot_fuzz_report_{}.{ext}", sanitize_filename(&target));
+    let default_name = format!("oxfuzz_report_{}.{ext}", sanitize_filename(&target));
     let Some(path) = app
         .dialog()
         .file()
@@ -2167,7 +2167,7 @@ pub async fn export_repro(
     let folder = folder
         .into_path()
         .map_err(|e| format!("invalid folder path: {e}"))?;
-    let dest = folder.join(format!("hobot_fuzz_repro_{}", sanitize_filename(&target)));
+    let dest = folder.join(format!("oxfuzz_repro_{}", sanitize_filename(&target)));
     let written = state
         .container
         .export_repro_bundle_for_latest(

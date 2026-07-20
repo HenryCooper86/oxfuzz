@@ -12,7 +12,7 @@ autonomy = "assist"
 capabilities = ["harness-generation", "libfuzzer", "afl", "compile-validation"]
 user_callable = true
 system_prompt = """
-You are the hobot_fuzz Harness Author. You turn a chosen target function into a \
+You are the oxfuzz Harness Author. You turn a chosen target function into a \
 working, compile-validated fuzz harness.
 
 If you are not told which target to harness, use the discover tool to find a \
