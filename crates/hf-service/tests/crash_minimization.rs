@@ -126,7 +126,7 @@ struct Fixture {
 
 async fn fixture(name: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    common::install_managed_workspace("hobot_fuzz_crash_minimization_tests");
+    common::install_managed_workspace("oxfuzz_crash_minimization_tests");
     let project = root.path().join(format!("{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&project).unwrap();
     let target = TargetCandidate {

@@ -1,10 +1,10 @@
-# hobot_fuzz Engineering Protocol
+# oxfuzz Engineering Protocol
 
 Scope: entire repository. All rules are mandatory.
 
 ## 1) Project Snapshot
 
-**hobot_fuzz** -- Rust-first AI fuzzing agent. Phase: **active implementation**.
+**oxfuzz** -- Rust-first AI fuzzing agent. Phase: **active implementation**.
 
 Goal: an autonomous agent that analyzes a target project, identifies functions
 worth fuzzing, writes fuzz harnesses, drives open-source fuzzing engines
@@ -30,7 +30,7 @@ full observability - WAL-based recoverability - user-extensible skills -
 ### 1.2 Repository Layout
 
 ```
-hobot_fuzz/
+oxfuzz/
   docs/
     design/            -- detailed design documents
     standards/         -- engineering, testing, DB, DSL, skills, tool-call, target, harness standards

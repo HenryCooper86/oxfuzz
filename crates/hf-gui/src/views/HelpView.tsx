@@ -60,8 +60,8 @@ export function HelpView() {
         <ViewHeader
           title={L("Help & Documentation", "帮助与文档")}
           description={L(
-            "How to use the hobot_fuzz desktop app, screen by screen. Everything here works offline.",
-            "如何逐屏使用 hobot_fuzz 桌面应用。此处内容均可离线查看。",
+            "How to use the oxfuzz desktop app, screen by screen. Everything here works offline.",
+            "如何逐屏使用 oxfuzz 桌面应用。此处内容均可离线查看。",
           )}
         />
         <div className="flex items-center gap-2">

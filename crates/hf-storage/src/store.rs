@@ -18,7 +18,7 @@ use hf_core::harness::Harness;
 use hf_core::target::{TargetCandidate, TargetInventory};
 
 /// Default database path used when `HF_DB_PATH` is unset.
-const DEFAULT_DB_PATH: &str = "data/hobot_fuzz.db";
+const DEFAULT_DB_PATH: &str = "data/oxfuzz.db";
 
 /// Errors raised by the storage layer.
 #[derive(Debug, Error)]
@@ -312,7 +312,7 @@ impl Store {
     }
 
     /// Connect using the `HF_DB_PATH` env var, defaulting to
-    /// `data/hobot_fuzz.db`.
+    /// `data/oxfuzz.db`.
     ///
     /// # Errors
     /// See [`Store::connect`].

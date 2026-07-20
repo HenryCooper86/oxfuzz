@@ -1,4 +1,4 @@
-//! hobot-fuzz CLI entry point.
+//! oxfuzz CLI entry point.
 //!
 //! The CLI is a thin presentation layer (AGENTS.md 2.9): every command builds
 //! the canonical [`hf_service::ServiceContainer`] via `bootstrap()` and calls
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 /// AI fuzzing agent.
 #[derive(Parser)]
-#[command(name = "hobot-fuzz", version, about)]
+#[command(name = "oxfuzz", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -160,8 +160,8 @@ enum Commands {
         /// Fuzz duration (e.g. 120s, 5m). Defaults to 120s.
         #[arg(long, default_value = "120s")]
         duration: String,
-        /// SARIF output path. Defaults to `hobot_fuzz.sarif`.
-        #[arg(long, default_value = "hobot_fuzz.sarif")]
+        /// SARIF output path. Defaults to `oxfuzz.sarif`.
+        #[arg(long, default_value = "oxfuzz.sarif")]
         sarif: PathBuf,
     },
     /// Export the latest run's crashes as SARIF (`GitHub` code scanning).
@@ -193,7 +193,7 @@ enum Commands {
         #[arg(long)]
         crash: Option<String>,
         /// Output directory for the bundle.
-        #[arg(long, default_value = "hobot_fuzz_repro")]
+        #[arg(long, default_value = "oxfuzz_repro")]
         out: PathBuf,
     },
     /// Push the latest run's triaged crashes to `DefectDojo` as findings.
@@ -212,7 +212,7 @@ enum Commands {
         /// Optional project root; omit to export all persisted projects.
         project: Option<PathBuf>,
         /// Output JSON bundle path.
-        #[arg(short, long, default_value = "hobot_fuzz_export.json")]
+        #[arg(short, long, default_value = "oxfuzz_export.json")]
         output: PathBuf,
     },
     /// Replay stored crashes against the current harness (regression check).
@@ -459,7 +459,7 @@ enum SessionOp {
 enum ProvidersOp {
     /// Thaw a frozen provider after a verifying health check.
     Thaw {
-        /// Provider id (see `hobot-fuzz providers`).
+        /// Provider id (see `oxfuzz providers`).
         id: String,
     },
 }
@@ -531,7 +531,7 @@ async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
-        println!("hobot_fuzz sandbox readiness");
+        println!("oxfuzz sandbox readiness");
         for line in doctor_lines(&status) {
             println!("{line}");
         }
@@ -1573,7 +1573,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => {
             let report = hf_service::init_workspace().await?;
-            println!("Initialized hobot_fuzz workspace.");
+            println!("Initialized oxfuzz workspace.");
             println!("  config dir: {}", report.config_dir.display());
             if report.created_configs.is_empty() {
                 println!("  config: all files already present");
@@ -1689,7 +1689,7 @@ async fn main() -> anyhow::Result<()> {
             let addr = std::net::SocketAddr::new(host, port);
             hf_web::validate_bind_addr(addr, security.token_configured())?;
             let app = hf_web::build_bootstrapped_with_security(security).await?;
-            println!("hobot-fuzz web server listening on http://{addr}");
+            println!("oxfuzz web server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;
         }
@@ -1738,7 +1738,7 @@ mod automotive_tests {
     #[test]
     fn cli_exposes_ai_assisted_automotive_report_export() {
         let cli = Cli::try_parse_from([
-            "hobot-fuzz",
+            "oxfuzz",
             "automotive",
             "report",
             "/tmp/project",
@@ -1819,10 +1819,10 @@ mod providers_tests {
 
     #[test]
     fn providers_command_parses_bare_list_and_thaw() {
-        let cli = Cli::try_parse_from(["hobot-fuzz", "providers"]).unwrap();
+        let cli = Cli::try_parse_from(["oxfuzz", "providers"]).unwrap();
         assert!(matches!(cli.command, Commands::Providers { op: None }));
 
-        let cli = Cli::try_parse_from(["hobot-fuzz", "providers", "thaw", "openai-main"]).unwrap();
+        let cli = Cli::try_parse_from(["oxfuzz", "providers", "thaw", "openai-main"]).unwrap();
         let Commands::Providers {
             op: Some(ProvidersOp::Thaw { id }),
         } = cli.command
@@ -1875,7 +1875,7 @@ mod policy_tests {
 
     #[test]
     fn policy_decisions_parses_with_a_bounded_limit() {
-        let cli = Cli::try_parse_from(["hobot-fuzz", "policy", "decisions"]).unwrap();
+        let cli = Cli::try_parse_from(["oxfuzz", "policy", "decisions"]).unwrap();
         let Commands::Policy {
             op: PolicyOp::Decisions { limit },
         } = cli.command
@@ -1884,8 +1884,7 @@ mod policy_tests {
         };
         assert_eq!(limit, 50);
 
-        let cli =
-            Cli::try_parse_from(["hobot-fuzz", "policy", "decisions", "--limit", "5"]).unwrap();
+        let cli = Cli::try_parse_from(["oxfuzz", "policy", "decisions", "--limit", "5"]).unwrap();
         let Commands::Policy {
             op: PolicyOp::Decisions { limit },
         } = cli.command

@@ -1,4 +1,4 @@
-//! `hobot_fuzz` GUI -- Tauri v2 desktop app.
+//! `oxfuzz` GUI -- Tauri v2 desktop app.
 //!
 //! Thin Tauri command wrappers around `hf-service::ServiceContainer`. No
 //! domain logic here (AGENTS.md 2.9). All builds and fuzz runs go through
@@ -51,7 +51,7 @@ pub fn run() {
     let app_state = match build_app_state() {
         Ok(state) => state,
         Err(error) => {
-            eprintln!("failed to initialize hobot_fuzz application state: {error}");
+            eprintln!("failed to initialize oxfuzz application state: {error}");
             return;
         }
     };
@@ -244,7 +244,7 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running hobot_fuzz GUI");
+        .expect("error while running oxfuzz GUI");
 }
 
 /// Build the `AppState` from the canonical [`hf_service::ServiceContainer::bootstrap`]:
@@ -303,7 +303,7 @@ fn pin_user_data_dirs() -> Result<(), String> {
     let data = base.join("data");
     std::fs::create_dir_all(&data).map_err(|error| error.to_string())?;
     if std::env::var_os("HF_DB_PATH").is_none() {
-        std::env::set_var("HF_DB_PATH", data.join("hobot_fuzz.db"));
+        std::env::set_var("HF_DB_PATH", data.join("oxfuzz.db"));
     }
     Ok(())
 }

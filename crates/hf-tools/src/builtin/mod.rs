@@ -1,4 +1,4 @@
-//! Read-only inspection tools shipped with `hobot_fuzz`.
+//! Read-only inspection tools shipped with `oxfuzz`.
 //!
 //! The active agent explicitly registers these three tools and adds its
 //! service-backed `KnowledgeSearch` implementation. Mutating files, executing

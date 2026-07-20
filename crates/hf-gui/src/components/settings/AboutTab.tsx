@@ -22,7 +22,7 @@ function buildReport(status: SystemStatus | null): string {
   const yn = (b: boolean | undefined) => (b ? "yes" : "no");
   const platform = typeof navigator === "undefined" ? "unknown" : navigator.userAgent;
   const lines = [
-    "### hobot_fuzz environment report",
+    "### oxfuzz environment report",
     "",
     `- App version: ${APP_VERSION}`,
     `- Platform: ${platform}`,
@@ -71,7 +71,7 @@ export function AboutTab() {
           <Crosshair size={28} style={{ color: "var(--accent)" }} />
         </div>
         <div>
-          <h2 className="text-lg font-semibold">hobot_fuzz</h2>
+          <h2 className="text-lg font-semibold">oxfuzz</h2>
           <div className="flex items-center gap-2 mt-1">
             <Badge variant="accent">v{APP_VERSION}</Badge>
             <Badge>MIT License</Badge>

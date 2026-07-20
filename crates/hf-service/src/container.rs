@@ -39,7 +39,7 @@ const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;
 /// Newest decisions retained in the audit trail; recording prunes beyond this
 /// window on write (mirrors schedule-execution history retention).
 const GUARDRAIL_DECISION_RETENTION: usize = 1000;
-const WORKSPACE_MANIFEST_FILE: &str = ".hobot-fuzz-workspace.json";
+const WORKSPACE_MANIFEST_FILE: &str = ".oxfuzz-workspace.json";
 const WORKSPACE_MANIFEST_VERSION: u32 = 1;
 
 type WorkspaceOperationGate = tokio::sync::RwLock<()>;
@@ -329,7 +329,7 @@ fn validate_workspace_manifest(root: &Path) -> Result<(), ClassifiedError> {
             manifest_path.display()
         ))
     })?;
-    if manifest.application != "hobot_fuzz"
+    if manifest.application != "oxfuzz"
         || manifest.version != WORKSPACE_MANIFEST_VERSION
         || manifest.canonical_root != root
     {
@@ -345,9 +345,9 @@ fn write_workspace_manifest(root: &Path) -> Result<(), ClassifiedError> {
     use std::io::Write as _;
 
     let destination = workspace_manifest(root);
-    let temporary = root.join(format!(".hobot-fuzz-workspace-{}.tmp", Uuid::new_v4()));
+    let temporary = root.join(format!(".oxfuzz-workspace-{}.tmp", Uuid::new_v4()));
     let manifest = WorkspaceOwnershipManifest {
-        application: "hobot_fuzz".to_owned(),
+        application: "oxfuzz".to_owned(),
         version: WORKSPACE_MANIFEST_VERSION,
         canonical_root: root.to_path_buf(),
     };
@@ -789,7 +789,7 @@ fn quarantine_corpus_entry(
         )));
     }
 
-    let quarantined = parent.join(format!(".hobot-fuzz-delete-{}", Uuid::new_v4()));
+    let quarantined = parent.join(format!(".oxfuzz-delete-{}", Uuid::new_v4()));
     std::fs::rename(path, &quarantined).map_err(|error| {
         ClassifiedError::Internal(format!(
             "quarantine corpus entry {}: {error}",
@@ -938,7 +938,7 @@ fn run_context_digest(workspace: &Path) -> Result<String, ClassifiedError> {
     }
 
     let mut digest = Sha256::new();
-    digest.update(b"hobot-fuzz-run-context-v1\0");
+    digest.update(b"oxfuzz-run-context-v1\0");
     digest.update(SANDBOX_IMAGE.as_bytes());
     digest.update(b"\0");
     let mut total_bytes = 0_u64;
@@ -1828,7 +1828,7 @@ fn build_workspace_dictionary(workspace: &Path, dict_name: &str) -> Option<PathB
         if !matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh") {
             continue;
         }
-        // Skip the generated harness itself -- its literals are hobot's, not
+        // Skip the generated harness itself -- its literals are oxfuzz's, not
         // the target's, and add noise.
         if path.file_stem().and_then(|s| s.to_str()) == Some("harness") {
             continue;
@@ -4345,7 +4345,7 @@ impl ServiceContainer {
             })
             .collect();
         Ok(serde_json::json!({
-            "schema": "hobot_fuzz.export.v2",
+            "schema": "oxfuzz.export.v2",
             "generated_at": Utc::now().to_rfc3339(),
             "tool_version": env!("CARGO_PKG_VERSION"),
             "project": key,
@@ -8064,7 +8064,7 @@ impl ServiceContainer {
     /// Assemble a self-contained reproduction bundle for `crash` into `dest`:
     /// the current harness source, the crash input bytes, and a `REPRODUCE.md`
     /// manifest carrying the exact build and run steps. A maintainer can then
-    /// reproduce the finding with only the target toolchain -- no `hobot_fuzz`
+    /// reproduce the finding with only the target toolchain -- no `oxfuzz`
     /// install (VISION reproducibility). Returns the bundle directory.
     ///
     /// # Errors
@@ -8269,7 +8269,7 @@ impl ServiceContainer {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "Fuzzing".to_owned());
         let test_title =
-            Some(target.map_or_else(|| "hobot_fuzz".to_owned(), |t| format!("hobot_fuzz: {t}")));
+            Some(target.map_or_else(|| "oxfuzz".to_owned(), |t| format!("oxfuzz: {t}")));
         let import = crate::defectdojo::ImportTarget {
             product_name,
             product_type_name: cfg.resolved_product_type(),
@@ -8385,7 +8385,7 @@ impl ServiceContainer {
             ClassifiedError::Validation(format!("unknown report format: {format}"))
         })?;
         let markdown = self.generate_report(project, target).await?;
-        let title = format!("hobot_fuzz report — {target}");
+        let title = format!("oxfuzz report — {target}");
         crate::report_export::write_report(&markdown, &title, fmt, out_path)
     }
 
@@ -9253,7 +9253,7 @@ impl ServiceContainer {
             .ok_or_else(|| ClassifiedError::Provider("no LLM provider configured".to_owned()))?;
         let messages = vec![
             Message::system(
-                "You are hobot_fuzz, an AI fuzzing assistant. You help users discover \
+                "You are oxfuzz, an AI fuzzing assistant. You help users discover \
                  fuzzing targets, generate harnesses, run fuzzing engines, triage crashes, \
                  and manage corpora. Be concise and actionable.",
             ),
@@ -10561,10 +10561,10 @@ mod workspace_tests {
         // With no override the workspace root normally lives under the
         // platform app-data dir. In restricted environments that path can be
         // unwritable, so `user_app_dir` may fall back to temp; either way,
-        // artifacts stay under a dedicated hobot_fuzz/workspaces root rather
+        // artifacts stay under a dedicated oxfuzz/workspaces root rather
         // than directly in the OS temp directory.
         let root = super::workspace_root_from(None);
-        assert!(root.ends_with(std::path::Path::new("hobot_fuzz").join("workspaces")));
+        assert!(root.ends_with(std::path::Path::new("oxfuzz").join("workspaces")));
         assert_ne!(root, std::env::temp_dir());
     }
 

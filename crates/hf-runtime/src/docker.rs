@@ -283,7 +283,7 @@ pub fn build_exec_args_with(
     // Workspace mount: host path -> container_workspace.
     // We use a placeholder host path here; `DockerRuntime::run_command`
     // substitutes the real cwd.
-    let host_workspace = "/tmp/hobot_fuzz_workspace";
+    let host_workspace = "/tmp/oxfuzz_workspace";
     args.push("-v".to_owned());
     let read_only = if opts.workspace_read_only { ":ro" } else { "" };
     args.push(format!(
@@ -595,7 +595,7 @@ impl DockerRuntime {
             )));
         }
         let mut args = build_exec_args_with(&self.cfg, limits, cmd, opts);
-        let placeholder = "/tmp/hobot_fuzz_workspace";
+        let placeholder = "/tmp/oxfuzz_workspace";
         let placeholder_mount = format!(
             "{placeholder}:{}{}",
             self.cfg.container_workspace,

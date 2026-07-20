@@ -11,11 +11,11 @@ use hf_service::ServiceContainer;
 fn isolate_workspace() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let workspace = common::install_managed_workspace("hobot_fuzz_covprune_it");
+        let workspace = common::install_managed_workspace("oxfuzz_covprune_it");
         let config = workspace.parent().unwrap().join("config");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(
-            config.join("hobot-fuzz.toml"),
+            config.join("oxfuzz.toml"),
             r#"
 [fuzzing]
 enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "clusterfuzzlite", "syzkaller"]

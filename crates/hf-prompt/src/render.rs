@@ -10,7 +10,7 @@ use hf_core::target::{TargetCandidate, TargetLanguage};
 #[must_use]
 pub fn render_discovery_prompt(candidates: &[TargetCandidate]) -> String {
     let mut lines = vec![
-        "You are the discovery-agent for hobot_fuzz.".to_owned(),
+        "You are the discovery-agent for oxfuzz.".to_owned(),
         "Your job: refine fuzzing fit scores and add rationale for each candidate.".to_owned(),
         "Output a JSON array of objects with fields:".to_owned(),
         "  symbol, fit_score (0.0-1.0), rationale (one sentence).".to_owned(),
@@ -75,7 +75,7 @@ pub fn render_harness_prompt(target: &TargetCandidate, engine: EngineKind) -> St
         )
     };
     format!(
-        "You are the harness-agent for hobot_fuzz.\n\
+        "You are the harness-agent for oxfuzz.\n\
          Your job: write a fuzzing harness for the target below using {engine_name}.\n\
          Rules:\n\
          - Use the engine entry point exactly: {entry_point}\n\
@@ -247,7 +247,7 @@ pub fn render_harness_refine_prompt(
 #[must_use]
 pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
     format!(
-        "You are the seed-corpus author for hobot_fuzz.\n\
+        "You are the seed-corpus author for oxfuzz.\n\
          Produce up to {count} diverse, INTERESTING seed inputs for the fuzz target below: \
          well-formed examples, boundary cases, and minimal-but-valid inputs that exercise \
          its parsing/decoding paths.\n\
@@ -276,7 +276,7 @@ pub fn render_seed_prompt(target: &TargetCandidate, count: usize) -> String {
 #[must_use]
 pub fn render_dictionary_prompt(symbol: &str, source_excerpt: &str) -> String {
     format!(
-        "You are the fuzzing-dictionary author for hobot_fuzz.\n\
+        "You are the fuzzing-dictionary author for oxfuzz.\n\
          Propose dictionary tokens that help a coverage-guided fuzzer get past \
          shallow keyword/magic-value gates in the target `{symbol}` below: format \
          markers (e.g. \"IHDR\", \"GET \", \"\\x89PNG\"), protocol keywords, and \
@@ -320,7 +320,7 @@ pub fn render_crash_verify_prompt(
             .join("\n")
     };
     format!(
-        "You are the crash verifier for hobot_fuzz. Judge whether the crash below, found \
+        "You are the crash verifier for oxfuzz. Judge whether the crash below, found \
          while fuzzing the target `{target}`, is a deterministically-reproducing GENUINE \
          target bug -- versus a harness or setup artifact (the harness itself is buggy, an \
          out-of-memory from an allocation the harness controls, a timeout with no fault, or \
@@ -353,7 +353,7 @@ pub fn render_harness_verify_prompt(
     execs_per_sec: f64,
 ) -> String {
     format!(
-        "You are the harness verifier for hobot_fuzz. The harness below compiled and passed a \
+        "You are the harness verifier for oxfuzz. The harness below compiled and passed a \
          smoke run for the target `{target}` at {execs_per_sec:.0} execs/sec. Decide whether it \
          MEANINGFULLY exercises the target with the FUZZER-PROVIDED input.\n\
          A hollow harness passes smoke yet never really tests the target: it ignores the input \

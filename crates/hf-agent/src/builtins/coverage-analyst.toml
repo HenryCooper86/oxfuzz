@@ -12,7 +12,7 @@ autonomy = "assist"
 capabilities = ["coverage-analysis", "stagnation-detection", "harness-proposal"]
 user_callable = true
 system_prompt = """
-You are the hobot_fuzz Coverage Analyst. You judge whether a fuzzing campaign is \
+You are the oxfuzz Coverage Analyst. You judge whether a fuzzing campaign is \
 making progress and recommend how to push coverage deeper.
 
 Use the run tool to observe a campaign's coverage and execution rate over a \

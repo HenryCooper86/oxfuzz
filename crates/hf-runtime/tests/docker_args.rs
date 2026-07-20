@@ -20,7 +20,7 @@ fn limits(max_mem_mb: u64, max_cpus: u32) -> ResourceLimits {
 
 fn cfg_with(default_limits: ResourceLimits) -> RuntimeConfig {
     RuntimeConfig {
-        image: "hobot/fuzz-sandbox:0.1.0".to_owned(),
+        image: "oxfuzz/fuzz-sandbox:0.1.0".to_owned(),
         container_workspace: "/work".to_owned(),
         default_limits,
         max_pids: 512,
@@ -36,7 +36,7 @@ fn build_exec_args_includes_image_and_command() {
         &["clang".to_owned(), "--version".to_owned()],
     );
     let joined = args.join(" ");
-    assert!(joined.contains("hobot/fuzz-sandbox:0.1.0"));
+    assert!(joined.contains("oxfuzz/fuzz-sandbox:0.1.0"));
     assert!(joined.contains("clang"));
     assert!(joined.contains("--version"));
 }
@@ -244,7 +244,7 @@ fn build_exec_args_supports_read_only_workspace_with_writable_run_mounts() {
     let joined = args.join(" ");
 
     assert!(
-        joined.contains("/tmp/hobot_fuzz_workspace:/work:ro"),
+        joined.contains("/tmp/oxfuzz_workspace:/work:ro"),
         "primary workspace must be immutable: {joined}"
     );
     assert!(
@@ -390,7 +390,7 @@ fn specialized_sandbox_profile_can_select_a_pinned_sidecar_image() {
 
     let cfg = RuntimeConfig::default();
     let options = SandboxOptions {
-        image: Some("hobot/scapy-automotive:2.7.0".to_owned()),
+        image: Some("oxfuzz/scapy-automotive:2.7.0".to_owned()),
         ..SandboxOptions::default()
     };
     let args = hf_runtime::docker::build_exec_args_with(
@@ -401,6 +401,6 @@ fn specialized_sandbox_profile_can_select_a_pinned_sidecar_image() {
     );
     let joined = args.join(" ");
 
-    assert!(joined.contains("hobot/scapy-automotive:2.7.0"));
-    assert!(!joined.contains("hobot/fuzz-sandbox:0.1.0"));
+    assert!(joined.contains("oxfuzz/scapy-automotive:2.7.0"));
+    assert!(!joined.contains("oxfuzz/fuzz-sandbox:0.1.0"));
 }

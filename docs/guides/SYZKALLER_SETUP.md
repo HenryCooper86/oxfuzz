@@ -1,7 +1,7 @@
 # syzkaller Kernel-Fuzzing Setup
 
 This guide explains how to run a real syzkaller kernel-fuzzing campaign from
-hobot_fuzz. Unlike the in-process engines (libFuzzer, AFL++, honggfuzz,
+oxfuzz. Unlike the in-process engines (libFuzzer, AFL++, honggfuzz,
 ClusterFuzzLite), syzkaller does not fuzz a single function through a generated
 harness. It mutates sequences of system calls and executes them inside a managed
 qemu VM whose kernel is built with coverage instrumentation (KCOV). A campaign is
@@ -9,7 +9,7 @@ driven by `syz-manager`, which needs three artifacts you provide:
 
 1. a KCOV-instrumented kernel image,
 2. a matching rootfs disk image (plus its SSH key), and
-3. a `syz-manager` config (hobot_fuzz can synthesize this for you).
+3. a `syz-manager` config (oxfuzz can synthesize this for you).
 
 > Scope note: a useful bug-finding run needs the artifacts below plus an
 > accelerated VM. Under Docker on macOS there is no `/dev/kvm`, so qemu runs in
@@ -20,7 +20,7 @@ driven by `syz-manager`, which needs three artifacts you provide:
 
 ### 1.1 Sandbox image with the syzkaller toolchain
 
-The shared sandbox image (`hobot/fuzz-sandbox:0.1.0`) must contain the
+The shared sandbox image (`oxfuzz/fuzz-sandbox:0.1.0`) must contain the
 syzkaller toolchain (Go 1.26, qemu, and the `syz-*` binaries). The Docker layer
 that installs it lives in `docker/sandbox/Dockerfile`.
 
@@ -30,12 +30,12 @@ Build it one of two ways:
   image for your host architecture and then verifies `syz-manager` is present.
 - Or, in the app: open Settings > General > Sandbox and switch the Architecture
   (this forces a rebuild). To force a same-arch rebuild instead, remove the
-  image first: `docker image rm hobot/fuzz-sandbox:0.1.0`.
+  image first: `docker image rm oxfuzz/fuzz-sandbox:0.1.0`.
 
 Confirm the toolchain is present:
 
 ```bash
-docker run --rm hobot/fuzz-sandbox:0.1.0 bash -lc 'which syz-manager && syz-manager --help | head -1'
+docker run --rm oxfuzz/fuzz-sandbox:0.1.0 bash -lc 'which syz-manager && syz-manager --help | head -1'
 ```
 
 ### 1.2 Architecture matching
@@ -81,7 +81,7 @@ make olddefconfig
 make -j"$(nproc)"
 ```
 
-The kernel image to hand to hobot_fuzz:
+The kernel image to hand to oxfuzz:
 
 - `linux/amd64`: `arch/x86/boot/bzImage`
 - `linux/arm64`: `arch/arm64/boot/Image` (use this file as the "Kernel image")
@@ -102,7 +102,7 @@ This produces (names vary by distro/arch):
 - `bullseye.img`  -> the "Rootfs disk image"
 - `bullseye.id_rsa` -> the "SSH key (rootfs login)"
 
-## 4. Run from hobot_fuzz
+## 4. Run from oxfuzz
 
 ### 4.1 Synthesized config (recommended)
 
@@ -114,7 +114,7 @@ This produces (names vary by distro/arch):
    - VM count (start with 1-2)
 3. Set a **Duration** and click **Launch Campaign**.
 
-`hobot_fuzz` validates and copies your artifacts into a unique service-owned
+`oxfuzz` validates and copies your artifacts into a unique service-owned
 staging directory. It writes a qemu `manager.cfg` for the selected architecture,
 then runs
 `timeout <duration> syz-manager -config=...`. Live coverage / executed / crash
@@ -168,7 +168,7 @@ Container path mapping (set up automatically):
 
 ### 4.2 Bring your own manager.cfg (advanced)
 
-If you supply **Existing manager.cfg (optional override)**, `hobot_fuzz` parses
+If you supply **Existing manager.cfg (optional override)**, `oxfuzz` parses
 and rewrites it instead of mounting its parent directory. The config must use
 `"type": "qemu"`. Its `image`, optional `sshkey`, and `vm.kernel` references
 may be relative to the config or point to regular files inside the config's

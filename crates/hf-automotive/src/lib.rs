@@ -1,4 +1,4 @@
-//! Pure automotive protocol contracts for `hobot_fuzz`.
+//! Pure automotive protocol contracts for `oxfuzz`.
 //!
 //! The optional `automotive-scapy` feature exposes serializable domain types.
 //! This crate never executes a process, reads an interface, or mutates files.

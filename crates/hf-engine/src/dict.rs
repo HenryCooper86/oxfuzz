@@ -3,7 +3,7 @@
 //! A dictionary is a list of interesting tokens (magic bytes, keywords, format
 //! markers) the fuzzer splices into inputs. Seeding one with the string
 //! literals a target compares against is one of the cheapest ways to get past
-//! shallow `memcmp`/keyword gates and reach deeper code, so `hobot_fuzz` extracts
+//! shallow `memcmp`/keyword gates and reach deeper code, so `oxfuzz` extracts
 //! literals from the target source and hands them to the engine.
 //!
 //! Tokens are byte sequences (a literal like `"\x89PNG"` is binary, and those

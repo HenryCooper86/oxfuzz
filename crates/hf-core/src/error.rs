@@ -16,7 +16,7 @@ pub enum ErrorSeverity {
 
 /// Classification metadata carried by errors in the ported agent-infra crates.
 ///
-/// (y-agent's `y-core` calls this trait `ClassifiedError`; hobot already uses
+/// (y-agent's `y-core` calls this trait `ClassifiedError`; oxfuzz already uses
 /// that name for its universal error enum, so the trait is renamed here.)
 pub trait ErrorClassification {
     /// Whether this error is safe to retry.

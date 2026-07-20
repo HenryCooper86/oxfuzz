@@ -11,7 +11,7 @@ import type { AutomotiveSettings } from "../lib/automotive";
 
 const base: AutomotiveSettings = {
   enabled: false,
-  sidecar_image: "hobot/scapy-automotive:2.7.0",
+  sidecar_image: "oxfuzz/scapy-automotive:2.7.0",
   allowed_protocols: ["can"],
   allowed_modes: ["offline_pcap", "virtual_can"],
   virtual_interfaces: ["vcan0"],

@@ -11,7 +11,7 @@ use hf_core::target::TargetLanguage;
 use hf_service::ServiceContainer;
 
 fn isolate_workspace() {
-    common::install_managed_workspace("hobot_fuzz_repair_it");
+    common::install_managed_workspace("oxfuzz_repair_it");
 }
 
 /// A runtime whose compile command fails (`exit 1`) for the first

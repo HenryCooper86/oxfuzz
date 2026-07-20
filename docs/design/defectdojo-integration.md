@@ -2,14 +2,14 @@
 
 ## Goal
 
-Push hobot_fuzz's triaged crashes to a [DefectDojo](https://www.defectdojo.org)
+Push oxfuzz's triaged crashes to a [DefectDojo](https://www.defectdojo.org)
 instance as findings, so fuzzing results flow into an org's existing
 DevSecOps / vulnerability-management workflow with no manual re-entry.
 
 ## Approach
 
 DefectDojo is a Django/Python server. We **ship no copy of it** -- no vendored
-source, no compose file, no image. hobot_fuzz acts as a thin REST client that
+source, no compose file, no image. oxfuzz acts as a thin REST client that
 maps triaged crashes to DefectDojo's **Generic Findings Import** JSON and POSTs
 them to the API. This reuses the existing CWE + `security-severity` logic that
 already backs the SARIF exporter (`hf-service/src/sarif.rs`), so a crash's
@@ -26,7 +26,7 @@ Shipping no server is not the same as pretending none is running. The desktop ap
 embeds the DefectDojo web UI (a native child webview -- DefectDojo sends
 `X-Frame-Options: DENY`, so an iframe is impossible), and a webview pointed at a
 stopped server renders an empty grey rectangle that is indistinguishable from a
-broken view. So hobot_fuzz **adopts and supervises** the DefectDojo compose
+broken view. So oxfuzz **adopts and supervises** the DefectDojo compose
 project the operator already installed, in `hf-service/src/defectdojo_lifecycle.rs`:
 
 | Concern | Decision |
@@ -50,7 +50,7 @@ project, `docker compose pull`s the released images, and brings the stack up
 under the project name and `DD_PORT` the lifecycle adopter expects, then writes
 `config/defectdojo.toml`. This does not change the "ship no compose file" stance
 -- the script uses upstream's compose, cloned outside the repo
-(`$HOME/.hobot_fuzz/defectdojo` by default) -- it only automates the manual
+(`$HOME/.oxfuzz/defectdojo` by default) -- it only automates the manual
 `docker compose up` the operator would otherwise run. It is idempotent (a fast
 no-op once the project is running) and is invoked best-effort, skippable
 (`HF_SKIP_DEFECTDOJO=1`), from the environment-setup entry points
@@ -95,7 +95,7 @@ so a redacted browser snapshot cannot overwrite hidden values.
 Read-modify-write patches for the same resolved config directory are serialized
 across store instances inside one process. Files are replaced atomically, but no
 cross-process advisory lock is available in the current dependency set; two
-independent hobot_fuzz processes can still race with last-writer-wins semantics.
+independent oxfuzz processes can still race with last-writer-wins semantics.
 
 ## Secrets
 

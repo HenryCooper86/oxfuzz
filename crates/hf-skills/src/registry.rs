@@ -90,7 +90,7 @@ fn atomic_replace(path: &std::path::Path, content: &[u8]) -> std::io::Result<()>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustTier {
-    /// Ships with `hobot_fuzz`; embedded in the binary, resettable.
+    /// Ships with `oxfuzz`; embedded in the binary, resettable.
     BuiltIn,
     /// Authored or overridden by the user under `skills/`.
     #[default]
@@ -187,7 +187,7 @@ impl SkillDefinition {
         };
         format!(
             "[skill]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"{desc}\"\n\
-author = \"hobot_fuzz\"\nsource_format = \"markdown\"\n\n\
+author = \"oxfuzz\"\nsource_format = \"markdown\"\n\n\
 [skill.classification]\ntype = \"llm_reasoning\"\ndomain = [{domain}]\natomic = true\n\n\
 [skill.constraints]\nmax_input_tokens = {max_in}\nmax_output_tokens = 4000\n\n\
 [skill.root]\npath = \"root.md\"\ntoken_count = {token_count}\n",

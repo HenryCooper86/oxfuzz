@@ -1,7 +1,7 @@
 //! Lifecycle for a *local* Docker `DefectDojo` instance: adopt it, start it with
 //! the app, and report what state it is in.
 //!
-//! `hobot_fuzz` still ships no `DefectDojo` server and no compose file (see
+//! `oxfuzz` still ships no `DefectDojo` server and no compose file (see
 //! `docs/design/defectdojo-integration.md`). What it does is *adopt* a compose
 //! project that already exists on the machine -- the one the operator created by
 //! following upstream's install -- and supervise it, so the embedded web view and
@@ -87,7 +87,7 @@ pub struct DefectDojoStatus {
     pub url: Option<String>,
     /// Human-readable explanation of [`Self::state`], suitable for direct display.
     pub message: String,
-    /// True when `hobot_fuzz` can start and stop this instance itself.
+    /// True when `oxfuzz` can start and stop this instance itself.
     pub managed: bool,
 }
 
@@ -271,7 +271,7 @@ async fn status_of(cfg: &DefectDojoConfig) -> DefectDojoStatus {
                 DefectDojoState::Remote,
                 url,
                 format!(
-                    "{} is a remote DefectDojo and is not answering -- hobot_fuzz does not start or stop it.",
+                    "{} is a remote DefectDojo and is not answering -- oxfuzz does not start or stop it.",
                     cfg.url
                 ),
             )

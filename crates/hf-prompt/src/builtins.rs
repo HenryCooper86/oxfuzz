@@ -7,7 +7,7 @@
 //! Prompt content is loaded from `config/prompts/*.txt` at compile time via
 //! `include_str!`. At runtime, users can override any prompt by placing a
 //! `.txt` file with the same name in their XDG config prompts directory
-//! (`~/.config/hobot_fuzz/prompts/`).
+//! (`~/.config/oxfuzz/prompts/`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -260,7 +260,7 @@ pub fn builtin_section_store() -> SectionStore {
 /// For each section, if `prompts_dir` is `Some` and a corresponding `.txt`
 /// file exists there, the file content is used instead of the compiled default.
 /// This allows users to customise prompts by editing files in their XDG config
-/// directory (`~/.config/hobot_fuzz/prompts/`).
+/// directory (`~/.config/oxfuzz/prompts/`).
 pub fn builtin_section_store_with_overrides(
     prompts_dir: Option<&Path>,
     runtime_backend: &RuntimeBackend,
@@ -440,14 +440,14 @@ mod tests {
         // No override directory — should use compiled defaults.
         let store = builtin_section_store_with_overrides(None, &RuntimeBackend::Native);
         let content = store.load_content("core.identity").unwrap();
-        assert!(content.contains("hobot_fuzz"));
+        assert!(content.contains("oxfuzz"));
         assert!(!content.contains("y-agent"));
     }
 
     #[test]
     fn test_builtin_store_with_overrides_loads_file() {
         // Create a temp dir with an override file.
-        let dir = std::env::temp_dir().join("hobot-fuzz-prompt-override-test");
+        let dir = std::env::temp_dir().join("oxfuzz-prompt-override-test");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("core_identity.txt"), "Custom identity prompt").unwrap();
 
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_tool_protocol_remote_override_file_takes_precedence() {
-        let dir = std::env::temp_dir().join("hobot-fuzz-prompt-remote-override-test");
+        let dir = std::env::temp_dir().join("oxfuzz-prompt-remote-override-test");
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(
             dir.join("core_tool_protocol_remote.txt"),

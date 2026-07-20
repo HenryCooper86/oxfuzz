@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install and start a local DefectDojo for hobot_fuzz on Docker/OrbStack.
+# Install and start a local DefectDojo for oxfuzz on Docker/OrbStack.
 #
-# hobot_fuzz ships no DefectDojo image or compose file: it adopts and supervises
+# oxfuzz ships no DefectDojo image or compose file: it adopts and supervises
 # an upstream install (see docs/design/defectdojo-integration.md). This script
 # performs that upstream install for you -- it clones DefectDojo's own
 # docker-compose project, brings it up on the port the app expects, and writes
@@ -10,7 +10,7 @@
 #
 # Environment overrides:
 #   HF_DEFECTDOJO_DIR      where the upstream compose project is cloned
-#                          (default: $HOME/.hobot_fuzz/defectdojo)
+#                          (default: $HOME/.oxfuzz/defectdojo)
 #   HF_DEFECTDOJO_PORT     host port the app owns (default: 8080)
 #   HF_DEFECTDOJO_PROJECT  docker compose project name (default: defectdojo)
 #   HF_DEFECTDOJO_READY_TIMEOUT  seconds to wait for first boot (default: 300)
@@ -22,7 +22,7 @@ set -uo pipefail
 export PATH="$HOME/.orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DD_DIR="${HF_DEFECTDOJO_DIR:-$HOME/.hobot_fuzz/defectdojo}"
+DD_DIR="${HF_DEFECTDOJO_DIR:-$HOME/.oxfuzz/defectdojo}"
 DD_PORT="${HF_DEFECTDOJO_PORT:-8080}"
 DD_PROJECT="${HF_DEFECTDOJO_PROJECT:-defectdojo}"
 READY_TIMEOUT="${HF_DEFECTDOJO_READY_TIMEOUT:-300}"
@@ -92,7 +92,7 @@ set -a; . "$DD_ENV"; set +a
 
 if [ "$need_start" = 1 ]; then
   cat >"$DD_DIR/docker-compose.override.yml" <<'YAML'
-# Written by hobot_fuzz scripts/setup-defectdojo.sh: inject the admin password
+# Written by oxfuzz scripts/setup-defectdojo.sh: inject the admin password
 # into the initializer so the account is created with known credentials.
 services:
   initializer:
@@ -134,7 +134,7 @@ if [ "$ready" = "1" ]; then
     | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 fi
 
-# --- Write hobot_fuzz config (gitignored; may hold the token) --------------
+# --- Write oxfuzz config (gitignored; may hold the token) --------------
 mkdir -p "$REPO_ROOT/config"
 {
   echo "# Written by scripts/setup-defectdojo.sh. Gitignored -- may hold a token."

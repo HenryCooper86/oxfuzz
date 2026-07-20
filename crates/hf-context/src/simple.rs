@@ -1,4 +1,4 @@
-//! Lightweight token-budget assembly (hobot's original API), kept so the agent
+//! Lightweight token-budget assembly (oxfuzz's original API), kept so the agent
 //! loop's simple trimming keeps working alongside the ported y-agent pipeline.
 
 use hf_core::types::{Message, Role};
