@@ -25,6 +25,25 @@ use hf_core::types::{ProviderId, TokenUsage};
 
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
 
+/// Normalize a configured Ollama base URL to the host root the native
+/// `/api/*` endpoints hang off.
+///
+/// Ollama exposes its native API at `<host>/api/chat`, but its OpenAI-compatible
+/// surface (and therefore most GUIs and copy-pasted docs) advertises `<host>/v1`.
+/// Users routinely paste the `/v1` form into an Ollama provider entry, which would
+/// otherwise resolve to the invalid `<host>/v1/api/chat`. Strip a trailing `/v1`
+/// (and any trailing slash) so both forms land on the correct native endpoint.
+fn normalize_base_url(base_url: Option<String>) -> String {
+    let raw = base_url.unwrap_or_else(|| OLLAMA_DEFAULT_URL.to_string());
+    let trimmed = raw.trim_end_matches('/');
+    let normalized = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+    if normalized.is_empty() {
+        OLLAMA_DEFAULT_URL.to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
 /// Ollama local LLM provider.
 #[derive(Debug)]
 pub struct OllamaProvider {
@@ -83,7 +102,7 @@ impl OllamaProvider {
         headers: &std::collections::HashMap<String, String, S>,
         http_protocol: HttpProtocol,
     ) -> Self {
-        let base_url = base_url.unwrap_or_else(|| OLLAMA_DEFAULT_URL.to_string());
+        let base_url = normalize_base_url(base_url);
         let custom_headers = crate::http_headers::custom_header_map(headers).unwrap_or_else(
             |message| {
                 tracing::warn!(provider_id = %id, error = %message, "Ignoring invalid provider custom headers");
@@ -636,6 +655,37 @@ mod tests {
             provider.api_url("api/chat"),
             "http://192.168.1.100:11434/api/chat"
         );
+    }
+
+    #[test]
+    fn test_ollama_base_url_strips_v1_suffix() {
+        // The GUI and Ollama's own docs surface the OpenAI-compatible base URL
+        // (`.../v1`). The native provider appends `/api/chat`, so a `/v1` suffix
+        // would yield the invalid `.../v1/api/chat`. Normalize it away so both
+        // `http://localhost:11434` and `http://localhost:11434/v1` work.
+        for base in [
+            "http://localhost:11434/v1",
+            "http://localhost:11434/v1/",
+            "http://localhost:11434/",
+        ] {
+            let provider = OllamaProvider::new(
+                "test",
+                "llama3",
+                String::new(),
+                Some(base.into()),
+                None,
+                vec![],
+                vec![],
+                3,
+                32_768,
+                ToolCallingMode::default(),
+            );
+            assert_eq!(
+                provider.api_url("api/chat"),
+                "http://localhost:11434/api/chat",
+                "base {base} should normalize to the native /api/chat endpoint",
+            );
+        }
     }
 
     #[test]

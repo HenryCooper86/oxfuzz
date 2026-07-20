@@ -6,20 +6,23 @@ import { Crosshair, Server, Shield, Database, CheckCircle2, ArrowRight, ArrowLef
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Badge } from "../ui/Badge";
+import { Select } from "../ui/Select";
 import { Separator } from "../ui/Separator";
 import { useToast } from "../ui/toastContext";
 import { getTransport } from "../../lib";
 import { useI18n } from "../../i18nContext";
-import { normalizeProvider, type Provider } from "../settings/providerTypes";
+import { resolveWizardProvider, wizardProviderPreset, WIZARD_PROVIDER_TYPES } from "./wizardProvider";
+import { DefectDojoWizardStep } from "./DefectDojoWizardStep";
 import { wizardStoragePaths, type WizardStoragePaths } from "../../lib/wizardPaths";
 
-type Step = "welcome" | "providers" | "runtime" | "guardrails" | "storage" | "complete";
+type Step = "welcome" | "providers" | "runtime" | "guardrails" | "defectdojo" | "storage" | "complete";
 
 const STEPS: { id: Step; label: string; icon: ReactNode }[] = [
   { id: "welcome", label: "Welcome", icon: <Crosshair size={16} /> },
   { id: "providers", label: "Providers", icon: <Server size={16} /> },
   { id: "runtime", label: "Sandbox", icon: <Shield size={16} /> },
   { id: "guardrails", label: "Guardrails", icon: <Shield size={16} /> },
+  { id: "defectdojo", label: "DefectDojo", icon: <Database size={16} /> },
   { id: "storage", label: "Storage", icon: <Database size={16} /> },
   { id: "complete", label: "Complete", icon: <CheckCircle2 size={16} /> },
 ];
@@ -37,9 +40,21 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const stepIdx = STEPS.findIndex((s) => s.id === step);
 
   // Config state
+  const [providerType, setProviderType] = useState("openai");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("gpt-4o");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
+
+  // Switching provider type refills the base URL and model with that provider's
+  // presets so, e.g., picking Ollama fills in the local host with no /v1 suffix.
+  function changeProviderType(next: string) {
+    setProviderType(next);
+    const preset = wizardProviderPreset(next);
+    setBaseUrl(preset.baseUrl);
+    setModel(preset.model);
+  }
+
+  const keyOptional = providerType === "ollama";
 
   useEffect(() => {
     getTransport()
@@ -65,17 +80,8 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       // Persist the provider to the backend (config/providers.toml) so harness
       // generation and chat actually have an LLM. Without this the key only
       // lived in localStorage and never reached the service layer.
-      const key = apiKey.trim();
-      const url = baseUrl.trim();
-      if (key || url) {
-        const provider: Provider = normalizeProvider({
-          id: "default",
-          provider_type: /(^|\.)openai\.com/.test(url) ? "openai" : "openai-compat",
-          model: model.trim() || "gpt-4o",
-          base_url: url,
-          api_key: key,
-          tags: ["general", "reasoning", "code"],
-        });
+      const provider = resolveWizardProvider({ providerType, apiKey, model, baseUrl });
+      if (provider) {
         await getTransport().invoke("set_providers", { providers: [provider] });
       }
       // ChatView reads the preferred model from localStorage; the API key now
@@ -165,8 +171,14 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
               <p className="text-xs text-text-secondary">{t("wizard.providerDesc")}</p>
               <div className="flex flex-col gap-2">
                 <div>
-                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("wizard.apiKey")}</label>
-                  <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." />
+                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("wizard.providerType")}</label>
+                  <Select value={providerType} onChange={changeProviderType} options={WIZARD_PROVIDER_TYPES} className="w-full" />
+                </div>
+                <div>
+                  <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>
+                    {t("wizard.apiKey")}{keyOptional ? ` (${t("wizard.optional")})` : ""}
+                  </label>
+                  <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={keyOptional ? t("wizard.apiKeyLocalHint") : "sk-..."} />
                 </div>
                 <div>
                   <label className="text-xs text-text-muted uppercase mb-1 block" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("wizard.model")}</label>
@@ -179,7 +191,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
               </div>
               <div className="flex items-center gap-2">
                 <Badge variant="warning">{t("wizard.required")}</Badge>
-                <span className="text-xs text-text-muted">{t("wizard.providerRequired")}</span>
+                <span className="text-xs text-text-muted">{keyOptional ? t("wizard.providerLocalHint") : t("wizard.providerRequired")}</span>
               </div>
             </div>
           )}
@@ -221,6 +233,8 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
               </div>
             </div>
           )}
+
+          {step === "defectdojo" && <DefectDojoWizardStep active />}
 
           {step === "storage" && (
             <div className="flex flex-col gap-3">
