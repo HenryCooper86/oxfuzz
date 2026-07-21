@@ -327,3 +327,102 @@ export function generateAutomotiveReport(
     includeAi,
   });
 }
+
+// --- Offline analysis (SavvyCAN-inspired: import, DBC decode, sniffer, diff) ---
+
+export type OfflineCaptureFormat = "candump" | "vector_asc" | "crtd" | "gvret_csv";
+
+export interface DecodedSignalView {
+  name: string;
+  value: number;
+  unit: string;
+  label: string | null;
+}
+
+export interface OfflineFrameView {
+  timestamp_micros: number;
+  channel: string;
+  id: number;
+  extended: boolean;
+  fd: boolean;
+  kind: string;
+  data_hex: string;
+  direction: string | null;
+  message: string | null;
+  signals: DecodedSignalView[];
+}
+
+export interface OfflineIdStat {
+  id: number;
+  extended: boolean;
+  count: number;
+  avg_period_micros: number | null;
+}
+
+export interface OfflineChangeMap {
+  id: number;
+  extended: boolean;
+  observations: number;
+  byte_changed: boolean[];
+  distinct_values: number[];
+}
+
+export interface CaptureImport {
+  format: string;
+  frame_count: number;
+  truncated: boolean;
+  dbc_message_count: number;
+  unique_ids: number;
+  duration_micros: number;
+  frames_per_second: number;
+  frames: OfflineFrameView[];
+  per_id: OfflineIdStat[];
+  change_maps: OfflineChangeMap[];
+}
+
+export interface CaptureDiffView {
+  only_in_first: number[];
+  only_in_second: number[];
+  changed: number[];
+}
+
+export interface ImportAutomotiveCaptureInput {
+  capturePath: string;
+  format: OfflineCaptureFormat;
+  dbcPath?: string | null;
+}
+
+export function importAutomotiveCapture(
+  input: ImportAutomotiveCaptureInput,
+  transport: Transport = getTransport(),
+): Promise<CaptureImport> {
+  return transport.invoke<CaptureImport>("automotive_import_capture", {
+    capturePath: input.capturePath,
+    format: input.format,
+    dbcPath: input.dbcPath ?? null,
+  });
+}
+
+export interface DiffAutomotiveCapturesInput {
+  firstPath: string;
+  secondPath: string;
+  format: OfflineCaptureFormat;
+}
+
+export function diffAutomotiveCaptures(
+  input: DiffAutomotiveCapturesInput,
+  transport: Transport = getTransport(),
+): Promise<CaptureDiffView> {
+  return transport.invoke<CaptureDiffView>("automotive_diff_captures", {
+    firstPath: input.firstPath,
+    secondPath: input.secondPath,
+    format: input.format,
+  });
+}
+
+export const OFFLINE_CAPTURE_FORMAT_OPTIONS: { value: OfflineCaptureFormat; label: string }[] = [
+  { value: "candump", label: "candump (SocketCAN)" },
+  { value: "vector_asc", label: "Vector ASC" },
+  { value: "crtd", label: "CRTD (OVMS)" },
+  { value: "gvret_csv", label: "GVRET CSV" },
+];
