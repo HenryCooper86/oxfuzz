@@ -120,7 +120,13 @@ describe("automotive surface boundaries", () => {
       "<AutomotiveSignalGraph",
     );
     // The graph is a self-contained inline-SVG chart (no external chart lib / CDN).
-    expect(source("../components/AutomotiveSignalGraph.tsx")).toContain("<svg");
+    const graph = source("../components/AutomotiveSignalGraph.tsx");
+    expect(graph).toContain("<svg");
+    // Multi-series overlay uses a validated categorical palette (theme-aware CSS
+    // vars) plus dash-pattern secondary encoding, so identity is never color-alone.
+    expect(graph).toContain("--chart-series-1");
+    expect(graph).toContain("SERIES_DASH");
+    expect(source("../styles/index.css")).toContain("--chart-series-1:");
     expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveFrameSender");
     const sender = source("../components/AutomotiveFrameSender.tsx");
     // The sender builds a replay plan and reuses the replay path + confirmation.
