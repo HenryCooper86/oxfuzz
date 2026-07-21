@@ -316,20 +316,24 @@ require a stronger boundary.
 The `automotive-scapy` feature adds sandboxed automotive capture analysis,
 deterministic mutation and replay-plan generation, retained operation evidence,
 state-signature corpus promotion, and evidence-backed campaign reporting. It is
-compile-time optional and also disabled at runtime by default. The Rust
-application never imports Scapy or runs host Python; Scapy 2.7.0 and optional
-`python-can` support live in a separately built GPL-2.0 sidecar image.
+enabled by default in the product crates (CLI, web, desktop) and turned on at
+runtime out of the box, so the CAN/UDS workspace is always present; build with
+`--no-default-features` to drop it. Physical-bench access stays disabled and
+approval-gated regardless. The Rust application never imports Scapy or runs host
+Python; Scapy 2.7.0 and optional `python-can` support live in a separately built
+GPL-2.0 sidecar image.
 
 ```bash
 # Build the separately distributed, pinned sidecar image.
 ./scripts/build-scapy-sidecar.sh
 
-# Build the CLI with the optional transport contract.
-cargo build -p hf-cli --features automotive-scapy
+# The transport contract is compiled in by default (use --no-default-features
+# to exclude it).
+cargo build -p hf-cli
 
-# Inspect policy, then explicitly enable it.
+# The subsystem is enabled by default; inspect the active policy (and
+# `automotive disable` if you need to turn it off).
 target/debug/oxfuzz automotive settings
-target/debug/oxfuzz automotive enable
 
 # Offline capture analysis never contacts a CAN interface.
 target/debug/oxfuzz automotive analyze /path/to/project \

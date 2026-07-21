@@ -382,9 +382,11 @@ async fn automotive_config_endpoint_round_trips_only_the_typed_policy() {
         .await
         .unwrap();
     let mut policy: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(policy["enabled"], false);
+    // The subsystem is enabled by default; physical bench stays off. Toggle the
+    // master switch to prove the typed policy round-trips a change back out.
+    assert_eq!(policy["enabled"], true);
     assert_eq!(policy["physical_bench"]["enabled"], false);
-    policy["enabled"] = serde_json::Value::Bool(true);
+    policy["enabled"] = serde_json::Value::Bool(false);
 
     let response = app
         .oneshot(
@@ -404,7 +406,7 @@ async fn automotive_config_endpoint_round_trips_only_the_typed_policy() {
         .await
         .unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(saved["enabled"], true);
+    assert_eq!(saved["enabled"], false);
     let raw = std::fs::read_to_string(directory.path().join("oxfuzz.toml")).unwrap();
     assert!(raw.contains("coverage_stagnation_secs = 77"));
     assert!(raw.contains("[automotive]"));

@@ -14,20 +14,20 @@ describe("automotive surface boundaries", () => {
 
   it("exposes automotive navigation and a dedicated typed settings tab", () => {
     expect(source("../types/index.ts")).toContain('| "automotive"');
-    expect(source("../components/Sidebar.tsx")).toContain('view: "automotive"');
+    expect(source("../components/Sidebar.tsx")).toContain('onNavigate("automotive")');
     expect(source("../components/settings/SettingsView.tsx")).toContain(
       "<AutomotiveSettingsTab",
     );
   });
 
-  it("gates the automotive nav entry behind the enabled subsystem, like DefectDojo", () => {
+  it("keeps the automotive nav entry always present and visually prominent", () => {
     const sidebar = source("../components/Sidebar.tsx");
-    // The automotive entry must be conditional on the subsystem being enabled --
-    // a permanent slot is noise for the many projects that never touch a bus.
-    // It mirrors the DefectDojo gate and lives under the Integrations group.
-    expect(sidebar).toContain("useAutomotive");
-    expect(sidebar).toMatch(/automotiveOn\s*&&/);
-    expect(sidebar).toContain('t("sidebar.integrations")');
+    // Automotive is a first-class capability: it renders unconditionally in its
+    // own labelled, accent-highlighted section and is never hidden behind a
+    // runtime `enabled` toggle the way the optional DefectDojo entry is.
+    expect(sidebar).toContain("AutomotiveNavButton");
+    expect(sidebar).toContain('t("sidebar.vehicle")');
+    expect(sidebar).not.toMatch(/automotiveOn\s*&&/);
   });
 
   it("keeps virtual replay in a confirmed sandbox workflow and physical execution absent", () => {
@@ -56,5 +56,25 @@ describe("automotive surface boundaries", () => {
     expect(workspace).toContain('"save_report_draft"');
     expect(workspace).toContain("<ReportPreview");
     expect(workspace).toContain('"export_markdown"');
+  });
+
+  it("makes the disabled state actionable and handles a feature-absent build", () => {
+    const workspace = source("../views/AutomotiveView.tsx");
+    // The disabled banner enables the subsystem in one click by persisting the
+    // master switch, rather than sending the user off to Settings.
+    expect(workspace).toContain("enableAutomotive");
+    expect(workspace).toContain("setAutomotiveSettings");
+    expect(workspace).toContain('t("automotive.enableAction")');
+    // A build compiled without the automotive feature shows a clean unavailable
+    // state instead of surfacing a raw backend error string.
+    expect(workspace).toContain("isFeatureUnavailable");
+    expect(workspace).toContain('t("automotive.unavailableTitle")');
+  });
+
+  it("polls operation status while a run is still in progress", () => {
+    const workspace = source("../views/AutomotiveView.tsx");
+    expect(workspace).toContain("OPERATIONS_POLL_MS");
+    expect(workspace).toContain("setInterval");
+    expect(workspace).toMatch(/status === "running"/);
   });
 });

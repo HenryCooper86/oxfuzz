@@ -269,7 +269,9 @@ impl Default for AutomotivePhysicalBenchSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AutomotiveSettings {
-    /// Runtime switch independent of the compile-time feature.
+    /// Runtime switch independent of the compile-time feature. Enabled by
+    /// default so the offline/virtual automotive workspace is usable out of the
+    /// box; physical-bench access stays separately gated below.
     pub enabled: bool,
     /// Pinned sandbox image containing the sidecar and Scapy.
     pub sidecar_image: String,
@@ -288,7 +290,7 @@ pub struct AutomotiveSettings {
 impl Default for AutomotiveSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             sidecar_image: "oxfuzz/scapy-automotive:2.7.0".to_owned(),
             allowed_protocols: AUTOMOTIVE_PROTOCOL_IDS
                 .iter()
@@ -3272,10 +3274,13 @@ product_name = "old-product"
     }
 
     #[test]
-    fn automotive_defaults_are_disabled_and_exclude_physical_access() {
+    fn automotive_defaults_are_enabled_but_exclude_physical_access() {
         let settings = AutomotiveSettings::default();
 
-        assert!(!settings.enabled);
+        // The subsystem is on by default (offline + virtual modes) so the
+        // workspace is present out of the box, but physical-bench access stays
+        // off and approval-gated regardless of this master switch.
+        assert!(settings.enabled);
         assert_eq!(settings.sidecar_image, "oxfuzz/scapy-automotive:2.7.0");
         assert!(settings
             .allowed_modes

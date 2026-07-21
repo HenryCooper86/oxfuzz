@@ -55,7 +55,7 @@ max_duration_secs = 7200
 # runtime switch must both be enabled. The sidecar executes only in hf-runtime;
 # offline PCAP and isolated vcan are the normal modes.
 [automotive]
-enabled = false
+enabled = true
 sidecar_image = "oxfuzz/scapy-automotive:2.7.0"
 allowed_protocols = ["can", "can_fd", "iso_tp", "uds", "gmlan", "some_ip", "some_ip_sd", "do_ip", "obd", "ccp", "xcp", "bmw_hsfz", "sec_oc"]
 allowed_modes = ["offline_pcap", "virtual_can"]

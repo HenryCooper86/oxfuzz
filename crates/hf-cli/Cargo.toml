@@ -5,8 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "CLI + TUI for oxfuzz"
 
+# Automotive ships on by default so the CAN/UDS workspace is a first-class part
+# of every build (including `cargo build`/dev). Build with `--no-default-features`
+# to drop the pure-Rust automotive dependency and use the feature-absent paths.
 [features]
-default = []
+default = ["automotive-scapy"]
 automotive-scapy = ["hf-service/automotive-scapy", "hf-web/automotive-scapy"]
 
 [[bin]]
