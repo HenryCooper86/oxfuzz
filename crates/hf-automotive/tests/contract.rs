@@ -5,10 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use hf_automotive::{
     canonical_transcript_hash, AnalyzeCaptureRequest, ArtifactRef, AutomotiveCapability,
     AutomotiveError, AutomotiveErrorCode, AutomotiveMode, AutomotiveProtocol, AutomotiveRequest,
-    AutomotiveResult, CapabilityReport, CapabilityRequest, ContractError, MessageDirection,
-    ModeConfig, MutationRequest, MutationResult, OperationLimits, ProtocolMessage, ReplayAction,
-    ReplayPlan, ReplayPlanRequest, ReplayRequest, ReplayResult, ReplayStep, ResponseEnvelope,
-    SchemaEnvelope, StateSignature, TranscriptEvent, Validate, AUTOMOTIVE_SCHEMA_VERSION,
+    AutomotiveResult, CapabilityReport, CapabilityRequest, ContractError, LiveMonitorRequest,
+    MessageDirection, ModeConfig, MutationRequest, MutationResult, OperationLimits,
+    ProtocolMessage, ReplayAction, ReplayPlan, ReplayPlanRequest, ReplayRequest, ReplayResult,
+    ReplayStep, ResponseEnvelope, SchemaEnvelope, StateSignature, TranscriptEvent, Validate,
+    AUTOMOTIVE_SCHEMA_VERSION,
 };
 
 fn limits() -> OperationLimits {
@@ -592,4 +593,36 @@ fn response_transcript_hash_must_match_the_typed_result() {
             ..
         })
     ));
+}
+
+#[test]
+fn live_monitor_requires_a_live_interface_and_names_its_operation() {
+    // Offline mode is rejected: a live capture needs a real interface.
+    let offline = LiveMonitorRequest {
+        protocol: AutomotiveProtocol::Can,
+        mode: ModeConfig::OfflinePcap,
+        limits: limits(),
+    };
+    assert!(matches!(
+        offline.validate(),
+        Err(ContractError::InvalidField {
+            field: "live_monitor.mode",
+            ..
+        })
+    ));
+
+    // Virtual CAN is accepted.
+    let live = LiveMonitorRequest {
+        protocol: AutomotiveProtocol::Can,
+        mode: ModeConfig::VirtualCan {
+            interface: "vcan0".to_owned(),
+        },
+        limits: limits(),
+    };
+    live.validate().expect("virtual live monitor is valid");
+
+    // The request serializes to the `live_monitor` operation name that the
+    // sidecar dispatches on.
+    let value = serde_json::to_value(AutomotiveRequest::LiveMonitor(live)).unwrap();
+    assert_eq!(value["operation"], "live_monitor");
 }
