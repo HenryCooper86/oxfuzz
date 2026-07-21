@@ -77,4 +77,17 @@ describe("automotive surface boundaries", () => {
     expect(workspace).toContain("setInterval");
     expect(workspace).toMatch(/status === "running"/);
   });
+
+  it("wires an offline analysis workspace: import, DBC decode, sniffer, and diff", () => {
+    const lib = source("../lib/automotive.ts");
+    expect(lib).toContain('"automotive_import_capture"');
+    expect(lib).toContain('"automotive_diff_captures"');
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveOfflineWorkspace");
+    const offline = source("../components/AutomotiveOfflineWorkspace.tsx");
+    expect(offline).toContain("importAutomotiveCapture");
+    expect(offline).toContain("diffAutomotiveCaptures");
+    const commands = source("../../src-tauri/src/commands.rs");
+    expect(commands).toContain("pub fn automotive_import_capture");
+    expect(commands).toContain("pub fn automotive_diff_captures");
+  });
 });

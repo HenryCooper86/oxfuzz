@@ -2616,6 +2616,54 @@ pub async fn generate_automotive_report(
     }
 }
 
+/// Import and analyze an operator-selected capture file offline (no sidecar):
+/// parse frames, compute bus statistics and the per-byte sniffer change map, and
+/// optionally decode signals with a supplied DBC database.
+#[tauri::command]
+pub fn automotive_import_capture(
+    state: tauri::State<'_, crate::state::AppState>,
+    capture_path: PathBuf,
+    format: String,
+    dbc_path: Option<PathBuf>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let import = state
+            .container
+            .automotive_import_capture(&capture_path, &format, dbc_path.as_deref())
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(import).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, capture_path, format, dbc_path);
+        Err(automotive_feature_unavailable())
+    }
+}
+
+/// Compare two operator-selected captures of the same format offline.
+#[tauri::command]
+pub fn automotive_diff_captures(
+    state: tauri::State<'_, crate::state::AppState>,
+    first_path: PathBuf,
+    second_path: PathBuf,
+    format: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let diff = state
+            .container
+            .automotive_diff_captures(&first_path, &second_path, &format)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(diff).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, first_path, second_path, format);
+        Err(automotive_feature_unavailable())
+    }
+}
+
 #[cfg(not(feature = "automotive-scapy"))]
 fn automotive_feature_unavailable() -> String {
     "automotive Scapy support is not included in this application build".to_owned()
