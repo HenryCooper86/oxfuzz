@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import re
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -377,6 +378,101 @@ class PythonCanTransport:
                 field="payload",
             )
         return payload
+
+    def sniff(self, max_events: int) -> list[dict[str, object]]:
+        """Passively receive up to ``max_events`` frames within the bounded
+        wall-clock window, returning one normalized record per frame. This is a
+        read-only capture: it never transmits."""
+        bus = self._open_bus()
+        deadline = time.monotonic() + self._config["limits"]["max_duration_ms"] / 1_000
+        payload_limit = self._config["limits"]["max_payload_bytes"]
+        frames: list[dict[str, object]] = []
+        while len(frames) < max_events and time.monotonic() < deadline:
+            try:
+                received = bus.recv(timeout=self._io_timeout)
+            except Exception as error:
+                raise SidecarError(
+                    "transport_error",
+                    "CAN frame receive failed",
+                    retryable=False,
+                    details={"exception_type": type(error).__name__},
+                ) from error
+            if received is None:
+                break
+            channel = getattr(received, "channel", None)
+            if channel is not None and channel != self._interface:
+                raise SidecarError(
+                    "interface_not_allowed",
+                    "received CAN frame came from a different interface",
+                    field="interface",
+                )
+            data = getattr(received, "data", b"")
+            payload = bytes(data) if isinstance(data, bytes | bytearray) else b""
+            arbitration = getattr(received, "arbitration_id", None)
+            timestamp = getattr(received, "timestamp", None)
+            frames.append(
+                {
+                    "arbitration_id": int(arbitration)
+                    if isinstance(arbitration, int) and not isinstance(arbitration, bool)
+                    else 0,
+                    "is_extended_id": bool(getattr(received, "is_extended_id", False)),
+                    "payload_hex": payload[:payload_limit].hex(),
+                    "timestamp": float(timestamp)
+                    if isinstance(timestamp, int | float) and not isinstance(timestamp, bool)
+                    else 0.0,
+                }
+            )
+        return frames
+
+    def probe(self, request_id: int, response_id: int, payload: bytes) -> bytes | None:
+        """Send one short UDS request as an ISO-TP single frame and return the
+        first CAN frame received on ``response_id`` within the timeout, or
+        ``None`` if the ECU stays silent. Read-only in intent: the caller only
+        ever supplies allowlisted read-only diagnostic requests."""
+        can_module = self._load_can_module()
+        bus = self._open_bus()
+        # ISO-TP single frame: PCI byte (length in low nibble) then the payload.
+        frame = bytes([len(payload) & 0x0F]) + payload
+        try:
+            outbound = can_module.Message(
+                arbitration_id=request_id,
+                data=frame,
+                is_extended_id=request_id > _STANDARD_CAN_ID_MAX,
+                is_fd=False,
+            )
+            bus.send(outbound, timeout=self._io_timeout)
+        except Exception as error:
+            raise SidecarError(
+                "transport_error",
+                "UDS probe transmission failed",
+                retryable=False,
+                details={"exception_type": type(error).__name__},
+            ) from error
+        deadline = time.monotonic() + self._io_timeout
+        while time.monotonic() < deadline:
+            try:
+                received = bus.recv(timeout=self._io_timeout)
+            except Exception as error:
+                raise SidecarError(
+                    "transport_error",
+                    "UDS probe receive failed",
+                    retryable=False,
+                    details={"exception_type": type(error).__name__},
+                ) from error
+            if received is None:
+                break
+            if getattr(received, "arbitration_id", None) != response_id:
+                continue
+            channel = getattr(received, "channel", None)
+            if channel is not None and channel != self._interface:
+                raise SidecarError(
+                    "interface_not_allowed",
+                    "received CAN frame came from a different interface",
+                    field="interface",
+                )
+            data = getattr(received, "data", b"")
+            return bytes(data) if isinstance(data, bytes | bytearray) else b""
+        return None
 
 
 def create_configured_transport(
