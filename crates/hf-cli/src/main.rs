@@ -321,6 +321,45 @@ enum AutomotiveOp {
         #[arg(long)]
         capture: PathBuf,
     },
+    /// Import and analyze a CAN log offline (`candump`, `vector_asc`, `crtd`,
+    /// `gvret_csv`), optionally decoding signals with a DBC database. Prints JSON.
+    Import {
+        capture: PathBuf,
+        #[arg(long, default_value = "candump")]
+        format: String,
+        #[arg(long)]
+        dbc: Option<PathBuf>,
+    },
+    /// Compare two CAN logs of the same format offline and report per-id
+    /// differences. Prints JSON.
+    Diff {
+        first: PathBuf,
+        second: PathBuf,
+        #[arg(long, default_value = "candump")]
+        format: String,
+    },
+    /// Run a bounded, read-only live capture ("monitor"/sniffer) on an
+    /// allowlisted virtual CAN interface. Retains the captured evidence.
+    Monitor {
+        project: PathBuf,
+        #[arg(long, default_value = "vcan0")]
+        interface: String,
+        #[arg(long, default_value = "can")]
+        protocol: String,
+    },
+    /// Run a read-only UDS ECU/service discovery scan on a virtual CAN
+    /// interface. Only read-only discovery services are permitted. Prints JSON.
+    Scan {
+        project: PathBuf,
+        #[arg(long, default_value = "vcan0")]
+        interface: String,
+        /// Comma-separated request arbitration ids (hex `0x` accepted).
+        #[arg(long, default_value = "0x7e0")]
+        request_ids: String,
+        /// Comma-separated read-only service ids (hex `0x` accepted).
+        #[arg(long, default_value = "0x3e,0x22")]
+        services: String,
+    },
     /// Generate a deterministic field-aware mutation artifact.
     Mutate {
         project: PathBuf,
@@ -1383,6 +1422,23 @@ async fn cmd_report(
     Ok(())
 }
 
+/// Parse a comma-separated list of unsigned integers, each decimal or `0x` hex.
+#[cfg(feature = "automotive-scapy")]
+fn parse_u32_list(input: &str) -> anyhow::Result<Vec<u32>> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .strip_prefix("0x")
+                .or_else(|| token.strip_prefix("0X"))
+                .map_or_else(|| token.parse::<u32>(), |hex| u32::from_str_radix(hex, 16))
+                .map_err(|_| anyhow::anyhow!("invalid integer '{token}'"))
+        })
+        .collect()
+}
+
 #[cfg(feature = "automotive-scapy")]
 fn parse_automotive_protocol(
     value: &str,
@@ -1455,6 +1511,71 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                     command: AutomotiveCommand::AnalyzeCapture {
                         protocol: parse_automotive_protocol(&protocol)?,
                         capture_path: capture,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Import {
+            capture,
+            format,
+            dbc,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let import = container.automotive_import_capture(&capture, &format, dbc.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&import)?);
+        }
+        AutomotiveOp::Diff {
+            first,
+            second,
+            format,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let diff = container.automotive_diff_captures(&first, &second, &format)?;
+            println!("{}", serde_json::to_string_pretty(&diff)?);
+        }
+        AutomotiveOp::Monitor {
+            project,
+            interface,
+            protocol,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::LiveMonitor {
+                        mode: hf_service::automotive::ModeConfig::VirtualCan { interface },
+                        protocol: parse_automotive_protocol(&protocol)?,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Scan {
+            project,
+            interface,
+            request_ids,
+            services,
+        } => {
+            let request_ids = parse_u32_list(&request_ids)?;
+            let services = parse_u32_list(&services)?
+                .into_iter()
+                .map(|value| {
+                    u8::try_from(value)
+                        .map_err(|_| anyhow::anyhow!("service id out of range: {value}"))
+                })
+                .collect::<anyhow::Result<Vec<u8>>>()?;
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::ScanUds {
+                        mode: hf_service::automotive::ModeConfig::VirtualCan { interface },
+                        protocol: parse_automotive_protocol("uds")?,
+                        request_ids,
+                        services,
                     },
                     approval: None,
                 })

@@ -488,6 +488,11 @@ fn automotive_routes() -> Router<AppState> {
             post(automotive_analyze_capture),
         )
         .route("/automotive/analyze", post(automotive_analyze_capture))
+        .route(
+            "/automotive/import-capture",
+            post(automotive_import_capture),
+        )
+        .route("/automotive/diff-captures", post(automotive_diff_captures))
         .route("/automotive/mutations", post(automotive_generate_mutations))
         .route(
             "/automotive/replay-plan",
@@ -2440,6 +2445,73 @@ async fn automotive_analyze_capture(
             approval: None,
         })
         .await
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveImportRequest {
+    project_root: PathBuf,
+    format: String,
+    capture_path: PathBuf,
+    dbc_path: Option<PathBuf>,
+}
+
+/// Import and analyze a capture offline. Both the capture and the optional DBC
+/// must resolve inside the approved project, as with other document routes.
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_import_capture(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveImportRequest>,
+) -> ApiResult<hf_service::automotive_offline::CaptureImport> {
+    let (_, capture_path) = state
+        .security
+        .approve_document(&request.project_root, &request.capture_path)
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    let dbc_path = match &request.dbc_path {
+        Some(path) => Some(
+            state
+                .security
+                .approve_document(&request.project_root, path)
+                .map_err(map_err(StatusCode::FORBIDDEN))?
+                .1,
+        ),
+        None => None,
+    };
+    state
+        .container
+        .automotive_import_capture(&capture_path, &request.format, dbc_path.as_deref())
+        .map(Json)
+        .map_err(classified_api_error)
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[derive(Debug, Deserialize)]
+struct AutomotiveDiffRequest {
+    project_root: PathBuf,
+    format: String,
+    first_path: PathBuf,
+    second_path: PathBuf,
+}
+
+/// Compare two captures offline; both must resolve inside the approved project.
+#[cfg(feature = "automotive-scapy")]
+async fn automotive_diff_captures(
+    State(state): State<AppState>,
+    Json(request): Json<AutomotiveDiffRequest>,
+) -> ApiResult<hf_service::automotive_offline::CaptureDiffView> {
+    let (_, first_path) = state
+        .security
+        .approve_document(&request.project_root, &request.first_path)
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    let (_, second_path) = state
+        .security
+        .approve_document(&request.project_root, &request.second_path)
+        .map_err(map_err(StatusCode::FORBIDDEN))?;
+    state
+        .container
+        .automotive_diff_captures(&first_path, &second_path, &request.format)
         .map(Json)
         .map_err(classified_api_error)
 }
