@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use hf_automotive::{
     AnalyzeCaptureRequest, ArtifactRef, AutomotiveRequest, CapabilityRequest, LiveMonitorRequest,
     MutationRequest, OperationLimits, ReplayPlanRequest, ReplayRequest, ResponseEnvelope,
-    SchemaEnvelope, Validate,
+    SchemaEnvelope, UdsScanRequest, Validate,
 };
 use hf_core::error::ClassifiedError;
 use hf_core::runtime::{
@@ -109,6 +109,17 @@ pub enum AutomotiveCommand {
         /// Protocol decoder for captured frames.
         protocol: AutomotiveProtocol,
     },
+    /// Perform a read-only UDS ECU/service discovery scan.
+    ScanUds {
+        /// Exact virtual or physical interface configuration.
+        mode: ModeConfig,
+        /// Protocol decoder (typically UDS).
+        protocol: AutomotiveProtocol,
+        /// Request arbitration ids to probe.
+        request_ids: Vec<u32>,
+        /// Read-only diagnostic service ids to probe.
+        services: Vec<u8>,
+    },
 }
 
 impl AutomotiveCommand {
@@ -118,14 +129,17 @@ impl AutomotiveCommand {
             Self::AnalyzeCapture { protocol, .. }
             | Self::GenerateMutations { protocol, .. }
             | Self::BuildReplayPlan { protocol, .. }
-            | Self::LiveMonitor { protocol, .. } => Some(*protocol),
+            | Self::LiveMonitor { protocol, .. }
+            | Self::ScanUds { protocol, .. } => Some(*protocol),
             Self::ExecuteReplay { plan, .. } => Some(plan.protocol),
         }
     }
 
     fn execution_mode(&self) -> AutomotiveMode {
         match self {
-            Self::ExecuteReplay { mode, .. } | Self::LiveMonitor { mode, .. } => mode.mode(),
+            Self::ExecuteReplay { mode, .. }
+            | Self::LiveMonitor { mode, .. }
+            | Self::ScanUds { mode, .. } => mode.mode(),
             Self::Capabilities
             | Self::AnalyzeCapture { .. }
             | Self::GenerateMutations { .. }
@@ -141,6 +155,7 @@ impl AutomotiveCommand {
             Self::BuildReplayPlan { .. } => "build_replay_plan",
             Self::ExecuteReplay { .. } => "execute_replay",
             Self::LiveMonitor { .. } => "live_monitor",
+            Self::ScanUds { .. } => "scan_uds",
         }
     }
 }
@@ -1017,6 +1032,11 @@ fn automotive_result_summary(result: &AutomotiveResult) -> String {
             },
             replay.state_signatures.len()
         ),
+        AutomotiveResult::UdsScan(scan) => format!(
+            "{} discovered ECU(s) on {}",
+            scan.ecus.len(),
+            mode_id(scan.mode)
+        ),
     }
 }
 
@@ -1026,7 +1046,8 @@ fn automotive_result_complete(result: &AutomotiveResult) -> bool {
         AutomotiveResult::Capabilities(_)
         | AutomotiveResult::CaptureAnalysis(_)
         | AutomotiveResult::Mutations(_)
-        | AutomotiveResult::ReplayPlan(_) => true,
+        | AutomotiveResult::ReplayPlan(_)
+        | AutomotiveResult::UdsScan(_) => true,
     }
 }
 
@@ -1139,7 +1160,8 @@ fn result_state_signatures(result: &AutomotiveResult) -> &[StateSignature] {
         AutomotiveResult::Replay(result) => &result.state_signatures,
         AutomotiveResult::Capabilities(_)
         | AutomotiveResult::Mutations(_)
-        | AutomotiveResult::ReplayPlan(_) => &[],
+        | AutomotiveResult::ReplayPlan(_)
+        | AutomotiveResult::UdsScan(_) => &[],
     }
 }
 
@@ -1157,10 +1179,14 @@ fn result_output_artifact<'a>(
             .artifacts
             .iter()
             .find(|artifact| artifact.artifact_id == artifact_id),
+        AutomotiveResult::UdsScan(result) if result.transcript.artifact_id == artifact_id => {
+            Some(&result.transcript)
+        }
         AutomotiveResult::Capabilities(_)
         | AutomotiveResult::CaptureAnalysis(_)
         | AutomotiveResult::ReplayPlan(_)
-        | AutomotiveResult::Replay(_) => None,
+        | AutomotiveResult::Replay(_)
+        | AutomotiveResult::UdsScan(_) => None,
     }
 }
 
@@ -1210,7 +1236,8 @@ fn retained_request_input(
         AutomotiveRequest::BuildReplayPlan(request) => Some(request.source),
         AutomotiveRequest::Capabilities(_)
         | AutomotiveRequest::ExecuteReplay(_)
-        | AutomotiveRequest::LiveMonitor(_) => None,
+        | AutomotiveRequest::LiveMonitor(_)
+        | AutomotiveRequest::ScanUds(_) => None,
     }
     .ok_or_else(|| {
         ClassifiedError::Storage(format!(
@@ -1794,6 +1821,20 @@ fn preflight(
                 limits,
             })
         }
+        AutomotiveCommand::ScanUds {
+            mode,
+            request_ids,
+            services,
+            ..
+        } => {
+            validate_uds_scan_policy(mode, services, settings)?;
+            AutomotiveRequest::ScanUds(UdsScanRequest {
+                mode: mode.clone(),
+                request_ids: request_ids.clone(),
+                services: services.clone(),
+                limits,
+            })
+        }
     };
     domain_request
         .validate()
@@ -2027,7 +2068,7 @@ fn require_matching_result(
         ) | (
             AutomotiveRequest::ExecuteReplay(_),
             AutomotiveResult::Replay(_)
-        )
+        ) | (AutomotiveRequest::ScanUds(_), AutomotiveResult::UdsScan(_))
     );
     if matches {
         Ok(())
@@ -2045,6 +2086,7 @@ fn verify_result_artifacts(
 ) -> Result<(), ClassifiedError> {
     let artifacts = match result {
         AutomotiveResult::CaptureAnalysis(analysis) => std::slice::from_ref(&analysis.transcript),
+        AutomotiveResult::UdsScan(scan) => std::slice::from_ref(&scan.transcript),
         AutomotiveResult::Mutations(mutations) => mutations.artifacts.as_slice(),
         AutomotiveResult::Capabilities(_)
         | AutomotiveResult::ReplayPlan(_)
@@ -2289,6 +2331,57 @@ fn validate_live_monitor_policy(
     }
 }
 
+/// Diagnostic service ids a discovery scan may probe. These are read-only and
+/// non-actuating: `TesterPresent` (0x3E), `DiagnosticSessionControl` (0x10 --
+/// the sidecar only ever probes the default session), `ReadDataByIdentifier`
+/// (0x22), `ReadDTCInformation` (0x19), and `ReadEcuIdentification` (0x1A).
+/// Every state-changing, actuating, security, memory, or programming service is
+/// denied so a scan can never reset, unlock, write, flash, or actuate an ECU.
+const READ_ONLY_UDS_SERVICES: &[u8] = &[0x3E, 0x10, 0x22, 0x19, 0x1A];
+
+/// Validate a UDS discovery scan. Read-only by construction: only virtual CAN is
+/// admitted (physical bench is deferred, as for the live monitor) and every
+/// probed service id must be on the read-only discovery allowlist.
+fn validate_uds_scan_policy(
+    mode: &ModeConfig,
+    services: &[u8],
+    settings: &AutomotiveSettings,
+) -> Result<(), ClassifiedError> {
+    match mode {
+        ModeConfig::OfflinePcap => {
+            return Err(ClassifiedError::Validation(
+                "offline capture mode cannot run a UDS scan".to_owned(),
+            ));
+        }
+        ModeConfig::VirtualCan { interface } => {
+            if !settings
+                .virtual_interfaces
+                .iter()
+                .any(|allowed| allowed == interface)
+            {
+                return Err(ClassifiedError::Validation(format!(
+                    "virtual CAN interface '{interface}' is not allowlisted"
+                )));
+            }
+        }
+        ModeConfig::PhysicalBench { .. } => {
+            return Err(ClassifiedError::Validation(
+                "physical-bench UDS scan is not yet supported; use a virtual CAN interface"
+                    .to_owned(),
+            ));
+        }
+    }
+    if let Some(denied) = services
+        .iter()
+        .find(|sid| !READ_ONLY_UDS_SERVICES.contains(sid))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "UDS scan service 0x{denied:02X} is not a read-only discovery service and is denied"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_physical_policy(
     interface: &str,
     approval_id: &str,
@@ -2429,7 +2522,8 @@ fn build_execution_config(
     let (mode, protocol, plan): (&ModeConfig, AutomotiveProtocol, Option<&ReplayPlan>) =
         match command {
             AutomotiveCommand::ExecuteReplay { mode, plan } => (mode, plan.protocol, Some(plan)),
-            AutomotiveCommand::LiveMonitor { mode, protocol } => (mode, *protocol, None),
+            AutomotiveCommand::LiveMonitor { mode, protocol }
+            | AutomotiveCommand::ScanUds { mode, protocol, .. } => (mode, *protocol, None),
             _ => return Ok(None),
         };
     // Plan-derived send allowlists (validated as a side effect). A live monitor
@@ -2458,21 +2552,39 @@ fn build_execution_config(
     // single-use approval is consumed and the sidecar then rejects on a scope mismatch,
     // and the sidecar is not an independent policy check. Other modes carry the
     // plan-derived sets (there is no physical policy allowlist for them).
-    let (arbitration_id_allowlist, service_allowlist): (Vec<u32>, Vec<u8>) = match mode {
-        ModeConfig::PhysicalBench { .. } => {
-            let mut arbitration = settings.physical_bench.arbitration_ids.clone();
-            arbitration.sort_unstable();
-            arbitration.dedup();
-            let mut uds = settings.physical_bench.uds_services.clone();
-            uds.sort_unstable();
-            uds.dedup();
-            (arbitration, uds)
-        }
-        _ => (
-            plan_arbitration_ids.iter().copied().collect(),
-            plan_services.iter().copied().collect(),
-        ),
-    };
+    let (arbitration_id_allowlist, service_allowlist): (Vec<u32>, Vec<u8>) =
+        if let AutomotiveCommand::ScanUds {
+            request_ids,
+            services,
+            ..
+        } = command
+        {
+            // A scan carries its already read-only-validated probe sets so the
+            // sidecar enforces the same request-id and service allowlists.
+            let mut ids = request_ids.clone();
+            ids.sort_unstable();
+            ids.dedup();
+            let mut svc = services.clone();
+            svc.sort_unstable();
+            svc.dedup();
+            (ids, svc)
+        } else {
+            match mode {
+                ModeConfig::PhysicalBench { .. } => {
+                    let mut arbitration = settings.physical_bench.arbitration_ids.clone();
+                    arbitration.sort_unstable();
+                    arbitration.dedup();
+                    let mut uds = settings.physical_bench.uds_services.clone();
+                    uds.sort_unstable();
+                    uds.dedup();
+                    (arbitration, uds)
+                }
+                _ => (
+                    plan_arbitration_ids.iter().copied().collect(),
+                    plan_services.iter().copied().collect(),
+                ),
+            }
+        };
     let mut value = serde_json::json!({
         "mode": mode_id(mode.mode()),
         "protocol": protocol_id(protocol),
@@ -2581,7 +2693,7 @@ mod tests {
         ArtifactRef, AutomotiveError, AutomotiveErrorCode, AutomotiveMode, AutomotiveProtocol,
         AutomotiveResult, CaptureAnalysisResult, ModeConfig, MutationResult, OperationLimits,
         ProtocolMessage, ReplayAction, ReplayPlan, ReplayResult, ReplayStep, ResponseEnvelope,
-        Sha256Digest, StateSignature,
+        Sha256Digest, StateSignature, UdsEcu, UdsScanResult, UdsService,
     };
     use hf_core::error::ClassifiedError;
     use hf_core::provider::{
@@ -3409,6 +3521,111 @@ mod tests {
             .await
             .unwrap_err();
         assert!(runtime.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uds_scan_denies_dangerous_services_before_any_runtime_call() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, _capture) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        let runtime = Arc::new(RecordingRuntime::default());
+        let (service, _store) = service(Arc::clone(&runtime), temp.path()).await;
+        let request = AutomotiveOperationRequest {
+            project_root: project,
+            command: AutomotiveCommand::ScanUds {
+                mode: ModeConfig::VirtualCan {
+                    interface: "vcan0".to_owned(),
+                },
+                protocol: AutomotiveProtocol::Uds,
+                request_ids: vec![0x7E0],
+                // 0x27 SecurityAccess is a dangerous, non-read-only service.
+                services: vec![0x22, 0x27],
+            },
+            approval: None,
+        };
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        let error = service
+            .execute_automotive_with_context(request, settings, &workspace)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("0x27"));
+        assert!(runtime.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uds_scan_virtual_can_dispatches_read_only_service_allowlist() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, _capture) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        let (transcript, transcript_artifact, transcript_bytes) = transcript_fixture();
+        let response = ResponseEnvelope::success(
+            "request-placeholder",
+            AutomotiveResult::UdsScan(UdsScanResult {
+                mode: AutomotiveMode::VirtualCan,
+                ecus: vec![UdsEcu {
+                    request_id: 0x7E0,
+                    response_id: 0x7E8,
+                    services: vec![UdsService {
+                        sid: 0x22,
+                        supported: true,
+                        nrc: None,
+                    }],
+                }],
+                transcript: transcript_artifact.clone(),
+                transcript_hash: transcript.clone(),
+            }),
+            Some(transcript),
+        );
+        let runtime = Arc::new(RecordingRuntime::with_response_and_output(
+            &response,
+            &transcript_artifact,
+            &transcript_bytes,
+        ));
+        let (service, _store) = service(Arc::clone(&runtime), temp.path()).await;
+        let request = AutomotiveOperationRequest {
+            project_root: project,
+            command: AutomotiveCommand::ScanUds {
+                mode: ModeConfig::VirtualCan {
+                    interface: "vcan0".to_owned(),
+                },
+                protocol: AutomotiveProtocol::Uds,
+                request_ids: vec![0x7E0],
+                services: vec![0x3E, 0x22],
+            },
+            approval: None,
+        };
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        let outcome = service
+            .execute_automotive_with_context(request, settings, &workspace)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome.result, AutomotiveResult::UdsScan(_)));
+        let calls = runtime.calls();
+        assert_eq!(calls.len(), 1);
+        let (_, limits, options) = &calls[0];
+        assert_eq!(options.network_mode, SandboxNetworkMode::None);
+        assert_eq!(
+            options.capabilities,
+            vec![SandboxCapability::NetAdmin, SandboxCapability::NetRaw]
+        );
+        let config = limits
+            .env
+            .get("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON")
+            .expect("execution config");
+        // The read-only services are carried (sorted) as the sidecar-enforced
+        // allowlist: 0x22=34, 0x3E=62.
+        assert!(config.contains("\"service_allowlist\":[34,62]"));
+        let stdin = String::from_utf8(options.stdin.clone().expect("JSONL stdin")).unwrap();
+        assert!(stdin.contains(r#""operation":"scan_uds""#));
     }
 
     #[tokio::test]
