@@ -2698,6 +2698,42 @@ pub async fn automotive_live_monitor(
     }
 }
 
+/// Run a read-only UDS ECU/service discovery scan on an allowlisted virtual CAN
+/// interface through the sandboxed sidecar. Only read-only discovery services
+/// are permitted; the service denies any dangerous service before dispatch.
+#[tauri::command]
+pub async fn automotive_scan_uds(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    interface: String,
+    request_ids: Vec<u32>,
+    services: Vec<u8>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let outcome = state
+            .container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::ScanUds {
+                    mode: hf_service::automotive::ModeConfig::VirtualCan { interface },
+                    protocol: hf_service::automotive::AutomotiveProtocol::Uds,
+                    request_ids,
+                    services,
+                },
+                approval: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, interface, request_ids, services);
+        Err(automotive_feature_unavailable())
+    }
+}
+
 #[cfg(not(feature = "automotive-scapy"))]
 fn automotive_feature_unavailable() -> String {
     "automotive Scapy support is not included in this application build".to_owned()
