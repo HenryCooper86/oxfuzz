@@ -426,3 +426,28 @@ export const OFFLINE_CAPTURE_FORMAT_OPTIONS: { value: OfflineCaptureFormat; labe
   { value: "crtd", label: "CRTD (OVMS)" },
   { value: "gvret_csv", label: "GVRET CSV" },
 ];
+
+export interface LiveMonitorInput {
+  projectRoot: string;
+  /** Allowlisted virtual CAN interface, e.g. vcan0. */
+  interface: string;
+  protocol?: AutomotiveProtocol;
+}
+
+/**
+ * Run a bounded, read-only live capture on a virtual CAN interface. Returns the
+ * retained capture-analysis operation outcome (transcript + state signatures).
+ */
+export function liveMonitorAutomotive(
+  input: LiveMonitorInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveCaptureAnalysisResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveCaptureAnalysisResult>>(
+    "automotive_live_monitor",
+    {
+      projectRoot: input.projectRoot,
+      interface: input.interface,
+      protocol: input.protocol ?? "can",
+    },
+  );
+}

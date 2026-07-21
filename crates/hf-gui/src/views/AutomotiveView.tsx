@@ -31,6 +31,7 @@ import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
 import { AutomotiveReplayWorkspace } from "../components/AutomotiveReplayWorkspace";
 import { AutomotiveOfflineWorkspace } from "../components/AutomotiveOfflineWorkspace";
+import { AutomotiveLiveMonitor } from "../components/AutomotiveLiveMonitor";
 import {
   Badge,
   Button,
@@ -609,6 +610,15 @@ export function AutomotiveView() {
           projectRoot={activeProject}
           protocol={protocol}
           settings={settings}
+          onOperation={refreshOperations}
+        />
+      )}
+
+      {settings && (
+        <AutomotiveLiveMonitor
+          projectRoot={activeProject}
+          settings={settings}
+          protocol={protocol}
           onOperation={refreshOperations}
         />
       )}

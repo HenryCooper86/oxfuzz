@@ -338,6 +338,15 @@ enum AutomotiveOp {
         #[arg(long, default_value = "candump")]
         format: String,
     },
+    /// Run a bounded, read-only live capture ("monitor"/sniffer) on an
+    /// allowlisted virtual CAN interface. Retains the captured evidence.
+    Monitor {
+        project: PathBuf,
+        #[arg(long, default_value = "vcan0")]
+        interface: String,
+        #[arg(long, default_value = "can")]
+        protocol: String,
+    },
     /// Generate a deterministic field-aware mutation artifact.
     Mutate {
         project: PathBuf,
@@ -1495,6 +1504,24 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             let container = ServiceContainer::bootstrap().await;
             let diff = container.automotive_diff_captures(&first, &second, &format)?;
             println!("{}", serde_json::to_string_pretty(&diff)?);
+        }
+        AutomotiveOp::Monitor {
+            project,
+            interface,
+            protocol,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let outcome = container
+                .execute_automotive(AutomotiveOperationRequest {
+                    project_root: project,
+                    command: AutomotiveCommand::LiveMonitor {
+                        mode: hf_service::automotive::ModeConfig::VirtualCan { interface },
+                        protocol: parse_automotive_protocol(&protocol)?,
+                    },
+                    approval: None,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
         }
         AutomotiveOp::Mutate {
             project,
