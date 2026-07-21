@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Business logic orchestrating discovery, harness, engine, crash, corpus, coverage"
 
+# Automotive on by default; `--no-default-features` drops the optional
+# hf-automotive dependency and compiles the feature-absent orchestration paths.
 [features]
-default = []
+default = ["automotive-scapy"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
 
 [dependencies]

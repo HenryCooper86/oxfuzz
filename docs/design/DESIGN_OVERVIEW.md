@@ -78,9 +78,11 @@ and runs still use `hf-runtime`, and fuzzer network access remains disabled.
 Presentation layers may display those guarantees but must not expose switches
 that imply they can be weakened.
 
-Automotive protocol support follows the same split. The feature-disabled core
-has no Scapy or Python requirement. The optional `hf-automotive` crate owns only
-versioned, serializable protocol contracts and deterministic evidence hashing.
+Automotive protocol support follows the same split. Product crates enable the
+feature by default so the workspace is always present, while a
+`--no-default-features` build has no Scapy or Python requirement. The optional
+`hf-automotive` crate owns only versioned, serializable protocol contracts and
+deterministic evidence hashing.
 The pinned Scapy adapter is a separately packaged runtime component;
 `hf-service` owns runtime enablement, capability negotiation, policy, scoped
 approval, immutable artifact staging, retained evidence, and state-corpus
