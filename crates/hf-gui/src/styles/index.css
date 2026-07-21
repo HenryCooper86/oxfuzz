@@ -28,6 +28,14 @@
   --info: #60a5fa;
   --info-subtle: rgba(96, 165, 250, 0.12);
 
+  /* Chart categorical series -- dataviz-validated (dark steps of the reference
+     categorical ramp; CVD/normal-vision floors pass, contrast >= 3:1). Used with
+     dash-pattern secondary encoding + a legend, so identity is never color-alone. */
+  --chart-series-1: #3987e5;
+  --chart-series-2: #d95926;
+  --chart-series-3: #199e70;
+  --chart-series-4: #c98500;
+
   /* Borders */
   --border: rgba(255, 255, 255, 0.06);
   --border-focus: rgba(255, 255, 255, 0.15);
@@ -79,6 +87,12 @@
   --warning: #c0880a;
   --info: #2563eb;
   --info-subtle: rgba(37, 99, 235, 0.08);
+
+  /* Chart categorical series -- light steps of the reference categorical ramp. */
+  --chart-series-1: #2a78d6;
+  --chart-series-2: #eb6834;
+  --chart-series-3: #1baf7a;
+  --chart-series-4: #eda100;
 
   --border: rgba(0, 0, 0, 0.1);
   --border-focus: rgba(0, 0, 0, 0.22);
