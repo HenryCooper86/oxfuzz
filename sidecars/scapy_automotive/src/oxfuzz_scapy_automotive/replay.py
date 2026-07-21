@@ -38,6 +38,8 @@ class Transport(Protocol):
 
     def receive(self, expected: dict[str, object]) -> bytes: ...
 
+    def sniff(self, max_events: int) -> list[dict[str, object]]: ...
+
 
 class UnavailableTransport:
     """Fail-closed default proving that the sidecar never chooses an interface."""
@@ -52,6 +54,14 @@ class UnavailableTransport:
 
     def receive(self, expected: dict[str, object]) -> bytes:
         del expected
+        raise SidecarError(
+            "transport_unavailable",
+            "no transport was injected by the sandbox runtime",
+            retryable=False,
+        )
+
+    def sniff(self, max_events: int) -> list[dict[str, object]]:
+        del max_events
         raise SidecarError(
             "transport_unavailable",
             "no transport was injected by the sandbox runtime",

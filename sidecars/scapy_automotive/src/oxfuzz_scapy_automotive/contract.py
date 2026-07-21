@@ -35,6 +35,7 @@ _OPERATIONS = frozenset(
         "generate_mutations",
         "build_replay_plan",
         "execute_replay",
+        "live_monitor",
     }
 )
 _LIMIT_KEYS = frozenset(
@@ -691,6 +692,129 @@ def _execute_replay(
     )
 
 
+def _live_monitor(
+    payload: Mapping[str, Any],
+    artifact_store: ArtifactStore,
+    execution_config: Any,
+    transport: Transport,
+) -> tuple[str, dict[str, Any], str]:
+    """Read-only bounded live capture. Never transmits; reuses the capture
+    analysis result so a live capture yields the same evidence as an offline
+    analysis."""
+    _exact_keys(payload, frozenset({"protocol", "mode", "limits"}), "payload")
+    protocol = _protocol(payload["protocol"])
+    wire_mode = _wire_mode(payload["mode"])
+    if wire_mode["mode"] == "offline_pcap":
+        raise SidecarError(
+            "unsupported_mode",
+            "offline capture mode cannot run a live monitor",
+            field="payload.mode",
+        )
+    limits = _limits(payload["limits"])
+    if execution_config is None:
+        raise SidecarError(
+            "policy_denied",
+            "sandbox runtime did not inject an execution policy",
+            field="execution_config",
+        )
+    config = validate_operation_config(execution_config)
+    if config["mode"] != wire_mode["mode"]:
+        raise SidecarError(
+            "policy_denied", "request mode does not match the injected policy", field="payload.mode"
+        )
+    if config["protocol"] != protocol:
+        raise SidecarError(
+            "policy_denied",
+            "request protocol does not match the injected policy",
+            field="payload.protocol",
+        )
+    if config["limits"] != limits:
+        raise SidecarError(
+            "policy_denied",
+            "request limits do not match the approved policy",
+            field="payload.limits",
+        )
+    if config.get("interface") != wire_mode.get("interface"):
+        raise SidecarError(
+            "policy_denied",
+            "request interface does not match the approved policy",
+            field="payload.mode.interface",
+        )
+    if wire_mode["mode"] == "physical_bench":
+        approval = config["approval"]
+        if approval["approval_id"] != wire_mode["approval_id"]:
+            raise SidecarError(
+                "approval_required",
+                "request approval ID does not match approved evidence",
+                field="payload.mode.approval_id",
+            )
+
+    captured = transport.sniff(limits["max_events"])
+    events: list[dict[str, Any]] = []
+    first_timestamp: float | None = None
+    for sequence, frame in enumerate(captured):
+        frame_map = _mapping(frame, f"frames[{sequence}]")
+        payload_hex = str(frame_map.get("payload_hex", ""))
+        try:
+            payload_hex = bytes.fromhex(payload_hex).hex()
+        except ValueError as error:
+            raise SidecarError(
+                "transport_error",
+                "captured frame payload is not hexadecimal",
+                field=f"frames[{sequence}]",
+            ) from error
+        timestamp = frame_map.get("timestamp", 0.0)
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int | float):
+            timestamp = 0.0
+        if first_timestamp is None:
+            first_timestamp = timestamp
+        metadata: dict[str, str] = {}
+        arbitration = frame_map.get("arbitration_id")
+        if isinstance(arbitration, int) and not isinstance(arbitration, bool):
+            metadata["arbitration_id"] = str(arbitration)
+        events.append(
+            {
+                "sequence": sequence,
+                "protocol": protocol,
+                "direction": "receive",
+                "offset_micros": max(0, int((timestamp - first_timestamp) * 1_000_000)),
+                "payload_hex": payload_hex,
+                "metadata": metadata,
+            }
+        )
+    if not events:
+        raise SidecarError(
+            "transport_error",
+            "live monitor captured no frames within the window",
+            field="payload.limits.max_duration_ms",
+            retryable=True,
+        )
+    transcript_bytes = rust_transcript_bytes(events)
+    transcript_hash = rust_transcript_sha256(events)
+    transcript = artifact_store.write_bytes(
+        "live-transcript",
+        "application/vnd.oxfuzz.automotive-transcript+json",
+        transcript_bytes,
+    )
+    if transcript["sha256"] != transcript_hash:
+        raise SidecarError(
+            "artifact_hash_mismatch",
+            "canonical transcript artifact does not match its semantic digest",
+            field="analysis.transcript.sha256",
+        )
+    return (
+        "capture_analysis",
+        {
+            "protocol": protocol,
+            "event_count": len(events),
+            "transcript": transcript,
+            "transcript_hash": transcript_hash,
+            "state_signatures": [],
+        },
+        transcript_hash,
+    )
+
+
 def _dispatch(
     operation: str,
     payload: Mapping[str, Any],
@@ -713,6 +837,8 @@ def _dispatch(
         return _build_replay_plan(payload, artifact_store)
     if operation == "execute_replay":
         return _execute_replay(payload, execution_config, transport)
+    if operation == "live_monitor":
+        return _live_monitor(payload, artifact_store, execution_config, transport)
     raise SidecarError(
         "unsupported_operation",
         "requested sidecar operation is not supported",
