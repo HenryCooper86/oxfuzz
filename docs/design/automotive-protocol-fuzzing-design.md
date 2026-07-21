@@ -15,10 +15,17 @@ Automotive workspace. The domain crate itself contains serializable values,
 fail-closed validation, and deterministic evidence hashing only.
 
 `hf-automotive` does not import Scapy, execute processes, access the filesystem,
-open a socket, select an interface, or contain service policy. Its
-`automotive-scapy` Cargo feature is disabled by default. Consumers must
-declare `hf-automotive` as an optional dependency and explicitly forward that
-feature.
+open a socket, select an interface, or contain service policy. Its own
+`automotive-scapy` Cargo feature is disabled by default *at the library level*:
+the crate is a pure optional dependency and never turns itself on. The shipped
+product crates (`hf-cli`, `hf-web`, `hf-service`, and the `hf-gui` Tauri shell)
+enable the feature in their own `default` set so the automotive workspace is a
+first-class, always-present part of the application in every build, including
+developer builds. A consumer that wants the MIT contract crate without the
+subsystem builds with `--no-default-features`, which forwards no automotive
+dependency and exercises the fail-closed "feature not included in this build"
+paths. Enabling the feature only compiles pure-Rust contract and orchestration
+code; it never links Scapy.
 
 The following implemented behavior deliberately remains outside the domain
 crate and is verified by its owning workstream:
@@ -210,12 +217,16 @@ totals, readiness, findings, citations, or safety posture.
 
 ## 8. Distribution and Licensing
 
-The Rust core remains MIT and has no Scapy dependency. Scapy 2.7.0 is pinned as
-a GPL-2.0 sidecar dependency distributed separately from the default
-feature-disabled core. Any package that distributes the sidecar must retain the
-applicable license notices and source-availability obligations. Release review
-must verify those obligations before enabling sidecar packaging; this design is
-an engineering boundary, not legal advice.
+The Rust core remains MIT and links no Scapy code. Enabling the
+`automotive-scapy` feature in the product crates' default set does not change
+that: the feature compiles only pure-Rust contract and orchestration types, and
+Scapy 2.7.0 stays a GPL-2.0 Python sidecar distributed as a separate, pinned
+Docker image that `hf-runtime` runs at operation time. The licensing boundary
+therefore attaches to distributing that sidecar image, not to the Cargo feature:
+any package that distributes the sidecar must retain the applicable license
+notices and source-availability obligations. Release review must verify those
+obligations before publishing the sidecar image; this design is an engineering
+boundary, not legal advice.
 
 ## 9. Rejected Alternatives
 
@@ -239,8 +250,10 @@ an engineering boundary, not legal advice.
 The implemented contract is covered by feature-enabled pure Rust tests for the
 complete vocabulary, serde names, mode/approval validation, capability reports,
 request/result consistency, replay ordering, structured errors, schema
-rejection, and deterministic transcript/state hashes. Default-feature builds
-contain no Scapy, Python, CAN, process, filesystem, or networking dependency.
+rejection, and deterministic transcript/state hashes. The pure-Rust feature
+never introduces a Scapy, Python, CAN, process, filesystem, or networking
+dependency; a `--no-default-features` build of any product crate drops the
+`hf-automotive` dependency entirely and exercises the feature-absent fallbacks.
 
 Service and presentation tests use fake-runtime JSONL transcripts and immutable
 fixtures. Unit and CI tests must not open a CAN interface or execute a real
