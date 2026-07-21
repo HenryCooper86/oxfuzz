@@ -2,7 +2,7 @@ import type { ViewType } from "../types";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
-import { useAutomotive, useDefectDojo } from "../lib";
+import { useDefectDojo } from "../lib";
 import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
@@ -116,6 +116,55 @@ function NavButton({
   );
 }
 
+/**
+ * Prominent, always-present entry into the Automotive (CAN/UDS) workspace.
+ * Unlike the optional Integrations, vehicle protocol fuzzing is a first-class
+ * capability, so it gets a permanent, accent-highlighted slot rather than a
+ * toggle-gated one -- it stands out with an accent border, a subtle tint, and a
+ * CAN/UDS tag even when inactive.
+ */
+function AutomotiveNavButton({
+  active,
+  onNavigate,
+}: {
+  active: boolean;
+  onNavigate: (view: ViewType) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      onClick={() => onNavigate("automotive")}
+      className="flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none hover:bg-accent-subtle"
+      style={{
+        padding: "8px 10px",
+        fontSize: "13px",
+        fontWeight: 600,
+        marginBottom: "2px",
+        color: "var(--text-primary)",
+        border: "1px solid",
+        borderColor: active ? "var(--accent)" : "var(--accent-subtle)",
+        background: active ? "var(--accent-subtle)" : "transparent",
+      }}
+    >
+      <span style={{ color: "var(--accent)", display: "flex" }}>
+        <CarFront size={18} />
+      </span>
+      <span className="flex-1">{t("nav.automotive")}</span>
+      <span
+        className="text-11px font-semibold uppercase rounded"
+        style={{
+          color: "var(--accent)",
+          background: "var(--accent-subtle)",
+          letterSpacing: "0.05em",
+          padding: "1px 5px",
+        }}
+      >
+        {t("sidebar.automotiveTag")}
+      </span>
+    </button>
+  );
+}
+
 /** Library row that opens the embedded in-app DefectDojo view. */
 function DefectDojoButton({ active, onOpen }: { active: boolean; onOpen: () => void }) {
   return (
@@ -205,11 +254,10 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { activeProject, recentProjects, removeRecent } = useProject();
   const { target } = useTarget();
   const { t } = useI18n();
-  // Surface the optional integrations only once they are actually enabled, so the
-  // sidebar stays clean for the many users who use neither: DefectDojo when its
-  // config is present, Automotive when the CAN/UDS subsystem is turned on.
+  // DefectDojo is surfaced only once configured, so the sidebar stays clean for
+  // projects that never use it. Automotive, by contrast, is always present (see
+  // AutomotiveNavButton below).
   const { configured: defectDojoOn } = useDefectDojo();
-  const { enabled: automotiveOn } = useAutomotive();
 
   return (
     <nav
@@ -270,21 +318,19 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
         ))}
 
-        {/* Optional add-ons, each shown only when enabled; the whole section
-            disappears when a user uses neither, keeping the sidebar uncluttered. */}
-        {(automotiveOn || defectDojoOn) && (
+        {/* Automotive is a permanent, first-class capability: always present and
+            visually prominent, never gated behind a runtime toggle. When the
+            subsystem is off or absent from the build, the workspace itself
+            explains how to enable it or that it is unavailable. */}
+        <SectionLabel>{t("sidebar.vehicle")}</SectionLabel>
+        <AutomotiveNavButton active={activeView === "automotive"} onNavigate={onNavigate} />
+
+        {/* DefectDojo stays an optional add-on, shown only once configured, so
+            the sidebar stays uncluttered for projects that never use it. */}
+        {defectDojoOn && (
           <>
             <SectionLabel>{t("sidebar.integrations")}</SectionLabel>
-            {automotiveOn && (
-              <NavButton
-                item={{ view: "automotive", icon: CarFront }}
-                active={activeView === "automotive"}
-                onNavigate={onNavigate}
-              />
-            )}
-            {defectDojoOn && (
-              <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
-            )}
+            <DefectDojoButton active={activeView === "defectdojo"} onOpen={() => onNavigate("defectdojo")} />
           </>
         )}
       </div>
