@@ -12,6 +12,8 @@ pub mod agent;
 #[cfg(feature = "automotive-scapy")]
 pub mod automotive;
 #[cfg(feature = "automotive-scapy")]
+pub mod automotive_offline;
+#[cfg(feature = "automotive-scapy")]
 pub mod automotive_report;
 pub mod campaign_state;
 pub mod checkpoints;

@@ -30,6 +30,7 @@ import { AUTOMOTIVE_PROTOCOL_OPTIONS } from "../lib/automotiveSettings";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
 import { AutomotiveReplayWorkspace } from "../components/AutomotiveReplayWorkspace";
+import { AutomotiveOfflineWorkspace } from "../components/AutomotiveOfflineWorkspace";
 import {
   Badge,
   Button,
@@ -611,6 +612,8 @@ export function AutomotiveView() {
           onOperation={refreshOperations}
         />
       )}
+
+      <AutomotiveOfflineWorkspace />
 
       <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
         <div className="flex flex-wrap items-start justify-between gap-3">
