@@ -327,3 +327,185 @@ export function generateAutomotiveReport(
     includeAi,
   });
 }
+
+// --- Offline analysis (SavvyCAN-inspired: import, DBC decode, sniffer, diff) ---
+
+export type OfflineCaptureFormat = "candump" | "vector_asc" | "crtd" | "gvret_csv";
+
+export interface DecodedSignalView {
+  name: string;
+  value: number;
+  unit: string;
+  label: string | null;
+}
+
+export interface OfflineFrameView {
+  timestamp_micros: number;
+  channel: string;
+  id: number;
+  extended: boolean;
+  fd: boolean;
+  kind: string;
+  data_hex: string;
+  direction: string | null;
+  message: string | null;
+  signals: DecodedSignalView[];
+}
+
+export interface OfflineIdStat {
+  id: number;
+  extended: boolean;
+  count: number;
+  avg_period_micros: number | null;
+}
+
+export interface OfflineChangeMap {
+  id: number;
+  extended: boolean;
+  observations: number;
+  byte_changed: boolean[];
+  distinct_values: number[];
+}
+
+export interface CaptureImport {
+  format: string;
+  frame_count: number;
+  truncated: boolean;
+  dbc_message_count: number;
+  unique_ids: number;
+  duration_micros: number;
+  frames_per_second: number;
+  frames: OfflineFrameView[];
+  per_id: OfflineIdStat[];
+  change_maps: OfflineChangeMap[];
+}
+
+export interface CaptureDiffView {
+  only_in_first: number[];
+  only_in_second: number[];
+  changed: number[];
+}
+
+export interface ImportAutomotiveCaptureInput {
+  capturePath: string;
+  format: OfflineCaptureFormat;
+  dbcPath?: string | null;
+}
+
+export function importAutomotiveCapture(
+  input: ImportAutomotiveCaptureInput,
+  transport: Transport = getTransport(),
+): Promise<CaptureImport> {
+  return transport.invoke<CaptureImport>("automotive_import_capture", {
+    capturePath: input.capturePath,
+    format: input.format,
+    dbcPath: input.dbcPath ?? null,
+  });
+}
+
+export interface DiffAutomotiveCapturesInput {
+  firstPath: string;
+  secondPath: string;
+  format: OfflineCaptureFormat;
+}
+
+export function diffAutomotiveCaptures(
+  input: DiffAutomotiveCapturesInput,
+  transport: Transport = getTransport(),
+): Promise<CaptureDiffView> {
+  return transport.invoke<CaptureDiffView>("automotive_diff_captures", {
+    firstPath: input.firstPath,
+    secondPath: input.secondPath,
+    format: input.format,
+  });
+}
+
+export const OFFLINE_CAPTURE_FORMAT_OPTIONS: { value: OfflineCaptureFormat; label: string }[] = [
+  { value: "candump", label: "candump (SocketCAN)" },
+  { value: "vector_asc", label: "Vector ASC" },
+  { value: "crtd", label: "CRTD (OVMS)" },
+  { value: "gvret_csv", label: "GVRET CSV" },
+];
+
+export interface LiveMonitorInput {
+  projectRoot: string;
+  /** Allowlisted virtual CAN interface, e.g. vcan0. */
+  interface: string;
+  protocol?: AutomotiveProtocol;
+}
+
+/**
+ * Run a bounded, read-only live capture on a virtual CAN interface. Returns the
+ * retained capture-analysis operation outcome (transcript + state signatures).
+ */
+export function liveMonitorAutomotive(
+  input: LiveMonitorInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveOperationOutcome<AutomotiveCaptureAnalysisResult>> {
+  return transport.invoke<AutomotiveOperationOutcome<AutomotiveCaptureAnalysisResult>>(
+    "automotive_live_monitor",
+    {
+      projectRoot: input.projectRoot,
+      interface: input.interface,
+      protocol: input.protocol ?? "can",
+    },
+  );
+}
+
+export interface UdsServiceView {
+  sid: number;
+  supported: boolean;
+  nrc: number | null;
+}
+
+export interface UdsEcuView {
+  request_id: number;
+  response_id: number;
+  services: UdsServiceView[];
+}
+
+export interface UdsScanData {
+  mode: string;
+  ecus: UdsEcuView[];
+  transcript: AutomotiveArtifactRef;
+  transcript_hash: string;
+}
+
+export interface AutomotiveUdsScanOutcome {
+  operation_id: string;
+  result: { result: "uds_scan"; data: UdsScanData };
+  transcript_sha256: string | null;
+  artifact_dir: string;
+}
+
+export interface ScanUdsInput {
+  projectRoot: string;
+  interface: string;
+  requestIds: number[];
+  services: number[];
+}
+
+/**
+ * Run a read-only UDS ECU/service discovery scan on a virtual CAN interface. The
+ * service rejects any non-read-only service before dispatch.
+ */
+export function scanUdsAutomotive(
+  input: ScanUdsInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveUdsScanOutcome> {
+  return transport.invoke<AutomotiveUdsScanOutcome>("automotive_scan_uds", {
+    projectRoot: input.projectRoot,
+    interface: input.interface,
+    requestIds: input.requestIds,
+    services: input.services,
+  });
+}
+
+/** The read-only UDS discovery services a scan may probe, with display labels. */
+export const READ_ONLY_UDS_SERVICES: { sid: number; label: string }[] = [
+  { sid: 0x3e, label: "TesterPresent" },
+  { sid: 0x22, label: "ReadDataByIdentifier" },
+  { sid: 0x10, label: "DiagnosticSessionControl" },
+  { sid: 0x19, label: "ReadDTCInformation" },
+  { sid: 0x1a, label: "ReadEcuIdentification" },
+];

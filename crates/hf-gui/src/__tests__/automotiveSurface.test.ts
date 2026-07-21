@@ -77,4 +77,54 @@ describe("automotive surface boundaries", () => {
     expect(workspace).toContain("setInterval");
     expect(workspace).toMatch(/status === "running"/);
   });
+
+  it("wires an offline analysis workspace: import, DBC decode, sniffer, and diff", () => {
+    const lib = source("../lib/automotive.ts");
+    expect(lib).toContain('"automotive_import_capture"');
+    expect(lib).toContain('"automotive_diff_captures"');
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveOfflineWorkspace");
+    const offline = source("../components/AutomotiveOfflineWorkspace.tsx");
+    expect(offline).toContain("importAutomotiveCapture");
+    expect(offline).toContain("diffAutomotiveCaptures");
+    const commands = source("../../src-tauri/src/commands.rs");
+    expect(commands).toContain("pub fn automotive_import_capture");
+    expect(commands).toContain("pub fn automotive_diff_captures");
+  });
+
+  it("wires a read-only virtual-CAN live monitor into the workspace", () => {
+    expect(source("../lib/automotive.ts")).toContain('"automotive_live_monitor"');
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveLiveMonitor");
+    const live = source("../components/AutomotiveLiveMonitor.tsx");
+    expect(live).toContain("liveMonitorAutomotive");
+    // Virtual CAN only from the GUI; physical bench is not offered here.
+    expect(live).toContain('"virtual_can"');
+    expect(source("../../src-tauri/src/commands.rs")).toContain(
+      "pub async fn automotive_live_monitor",
+    );
+  });
+
+  it("wires a read-only UDS discovery scan with a dangerous-service denial", () => {
+    expect(source("../lib/automotive.ts")).toContain('"automotive_scan_uds"');
+    expect(source("../lib/automotive.ts")).toContain("READ_ONLY_UDS_SERVICES");
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveUdsScan");
+    expect(source("../components/AutomotiveUdsScan.tsx")).toContain("scanUdsAutomotive");
+    expect(source("../../src-tauri/src/commands.rs")).toContain(
+      "pub async fn automotive_scan_uds",
+    );
+    // The service enforces the read-only allowlist / dangerous-service denial.
+    expect(source("../../../hf-service/src/automotive.rs")).toContain("READ_ONLY_UDS_SERVICES");
+  });
+
+  it("wires signal graphing and a periodic frame sender that reuses replay", () => {
+    expect(source("../components/AutomotiveOfflineWorkspace.tsx")).toContain(
+      "<AutomotiveSignalGraph",
+    );
+    // The graph is a self-contained inline-SVG chart (no external chart lib / CDN).
+    expect(source("../components/AutomotiveSignalGraph.tsx")).toContain("<svg");
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveFrameSender");
+    const sender = source("../components/AutomotiveFrameSender.tsx");
+    // The sender builds a replay plan and reuses the replay path + confirmation.
+    expect(sender).toContain("executeAutomotiveReplay");
+    expect(sender).toContain("useConfirm");
+  });
 });

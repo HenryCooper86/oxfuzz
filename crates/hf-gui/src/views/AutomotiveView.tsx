@@ -30,6 +30,10 @@ import { AUTOMOTIVE_PROTOCOL_OPTIONS } from "../lib/automotiveSettings";
 import { useProject } from "../providers/project";
 import { useToast } from "../components/ui/toastContext";
 import { AutomotiveReplayWorkspace } from "../components/AutomotiveReplayWorkspace";
+import { AutomotiveOfflineWorkspace } from "../components/AutomotiveOfflineWorkspace";
+import { AutomotiveLiveMonitor } from "../components/AutomotiveLiveMonitor";
+import { AutomotiveUdsScan } from "../components/AutomotiveUdsScan";
+import { AutomotiveFrameSender } from "../components/AutomotiveFrameSender";
 import {
   Badge,
   Button,
@@ -611,6 +615,33 @@ export function AutomotiveView() {
           onOperation={refreshOperations}
         />
       )}
+
+      {settings && (
+        <AutomotiveLiveMonitor
+          projectRoot={activeProject}
+          settings={settings}
+          protocol={protocol}
+          onOperation={refreshOperations}
+        />
+      )}
+
+      {settings && (
+        <AutomotiveUdsScan
+          projectRoot={activeProject}
+          settings={settings}
+          onOperation={refreshOperations}
+        />
+      )}
+
+      {settings && (
+        <AutomotiveFrameSender
+          projectRoot={activeProject}
+          settings={settings}
+          onOperation={refreshOperations}
+        />
+      )}
+
+      <AutomotiveOfflineWorkspace />
 
       <section className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>
         <div className="flex flex-wrap items-start justify-between gap-3">
