@@ -114,4 +114,17 @@ describe("automotive surface boundaries", () => {
     // The service enforces the read-only allowlist / dangerous-service denial.
     expect(source("../../../hf-service/src/automotive.rs")).toContain("READ_ONLY_UDS_SERVICES");
   });
+
+  it("wires signal graphing and a periodic frame sender that reuses replay", () => {
+    expect(source("../components/AutomotiveOfflineWorkspace.tsx")).toContain(
+      "<AutomotiveSignalGraph",
+    );
+    // The graph is a self-contained inline-SVG chart (no external chart lib / CDN).
+    expect(source("../components/AutomotiveSignalGraph.tsx")).toContain("<svg");
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveFrameSender");
+    const sender = source("../components/AutomotiveFrameSender.tsx");
+    // The sender builds a replay plan and reuses the replay path + confirmation.
+    expect(sender).toContain("executeAutomotiveReplay");
+    expect(sender).toContain("useConfirm");
+  });
 });
