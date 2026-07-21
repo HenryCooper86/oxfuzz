@@ -451,3 +451,61 @@ export function liveMonitorAutomotive(
     },
   );
 }
+
+export interface UdsServiceView {
+  sid: number;
+  supported: boolean;
+  nrc: number | null;
+}
+
+export interface UdsEcuView {
+  request_id: number;
+  response_id: number;
+  services: UdsServiceView[];
+}
+
+export interface UdsScanData {
+  mode: string;
+  ecus: UdsEcuView[];
+  transcript: AutomotiveArtifactRef;
+  transcript_hash: string;
+}
+
+export interface AutomotiveUdsScanOutcome {
+  operation_id: string;
+  result: { result: "uds_scan"; data: UdsScanData };
+  transcript_sha256: string | null;
+  artifact_dir: string;
+}
+
+export interface ScanUdsInput {
+  projectRoot: string;
+  interface: string;
+  requestIds: number[];
+  services: number[];
+}
+
+/**
+ * Run a read-only UDS ECU/service discovery scan on a virtual CAN interface. The
+ * service rejects any non-read-only service before dispatch.
+ */
+export function scanUdsAutomotive(
+  input: ScanUdsInput,
+  transport: Transport = getTransport(),
+): Promise<AutomotiveUdsScanOutcome> {
+  return transport.invoke<AutomotiveUdsScanOutcome>("automotive_scan_uds", {
+    projectRoot: input.projectRoot,
+    interface: input.interface,
+    requestIds: input.requestIds,
+    services: input.services,
+  });
+}
+
+/** The read-only UDS discovery services a scan may probe, with display labels. */
+export const READ_ONLY_UDS_SERVICES: { sid: number; label: string }[] = [
+  { sid: 0x3e, label: "TesterPresent" },
+  { sid: 0x22, label: "ReadDataByIdentifier" },
+  { sid: 0x10, label: "DiagnosticSessionControl" },
+  { sid: 0x19, label: "ReadDTCInformation" },
+  { sid: 0x1a, label: "ReadEcuIdentification" },
+];

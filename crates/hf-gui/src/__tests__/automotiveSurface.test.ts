@@ -102,4 +102,16 @@ describe("automotive surface boundaries", () => {
       "pub async fn automotive_live_monitor",
     );
   });
+
+  it("wires a read-only UDS discovery scan with a dangerous-service denial", () => {
+    expect(source("../lib/automotive.ts")).toContain('"automotive_scan_uds"');
+    expect(source("../lib/automotive.ts")).toContain("READ_ONLY_UDS_SERVICES");
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveUdsScan");
+    expect(source("../components/AutomotiveUdsScan.tsx")).toContain("scanUdsAutomotive");
+    expect(source("../../src-tauri/src/commands.rs")).toContain(
+      "pub async fn automotive_scan_uds",
+    );
+    // The service enforces the read-only allowlist / dangerous-service denial.
+    expect(source("../../../hf-service/src/automotive.rs")).toContain("READ_ONLY_UDS_SERVICES");
+  });
 });
