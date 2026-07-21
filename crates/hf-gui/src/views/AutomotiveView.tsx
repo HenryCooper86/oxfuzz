@@ -17,6 +17,7 @@ import {
   getAutomotiveSettings,
   inspectAutomotiveCapabilities,
   listAutomotiveOperations,
+  setAutomotiveSettings,
   type AutomotiveCapabilitiesResult,
   type AutomotiveCaptureAnalysisResult,
   type AutomotiveCampaignReport,
@@ -60,6 +61,17 @@ function statusVariant(
   return "default";
 }
 
+// While an operation is still running, refresh its status on this cadence so the
+// user sees progress and completion without clicking Refresh.
+const OPERATIONS_POLL_MS = 4000;
+
+// The service returns this class of message when the desktop shell was compiled
+// without the `automotive-scapy` feature. Detect it so the workspace can show a
+// clean "not in this build" state instead of a raw backend error string.
+function isFeatureUnavailable(reason: string): boolean {
+  return /not included in this (?:application )?build/i.test(reason);
+}
+
 export function AutomotiveView() {
   const { t } = useI18n();
   const { activeProject } = useProject();
@@ -83,6 +95,8 @@ export function AutomotiveView() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [reportFormats, setReportFormats] = useState<string[]>(["md", "html"]);
   const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [enabling, setEnabling] = useState(false);
   const operationsRequestRef = useRef(0);
   const operationsProjectRef = useRef("");
 
@@ -122,7 +136,11 @@ export function AutomotiveView() {
           ? current
           : next.allowed_protocols[0]);
       } catch (reason) {
-        if (active) setError(String(reason));
+        if (active) {
+          const message = String(reason);
+          if (isFeatureUnavailable(message)) setUnavailable(true);
+          else setError(message);
+        }
       } finally {
         if (active) setLoadingSettings(false);
       }
@@ -145,6 +163,18 @@ export function AutomotiveView() {
       operationsRequestRef.current += 1;
     };
   }, [refreshOperations]);
+
+  // Poll while any operation is still running so its status and completion
+  // appear without the user pressing Refresh. The interval clears itself as soon
+  // as nothing is running (or the project changes / the view unmounts).
+  const hasRunningOperations = operations.some((operation) => operation.status === "running");
+  useEffect(() => {
+    if (!hasRunningOperations || !activeProject) return undefined;
+    const timer = setInterval(() => {
+      void refreshOperations();
+    }, OPERATIONS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [hasRunningOperations, activeProject, refreshOperations]);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -225,6 +255,27 @@ export function AutomotiveView() {
       });
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function enableAutomotive() {
+    if (!settings || settings.enabled || enabling) return;
+    setEnabling(true);
+    setError(null);
+    try {
+      const next = await setAutomotiveSettings({ ...settings, enabled: true });
+      setSettings(next);
+      toast({ title: t("automotive.enabledToast"), variant: "success" });
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      toast({
+        title: t("automotive.enableFailed"),
+        description: message,
+        variant: "error",
+      });
+    } finally {
+      setEnabling(false);
     }
   }
 
@@ -310,6 +361,16 @@ export function AutomotiveView() {
 
   if (loadingSettings) return <LoadingState label={t("automotive.loadingPolicy")} />;
 
+  if (unavailable) {
+    return (
+      <EmptyState
+        icon={<CarFront size={24} />}
+        title={t("automotive.unavailableTitle")}
+        hint={t("automotive.unavailableHint")}
+      />
+    );
+  }
+
   if (!activeProject) {
     return (
       <EmptyState
@@ -338,10 +399,18 @@ export function AutomotiveView() {
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <ViewHeader
-          title={t("automotive.title")}
-          description={t("automotive.description")}
-        />
+        <div className="flex items-start gap-3">
+          <div
+            className="flex items-center justify-center rounded-lg shrink-0"
+            style={{ width: 40, height: 40, background: "var(--accent-subtle)", color: "var(--accent)" }}
+          >
+            <CarFront size={22} />
+          </div>
+          <ViewHeader
+            title={t("automotive.title")}
+            description={t("automotive.description")}
+          />
+        </div>
         <Button
           variant="outline"
           size="sm"
@@ -353,19 +422,28 @@ export function AutomotiveView() {
         </Button>
       </div>
 
-      {!settings?.enabled && (
+      {settings && !settings.enabled && (
         <div
           role="alert"
-          className="surface-card flex items-start gap-3 text-12px text-text-secondary"
+          className="surface-card flex flex-wrap items-center gap-3 text-12px text-text-secondary"
           style={{ padding: "var(--space-md)", borderColor: "var(--warning)" }}
         >
           <ShieldAlert size={18} className="shrink-0 text-warning" />
-          <div>
+          <div className="flex-1 min-w-0">
             <div className="font-semibold text-text-primary">
               {t("automotive.disabledTitle")}
             </div>
             <div>{t("automotive.disabledHint")}</div>
           </div>
+          <Button
+            variant="primary"
+            size="sm"
+            loading={enabling}
+            disabled={enabling}
+            onClick={() => void enableAutomotive()}
+          >
+            {t("automotive.enableAction")}
+          </Button>
         </div>
       )}
 

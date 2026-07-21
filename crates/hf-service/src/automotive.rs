@@ -2979,8 +2979,15 @@ mod tests {
             approval: None,
         };
 
+        // Exercise the disabled path explicitly: the master switch defaults to
+        // enabled now, so opt this fixture out to prove rejection happens before
+        // any workspace or runtime mutation.
+        let disabled = AutomotiveSettings {
+            enabled: false,
+            ..AutomotiveSettings::default()
+        };
         let error = service
-            .execute_automotive_with_context(request, AutomotiveSettings::default(), &workspace)
+            .execute_automotive_with_context(request, disabled, &workspace)
             .await
             .unwrap_err();
 
