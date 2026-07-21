@@ -90,4 +90,16 @@ describe("automotive surface boundaries", () => {
     expect(commands).toContain("pub fn automotive_import_capture");
     expect(commands).toContain("pub fn automotive_diff_captures");
   });
+
+  it("wires a read-only virtual-CAN live monitor into the workspace", () => {
+    expect(source("../lib/automotive.ts")).toContain('"automotive_live_monitor"');
+    expect(source("../views/AutomotiveView.tsx")).toContain("<AutomotiveLiveMonitor");
+    const live = source("../components/AutomotiveLiveMonitor.tsx");
+    expect(live).toContain("liveMonitorAutomotive");
+    // Virtual CAN only from the GUI; physical bench is not offered here.
+    expect(live).toContain('"virtual_can"');
+    expect(source("../../src-tauri/src/commands.rs")).toContain(
+      "pub async fn automotive_live_monitor",
+    );
+  });
 });
