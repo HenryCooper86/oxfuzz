@@ -6,8 +6,9 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
 use hf_automotive::{
-    AnalyzeCaptureRequest, ArtifactRef, AutomotiveRequest, CapabilityRequest, MutationRequest,
-    OperationLimits, ReplayPlanRequest, ReplayRequest, ResponseEnvelope, SchemaEnvelope, Validate,
+    AnalyzeCaptureRequest, ArtifactRef, AutomotiveRequest, CapabilityRequest, LiveMonitorRequest,
+    MutationRequest, OperationLimits, ReplayPlanRequest, ReplayRequest, ResponseEnvelope,
+    SchemaEnvelope, Validate,
 };
 use hf_core::error::ClassifiedError;
 use hf_core::runtime::{
@@ -101,6 +102,13 @@ pub enum AutomotiveCommand {
         /// Typed plan to execute.
         plan: ReplayPlan,
     },
+    /// Perform a bounded, read-only live capture ("monitor"/sniffer).
+    LiveMonitor {
+        /// Exact virtual or physical interface configuration.
+        mode: ModeConfig,
+        /// Protocol decoder for captured frames.
+        protocol: AutomotiveProtocol,
+    },
 }
 
 impl AutomotiveCommand {
@@ -109,14 +117,15 @@ impl AutomotiveCommand {
             Self::Capabilities => None,
             Self::AnalyzeCapture { protocol, .. }
             | Self::GenerateMutations { protocol, .. }
-            | Self::BuildReplayPlan { protocol, .. } => Some(*protocol),
+            | Self::BuildReplayPlan { protocol, .. }
+            | Self::LiveMonitor { protocol, .. } => Some(*protocol),
             Self::ExecuteReplay { plan, .. } => Some(plan.protocol),
         }
     }
 
     fn execution_mode(&self) -> AutomotiveMode {
         match self {
-            Self::ExecuteReplay { mode, .. } => mode.mode(),
+            Self::ExecuteReplay { mode, .. } | Self::LiveMonitor { mode, .. } => mode.mode(),
             Self::Capabilities
             | Self::AnalyzeCapture { .. }
             | Self::GenerateMutations { .. }
@@ -131,6 +140,7 @@ impl AutomotiveCommand {
             Self::GenerateMutations { .. } => "generate_mutations",
             Self::BuildReplayPlan { .. } => "build_replay_plan",
             Self::ExecuteReplay { .. } => "execute_replay",
+            Self::LiveMonitor { .. } => "live_monitor",
         }
     }
 }
@@ -1198,7 +1208,9 @@ fn retained_request_input(
         AutomotiveRequest::AnalyzeCapture(request) => Some(request.capture),
         AutomotiveRequest::GenerateMutations(request) => Some(request.source),
         AutomotiveRequest::BuildReplayPlan(request) => Some(request.source),
-        AutomotiveRequest::Capabilities(_) | AutomotiveRequest::ExecuteReplay(_) => None,
+        AutomotiveRequest::Capabilities(_)
+        | AutomotiveRequest::ExecuteReplay(_)
+        | AutomotiveRequest::LiveMonitor(_) => None,
     }
     .ok_or_else(|| {
         ClassifiedError::Storage(format!(
@@ -1774,6 +1786,14 @@ fn preflight(
                 limits,
             })
         }
+        AutomotiveCommand::LiveMonitor { mode, protocol } => {
+            validate_live_monitor_policy(mode, settings)?;
+            AutomotiveRequest::LiveMonitor(LiveMonitorRequest {
+                protocol: *protocol,
+                mode: mode.clone(),
+                limits,
+            })
+        }
     };
     domain_request
         .validate()
@@ -1995,7 +2015,8 @@ fn require_matching_result(
             AutomotiveRequest::Capabilities(_),
             AutomotiveResult::Capabilities(_)
         ) | (
-            AutomotiveRequest::AnalyzeCapture(_),
+            // Both an offline analysis and a live monitor yield a capture analysis.
+            AutomotiveRequest::AnalyzeCapture(_) | AutomotiveRequest::LiveMonitor(_),
             AutomotiveResult::CaptureAnalysis(_)
         ) | (
             AutomotiveRequest::GenerateMutations(_),
@@ -2235,6 +2256,39 @@ fn validate_replay_policy(
     }
 }
 
+/// Validate a live-monitor request. This is a read-only capture, so it needs no
+/// arbitration-id/service allowlists (nothing is transmitted). Physical-bench
+/// live capture is deferred until it has a purpose-built approval scope (the
+/// replay approval scope hashes a plan, which a live capture does not have), so
+/// only virtual CAN is admitted here.
+fn validate_live_monitor_policy(
+    mode: &ModeConfig,
+    settings: &AutomotiveSettings,
+) -> Result<(), ClassifiedError> {
+    match mode {
+        ModeConfig::OfflinePcap => Err(ClassifiedError::Validation(
+            "offline capture mode cannot run a live monitor".to_owned(),
+        )),
+        ModeConfig::VirtualCan { interface } => {
+            if settings
+                .virtual_interfaces
+                .iter()
+                .any(|allowed| allowed == interface)
+            {
+                Ok(())
+            } else {
+                Err(ClassifiedError::Validation(format!(
+                    "virtual CAN interface '{interface}' is not allowlisted"
+                )))
+            }
+        }
+        ModeConfig::PhysicalBench { .. } => Err(ClassifiedError::Validation(
+            "physical-bench live monitor is not yet supported; use a virtual CAN interface"
+                .to_owned(),
+        )),
+    }
+}
+
 fn validate_physical_policy(
     interface: &str,
     approval_id: &str,
@@ -2372,11 +2426,18 @@ fn build_execution_config(
     settings: &AutomotiveSettings,
     limits: &OperationLimits,
 ) -> Result<Option<String>, ClassifiedError> {
-    let AutomotiveCommand::ExecuteReplay { mode, plan } = command else {
-        return Ok(None);
+    let (mode, protocol, plan): (&ModeConfig, AutomotiveProtocol, Option<&ReplayPlan>) =
+        match command {
+            AutomotiveCommand::ExecuteReplay { mode, plan } => (mode, plan.protocol, Some(plan)),
+            AutomotiveCommand::LiveMonitor { mode, protocol } => (mode, *protocol, None),
+            _ => return Ok(None),
+        };
+    // Plan-derived send allowlists (validated as a side effect). A live monitor
+    // has no plan and transmits nothing, so its send allowlists are empty.
+    let (plan_arbitration_ids, plan_services) = match plan {
+        Some(plan) => replay_allowlists(plan)?,
+        None => (BTreeSet::new(), BTreeSet::new()),
     };
-    // Validate the plan (arbitration/service extraction, ranges) as a side effect.
-    let (plan_arbitration_ids, plan_services) = replay_allowlists(plan)?;
     let (physical_enabled, interface, interface_allowlist) = match mode {
         ModeConfig::OfflinePcap => (false, None, Vec::new()),
         ModeConfig::VirtualCan { interface } => (
@@ -2414,7 +2475,7 @@ fn build_execution_config(
     };
     let mut value = serde_json::json!({
         "mode": mode_id(mode.mode()),
-        "protocol": protocol_id(plan.protocol),
+        "protocol": protocol_id(protocol),
         "physical_enabled": physical_enabled,
         "interface_allowlist": interface_allowlist,
         "arbitration_id_allowlist": arbitration_id_allowlist,
@@ -3242,6 +3303,112 @@ mod tests {
         assert!(public_json.get("approval_json").is_none());
         assert!(public_json.get("result_json").is_none());
         assert!(workspace.exists());
+    }
+
+    #[tokio::test]
+    async fn live_monitor_virtual_can_dispatches_with_a_policy_in_a_hardened_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, _capture) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        let (transcript, transcript_artifact, transcript_bytes) = transcript_fixture();
+        let state = StateSignature::from_observations(
+            AutomotiveProtocol::Can,
+            BTreeMap::from([("arbitration_id".to_owned(), "291".to_owned())]),
+        )
+        .unwrap();
+        let response = ResponseEnvelope::success(
+            "request-placeholder",
+            AutomotiveResult::CaptureAnalysis(CaptureAnalysisResult {
+                protocol: AutomotiveProtocol::Can,
+                event_count: 2,
+                transcript: transcript_artifact.clone(),
+                transcript_hash: transcript.clone(),
+                state_signatures: vec![state],
+            }),
+            Some(transcript),
+        );
+        let runtime = Arc::new(RecordingRuntime::with_response_and_output(
+            &response,
+            &transcript_artifact,
+            &transcript_bytes,
+        ));
+        let (service, _store) = service(Arc::clone(&runtime), temp.path()).await;
+        let request = AutomotiveOperationRequest {
+            project_root: project,
+            command: AutomotiveCommand::LiveMonitor {
+                mode: ModeConfig::VirtualCan {
+                    interface: "vcan0".to_owned(),
+                },
+                protocol: AutomotiveProtocol::Can,
+            },
+            approval: None,
+        };
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        let outcome = service
+            .execute_automotive_with_context(request, settings, &workspace)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcome.result,
+            AutomotiveResult::CaptureAnalysis(_)
+        ));
+        let calls = runtime.calls();
+        assert_eq!(calls.len(), 1);
+        let (_, limits, options) = &calls[0];
+        // Virtual CAN: no network, but NetAdmin+NetRaw to bring up and read vcan.
+        assert_eq!(options.network_mode, SandboxNetworkMode::None);
+        assert_eq!(
+            options.capabilities,
+            vec![SandboxCapability::NetAdmin, SandboxCapability::NetRaw]
+        );
+        // A live operation carries an execution policy for a virtual interface.
+        let config = limits
+            .env
+            .get("OXFUZZ_SCAPY_EXECUTION_CONFIG_JSON")
+            .expect("execution config");
+        assert!(config.contains("\"mode\":\"virtual_can\""));
+        assert!(config.contains("\"physical_enabled\":false"));
+        // The JSONL request dispatches the live_monitor operation.
+        let stdin = String::from_utf8(options.stdin.clone().expect("JSONL stdin")).unwrap();
+        assert!(stdin.contains(r#""operation":"live_monitor""#));
+    }
+
+    #[tokio::test]
+    async fn live_monitor_rejects_physical_bench_for_now() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, _capture) = project_fixture(temp.path());
+        let workspace = temp.path().join("workspace");
+        let runtime = Arc::new(RecordingRuntime::default());
+        let (service, _store) = service(Arc::clone(&runtime), temp.path()).await;
+        let request = AutomotiveOperationRequest {
+            project_root: project,
+            command: AutomotiveCommand::LiveMonitor {
+                mode: ModeConfig::PhysicalBench {
+                    interface: "can0".to_owned(),
+                    approval_id: "approval-1".to_owned(),
+                },
+                protocol: AutomotiveProtocol::Can,
+            },
+            approval: None,
+        };
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        // Physical-bench live monitor must be rejected before any runtime call --
+        // whether by the mode allowlist or the live-monitor policy, it never
+        // reaches the sandbox.
+        service
+            .execute_automotive_with_context(request, settings, &workspace)
+            .await
+            .unwrap_err();
+        assert!(runtime.calls().is_empty());
     }
 
     #[tokio::test]
