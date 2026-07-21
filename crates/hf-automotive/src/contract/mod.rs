@@ -11,6 +11,6 @@ pub use model::{
     CapabilityRequest, CaptureAnalysisResult, LiveMonitorRequest, MessageDirection, ModeConfig,
     MutationRequest, MutationResult, OperationLimits, ProtocolMessage, ReplayAction, ReplayPlan,
     ReplayPlanRequest, ReplayRequest, ReplayResult, ReplayStep, ResponseEnvelope, SchemaEnvelope,
-    TranscriptEvent,
+    TranscriptEvent, UdsEcu, UdsScanRequest, UdsScanResult, UdsService,
 };
 pub use validation::{ContractError, Validate, AUTOMOTIVE_SCHEMA_VERSION};

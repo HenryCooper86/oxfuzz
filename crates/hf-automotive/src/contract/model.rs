@@ -95,6 +95,8 @@ pub enum AutomotiveCapability {
     StateFeedback,
     /// Perform a bounded live capture ("monitor"/sniffer) on an interface.
     LiveMonitor,
+    /// Perform a read-only UDS ECU/service discovery scan.
+    ScanUds,
 }
 
 /// Concrete mode parameters supplied by the service after policy checks.
@@ -640,6 +642,131 @@ impl Validate for LiveMonitorRequest {
     }
 }
 
+/// Read-only UDS ECU/service discovery request.
+///
+/// The service admits only read-only diagnostic service ids (the domain crate is
+/// protocol-neutral and does not decide which ids are dangerous); this request
+/// only bounds structure. The result is a [`UdsScanResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdsScanRequest {
+    /// Virtual or physical interface configuration (never offline).
+    pub mode: ModeConfig,
+    /// Request arbitration ids to probe (bounded, non-empty).
+    pub request_ids: Vec<u32>,
+    /// Diagnostic service ids to probe (bounded, non-empty).
+    pub services: Vec<u8>,
+    /// Scan and resource bounds.
+    pub limits: OperationLimits,
+}
+
+/// Upper bound on probed ids/services per scan request.
+const MAX_SCAN_TARGETS: usize = 256;
+
+impl Validate for UdsScanRequest {
+    fn validate(&self) -> Result<(), ContractError> {
+        self.mode.validate()?;
+        if self.mode.mode() == AutomotiveMode::OfflinePcap {
+            return Err(ContractError::InvalidField {
+                field: "uds_scan.mode",
+                reason: "a UDS scan requires a virtual or physical interface".to_owned(),
+            });
+        }
+        for (field, len) in [
+            ("uds_scan.request_ids", self.request_ids.len()),
+            ("uds_scan.services", self.services.len()),
+        ] {
+            if len == 0 {
+                return Err(ContractError::MissingField { field });
+            }
+            if len > MAX_SCAN_TARGETS {
+                return Err(ContractError::LimitExceeded {
+                    field,
+                    maximum: MAX_SCAN_TARGETS as u64,
+                    actual: len as u64,
+                });
+            }
+        }
+        for id in &self.request_ids {
+            if *id > 0x1FFF_FFFF {
+                return Err(ContractError::InvalidField {
+                    field: "uds_scan.request_ids",
+                    reason: "arbitration id exceeds the 29-bit range".to_owned(),
+                });
+            }
+        }
+        self.limits.validate()
+    }
+}
+
+/// One probed diagnostic service and how the ECU answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdsService {
+    /// Probed service id.
+    pub sid: u8,
+    /// Whether the ECU returned a positive response.
+    pub supported: bool,
+    /// Negative response code, when the ECU answered negatively.
+    pub nrc: Option<u8>,
+}
+
+/// One discovered ECU and its probed services.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdsEcu {
+    /// Request arbitration id that elicited a response.
+    pub request_id: u32,
+    /// Response arbitration id the ECU answered on.
+    pub response_id: u32,
+    /// Per-service discovery outcomes (non-empty).
+    pub services: Vec<UdsService>,
+}
+
+/// Result of a read-only UDS discovery scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdsScanResult {
+    /// Executed mode.
+    pub mode: AutomotiveMode,
+    /// Discovered ECUs (present = at least one reply, positive or negative).
+    pub ecus: Vec<UdsEcu>,
+    /// Immutable canonical transcript of the request/response evidence.
+    pub transcript: ArtifactRef,
+    /// Digest of the canonical transcript.
+    pub transcript_hash: Sha256Digest,
+}
+
+impl Validate for UdsScanResult {
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.ecus.len() > MAX_EVENTS as usize {
+            return Err(ContractError::LimitExceeded {
+                field: "uds_scan.ecus",
+                maximum: u64::from(MAX_EVENTS),
+                actual: self.ecus.len() as u64,
+            });
+        }
+        for ecu in &self.ecus {
+            if ecu.services.is_empty() {
+                return Err(ContractError::MissingField {
+                    field: "uds_scan.ecus.services",
+                });
+            }
+        }
+        self.transcript.validate()?;
+        if self.transcript.media_type != "application/vnd.oxfuzz.automotive-transcript+json" {
+            return Err(ContractError::InvalidField {
+                field: "uds_scan.transcript.media_type",
+                reason: "expected a canonical automotive transcript artifact".to_owned(),
+            });
+        }
+        self.transcript_hash.validate()?;
+        if self.transcript.sha256 != self.transcript_hash.as_str() {
+            return Err(ContractError::InconsistentField {
+                field: "uds_scan.transcript.sha256",
+                reason: "artifact digest does not match the canonical transcript digest".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Empty payload for capability negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityRequest {}
@@ -666,6 +793,8 @@ pub enum AutomotiveRequest {
     ExecuteReplay(ReplayRequest),
     /// Perform a bounded live capture on an approved interface.
     LiveMonitor(LiveMonitorRequest),
+    /// Perform a read-only UDS ECU/service discovery scan.
+    ScanUds(UdsScanRequest),
 }
 
 impl Validate for AutomotiveRequest {
@@ -677,6 +806,7 @@ impl Validate for AutomotiveRequest {
             Self::BuildReplayPlan(request) => request.validate(),
             Self::ExecuteReplay(request) => request.validate(),
             Self::LiveMonitor(request) => request.validate(),
+            Self::ScanUds(request) => request.validate(),
         }
     }
 }
@@ -813,6 +943,8 @@ pub enum AutomotiveResult {
     ReplayPlan(ReplayPlan),
     /// Virtual or physical replay outcome.
     Replay(ReplayResult),
+    /// Read-only UDS discovery scan outcome.
+    UdsScan(UdsScanResult),
 }
 
 impl Validate for AutomotiveResult {
@@ -823,6 +955,7 @@ impl Validate for AutomotiveResult {
             Self::Mutations(result) => result.validate(),
             Self::ReplayPlan(result) => result.validate(),
             Self::Replay(result) => result.validate(),
+            Self::UdsScan(result) => result.validate(),
         }
     }
 }
@@ -833,6 +966,7 @@ impl AutomotiveResult {
             Self::CaptureAnalysis(result) => Some(&result.transcript_hash),
             Self::Mutations(result) => result.transcript_hash.as_ref(),
             Self::Replay(result) => Some(&result.transcript_hash),
+            Self::UdsScan(result) => Some(&result.transcript_hash),
             Self::Capabilities(_) | Self::ReplayPlan(_) => None,
         }
     }
