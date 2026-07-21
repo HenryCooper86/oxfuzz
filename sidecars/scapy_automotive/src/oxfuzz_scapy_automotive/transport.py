@@ -424,6 +424,56 @@ class PythonCanTransport:
             )
         return frames
 
+    def probe(self, request_id: int, response_id: int, payload: bytes) -> bytes | None:
+        """Send one short UDS request as an ISO-TP single frame and return the
+        first CAN frame received on ``response_id`` within the timeout, or
+        ``None`` if the ECU stays silent. Read-only in intent: the caller only
+        ever supplies allowlisted read-only diagnostic requests."""
+        can_module = self._load_can_module()
+        bus = self._open_bus()
+        # ISO-TP single frame: PCI byte (length in low nibble) then the payload.
+        frame = bytes([len(payload) & 0x0F]) + payload
+        try:
+            outbound = can_module.Message(
+                arbitration_id=request_id,
+                data=frame,
+                is_extended_id=request_id > _STANDARD_CAN_ID_MAX,
+                is_fd=False,
+            )
+            bus.send(outbound, timeout=self._io_timeout)
+        except Exception as error:
+            raise SidecarError(
+                "transport_error",
+                "UDS probe transmission failed",
+                retryable=False,
+                details={"exception_type": type(error).__name__},
+            ) from error
+        deadline = time.monotonic() + self._io_timeout
+        while time.monotonic() < deadline:
+            try:
+                received = bus.recv(timeout=self._io_timeout)
+            except Exception as error:
+                raise SidecarError(
+                    "transport_error",
+                    "UDS probe receive failed",
+                    retryable=False,
+                    details={"exception_type": type(error).__name__},
+                ) from error
+            if received is None:
+                break
+            if getattr(received, "arbitration_id", None) != response_id:
+                continue
+            channel = getattr(received, "channel", None)
+            if channel is not None and channel != self._interface:
+                raise SidecarError(
+                    "interface_not_allowed",
+                    "received CAN frame came from a different interface",
+                    field="interface",
+                )
+            data = getattr(received, "data", b"")
+            return bytes(data) if isinstance(data, bytes | bytearray) else b""
+        return None
+
 
 def create_configured_transport(
     config_value: Any,

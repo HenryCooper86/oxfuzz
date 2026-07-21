@@ -36,8 +36,19 @@ _OPERATIONS = frozenset(
         "build_replay_plan",
         "execute_replay",
         "live_monitor",
+        "scan_uds",
     }
 )
+
+# Read-only UDS discovery probes: the exact request bytes sent per service id.
+# Only non-actuating, non-security services with fixed safe sub-functions.
+_UDS_PROBES: dict[int, bytes] = {
+    0x3E: bytes([0x3E, 0x00]),  # TesterPresent
+    0x10: bytes([0x10, 0x01]),  # DiagnosticSessionControl (default session only)
+    0x22: bytes([0x22, 0xF1, 0x90]),  # ReadDataByIdentifier (VIN)
+    0x19: bytes([0x19, 0x01, 0xFF]),  # ReadDTCInformation
+    0x1A: bytes([0x1A, 0x90]),  # ReadEcuIdentification (legacy)
+}
 _LIMIT_KEYS = frozenset(
     {"max_events", "max_payload_bytes", "max_duration_ms", "max_rate_per_second"}
 )
@@ -815,6 +826,171 @@ def _live_monitor(
     )
 
 
+def _classify_uds_response(sid: int, data: bytes) -> tuple[bool, int | None] | None:
+    """Classify a raw response frame's first ISO-TP data. Returns
+    ``(supported, nrc)`` or ``None`` when it is not a UDS reply. Only the first
+    frame is needed for discovery: a First Frame already carries the response
+    service byte of a multi-frame positive response."""
+    if not data:
+        return None
+    pci_type = data[0] >> 4
+    if pci_type == 0x0:
+        length = data[0] & 0x0F
+        uds = data[1 : 1 + length]
+    elif pci_type == 0x1:
+        uds = data[2:]
+    else:
+        return None
+    if not uds:
+        return None
+    if uds[0] == (sid + 0x40) & 0xFF:
+        return (True, None)
+    if uds[0] == 0x7F:
+        nrc = uds[2] if len(uds) >= 3 else None
+        return (False, nrc)
+    return None
+
+
+def _int_list(value: Any, field: str) -> list[int]:
+    if not isinstance(value, list) or not value:
+        raise validation_error(f"{field} must be a non-empty array", field=field)
+    result: list[int] = []
+    for item in value:
+        if not isinstance(item, int) or isinstance(item, bool):
+            raise validation_error(f"{field} must contain integers", field=field)
+        result.append(item)
+    return result
+
+
+def _scan_uds(
+    payload: Mapping[str, Any],
+    artifact_store: ArtifactStore,
+    execution_config: Any,
+    transport: Transport,
+) -> tuple[str, dict[str, Any], str]:
+    """Read-only UDS ECU/service discovery. Sends only allowlisted, non-actuating
+    diagnostic requests and classifies each ECU's reply; it never sends a
+    state-changing, security, memory, or programming service."""
+    _exact_keys(payload, frozenset({"mode", "request_ids", "services", "limits"}), "payload")
+    wire_mode = _wire_mode(payload["mode"])
+    if wire_mode["mode"] == "offline_pcap":
+        raise SidecarError(
+            "unsupported_mode", "offline capture mode cannot run a UDS scan", field="payload.mode"
+        )
+    limits = _limits(payload["limits"])
+    request_ids = _int_list(payload["request_ids"], "payload.request_ids")
+    services = _int_list(payload["services"], "payload.services")
+    if execution_config is None:
+        raise SidecarError(
+            "policy_denied",
+            "sandbox runtime did not inject an execution policy",
+            field="execution_config",
+        )
+    config = validate_operation_config(execution_config)
+    if config["mode"] != wire_mode["mode"]:
+        raise SidecarError(
+            "policy_denied", "request mode does not match the injected policy", field="payload.mode"
+        )
+    if config["limits"] != limits:
+        raise SidecarError(
+            "policy_denied",
+            "request limits do not match the approved policy",
+            field="payload.limits",
+        )
+    if config.get("interface") != wire_mode.get("interface"):
+        raise SidecarError(
+            "policy_denied",
+            "request interface does not match the approved policy",
+            field="payload.mode.interface",
+        )
+    # Belt-and-suspenders: independently enforce the injected read-only allowlists
+    # and the sidecar's own read-only probe table.
+    allowed_ids = set(config.get("arbitration_id_allowlist", []))
+    allowed_services = set(config.get("service_allowlist", []))
+    for request_id in request_ids:
+        if request_id not in allowed_ids:
+            raise SidecarError(
+                "arbitration_id_not_allowed",
+                "request id is not in the approved allowlist",
+                field="payload.request_ids",
+            )
+    for service in services:
+        if service not in allowed_services or service not in _UDS_PROBES:
+            raise SidecarError(
+                "service_not_allowed",
+                "service is not an allowlisted read-only discovery service",
+                field="payload.services",
+            )
+
+    events: list[dict[str, Any]] = []
+    ecus: list[dict[str, Any]] = []
+    sequence = 0
+    for request_id in request_ids:
+        response_id = request_id + 8  # 11-bit UDS response convention
+        discovered: list[dict[str, Any]] = []
+        for service in services:
+            probe = _UDS_PROBES[service]
+            events.append(
+                {
+                    "sequence": sequence,
+                    "protocol": "uds",
+                    "direction": "transmit",
+                    "offset_micros": 0,
+                    "payload_hex": probe.hex(),
+                    "metadata": {"arbitration_id": str(request_id)},
+                }
+            )
+            sequence += 1
+            response = transport.probe(request_id, response_id, probe)
+            if response is None:
+                continue
+            response = bytes(response)
+            events.append(
+                {
+                    "sequence": sequence,
+                    "protocol": "uds",
+                    "direction": "receive",
+                    "offset_micros": 0,
+                    "payload_hex": response.hex(),
+                    "metadata": {"arbitration_id": str(response_id)},
+                }
+            )
+            sequence += 1
+            classification = _classify_uds_response(service, response)
+            if classification is None:
+                continue
+            supported, nrc = classification
+            discovered.append({"sid": service, "supported": supported, "nrc": nrc})
+        if discovered:
+            ecus.append(
+                {"request_id": request_id, "response_id": response_id, "services": discovered}
+            )
+
+    transcript_bytes = rust_transcript_bytes(events)
+    transcript_hash = rust_transcript_sha256(events)
+    transcript = artifact_store.write_bytes(
+        "scan-transcript",
+        "application/vnd.oxfuzz.automotive-transcript+json",
+        transcript_bytes,
+    )
+    if transcript["sha256"] != transcript_hash:
+        raise SidecarError(
+            "artifact_hash_mismatch",
+            "canonical transcript artifact does not match its semantic digest",
+            field="uds_scan.transcript.sha256",
+        )
+    return (
+        "uds_scan",
+        {
+            "mode": wire_mode["mode"],
+            "ecus": ecus,
+            "transcript": transcript,
+            "transcript_hash": transcript_hash,
+        },
+        transcript_hash,
+    )
+
+
 def _dispatch(
     operation: str,
     payload: Mapping[str, Any],
@@ -839,6 +1015,8 @@ def _dispatch(
         return _execute_replay(payload, execution_config, transport)
     if operation == "live_monitor":
         return _live_monitor(payload, artifact_store, execution_config, transport)
+    if operation == "scan_uds":
+        return _scan_uds(payload, artifact_store, execution_config, transport)
     raise SidecarError(
         "unsupported_operation",
         "requested sidecar operation is not supported",

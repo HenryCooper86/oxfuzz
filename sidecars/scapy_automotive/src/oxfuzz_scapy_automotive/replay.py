@@ -40,6 +40,8 @@ class Transport(Protocol):
 
     def sniff(self, max_events: int) -> list[dict[str, object]]: ...
 
+    def probe(self, request_id: int, response_id: int, payload: bytes) -> bytes | None: ...
+
 
 class UnavailableTransport:
     """Fail-closed default proving that the sidecar never chooses an interface."""
@@ -62,6 +64,14 @@ class UnavailableTransport:
 
     def sniff(self, max_events: int) -> list[dict[str, object]]:
         del max_events
+        raise SidecarError(
+            "transport_unavailable",
+            "no transport was injected by the sandbox runtime",
+            retryable=False,
+        )
+
+    def probe(self, request_id: int, response_id: int, payload: bytes) -> bytes | None:
+        del request_id, response_id, payload
         raise SidecarError(
             "transport_unavailable",
             "no transport was injected by the sandbox runtime",

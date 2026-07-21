@@ -41,7 +41,7 @@ def capability_report(
         capabilities.insert(0, "decode_capture")
     if python_can_compatible:
         modes.extend(["virtual_can", "physical_bench"])
-        capabilities.extend(["execute_virtual", "execute_physical", "live_monitor"])
+        capabilities.extend(["execute_virtual", "execute_physical", "live_monitor", "scan_uds"])
     return {
         "adapter_name": "scapy-sidecar",
         "adapter_version": ADAPTER_VERSION,
