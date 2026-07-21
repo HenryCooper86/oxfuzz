@@ -33,6 +33,7 @@ import { AutomotiveReplayWorkspace } from "../components/AutomotiveReplayWorkspa
 import { AutomotiveOfflineWorkspace } from "../components/AutomotiveOfflineWorkspace";
 import { AutomotiveLiveMonitor } from "../components/AutomotiveLiveMonitor";
 import { AutomotiveUdsScan } from "../components/AutomotiveUdsScan";
+import { AutomotiveFrameSender } from "../components/AutomotiveFrameSender";
 import {
   Badge,
   Button,
@@ -626,6 +627,14 @@ export function AutomotiveView() {
 
       {settings && (
         <AutomotiveUdsScan
+          projectRoot={activeProject}
+          settings={settings}
+          onOperation={refreshOperations}
+        />
+      )}
+
+      {settings && (
+        <AutomotiveFrameSender
           projectRoot={activeProject}
           settings={settings}
           onOperation={refreshOperations}

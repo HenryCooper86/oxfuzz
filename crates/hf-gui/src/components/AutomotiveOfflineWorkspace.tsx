@@ -13,6 +13,7 @@ import {
   type OfflineFrameView,
 } from "../lib/automotive";
 import { useToast } from "./ui/toastContext";
+import { AutomotiveSignalGraph } from "./AutomotiveSignalGraph";
 import { Badge, Button, Select } from "./ui";
 
 /** Rows rendered in the frame grid; the service already caps the payload. */
@@ -244,6 +245,7 @@ export function AutomotiveOfflineWorkspace() {
               </tbody>
             </table>
           </div>
+          <AutomotiveSignalGraph frames={result.frames} />
         </>
       )}
 
