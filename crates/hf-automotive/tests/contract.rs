@@ -8,8 +8,8 @@ use hf_automotive::{
     AutomotiveResult, CapabilityReport, CapabilityRequest, ContractError, LiveMonitorRequest,
     MessageDirection, ModeConfig, MutationRequest, MutationResult, OperationLimits,
     ProtocolMessage, ReplayAction, ReplayPlan, ReplayPlanRequest, ReplayRequest, ReplayResult,
-    ReplayStep, ResponseEnvelope, SchemaEnvelope, StateSignature, TranscriptEvent, Validate,
-    AUTOMOTIVE_SCHEMA_VERSION,
+    ReplayStep, ResponseEnvelope, SchemaEnvelope, StateSignature, TranscriptEvent, UdsEcu,
+    UdsScanRequest, UdsScanResult, UdsService, Validate, AUTOMOTIVE_SCHEMA_VERSION,
 };
 
 fn limits() -> OperationLimits {
@@ -625,4 +625,77 @@ fn live_monitor_requires_a_live_interface_and_names_its_operation() {
     // sidecar dispatches on.
     let value = serde_json::to_value(AutomotiveRequest::LiveMonitor(live)).unwrap();
     assert_eq!(value["operation"], "live_monitor");
+}
+
+#[test]
+fn uds_scan_request_validates_targets_and_names_its_operation() {
+    let virtual_mode = ModeConfig::VirtualCan {
+        interface: "vcan0".to_owned(),
+    };
+    // Empty probe sets are rejected.
+    let empty = UdsScanRequest {
+        mode: virtual_mode.clone(),
+        request_ids: Vec::new(),
+        services: vec![0x22],
+        limits: limits(),
+    };
+    assert!(empty.validate().is_err());
+
+    // Offline mode is rejected.
+    let offline = UdsScanRequest {
+        mode: ModeConfig::OfflinePcap,
+        request_ids: vec![0x7E0],
+        services: vec![0x3E],
+        limits: limits(),
+    };
+    assert!(matches!(
+        offline.validate(),
+        Err(ContractError::InvalidField {
+            field: "uds_scan.mode",
+            ..
+        })
+    ));
+
+    let scan = UdsScanRequest {
+        mode: virtual_mode,
+        request_ids: vec![0x7E0, 0x7E1],
+        services: vec![0x3E, 0x22, 0x19],
+        limits: limits(),
+    };
+    scan.validate().expect("valid virtual UDS scan");
+    let value = serde_json::to_value(AutomotiveRequest::ScanUds(scan)).unwrap();
+    assert_eq!(value["operation"], "scan_uds");
+}
+
+#[test]
+fn uds_scan_result_requires_a_matching_transcript_and_probed_services() {
+    let transcript_hash =
+        canonical_transcript_hash(&[event(0, AutomotiveProtocol::Uds, "62f190", BTreeMap::new())])
+            .unwrap();
+    let transcript = ArtifactRef {
+        artifact_id: "scan-transcript".to_owned(),
+        sha256: transcript_hash.as_str().to_owned(),
+        media_type: "application/vnd.oxfuzz.automotive-transcript+json".to_owned(),
+        size_bytes: 64,
+    };
+    let good = UdsScanResult {
+        mode: AutomotiveMode::VirtualCan,
+        ecus: vec![UdsEcu {
+            request_id: 0x7E0,
+            response_id: 0x7E8,
+            services: vec![UdsService {
+                sid: 0x22,
+                supported: true,
+                nrc: None,
+            }],
+        }],
+        transcript,
+        transcript_hash,
+    };
+    assert!(AutomotiveResult::UdsScan(good.clone()).validate().is_ok());
+
+    // An ECU with no probed services is rejected.
+    let mut bad = good;
+    bad.ecus[0].services.clear();
+    assert!(AutomotiveResult::UdsScan(bad).validate().is_err());
 }
