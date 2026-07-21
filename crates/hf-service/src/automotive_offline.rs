@@ -104,7 +104,7 @@ pub struct CaptureImport {
     pub duration_micros: u64,
     /// Frames per second across the span.
     pub frames_per_second: f64,
-    /// Bounded frame grid (first [`FRAME_VIEW_CAP`] frames).
+    /// Bounded frame grid (first `FRAME_VIEW_CAP` frames; see `truncated`).
     pub frames: Vec<FrameView>,
     /// Per-id statistics.
     pub per_id: Vec<IdStatView>,
