@@ -451,6 +451,90 @@ async fn automotive_capture_route_rejects_files_outside_the_approved_project() {
 
 #[cfg(feature = "automotive-scapy")]
 #[tokio::test]
+async fn automotive_import_route_analyzes_an_in_project_capture() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let capture = project.join("trace.log");
+    std::fs::write(
+        &capture,
+        "(1.000000) can0 123#DEADBEEF\n(1.100000) can0 123#DEADBE00\n",
+    )
+    .unwrap();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/automotive/import-capture")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project_root": project,
+                        "format": "candump",
+                        "capture_path": capture,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["frame_count"], 2);
+    assert_eq!(value["unique_ids"], 1);
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
+async fn automotive_import_route_rejects_files_outside_the_project() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let outside = directory.path().join("outside.log");
+    std::fs::write(&outside, "(1.0) can0 123#00\n").unwrap();
+    let security =
+        hf_web::WebSecurityConfig::new(None, true, Vec::new(), vec![project.clone()]).unwrap();
+    let app = hf_web::router::build_with_state_and_security(
+        hf_web::router::AppState::new(hf_service::ServiceContainer::stubbed()),
+        security,
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/automotive/import-capture")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project_root": project,
+                        "format": "candump",
+                        "capture_path": outside,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[tokio::test]
 async fn automotive_replay_route_is_typed_and_rejects_an_incomplete_request() {
     allow_open_dev_mode();
     let app = hf_web::router::build_with_state(hf_web::router::AppState::new(

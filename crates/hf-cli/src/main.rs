@@ -321,6 +321,23 @@ enum AutomotiveOp {
         #[arg(long)]
         capture: PathBuf,
     },
+    /// Import and analyze a CAN log offline (`candump`, `vector_asc`, `crtd`,
+    /// `gvret_csv`), optionally decoding signals with a DBC database. Prints JSON.
+    Import {
+        capture: PathBuf,
+        #[arg(long, default_value = "candump")]
+        format: String,
+        #[arg(long)]
+        dbc: Option<PathBuf>,
+    },
+    /// Compare two CAN logs of the same format offline and report per-id
+    /// differences. Prints JSON.
+    Diff {
+        first: PathBuf,
+        second: PathBuf,
+        #[arg(long, default_value = "candump")]
+        format: String,
+    },
     /// Generate a deterministic field-aware mutation artifact.
     Mutate {
         project: PathBuf,
@@ -1460,6 +1477,24 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        AutomotiveOp::Import {
+            capture,
+            format,
+            dbc,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let import = container.automotive_import_capture(&capture, &format, dbc.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&import)?);
+        }
+        AutomotiveOp::Diff {
+            first,
+            second,
+            format,
+        } => {
+            let container = ServiceContainer::bootstrap().await;
+            let diff = container.automotive_diff_captures(&first, &second, &format)?;
+            println!("{}", serde_json::to_string_pretty(&diff)?);
         }
         AutomotiveOp::Mutate {
             project,
