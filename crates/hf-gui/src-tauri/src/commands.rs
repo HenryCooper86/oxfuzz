@@ -2664,6 +2664,40 @@ pub fn automotive_diff_captures(
     }
 }
 
+/// Run a bounded, read-only live capture ("monitor"/sniffer) on an allowlisted
+/// virtual CAN interface through the sandboxed sidecar. Retains the evidence.
+#[tauri::command]
+pub async fn automotive_live_monitor(
+    state: tauri::State<'_, crate::state::AppState>,
+    project_root: PathBuf,
+    interface: String,
+    protocol: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automotive-scapy")]
+    {
+        let protocol = serde_json::from_value(serde_json::Value::String(protocol))
+            .map_err(|error| error.to_string())?;
+        let outcome = state
+            .container
+            .execute_automotive(hf_service::automotive::AutomotiveOperationRequest {
+                project_root,
+                command: hf_service::automotive::AutomotiveCommand::LiveMonitor {
+                    mode: hf_service::automotive::ModeConfig::VirtualCan { interface },
+                    protocol,
+                },
+                approval: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "automotive-scapy"))]
+    {
+        let _ = (state, project_root, interface, protocol);
+        Err(automotive_feature_unavailable())
+    }
+}
+
 #[cfg(not(feature = "automotive-scapy"))]
 fn automotive_feature_unavailable() -> String {
     "automotive Scapy support is not included in this application build".to_owned()
