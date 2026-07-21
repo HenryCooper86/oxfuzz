@@ -93,6 +93,8 @@ pub enum AutomotiveCapability {
     ExecutePhysical,
     /// Derive protocol-state novelty signatures.
     StateFeedback,
+    /// Perform a bounded live capture ("monitor"/sniffer) on an interface.
+    LiveMonitor,
 }
 
 /// Concrete mode parameters supplied by the service after policy checks.
@@ -608,6 +610,36 @@ impl Validate for ReplayRequest {
     }
 }
 
+/// Bounded live-capture ("monitor"/sniffer) request on an approved interface.
+///
+/// The result reuses [`CaptureAnalysisResult`]: a live capture yields the same
+/// canonical transcript + state-signature evidence as an offline analysis, so
+/// the service's offline change-map and bus-statistics tooling applies to it
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMonitorRequest {
+    /// Protocol decoder for captured frames.
+    pub protocol: AutomotiveProtocol,
+    /// Virtual or physical interface configuration (never offline).
+    pub mode: ModeConfig,
+    /// Capture and resource bounds; `max_events` and `max_duration_ms` bound the
+    /// live capture window.
+    pub limits: OperationLimits,
+}
+
+impl Validate for LiveMonitorRequest {
+    fn validate(&self) -> Result<(), ContractError> {
+        self.mode.validate()?;
+        if self.mode.mode() == AutomotiveMode::OfflinePcap {
+            return Err(ContractError::InvalidField {
+                field: "live_monitor.mode",
+                reason: "live monitor requires a virtual or physical interface".to_owned(),
+            });
+        }
+        self.limits.validate()
+    }
+}
+
 /// Empty payload for capability negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityRequest {}
@@ -632,6 +664,8 @@ pub enum AutomotiveRequest {
     BuildReplayPlan(ReplayPlanRequest),
     /// Execute an approved replay plan.
     ExecuteReplay(ReplayRequest),
+    /// Perform a bounded live capture on an approved interface.
+    LiveMonitor(LiveMonitorRequest),
 }
 
 impl Validate for AutomotiveRequest {
@@ -642,6 +676,7 @@ impl Validate for AutomotiveRequest {
             Self::GenerateMutations(request) => request.validate(),
             Self::BuildReplayPlan(request) => request.validate(),
             Self::ExecuteReplay(request) => request.validate(),
+            Self::LiveMonitor(request) => request.validate(),
         }
     }
 }
