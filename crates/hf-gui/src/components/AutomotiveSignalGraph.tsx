@@ -162,6 +162,27 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
 
   const hoverX = hoverTime === null ? null : xAt(hoverTime);
 
+  // Direct end-labels, decluttered: nudge apart so they never overlap, then
+  // shift the whole set up if the last one overflows the plot.
+  const LABEL_GAP = 15;
+  const endLabels = series
+    .map((entry) => {
+      const last = entry.points[entry.points.length - 1];
+      return last ? { name: entry.name, color: entry.color, y: yAt(entry, last.v) } : null;
+    })
+    .filter((label): label is { name: string; color: string; y: number } => label !== null)
+    .sort((a, b) => a.y - b.y);
+  for (let i = 1; i < endLabels.length; i += 1) {
+    if (endLabels[i].y - endLabels[i - 1].y < LABEL_GAP) {
+      endLabels[i].y = endLabels[i - 1].y + LABEL_GAP;
+    }
+  }
+  const lastLabel = endLabels[endLabels.length - 1];
+  const overflow = lastLabel ? lastLabel.y - (HEIGHT - PAD_B) : 0;
+  if (overflow > 0) {
+    for (const label of endLabels) label.y -= overflow;
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -281,29 +302,25 @@ export function AutomotiveSignalGraph({ frames }: { frames: OfflineFrameView[] }
           </span>
         ))}
 
-        {/* Direct end-labels (<= MAX_SERIES series). */}
-        {series.map((entry) => {
-          const last = entry.points[entry.points.length - 1];
-          if (!last) return null;
-          return (
-            <span
-              key={entry.name}
-              className="pointer-events-none absolute text-10px font-mono"
-              style={{
-                right: 4,
-                top: yAt(entry, last.v),
-                transform: "translateY(-50%)",
-                color: entry.color,
-                maxWidth: PAD_R - 8,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {entry.name}
-            </span>
-          );
-        })}
+        {/* Direct end-labels (<= MAX_SERIES series), decluttered. */}
+        {endLabels.map((label) => (
+          <span
+            key={label.name}
+            className="pointer-events-none absolute text-10px font-mono"
+            style={{
+              right: 4,
+              top: label.y,
+              transform: "translateY(-50%)",
+              color: label.color,
+              maxWidth: PAD_R - 8,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {label.name}
+          </span>
+        ))}
 
         {allPoints.length > 0 && (
           <>
