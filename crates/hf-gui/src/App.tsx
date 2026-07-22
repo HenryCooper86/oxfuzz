@@ -9,6 +9,7 @@ import { ConfirmProvider } from "./providers/ConfirmContext";
 import { TooltipProvider } from "./components/ui/Tooltip";
 import { ToastProvider } from "./components/ui/Toast";
 import { useToast } from "./components/ui/toastContext";
+import { ViewCanvas } from "./components/ui";
 import { getTransport } from "./lib";
 import { DiagnosticsPanel } from "./components/observation/DiagnosticsPanel";
 import { ObservabilityPanel } from "./components/observation/ObservabilityPanel";
@@ -166,98 +167,98 @@ function AppInner() {
                 <ErrorBoundary resetKey={activeView}>
                 {activeView === "chat" && <ChatView key={chatResetKey} />}
                 {activeView === "dashboard" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <DashboardView onNavigate={navigate} />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "workflow" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <WorkflowView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "discover" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <DiscoverView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "harness" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <HarnessView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "run" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <RunView onNavigate={setActiveView} />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "triage" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <TriageView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "corpus" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <CorpusView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "projects" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <ProjectsView onNavigate={setActiveView} />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "artifacts" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <ArtifactsView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "reports" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <ReportsView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "runs" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <RunsView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "audit" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <AuditView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "agents" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <AgentsView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "skills" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <SkillsView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "knowledge" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <KnowledgeView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "automation" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <AutomationView />
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "automotive" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <Suspense fallback={<LoadingState />}>
                       <AutomotiveView />
                     </Suspense>
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "help" && (
-                  <div className="flex-1 overflow-auto" style={{ padding: "var(--space-lg)" }}>
+                  <ViewCanvas>
                     <Suspense fallback={<LoadingState />}>
                       <HelpView />
                     </Suspense>
-                  </div>
+                  </ViewCanvas>
                 )}
                 {activeView === "defectdojo" && <DefectDojoView onBack={() => navigate("dashboard")} />}
                 </ErrorBoundary>
