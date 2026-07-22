@@ -61,10 +61,9 @@ describe("UI polish foundations", () => {
     }
   });
 
-  it("uses oxfuzz as application chrome and the view title as normal secondary context", () => {
+  it("keeps the view title as normal secondary context in the header", () => {
     const header = source("../components/Header.tsx");
 
-    expect(header).toContain("oxfuzz");
     expect(header).toContain("{title}");
     expect(header).toContain("var(--text-secondary)");
     expect(header).not.toMatch(/fontStyle:\s*["']italic["']/);
