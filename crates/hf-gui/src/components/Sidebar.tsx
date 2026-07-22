@@ -1,9 +1,11 @@
+import { useState } from "react";
 import type { ViewType } from "../types";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
-import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
+import { AI_SYSTEM_VIEW_IDS, RESULTS_VIEW_IDS, sidebarSectionContainsView } from "../lib/sidebarSections";
+import { Bot, BookOpen, Bug, Boxes, CarFront, ChevronDown, ChevronRight, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -75,6 +77,52 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     >
       {children}
     </div>
+  );
+}
+
+function CollapsibleNavSection({
+  contentId,
+  label,
+  items,
+  viewIds,
+  activeView,
+  onNavigate,
+}: {
+  contentId: string;
+  label: string;
+  items: NavItem[];
+  viewIds: readonly ViewType[];
+  activeView: ViewType;
+  onNavigate: (view: ViewType) => void;
+}) {
+  const containsActiveView = sidebarSectionContainsView(viewIds, activeView);
+  const [isOpen, setIsOpen] = useState(containsActiveView);
+  const [previousActiveView, setPreviousActiveView] = useState(activeView);
+
+  if (activeView !== previousActiveView) {
+    setPreviousActiveView(activeView);
+    if (containsActiveView) setIsOpen(true);
+  }
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setIsOpen((open) => (containsActiveView ? true : !open))}
+        aria-expanded={isOpen}
+        aria-controls={contentId}
+        className="flex items-center justify-between w-full rounded-md text-left text-xs font-semibold uppercase text-text-muted hover:bg-accent-subtle"
+        style={{ letterSpacing: "0.08em", padding: "7px 10px 2px" }}
+      >
+        <span>{label}</span>
+        {isOpen ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+      </button>
+      <div id={contentId} hidden={!isOpen}>
+        {items.map((item) => (
+          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -308,15 +356,23 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           </div>
         ))}
 
-        <SectionLabel>{t("sidebar.results")}</SectionLabel>
-        {RESULTS_ITEMS.map((item) => (
-          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
-        ))}
+        <CollapsibleNavSection
+          contentId="sidebar-results-section"
+          label={t("sidebar.results")}
+          items={RESULTS_ITEMS}
+          viewIds={RESULTS_VIEW_IDS}
+          activeView={activeView}
+          onNavigate={onNavigate}
+        />
 
-        <SectionLabel>{t("sidebar.aiSystem")}</SectionLabel>
-        {AI_SYSTEM_ITEMS.map((item) => (
-          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
-        ))}
+        <CollapsibleNavSection
+          contentId="sidebar-ai-system-section"
+          label={t("sidebar.aiSystem")}
+          items={AI_SYSTEM_ITEMS}
+          viewIds={AI_SYSTEM_VIEW_IDS}
+          activeView={activeView}
+          onNavigate={onNavigate}
+        />
 
         {/* Automotive is a permanent, first-class capability: always present and
             visually prominent, never gated behind a runtime toggle. When the
