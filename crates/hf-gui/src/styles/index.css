@@ -10,8 +10,8 @@
 
   /* Text hierarchy */
   --text-primary: #e8e6e1;
-  --text-secondary: #8a8680;
-  --text-muted: #555250;
+  --text-secondary: #aaa59e;
+  --text-muted: #8c8881;
 
   /* Accent -- warm gold */
   --accent: #c8b560;
@@ -37,7 +37,7 @@
   --chart-series-4: #c98500;
 
   /* Borders */
-  --border: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08);
   --border-focus: rgba(255, 255, 255, 0.15);
 
   /* Shadows */
@@ -73,7 +73,7 @@
 
   --text-primary: #1a1917;
   --text-secondary: #6b6560;
-  --text-muted: #9c9894;
+  --text-muted: #76716c;
 
   --accent: #9a7c2a;
   --accent-hover: #7e6420;
@@ -94,7 +94,7 @@
   --chart-series-3: #1baf7a;
   --chart-series-4: #eda100;
 
-  --border: rgba(0, 0, 0, 0.1);
+  --border: rgba(0, 0, 0, 0.13);
   --border-focus: rgba(0, 0, 0, 0.22);
 
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
@@ -129,6 +129,26 @@ body {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+}
+
+.view-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-lg);
+}
+
+.view-canvas {
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding-bottom: var(--space-xl);
+}
+
+@media (max-width: 768px) {
+  .view-scroll {
+    padding: var(--space-md);
+  }
 }
 
 /* Scrollbars -- thin and discreet */
