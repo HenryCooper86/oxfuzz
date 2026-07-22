@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Direction of a captured frame, when the source records it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// Received frame.
@@ -115,18 +115,34 @@ fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_nibble(pair[0])?;
+            let low = hex_nibble(pair[1])?;
+            Some((high << 4) | low)
+        })
         .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Convert `<secs>.<frac>` seconds text into microseconds.
 fn seconds_to_micros(text: &str) -> Option<u64> {
     let (secs, frac) = text.split_once('.').unwrap_or((text, ""));
     let secs: u64 = secs.parse().ok()?;
+    if !frac.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     // Normalize the fractional part to exactly six digits (microseconds).
-    let mut micros_digits = frac.chars().take(6).collect::<String>();
+    let mut micros_digits = frac.bytes().take(6).map(char::from).collect::<String>();
     while micros_digits.len() < 6 {
         micros_digits.push('0');
     }
@@ -150,14 +166,21 @@ fn parse_candump_frame(frame: &str) -> Option<(u32, bool, bool, FrameKind, Vec<u
 
     if let Some(fd_rest) = rest.strip_prefix('#') {
         // CAN-FD: one flags nibble then the payload.
+        hex_nibble(*fd_rest.as_bytes().first()?)?;
         let payload = fd_rest.get(1..)?;
         let data = hex_bytes(payload)?;
+        if data.len() > 64 {
+            return None;
+        }
         return Some((id, extended, true, FrameKind::Data, data));
     }
     if let Some(remote) = rest.strip_prefix('R') {
         // Optional single DLC digit; no data bytes.
-        if !remote.is_empty() && remote.parse::<u8>().is_err() {
-            return None;
+        if !remote.is_empty() {
+            let dlc = remote.parse::<u8>().ok()?;
+            if dlc > 8 {
+                return None;
+            }
         }
         return Some((id, extended, false, FrameKind::Remote, Vec::new()));
     }
@@ -167,6 +190,9 @@ fn parse_candump_frame(frame: &str) -> Option<(u32, bool, bool, FrameKind, Vec<u
         FrameKind::Data
     };
     let data = hex_bytes(rest)?;
+    if data.len() > 8 {
+        return None;
+    }
     Some((id, extended, false, kind, data))
 }
 
@@ -240,15 +266,32 @@ fn parse_asc(text: &str) -> Result<Vec<FrameRecord>, ImportError> {
             .ok_or_else(|| err("vector-asc", line_no, "invalid timestamp"))?;
         let (id_text, extended) = strip_extended_suffix(tokens[2]);
         let id = u32::from_str_radix(id_text, radix)
-            .map_err(|_| err("vector-asc", line_no, "invalid id"))?
-            & 0x1FFF_FFFF;
+            .map_err(|_| err("vector-asc", line_no, "invalid id"))?;
+        let maximum_id = if extended { 0x1FFF_FFFF } else { 0x7FF };
+        if id > maximum_id {
+            return Err(err(
+                "vector-asc",
+                line_no,
+                "id exceeds the declared frame format",
+            ));
+        }
         let is_remote = tokens[4].eq_ignore_ascii_case("r");
         let dlc: usize = tokens[5]
             .parse()
             .map_err(|_| err("vector-asc", line_no, "invalid dlc"))?;
+        if dlc > 8 {
+            return Err(err("vector-asc", line_no, "classic CAN dlc exceeds 8"));
+        }
         let (kind, data) = if is_remote {
             (FrameKind::Remote, Vec::new())
         } else {
+            if tokens.len() < 6 + dlc {
+                return Err(err(
+                    "vector-asc",
+                    line_no,
+                    "fewer data bytes than declared dlc",
+                ));
+            }
             let mut bytes = Vec::with_capacity(dlc);
             for token in tokens.iter().skip(6).take(dlc) {
                 bytes.push(
@@ -319,6 +362,9 @@ fn parse_crtd(text: &str) -> Result<Vec<FrameRecord>, ImportError> {
                     .map_err(|_| err("crtd", line_no, "invalid data byte"))?,
             );
         }
+        if data.len() > 8 {
+            return Err(err("crtd", line_no, "classic CAN payload exceeds 8 bytes"));
+        }
         out.push(FrameRecord {
             timestamp_micros: ts,
             channel: if bus.is_empty() {
@@ -359,14 +405,39 @@ fn parse_gvret_csv(text: &str) -> Result<Vec<FrameRecord>, ImportError> {
             fields[0].parse::<u64>().ok()
         }
         .ok_or_else(|| err("gvret-csv", line_no, "invalid timestamp"))?;
+        let extended = match fields[2].to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => return Err(err("gvret-csv", line_no, "invalid extended flag")),
+        };
         let id = u32::from_str_radix(fields[1], 16)
-            .map_err(|_| err("gvret-csv", line_no, "invalid id"))?
-            & 0x1FFF_FFFF;
-        let extended = matches!(fields[2].to_ascii_lowercase().as_str(), "true" | "1");
+            .map_err(|_| err("gvret-csv", line_no, "invalid id"))?;
+        let maximum_id = if extended { 0x1FFF_FFFF } else { 0x7FF };
+        if id > maximum_id {
+            return Err(err(
+                "gvret-csv",
+                line_no,
+                "id exceeds the declared frame format",
+            ));
+        }
         let channel = fields[3].to_owned();
         let len: usize = fields[4]
             .parse()
             .map_err(|_| err("gvret-csv", line_no, "invalid length"))?;
+        if len > 8 {
+            return Err(err(
+                "gvret-csv",
+                line_no,
+                "classic CAN payload exceeds 8 bytes",
+            ));
+        }
+        if fields.len() < 5_usize.saturating_add(len) {
+            return Err(err(
+                "gvret-csv",
+                line_no,
+                "fewer data bytes than declared length",
+            ));
+        }
         let mut data = Vec::with_capacity(len);
         for field in fields.iter().skip(5).take(len) {
             if field.is_empty() {
@@ -431,6 +502,25 @@ mod tests {
     }
 
     #[test]
+    fn candump_rejects_non_ascii_hex_without_panicking() {
+        let text = "(1.0) can0 123#AéB\n";
+        assert!(parse(Format::Candump, text).is_err());
+    }
+
+    #[test]
+    fn candump_rejects_trailing_timestamp_text() {
+        let text = "(1.123456garbage) can0 123#00\n";
+        assert!(parse(Format::Candump, text).is_err());
+    }
+
+    #[test]
+    fn candump_enforces_classic_fd_and_remote_frame_limits() {
+        assert!(parse(Format::Candump, "(1.0) can0 123#000102030405060708\n").is_err());
+        assert!(parse(Format::Candump, "(1.0) can0 123##Z0011\n").is_err());
+        assert!(parse(Format::Candump, "(1.0) can0 123#R9\n").is_err());
+    }
+
+    #[test]
     fn imports_vector_asc_classic() {
         let text = "\
 date Wed Sep 27 10:00:00.000 2017
@@ -452,6 +542,21 @@ End TriggerBlock\n";
     }
 
     #[test]
+    fn vector_asc_requires_the_declared_number_of_bytes() {
+        let text = "base hex timestamps absolute\n0.1 1 123 Rx d 3 AA BB\n";
+        assert!(parse(Format::VectorAsc, text).is_err());
+    }
+
+    #[test]
+    fn vector_asc_rejects_ids_outside_the_declared_frame_format() {
+        let standard = "base hex timestamps absolute\n0.1 1 FFF Rx d 1 AA\n";
+        assert!(parse(Format::VectorAsc, standard).is_err());
+
+        let extended = "base hex timestamps absolute\n0.1 1 20000000x Rx d 1 AA\n";
+        assert!(parse(Format::VectorAsc, extended).is_err());
+    }
+
+    #[test]
     fn imports_crtd() {
         let text = "\
 1542473901.020305 1R11 213 00 11 22 33
@@ -466,6 +571,12 @@ End TriggerBlock\n";
         assert!(frames[1].extended);
         assert_eq!(frames[1].channel, "2");
         assert_eq!(frames[1].direction, Some(Direction::Tx));
+    }
+
+    #[test]
+    fn crtd_rejects_oversized_classic_frames() {
+        let text = "1.0 1R11 123 00 01 02 03 04 05 06 07 08\n";
+        assert!(parse(Format::Crtd, text).is_err());
     }
 
     #[test]
@@ -484,6 +595,24 @@ Time Stamp,ID,Extended,Bus,LEN,D1,D2,D3,D4,D5,D6,D7,D8
             vec![0xFE, 0x36, 0x12, 0xFE, 0x69, 0x05, 0x07, 0xAD]
         );
         assert_eq!(frames[1].data.len(), 7);
+    }
+
+    #[test]
+    fn gvret_requires_the_declared_number_of_bytes() {
+        let text = "Time Stamp,ID,Extended,Bus,LEN,D1,D2,D3\n1,123,false,0,3,AA,BB\n";
+        assert!(parse(Format::GvretCsv, text).is_err());
+    }
+
+    #[test]
+    fn gvret_rejects_invalid_flags_lengths_and_ids() {
+        assert!(parse(Format::GvretCsv, "1,123,maybe,0,1,AA\n").is_err());
+        assert!(parse(
+            Format::GvretCsv,
+            "1,123,false,0,9,00,01,02,03,04,05,06,07,08\n"
+        )
+        .is_err());
+        assert!(parse(Format::GvretCsv, "1,FFF,false,0,1,AA\n").is_err());
+        assert!(parse(Format::GvretCsv, "1,20000000,true,0,1,AA\n").is_err());
     }
 
     #[test]

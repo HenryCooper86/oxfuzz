@@ -171,12 +171,35 @@ impl Database {
             let line_no = index + 1;
             let mut tokens = line.split_whitespace();
             match tokens.next() {
-                Some("BO_") => messages.push(parse_message(line, line_no)?),
+                Some("BO_") => {
+                    let message = parse_message(line, line_no)?;
+                    if messages.iter().any(|existing| {
+                        existing.id == message.id && existing.extended == message.extended
+                    }) {
+                        return Err(DbcError::Malformed {
+                            kind: "BO_",
+                            line: line_no,
+                            reason: "duplicate message id".to_owned(),
+                        });
+                    }
+                    messages.push(message);
+                }
                 Some("SG_") => {
-                    let signal = parse_signal(line, line_no)?;
                     let message = messages
                         .last_mut()
                         .ok_or(DbcError::OrphanSignal { line: line_no })?;
+                    let signal = parse_signal(line, line_no)?;
+                    if message
+                        .signals
+                        .iter()
+                        .any(|existing| existing.name == signal.name)
+                    {
+                        return Err(DbcError::Malformed {
+                            kind: "SG_",
+                            line: line_no,
+                            reason: "duplicate signal name".to_owned(),
+                        });
+                    }
                     message.signals.push(signal);
                 }
                 Some("VAL_") => value_tables.push(parse_value_table(line, line_no)?),
@@ -348,6 +371,9 @@ fn parse_message(line: &str, line_no: usize) -> Result<Message, DbcError> {
         .ok_or_else(|| malformed("missing DLC"))?
         .parse()
         .map_err(|_| malformed("DLC is not a byte"))?;
+    if dlc > 64 {
+        return Err(malformed("DLC exceeds the CAN FD payload limit"));
+    }
     Ok(Message {
         id: raw_id & 0x1FFF_FFFF,
         extended: raw_id & 0x8000_0000 != 0,
@@ -401,6 +427,9 @@ fn parse_signal(line: &str, line_no: usize) -> Result<Signal, DbcError> {
         .parse()
         .map_err(|_| malformed("invalid start bit"))?;
     let length: u16 = len_str.parse().map_err(|_| malformed("invalid length"))?;
+    if !(1..=64).contains(&length) {
+        return Err(malformed("signal length must be between 1 and 64 bits"));
+    }
     let mut order_chars = order_type.chars();
     let byte_order = match order_chars.next() {
         Some('1') => ByteOrder::Little,
@@ -412,10 +441,19 @@ fn parse_signal(line: &str, line_no: usize) -> Result<Signal, DbcError> {
         Some('-') => ValueType::Signed,
         _ => return Err(malformed("value type must be + or -")),
     };
+    if order_chars.next().is_some() {
+        return Err(malformed("unexpected text after the bit layout"));
+    }
 
     let (factor, offset) =
         parse_factor_offset(tail).ok_or_else(|| malformed("invalid (factor,offset)"))?;
-    let (min, max) = parse_min_max(tail).unwrap_or((0.0, 0.0));
+    if !factor.is_finite() || !offset.is_finite() {
+        return Err(malformed("factor and offset must be finite"));
+    }
+    let (min, max) = parse_min_max(tail).ok_or_else(|| malformed("invalid [min|max]"))?;
+    if !min.is_finite() || !max.is_finite() {
+        return Err(malformed("minimum and maximum must be finite"));
+    }
     let unit = parse_quoted(tail).unwrap_or_default();
 
     Ok(Signal {
@@ -610,6 +648,66 @@ VAL_ 200 Mode 0 "voltage" 1 "current" ;
         let bad = "BO_ 1 X: 8 ECU\n SG_ Broken : notbits@1+ (1,0) \"\" ECU\n";
         assert!(matches!(
             Database::parse(bad),
+            Err(DbcError::Malformed { kind: "SG_", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_signal_lengths_outside_the_public_contract() {
+        for length in [0, 65] {
+            let bad = format!("BO_ 1 X: 8 ECU\n SG_ Broken : 0|{length}@1+ (1,0) [0|1] \"\" ECU\n");
+            assert!(matches!(
+                Database::parse(&bad),
+                Err(DbcError::Malformed { kind: "SG_", .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_non_finite_scaling_and_malformed_bounds() {
+        let non_finite = "BO_ 1 X: 8 ECU\n SG_ Broken : 0|8@1+ (NaN,0) [0|1] \"\" ECU\n";
+        assert!(matches!(
+            Database::parse(non_finite),
+            Err(DbcError::Malformed { kind: "SG_", .. })
+        ));
+
+        let malformed_bounds = "BO_ 1 X: 8 ECU\n SG_ Broken : 0|8@1+ (1,0) [not-bounds] \"\" ECU\n";
+        assert!(matches!(
+            Database::parse(malformed_bounds),
+            Err(DbcError::Malformed { kind: "SG_", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_messages_and_signal_names() {
+        let duplicate_message = "BO_ 1 First: 8 ECU\nBO_ 1 Second: 8 ECU\n";
+        assert!(matches!(
+            Database::parse(duplicate_message),
+            Err(DbcError::Malformed { kind: "BO_", .. })
+        ));
+
+        let duplicate_signal = "\
+BO_ 1 Message: 8 ECU
+ SG_ Value : 0|8@1+ (1,0) [0|255] \"\" ECU
+ SG_ Value : 8|8@1+ (1,0) [0|255] \"\" ECU
+";
+        assert!(matches!(
+            Database::parse(duplicate_signal),
+            Err(DbcError::Malformed { kind: "SG_", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_message_dlc_and_trailing_bit_layout_text() {
+        let invalid_dlc = "BO_ 1 Message: 65 ECU\n";
+        assert!(matches!(
+            Database::parse(invalid_dlc),
+            Err(DbcError::Malformed { kind: "BO_", .. })
+        ));
+
+        let invalid_layout = "BO_ 1 X: 8 ECU\n SG_ Broken : 0|8@1+garbage (1,0) [0|1] \"\" ECU\n";
+        assert!(matches!(
+            Database::parse(invalid_layout),
             Err(DbcError::Malformed { kind: "SG_", .. })
         ));
     }

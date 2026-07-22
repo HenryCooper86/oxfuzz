@@ -97,7 +97,8 @@ impl Reassembler {
         };
         let pci = frame.get(offset..).unwrap_or(&[]);
         let Some(&first) = pci.first() else {
-            return Ok(None);
+            self.reset();
+            return Err(IsoTpError::Truncated);
         };
         match first >> 4 {
             0x0 => self.single_frame(pci),
@@ -129,6 +130,7 @@ impl Reassembler {
     }
 
     fn first_frame(&mut self, pci: &[u8]) -> Result<Option<Pdu>, IsoTpError> {
+        self.reset();
         let high = usize::from(pci[0] & 0x0F);
         let low = usize::from(*pci.get(1).ok_or(IsoTpError::Truncated)?);
         let (len, payload_start) = if high == 0 && low == 0 {
@@ -142,9 +144,14 @@ impl Reassembler {
         } else {
             ((high << 8) | low, 2)
         };
-        self.buffer.clear();
-        self.buffer
-            .extend_from_slice(pci.get(payload_start..).unwrap_or(&[]));
+        if len == 0 {
+            return Err(IsoTpError::Truncated);
+        }
+        let payload = pci.get(payload_start..).ok_or(IsoTpError::Truncated)?;
+        if payload.is_empty() || len <= payload.len() {
+            return Err(IsoTpError::Truncated);
+        }
+        self.buffer.extend_from_slice(payload);
         self.expected_len = len;
         self.next_sn = 1;
         self.active = true;
@@ -163,6 +170,10 @@ impl Reassembler {
             let expected = self.next_sn;
             self.reset();
             return Err(IsoTpError::SequenceError { expected, got: sn });
+        }
+        if pci.len() == 1 {
+            self.reset();
+            return Err(IsoTpError::Truncated);
         }
         let remaining = self.expected_len - self.buffer.len();
         let payload = pci.get(1..).unwrap_or(&[]);
@@ -273,6 +284,43 @@ mod tests {
         // Byte 0 is the address extension; PCI/data follow.
         let pdu = r.push(&[0xF1, 0x02, 0xDE, 0xAD]).unwrap().unwrap();
         assert_eq!(pdu.data, vec![0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn missing_pci_is_reported_as_truncated() {
+        let mut normal = Reassembler::new(Addressing::Normal);
+        assert_eq!(normal.push(&[]), Err(IsoTpError::Truncated));
+
+        let mut extended = Reassembler::new(Addressing::Extended);
+        assert_eq!(extended.push(&[0xF1]), Err(IsoTpError::Truncated));
+    }
+
+    #[test]
+    fn zero_length_first_frame_is_rejected() {
+        let mut r = Reassembler::new(Addressing::Normal);
+        assert_eq!(
+            r.push(&[0x10, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            Err(IsoTpError::Truncated)
+        );
+    }
+
+    #[test]
+    fn first_frame_requires_payload_and_a_multiframe_length() {
+        let mut no_payload = Reassembler::new(Addressing::Normal);
+        assert_eq!(no_payload.push(&[0x10, 0x10]), Err(IsoTpError::Truncated));
+
+        let mut already_complete = Reassembler::new(Addressing::Normal);
+        assert_eq!(
+            already_complete.push(&[0x10, 0x03, 0xAA, 0xBB, 0xCC]),
+            Err(IsoTpError::Truncated)
+        );
+    }
+
+    #[test]
+    fn consecutive_frame_requires_payload() {
+        let mut r = Reassembler::new(Addressing::Normal);
+        r.push(&[0x10, 0x10, 0, 1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(r.push(&[0x21]), Err(IsoTpError::Truncated));
     }
 
     #[test]
