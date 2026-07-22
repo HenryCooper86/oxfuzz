@@ -1,16 +1,9 @@
-import { useState } from "react";
 import type { ViewType } from "../types";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
-import {
-  AI_SYSTEM_VIEW_IDS,
-  RESULTS_VIEW_IDS,
-  getSidebarSectionOpenAfterNavigation,
-  sidebarSectionContainsView,
-} from "../lib/sidebarSections";
-import { Bot, BookOpen, Bug, Boxes, CarFront, ChevronDown, ChevronRight, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
+import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
   activeView: ViewType;
@@ -85,54 +78,6 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function CollapsibleNavSection({
-  contentId,
-  label,
-  items,
-  viewIds,
-  activeView,
-  onNavigate,
-}: {
-  contentId: string;
-  label: string;
-  items: NavItem[];
-  viewIds: readonly ViewType[];
-  activeView: ViewType;
-  onNavigate: (view: ViewType) => void;
-}) {
-  const containsActiveView = sidebarSectionContainsView(viewIds, activeView);
-  const [isOpen, setIsOpen] = useState(containsActiveView);
-  const [previousActiveView, setPreviousActiveView] = useState(activeView);
-
-  if (activeView !== previousActiveView) {
-    setPreviousActiveView(activeView);
-    setIsOpen((open) =>
-      getSidebarSectionOpenAfterNavigation(open, previousActiveView, activeView, viewIds),
-    );
-  }
-
-  return (
-    <section>
-      <button
-        type="button"
-        onClick={() => setIsOpen((open) => !open)}
-        aria-expanded={isOpen}
-        aria-controls={contentId}
-        className="flex items-center justify-between w-full rounded-md text-left text-xs font-semibold uppercase text-text-muted hover:bg-accent-subtle"
-        style={{ letterSpacing: "0.08em", padding: "7px 10px 2px" }}
-      >
-        <span>{label}</span>
-        {isOpen ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
-      </button>
-      <div id={contentId} hidden={!isOpen}>
-        {items.map((item) => (
-          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
 function NavButton({
   item,
   active,
@@ -167,55 +112,6 @@ function NavButton({
         <Icon size={depth > 0 ? 16 : 18} />
       </span>
       <span>{t(`nav.${view}`)}</span>
-    </button>
-  );
-}
-
-/**
- * Prominent, always-present entry into the Automotive (CAN/UDS) workspace.
- * Unlike the optional Integrations, vehicle protocol fuzzing is a first-class
- * capability, so it gets a permanent, accent-highlighted slot rather than a
- * toggle-gated one -- it stands out with an accent border, a subtle tint, and a
- * CAN/UDS tag even when inactive.
- */
-function AutomotiveNavButton({
-  active,
-  onNavigate,
-}: {
-  active: boolean;
-  onNavigate: (view: ViewType) => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <button
-      onClick={() => onNavigate("automotive")}
-      className="flex items-center gap-2 w-full text-left rounded-md transition-all duration-150 outline-none hover:bg-accent-subtle"
-      style={{
-        padding: "8px 10px",
-        fontSize: "13px",
-        fontWeight: 600,
-        marginBottom: "2px",
-        color: "var(--text-primary)",
-        border: "1px solid",
-        borderColor: active ? "var(--accent)" : "var(--accent-subtle)",
-        background: active ? "var(--accent-subtle)" : "transparent",
-      }}
-    >
-      <span style={{ color: "var(--accent)", display: "flex" }}>
-        <CarFront size={18} />
-      </span>
-      <span className="flex-1">{t("nav.automotive")}</span>
-      <span
-        className="text-11px font-semibold uppercase rounded"
-        style={{
-          color: "var(--accent)",
-          background: "var(--accent-subtle)",
-          letterSpacing: "0.05em",
-          padding: "1px 5px",
-        }}
-      >
-        {t("sidebar.automotiveTag")}
-      </span>
     </button>
   );
 }
@@ -311,7 +207,7 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
   const { t } = useI18n();
   // DefectDojo is surfaced only once configured, so the sidebar stays clean for
   // projects that never use it. Automotive, by contrast, is always present (see
-  // AutomotiveNavButton below).
+  // the Vehicle Security section below).
   const { configured: defectDojoOn } = useDefectDojo();
 
   return (
@@ -363,30 +259,27 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           </div>
         ))}
 
-        <CollapsibleNavSection
-          contentId="sidebar-results-section"
-          label={t("sidebar.results")}
-          items={RESULTS_ITEMS}
-          viewIds={RESULTS_VIEW_IDS}
-          activeView={activeView}
-          onNavigate={onNavigate}
-        />
+        <SectionLabel>{t("sidebar.results")}</SectionLabel>
+        {RESULTS_ITEMS.map((item) => (
+          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
+        ))}
 
-        <CollapsibleNavSection
-          contentId="sidebar-ai-system-section"
-          label={t("sidebar.aiSystem")}
-          items={AI_SYSTEM_ITEMS}
-          viewIds={AI_SYSTEM_VIEW_IDS}
-          activeView={activeView}
-          onNavigate={onNavigate}
-        />
+        <SectionLabel>{t("sidebar.aiSystem")}</SectionLabel>
+        {AI_SYSTEM_ITEMS.map((item) => (
+          <NavButton key={item.view} item={item} active={activeView === item.view} onNavigate={onNavigate} />
+        ))}
 
         {/* Automotive is a permanent, first-class capability: always present and
-            visually prominent, never gated behind a runtime toggle. When the
+            never gated behind a runtime toggle. It renders as a standard nav row
+            for visual consistency with the rest of the sidebar. When the
             subsystem is off or absent from the build, the workspace itself
             explains how to enable it or that it is unavailable. */}
         <SectionLabel>{t("sidebar.vehicle")}</SectionLabel>
-        <AutomotiveNavButton active={activeView === "automotive"} onNavigate={onNavigate} />
+        <NavButton
+          item={{ view: "automotive", icon: CarFront }}
+          active={activeView === "automotive"}
+          onNavigate={onNavigate}
+        />
 
         {/* DefectDojo stays an optional add-on, shown only once configured, so
             the sidebar stays uncluttered for projects that never use it. */}
