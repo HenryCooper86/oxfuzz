@@ -1,14 +1,27 @@
 import type { ViewType } from "../types";
 
-const ACTION_DESTINATIONS: Readonly<Record<string, ViewType>> = {
-  run_discovery: "discover",
-  review_harnesses: "harness",
-  triage_crashes: "triage",
-  smoke_campaign: "run",
-  select_project: "projects",
-  init_persistence: "settings",
-};
-
 export function dashboardActionDestination(actionCode: string): ViewType | null {
-  return ACTION_DESTINATIONS[actionCode] ?? null;
+  switch (actionCode) {
+    case "run_discovery":
+      return "discover";
+    case "review_harnesses":
+      return "harness";
+    case "triage_crashes":
+      return "triage";
+    case "smoke_campaign":
+      return "run";
+    case "select_project":
+      return "projects";
+    case "init_persistence":
+      return "settings";
+    default:
+      return null;
+  }
+}
+
+export function isDashboardActionInteractive(
+  destination: ViewType | null,
+  navigationAvailable: boolean,
+): destination is ViewType {
+  return destination !== null && navigationAvailable;
 }
