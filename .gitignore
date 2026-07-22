@@ -58,6 +58,7 @@ coverage/
 .cursor/
 .claude/
 .opencode/
+.worktrees/
 .turbo/
 
 ### Fuzzing runtime artifacts
