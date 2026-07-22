@@ -94,6 +94,11 @@ impl MockProvider {
                 message: msg.clone(),
             }),
             MockBehaviour::Cycle(responses) => {
+                if responses.is_empty() {
+                    return Err(ProviderError::Other {
+                        message: "mock response cycle cannot be empty".to_owned(),
+                    });
+                }
                 let idx = count % responses.len();
                 Ok(responses[idx].clone())
             }
@@ -229,5 +234,12 @@ mod tests {
         assert_eq!(r2.content.as_deref(), Some("second"));
         let r3 = provider.chat_completion(&req).await.unwrap();
         assert_eq!(r3.content.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn empty_cycle_returns_an_error_instead_of_panicking() {
+        let provider = MockProvider::new(MockBehaviour::Cycle(Vec::new()));
+        let result = provider.chat_completion(&make_req("hi")).await;
+        assert!(matches!(result, Err(ProviderError::Other { .. })));
     }
 }

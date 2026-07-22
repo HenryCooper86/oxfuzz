@@ -151,6 +151,13 @@ plateau drags on, counted in whole windows of the threshold: improving the
 mutation inputs (seeds / dictionary / custom mutator) first, then regenerating
 the harness, and finally recommending to stop spending on the target.
 
+The feature-gated coverage-per-cost advisor extends this signal across a bounded
+set of comparable completed campaigns. It uses explicit engine hourly rates,
+attributable model spend, edge deltas, corpus additions, and crash deltas to
+produce deterministic proposals. It never dispatches a run or promotes a
+harness. The complete contract and safety boundary are defined in
+`proof-carrying-campaign-intelligence.md`.
+
 ## 5. Tests
 
 - Unit: prune removes a duplicate-coverage entry.

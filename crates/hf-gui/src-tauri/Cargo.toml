@@ -7,8 +7,9 @@ description = "Tauri v2 desktop GUI for oxfuzz"
 
 # Automotive on by default; `--no-default-features` drops it (see hf-cli note).
 [features]
-default = ["automotive-scapy"]
+default = ["automotive-scapy", "proof-carrying"]
 automotive-scapy = ["hf-service/automotive-scapy"]
+proof-carrying = ["hf-service/proof-carrying"]
 
 [lib]
 name = "hf_gui_lib"

@@ -38,6 +38,13 @@ pub struct Crash {
    stack, severity guess.
 6. **HITL** -- human reviews, edits, and approves/closes.
 
+An optional remediation handoff may bind the reviewed finding, patch candidate,
+minimized reproducer, exact run evidence manifest, and a later sandbox
+verification result. A draft is explicitly unverified. The state can become
+verified only when the service supplies matching original-crash, patched-replay,
+and regression evidence as specified by
+`proof-carrying-campaign-intelligence.md`.
+
 ## 4. Safety
 
 - Crash inputs are untrusted; minimization runs in sandbox.
