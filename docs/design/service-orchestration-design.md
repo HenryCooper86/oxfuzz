@@ -306,6 +306,20 @@ known value only while visibly reporting that diagnostics are unavailable. A
 storage failure must never be converted into a zero-call summary, because zero
 is a valid measurement and would conceal an observability outage.
 
+### 4.6 Proof-Carrying Campaign Intelligence
+
+Behind the `proof-carrying` feature, `hf-service` assembles canonical campaign
+evidence from durable run, harness-promotion, crash, coverage, corpus, sandbox,
+and diagnostics records. Missing legacy provenance is an explicit incomplete
+result; mutable active paths are never substituted for run-owned evidence.
+
+The service also adapts comparable run history into the pure `hf-coverage`
+campaign advisor and packages `hf-crash` remediation contracts. Both outputs are
+advisory until an operator uses the existing guarded workflow. A remediation
+claim becomes verified only from service-owned sandbox evidence tied to the
+exact patch and reproducer digests. See
+`proof-carrying-campaign-intelligence.md` for the versioned contracts.
+
 ## 5. Sub-Agents
 
 `hf-agent` owns only the model reason/act loop and depends on an inward

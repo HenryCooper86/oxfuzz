@@ -833,6 +833,15 @@ fn quarantine_corpus_entry(
     Ok(Some(quarantined))
 }
 
+/// Independently verifiable components of one immutable run context.
+#[derive(Debug)]
+struct RunContextDigests {
+    combined: String,
+    source: String,
+    corpus: String,
+    sandbox: String,
+}
+
 /// Digest the immutable comparison context for a coverage run: staged target
 /// sources, the starting corpus, and the exact sandbox image identifier.
 ///
@@ -840,7 +849,7 @@ fn quarantine_corpus_entry(
 /// `copy_project_sources` plus the corpus. Symlinks and unexpectedly large
 /// trees fail closed so an untrusted workspace cannot turn regression
 /// bookkeeping into an unbounded host traversal.
-fn run_context_digest(workspace: &Path) -> Result<String, ClassifiedError> {
+fn run_context_digests(workspace: &Path) -> Result<RunContextDigests, ClassifiedError> {
     use sha2::{Digest, Sha256};
     use std::io::Read as _;
 
@@ -937,10 +946,14 @@ fn run_context_digest(workspace: &Path) -> Result<String, ClassifiedError> {
         )));
     }
 
-    let mut digest = Sha256::new();
-    digest.update(b"oxfuzz-run-context-v1\0");
-    digest.update(SANDBOX_IMAGE.as_bytes());
-    digest.update(b"\0");
+    let mut combined_digest = Sha256::new();
+    combined_digest.update(b"oxfuzz-run-context-v1\0");
+    combined_digest.update(SANDBOX_IMAGE.as_bytes());
+    combined_digest.update(b"\0");
+    let mut source_digest = Sha256::new();
+    source_digest.update(b"oxfuzz-run-source-v1\0");
+    let mut corpus_digest = Sha256::new();
+    corpus_digest.update(b"oxfuzz-run-corpus-v1\0");
     let mut total_bytes = 0_u64;
     let mut chunk = [0_u8; 64 * 1024];
     for relative in relative_paths {
@@ -965,8 +978,15 @@ fn run_context_digest(workspace: &Path) -> Result<String, ClassifiedError> {
                 "comparison context exceeds {MAX_BYTES} bytes"
             )));
         }
-        digest.update(relative.to_string_lossy().as_bytes());
-        digest.update(b"\0");
+        let component_digest = if relative.starts_with("corpus") {
+            &mut corpus_digest
+        } else {
+            &mut source_digest
+        };
+        combined_digest.update(relative.to_string_lossy().as_bytes());
+        combined_digest.update(b"\0");
+        component_digest.update(relative.to_string_lossy().as_bytes());
+        component_digest.update(b"\0");
         let mut file = std::fs::File::open(&path).map_err(|error| {
             ClassifiedError::Validation(format!(
                 "read comparison input {}: {error}",
@@ -983,11 +1003,21 @@ fn run_context_digest(workspace: &Path) -> Result<String, ClassifiedError> {
             if read == 0 {
                 break;
             }
-            digest.update(&chunk[..read]);
+            combined_digest.update(&chunk[..read]);
+            component_digest.update(&chunk[..read]);
         }
-        digest.update(b"\0");
+        combined_digest.update(b"\0");
+        component_digest.update(b"\0");
     }
-    Ok(format!("{:x}", digest.finalize()))
+    let mut sandbox_digest = Sha256::new();
+    sandbox_digest.update(b"oxfuzz-sandbox-reference-v1\0");
+    sandbox_digest.update(SANDBOX_IMAGE.as_bytes());
+    Ok(RunContextDigests {
+        combined: format!("{:x}", combined_digest.finalize()),
+        source: format!("{:x}", source_digest.finalize()),
+        corpus: format!("{:x}", corpus_digest.finalize()),
+        sandbox: format!("{:x}", sandbox_digest.finalize()),
+    })
 }
 
 /// Copy the exact approved source/binary into a run-owned input directory and
@@ -5895,7 +5925,11 @@ impl ServiceContainer {
         smoke_config.seed = Some(hf_engine::seed::derive_run_seed(smoke_record.id));
         smoke_record.config = Some(smoke_config.clone());
         smoke_record.kind = RunKind::Smoke;
-        smoke_record.context_rev = Some(run_context_digest(&workspace)?);
+        let context = run_context_digests(&workspace)?;
+        smoke_record.context_rev = Some(context.combined);
+        smoke_record.source_rev = Some(context.source);
+        smoke_record.corpus_rev = Some(context.corpus);
+        smoke_record.sandbox_rev = Some(context.sandbox);
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
         smoke_record.status = RunStatus::Running;
         smoke_record.harness_rev = Some(artifacts.source_sha256.clone());
@@ -6057,6 +6091,9 @@ impl ServiceContainer {
         }
         self.verify_harness_qualification(project, target, &harness)
             .await?;
+        let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
+        let source_sha256 = source_sha256.to_owned();
+        let binary_sha256 = binary_sha256.to_owned();
         harness.status = HarnessStatus::Promoted;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
@@ -6064,7 +6101,13 @@ impl ServiceContainer {
             )
         })?;
         store
-            .upsert_harness(&harness)
+            .promote_harness_with_approval(
+                &harness,
+                hf_storage::HarnessApprovalKind::CleanSmoke,
+                &source_sha256,
+                &binary_sha256,
+                Utc::now(),
+            )
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
         Ok(harness)
@@ -6091,6 +6134,9 @@ impl ServiceContainer {
         }
         self.verify_harness_qualification(project, target, &harness)
             .await?;
+        let (_, source_sha256, binary_sha256) = qualification_evidence(&harness)?;
+        let source_sha256 = source_sha256.to_owned();
+        let binary_sha256 = binary_sha256.to_owned();
         harness.status = HarnessStatus::Promoted;
         let store = self.store.as_ref().ok_or_else(|| {
             ClassifiedError::Validation(
@@ -6098,7 +6144,13 @@ impl ServiceContainer {
             )
         })?;
         store
-            .upsert_harness(&harness)
+            .promote_harness_with_approval(
+                &harness,
+                hf_storage::HarnessApprovalKind::KnownFindings,
+                &source_sha256,
+                &binary_sha256,
+                Utc::now(),
+            )
             .await
             .map_err(|e| ClassifiedError::Storage(e.to_string()))?;
         Ok(harness)
@@ -6719,7 +6771,11 @@ impl ServiceContainer {
             None => run_cfg.seed = Some(hf_engine::seed::derive_run_seed(run_record.id)),
         }
         run_record.config = Some(run_cfg.clone());
-        run_record.context_rev = Some(run_context_digest(&workspace)?);
+        let context = run_context_digests(&workspace)?;
+        run_record.context_rev = Some(context.combined);
+        run_record.source_rev = Some(context.source);
+        run_record.corpus_rev = Some(context.corpus);
+        run_record.sandbox_rev = Some(context.sandbox);
         let artifacts = stage_run_artifacts(&workspace, run_record.id, &qualified.source, &binary)?;
         if let Err(error) = verify_staged_qualification(&qualified, &artifacts) {
             if let Some(run_root) = artifacts.output_host.parent() {
@@ -10544,7 +10600,7 @@ mod workspace_tests {
     use super::{
         document_staging_dir, output_budget_status, prepare_managed_workspace_root,
         prepare_managed_workspace_root_with_adoption, project_workspace_dir,
-        read_current_harness_source, run_binary_path, run_context_digest, run_output_dir,
+        read_current_harness_source, run_binary_path, run_context_digests, run_output_dir,
         run_output_relative, stage_run_artifacts, verify_run_artifacts, workspace_dir,
         workspace_lock_file, workspace_root_selection, write_current_harness_source, OutputBudget,
         ServiceContainer, WORKSPACE_MANIFEST_FILE,
@@ -10918,10 +10974,35 @@ mod workspace_tests {
         std::fs::write(workspace.path().join("src/lib.rs"), "pub fn parse() {}").unwrap();
         std::fs::write(workspace.path().join("corpus/seed"), b"one").unwrap();
 
-        let first = run_context_digest(workspace.path()).unwrap();
-        assert_eq!(first, run_context_digest(workspace.path()).unwrap());
+        let first = run_context_digests(workspace.path()).unwrap().combined;
+        assert_eq!(
+            first,
+            run_context_digests(workspace.path()).unwrap().combined
+        );
         std::fs::write(workspace.path().join("corpus/seed"), b"two").unwrap();
-        assert_ne!(first, run_context_digest(workspace.path()).unwrap());
+        assert_ne!(
+            first,
+            run_context_digests(workspace.path()).unwrap().combined
+        );
+    }
+
+    #[test]
+    fn comparison_context_retains_independent_provenance_components() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("src")).unwrap();
+        std::fs::create_dir(workspace.path().join("corpus")).unwrap();
+        std::fs::write(workspace.path().join("src/lib.rs"), "pub fn parse() {}").unwrap();
+        std::fs::write(workspace.path().join("corpus/seed"), b"one").unwrap();
+
+        let first = run_context_digests(workspace.path()).unwrap();
+        std::fs::write(workspace.path().join("corpus/seed"), b"two").unwrap();
+        let second = run_context_digests(workspace.path()).unwrap();
+
+        assert_eq!(first.source, second.source);
+        assert_ne!(first.corpus, second.corpus);
+        assert_ne!(first.combined, second.combined);
+        assert_eq!(first.sandbox, second.sandbox);
+        assert_eq!(first.sandbox.len(), 64);
     }
 
     #[cfg(unix)]
@@ -10939,7 +11020,7 @@ mod workspace_tests {
         )
         .unwrap();
 
-        let error = run_context_digest(workspace.path()).unwrap_err();
+        let error = run_context_digests(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("symlink"));
     }
 
