@@ -33,6 +33,7 @@ all under human-in-the-loop supervision.
 | Crash triage | hf-crash | `Crash`, `CrashReport` | crash-triage-design.md |
 | Corpus management | hf-corpus | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 | Coverage tracking | hf-coverage | `CoverageReport` | corpus-coverage-design.md |
+| Campaign evidence and advice | hf-service + hf-coverage | versioned evidence/advice DTOs | proof-carrying-campaign-intelligence.md |
 | Sandbox / runtime | hf-runtime | `RuntimeAdapter` | runtime-design.md |
 | Tool registry | hf-tools | `Tool`, `ToolRegistry` | ../standards/TOOL_CALL_PROTOCOL.md |
 | Skill evolution | hf-skills | `SkillRegistry` | (reuse y-agent) |
@@ -40,6 +41,7 @@ all under human-in-the-loop supervision.
 | Service orchestration | hf-service | - | service-orchestration-design.md |
 | Agent loop | hf-agent | `AgentDelegator` | agent-prompt-security-design.md |
 | Web API security / transport | hf-web | - | web-api-security-design.md |
+| Remediation handoff | hf-crash + hf-service | versioned remediation DTO | proof-carrying-campaign-intelligence.md |
 
 ## 4. Crate Dependency Rules
 

@@ -15,6 +15,8 @@ pub mod automotive;
 pub mod automotive_offline;
 #[cfg(feature = "automotive-scapy")]
 pub mod automotive_report;
+#[cfg(feature = "proof-carrying")]
+pub mod campaign_intelligence;
 pub mod campaign_state;
 pub mod checkpoints;
 pub mod config;
@@ -23,10 +25,14 @@ mod crash_minimization;
 pub mod defectdojo;
 pub mod defectdojo_lifecycle;
 pub mod diagnostics;
+#[cfg(feature = "proof-carrying")]
+pub mod evidence;
 pub mod init;
 pub mod issue_tracker;
 pub mod knowledge;
 pub mod recovery;
+#[cfg(feature = "proof-carrying")]
+pub mod remediation;
 pub mod report;
 pub mod report_export;
 pub mod report_store;

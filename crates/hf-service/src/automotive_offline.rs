@@ -72,6 +72,15 @@ pub struct IdStatView {
     pub avg_period_micros: Option<u64>,
 }
 
+/// Collision-safe CAN arbitration identity for serialized analysis results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameIdentityView {
+    /// Arbitration id with the format flag stripped.
+    pub id: u32,
+    /// Whether the frame uses the 29-bit extended namespace.
+    pub extended: bool,
+}
+
 /// Per-id, per-byte change map for the sniffer view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangeMapView {
@@ -110,17 +119,76 @@ pub struct CaptureImport {
     pub per_id: Vec<IdStatView>,
     /// Per-id change maps (the sniffer).
     pub change_maps: Vec<ChangeMapView>,
+    /// ISO-TP/UDS protocol-state novelty, separate from source coverage.
+    pub protocol_states: ProtocolStateView,
 }
 
 /// The result of comparing two captures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureDiffView {
     /// Ids only in the first capture.
-    pub only_in_first: Vec<u32>,
+    pub only_in_first: Vec<FrameIdentityView>,
     /// Ids only in the second capture.
-    pub only_in_second: Vec<u32>,
+    pub only_in_second: Vec<FrameIdentityView>,
     /// Ids in both whose payload set differs.
-    pub changed: Vec<u32>,
+    pub changed: Vec<FrameIdentityView>,
+}
+
+/// Stream identity for an offline UDS state observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolStreamView {
+    /// Capture interface/channel.
+    pub channel: String,
+    /// Collision-safe arbitration identity.
+    pub frame: FrameIdentityView,
+    /// Optional `rx` or `tx` direction.
+    pub direction: Option<String>,
+}
+
+/// Presentation-neutral UDS state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolStateLabelView {
+    /// Stable state kind.
+    pub kind: String,
+    /// Request service id, or first payload byte for `other`.
+    pub service: u8,
+    /// Subfunction, echoed response parameter, or negative response code.
+    pub detail: Option<u8>,
+}
+
+/// One unique stream-scoped protocol state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolStateObservationView {
+    /// Stream that produced the state.
+    pub stream: ProtocolStreamView,
+    /// Decoded UDS state.
+    pub state: ProtocolStateLabelView,
+}
+
+/// One unique stream-scoped protocol transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolStateTransitionView {
+    /// Stream that produced the transition.
+    pub stream: ProtocolStreamView,
+    /// Previous state.
+    pub from: ProtocolStateLabelView,
+    /// Next state.
+    pub to: ProtocolStateLabelView,
+    /// Number of occurrences in the capture.
+    pub count: usize,
+}
+
+/// Offline ISO-TP/UDS state novelty summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolStateView {
+    /// Complete ISO-TP payloads decoded.
+    pub completed_pdus: usize,
+    /// Malformed ISO-TP frames rejected.
+    pub malformed_frames: usize,
+    /// Unique stream-scoped states.
+    pub unique_states: Vec<ProtocolStateObservationView>,
+    /// Unique stream-scoped transitions.
+    pub transitions: Vec<ProtocolStateTransitionView>,
 }
 
 impl ServiceContainer {
@@ -220,6 +288,7 @@ fn analyze_capture_text(
 
     let stats = analysis::bus_stats(&frames);
     let change_maps = analysis::change_maps(&frames);
+    let protocol_states = protocol_state_view(analysis::uds_state_analysis(&frames));
 
     let frame_count = frames.len();
     let truncated = frame_count > FRAME_VIEW_CAP;
@@ -241,23 +310,24 @@ fn analyze_capture_text(
         per_id: stats
             .per_id
             .into_iter()
-            .map(|(id, stat)| IdStatView {
-                id,
-                extended: stat.extended,
+            .map(|stat| IdStatView {
+                id: stat.identity.id,
+                extended: stat.identity.extended,
                 count: stat.count,
                 avg_period_micros: stat.avg_period_micros,
             })
             .collect(),
         change_maps: change_maps
             .into_iter()
-            .map(|(id, map)| ChangeMapView {
-                id,
-                extended: map.extended,
+            .map(|map| ChangeMapView {
+                id: map.identity.id,
+                extended: map.identity.extended,
                 observations: map.observations,
                 byte_changed: map.byte_changed,
                 distinct_values: map.distinct_values,
             })
             .collect(),
+        protocol_states,
     })
 }
 
@@ -273,10 +343,91 @@ fn diff_capture_texts(
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;
     let diff = analysis::diff(&a, &b);
     Ok(CaptureDiffView {
-        only_in_first: diff.only_in_first,
-        only_in_second: diff.only_in_second,
-        changed: diff.changed,
+        only_in_first: diff
+            .only_in_first
+            .into_iter()
+            .map(frame_identity_view)
+            .collect(),
+        only_in_second: diff
+            .only_in_second
+            .into_iter()
+            .map(frame_identity_view)
+            .collect(),
+        changed: diff.changed.into_iter().map(frame_identity_view).collect(),
     })
+}
+
+fn frame_identity_view(identity: analysis::FrameIdentity) -> FrameIdentityView {
+    FrameIdentityView {
+        id: identity.id,
+        extended: identity.extended,
+    }
+}
+
+fn protocol_stream_view(stream: analysis::UdsStream) -> ProtocolStreamView {
+    ProtocolStreamView {
+        channel: stream.channel,
+        frame: frame_identity_view(stream.identity),
+        direction: stream
+            .direction
+            .map(|value| direction_str(value).to_owned()),
+    }
+}
+
+fn protocol_state_label_view(state: &analysis::UdsState) -> ProtocolStateLabelView {
+    match state {
+        analysis::UdsState::Request {
+            service,
+            subfunction,
+        } => ProtocolStateLabelView {
+            kind: "request".to_owned(),
+            service: *service,
+            detail: *subfunction,
+        },
+        analysis::UdsState::PositiveResponse {
+            service,
+            subfunction,
+        } => ProtocolStateLabelView {
+            kind: "positive_response".to_owned(),
+            service: *service,
+            detail: *subfunction,
+        },
+        analysis::UdsState::NegativeResponse { service, code } => ProtocolStateLabelView {
+            kind: "negative_response".to_owned(),
+            service: *service,
+            detail: Some(*code),
+        },
+        analysis::UdsState::Other { service } => ProtocolStateLabelView {
+            kind: "other".to_owned(),
+            service: *service,
+            detail: None,
+        },
+    }
+}
+
+fn protocol_state_view(value: analysis::UdsStateAnalysis) -> ProtocolStateView {
+    ProtocolStateView {
+        completed_pdus: value.completed_pdus,
+        malformed_frames: value.malformed_frames,
+        unique_states: value
+            .unique_states
+            .into_iter()
+            .map(|observation| ProtocolStateObservationView {
+                stream: protocol_stream_view(observation.stream),
+                state: protocol_state_label_view(&observation.state),
+            })
+            .collect(),
+        transitions: value
+            .transitions
+            .into_iter()
+            .map(|transition| ProtocolStateTransitionView {
+                stream: protocol_stream_view(transition.stream),
+                from: protocol_state_label_view(&transition.from),
+                to: protocol_state_label_view(&transition.to),
+                count: transition.count,
+            })
+            .collect(),
+    }
 }
 
 fn frame_view(frame: &capture::FrameRecord, database: Option<&dbc::Database>) -> FrameView {
@@ -377,9 +528,57 @@ BO_ 256 EngineData: 8 ECU
         let a = "(1.0) can0 100#00\n(1.0) can0 200#AA\n";
         let b = "(1.0) can0 100#01\n(1.0) can0 300#BB\n";
         let diff = diff_capture_texts("candump", a, b).expect("diff");
-        assert_eq!(diff.changed, vec![0x100]);
-        assert_eq!(diff.only_in_first, vec![0x200]);
-        assert_eq!(diff.only_in_second, vec![0x300]);
+        assert_eq!(
+            diff.changed,
+            vec![FrameIdentityView {
+                id: 0x100,
+                extended: false,
+            }]
+        );
+        assert_eq!(
+            diff.only_in_first,
+            vec![FrameIdentityView {
+                id: 0x200,
+                extended: false,
+            }]
+        );
+        assert_eq!(
+            diff.only_in_second,
+            vec![FrameIdentityView {
+                id: 0x300,
+                extended: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn serialized_analysis_keeps_can_id_namespaces_distinct() {
+        let text = "(1.0) can0 123#00\n(1.1) can0 00000123#11\n";
+        let import = analyze_capture_text("candump", text, None).expect("analysis");
+        assert_eq!(import.unique_ids, 2);
+        assert_eq!(import.per_id.len(), 2);
+        assert!(import
+            .per_id
+            .iter()
+            .any(|entry| entry.id == 0x123 && !entry.extended));
+        assert!(import
+            .per_id
+            .iter()
+            .any(|entry| entry.id == 0x123 && entry.extended));
+    }
+
+    #[test]
+    fn import_exposes_protocol_state_novelty() {
+        let text = "(1.0) can0 7E0#021001\n(1.1) can0 7E0#025001\n";
+        let import = analyze_capture_text("candump", text, None).expect("analysis");
+        assert_eq!(import.protocol_states.completed_pdus, 2);
+        assert_eq!(import.protocol_states.unique_states.len(), 2);
+        assert_eq!(import.protocol_states.transitions.len(), 1);
+        assert_eq!(import.protocol_states.transitions[0].from.kind, "request");
+        assert_eq!(
+            import.protocol_states.transitions[0].to.kind,
+            "positive_response"
+        );
     }
 
     #[test]

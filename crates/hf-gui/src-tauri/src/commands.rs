@@ -2183,6 +2183,144 @@ pub async fn export_repro(
     Ok(Some(written.to_string_lossy().to_string()))
 }
 
+/// Return a side-effect-free campaign proposal and its supporting evidence.
+#[cfg(feature = "proof-carrying")]
+#[tauri::command]
+pub fn campaign_advice(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request = serde_json::from_value(request).map_err(|error| error.to_string())?;
+    let advice = state
+        .container
+        .campaign_advice(&request)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(advice).map_err(|error| error.to_string())
+}
+
+/// Explain that campaign intelligence was excluded from this build.
+#[cfg(not(feature = "proof-carrying"))]
+#[tauri::command]
+pub fn campaign_advice(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, request);
+    Err(proof_carrying_feature_unavailable())
+}
+
+/// Assemble final proof-carrying evidence for a terminal campaign.
+#[cfg(feature = "proof-carrying")]
+#[tauri::command]
+pub async fn campaign_evidence(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+) -> Result<serde_json::Value, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    let evidence = state
+        .container
+        .campaign_evidence_manifest(
+            run_id,
+            hf_service::evidence::CampaignEvidencePricing {
+                compute_usd_per_hour,
+                model_cost_usd,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(evidence).map_err(|error| error.to_string())
+}
+
+/// Explain that campaign evidence was excluded from this build.
+#[cfg(not(feature = "proof-carrying"))]
+#[tauri::command]
+pub async fn campaign_evidence(
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+) -> Result<serde_json::Value, String> {
+    let _ = (state, run_id, compute_usd_per_hour, model_cost_usd);
+    Err(proof_carrying_feature_unavailable())
+}
+
+/// Export a draft remediation bundle into a directory selected by the user.
+#[cfg(feature = "proof-carrying")]
+#[tauri::command]
+pub async fn export_remediation_draft(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    finding_id: String,
+    patch: String,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt as _;
+
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|error| error.to_string())?;
+    let finding_id = uuid::Uuid::parse_str(&finding_id).map_err(|error| error.to_string())?;
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("Choose a folder for the remediation handoff")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let folder = folder
+        .into_path()
+        .map_err(|error| format!("invalid folder path: {error}"))?;
+    let short_id: String = finding_id.simple().to_string().chars().take(12).collect();
+    let destination = folder.join(format!("oxfuzz_remediation_{short_id}"));
+    state
+        .container
+        .export_remediation_draft(
+            run_id,
+            finding_id,
+            &patch,
+            &destination,
+            hf_service::evidence::CampaignEvidencePricing {
+                compute_usd_per_hour,
+                model_cost_usd,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+
+/// Explain that remediation handoffs were excluded from this build.
+#[cfg(not(feature = "proof-carrying"))]
+#[tauri::command]
+pub async fn export_remediation_draft(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+    run_id: String,
+    finding_id: String,
+    patch: String,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+) -> Result<Option<String>, String> {
+    let _ = (
+        app,
+        state,
+        run_id,
+        finding_id,
+        patch,
+        compute_usd_per_hour,
+        model_cost_usd,
+    );
+    Err(proof_carrying_feature_unavailable())
+}
+
+#[cfg(not(feature = "proof-carrying"))]
+fn proof_carrying_feature_unavailable() -> String {
+    "proof-carrying campaign intelligence is not included in this application build".to_owned()
+}
+
 /// Export already-composed report `content` (e.g. a saved draft) in `format`
 /// via a native save dialog. Returns the saved path or `None` if cancelled.
 #[tauri::command]

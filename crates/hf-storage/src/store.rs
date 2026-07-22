@@ -218,6 +218,33 @@ pub struct AutomotiveStateCorpusRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Kind of explicit human harness promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessApprovalKind {
+    /// Crash-free smoke qualification was approved.
+    CleanSmoke,
+    /// Smoke findings were reviewed and explicitly accepted.
+    KnownFindings,
+}
+
+/// Durable digest-bound provenance for one explicit harness promotion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessApprovalRecord {
+    /// Service-owned approval id.
+    pub id: Uuid,
+    /// Exact promoted harness.
+    pub harness_id: Uuid,
+    /// Smoke-qualified source digest.
+    pub source_sha256: String,
+    /// Smoke-qualified binary digest.
+    pub binary_sha256: String,
+    /// Whether clean smoke or reviewed findings were approved.
+    pub approval_kind: HarnessApprovalKind,
+    /// Approval time.
+    pub approved_at: DateTime<Utc>,
+}
+
 /// A persisted fuzz-run record.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -253,6 +280,12 @@ pub struct RunRecord {
     /// Digest of target sources, starting corpus, and runtime image used to
     /// decide whether two campaign coverage measurements are comparable.
     pub context_rev: Option<String>,
+    /// Digest of the staged target-source inputs.
+    pub source_rev: Option<String>,
+    /// Digest of the starting corpus snapshot.
+    pub corpus_rev: Option<String>,
+    /// Digest of the pinned sandbox image reference.
+    pub sandbox_rev: Option<String>,
 }
 
 impl RunRecord {
@@ -280,6 +313,9 @@ impl RunRecord {
             binary_rev: None,
             evidence_dir: None,
             context_rev: None,
+            source_rev: None,
+            corpus_rev: None,
+            sandbox_rev: None,
         }
     }
 }
@@ -384,8 +420,8 @@ impl Store {
             None => None,
         };
         sqlx::query(
-            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev, binary_rev, evidence_dir, run_kind, context_rev)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO runs (id, project_root, engine, status, started_at, ended_at, config_json, edges, execs, crash_count, harness_rev, binary_rev, evidence_dir, run_kind, context_rev, source_rev, corpus_rev, sandbox_rev)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )
         .bind(run.id.to_string())
         .bind(&run.project_root)
@@ -402,6 +438,9 @@ impl Store {
         .bind(run.evidence_dir.as_deref())
         .bind(enum_str(&run.kind))
         .bind(run.context_rev.as_deref())
+        .bind(run.source_rev.as_deref())
+        .bind(run.corpus_rev.as_deref())
+        .bind(run.sandbox_rev.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1495,6 +1534,120 @@ impl Store {
         rows.iter().map(|r| json_col(r, "data_json")).collect()
     }
 
+    /// Atomically persist a promoted harness and its digest-bound human approval.
+    /// Exact retries return the first approval record.
+    ///
+    /// # Errors
+    /// Returns an error when the harness is not promoted, a digest is malformed,
+    /// serialization fails, or the transaction cannot commit.
+    pub async fn promote_harness_with_approval(
+        &self,
+        harness: &Harness,
+        approval_kind: HarnessApprovalKind,
+        source_sha256: &str,
+        binary_sha256: &str,
+        approved_at: DateTime<Utc>,
+    ) -> Result<HarnessApprovalRecord, StorageError> {
+        if harness.status != hf_core::harness::HarnessStatus::Promoted
+            || !is_sha256(source_sha256)
+            || !is_sha256(binary_sha256)
+        {
+            return Err(StorageError::InvalidData(
+                "harness approval requires promoted status and lowercase SHA-256 digests"
+                    .to_owned(),
+            ));
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let approval_kind_text = enum_str(&approval_kind);
+        let existing = sqlx::query(
+            "SELECT id, harness_id, source_sha256, binary_sha256, approval_kind, approved_at
+             FROM harness_approvals
+             WHERE harness_id = ?1 AND source_sha256 = ?2 AND binary_sha256 = ?3
+                   AND approval_kind = ?4",
+        )
+        .bind(harness.id.to_string())
+        .bind(source_sha256)
+        .bind(binary_sha256)
+        .bind(&approval_kind_text)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        let approval = if let Some(row) = existing {
+            harness_approval_from_row(&row)?
+        } else {
+            let approval = HarnessApprovalRecord {
+                id: Uuid::new_v4(),
+                harness_id: harness.id,
+                source_sha256: source_sha256.to_owned(),
+                binary_sha256: binary_sha256.to_owned(),
+                approval_kind,
+                approved_at,
+            };
+            sqlx::query(
+                "INSERT INTO harness_approvals
+                    (id, harness_id, source_sha256, binary_sha256, approval_kind, approved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(approval.id.to_string())
+            .bind(approval.harness_id.to_string())
+            .bind(&approval.source_sha256)
+            .bind(&approval.binary_sha256)
+            .bind(&approval_kind_text)
+            .bind(approval.approved_at.to_rfc3339())
+            .execute(&mut *transaction)
+            .await?;
+            approval
+        };
+
+        let smoke_json = harness
+            .smoke_run
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO harnesses
+                (id, target_id, engine, source, status, smoke_run_json, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(harness.id.to_string())
+        .bind(harness.target_id.to_string())
+        .bind(enum_str(&harness.engine))
+        .bind(&harness.source)
+        .bind(enum_str(&harness.status))
+        .bind(smoke_json)
+        .bind(serde_json::to_string(harness)?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(approval)
+    }
+
+    /// Load the exact approval for a harness source/binary revision.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed stored evidence.
+    pub async fn harness_approval(
+        &self,
+        harness_id: Uuid,
+        source_sha256: &str,
+        binary_sha256: &str,
+    ) -> Result<Option<HarnessApprovalRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, harness_id, source_sha256, binary_sha256, approval_kind, approved_at
+             FROM harness_approvals
+             WHERE harness_id = ?1 AND source_sha256 = ?2 AND binary_sha256 = ?3
+             ORDER BY approved_at DESC, rowid DESC LIMIT 1",
+        )
+        .bind(harness_id.to_string())
+        .bind(source_sha256)
+        .bind(binary_sha256)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|value| harness_approval_from_row(&value))
+            .transpose()
+    }
+
     // -- crashes ------------------------------------------------------------
 
     /// Insert or replace a crash record.
@@ -2055,6 +2208,28 @@ fn guardrail_decision_from_row(
     })
 }
 
+fn harness_approval_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<HarnessApprovalRecord, StorageError> {
+    Ok(HarnessApprovalRecord {
+        id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        harness_id: Uuid::parse_str(&row.try_get::<String, _>("harness_id")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        source_sha256: row.try_get("source_sha256")?,
+        binary_sha256: row.try_get("binary_sha256")?,
+        approval_kind: enum_from(&row.try_get::<String, _>("approval_kind")?)?,
+        approved_at: ts(&row.try_get::<String, _>("approved_at")?)?,
+    })
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Decode a JSON-text column into a model.
 fn json_col<T: DeserializeOwned>(
     row: &sqlx::sqlite::SqliteRow,
@@ -2091,6 +2266,9 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
     let evidence_dir: Option<String> = row.try_get("evidence_dir")?;
     let run_kind: String = row.try_get("run_kind")?;
     let context_rev: Option<String> = row.try_get("context_rev")?;
+    let source_rev: Option<String> = row.try_get("source_rev")?;
+    let corpus_rev: Option<String> = row.try_get("corpus_rev")?;
+    let sandbox_rev: Option<String> = row.try_get("sandbox_rev")?;
     Ok(RunRecord {
         id: Uuid::parse_str(&id_str)
             .map_err(|e| StorageError::Timestamp(format!("bad uuid: {e}")))?,
@@ -2108,6 +2286,9 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RunRecord, StorageError
         binary_rev,
         evidence_dir,
         context_rev,
+        source_rev,
+        corpus_rev,
+        sandbox_rev,
     })
 }
 

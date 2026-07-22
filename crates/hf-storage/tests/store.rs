@@ -12,8 +12,8 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, ProjectAutoRevert, RunKind, RunRecord,
-    RunStatus, StorageError, Store,
+    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind, ProjectAutoRevert,
+    RunKind, RunRecord, RunStatus, StorageError, Store,
 };
 use uuid::Uuid;
 
@@ -994,7 +994,10 @@ fn sample_harness(target_id: Uuid) -> Harness {
 #[tokio::test]
 async fn run_roundtrip_and_status_update() {
     let (store, _dir) = temp_store().await;
-    let run = RunRecord::new("/proj", EngineKind::AflPlusPlus, None, Utc::now());
+    let mut run = RunRecord::new("/proj", EngineKind::AflPlusPlus, None, Utc::now());
+    run.source_rev = Some("a".repeat(64));
+    run.corpus_rev = Some("b".repeat(64));
+    run.sandbox_rev = Some("c".repeat(64));
     let id = run.id;
     store.insert_run(&run).await.unwrap();
 
@@ -1003,6 +1006,9 @@ async fn run_roundtrip_and_status_update() {
     assert_eq!(fetched.status, RunStatus::Pending);
     assert_eq!(fetched.kind, RunKind::Campaign);
     assert_eq!(fetched.engine, EngineKind::AflPlusPlus);
+    assert_eq!(fetched.source_rev, Some("a".repeat(64)));
+    assert_eq!(fetched.corpus_rev, Some("b".repeat(64)));
+    assert_eq!(fetched.sandbox_rev, Some("c".repeat(64)));
 
     let ended = Utc::now();
     store
@@ -1038,6 +1044,88 @@ async fn target_and_harness_roundtrip() {
     assert_eq!(got.target_id, target_id);
     assert_eq!(store.list_harnesses(target_id).await.unwrap().len(), 1);
     assert_eq!(store.list_all_harnesses().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn harness_promotion_and_digest_bound_approval_are_atomic_and_idempotent() {
+    let (store, _dir) = temp_store().await;
+    let mut harness = sample_harness(Uuid::new_v4());
+    store.upsert_harness(&harness).await.unwrap();
+    harness.status = HarnessStatus::Promoted;
+    let approved_at = Utc::now();
+
+    let approval = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            approved_at,
+        )
+        .await
+        .expect("atomic promotion");
+    assert_eq!(approval.harness_id, harness.id);
+    assert_eq!(approval.source_sha256, "a".repeat(64));
+    assert_eq!(approval.binary_sha256, "b".repeat(64));
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::Promoted
+    );
+    assert_eq!(
+        store
+            .harness_approval(harness.id, &"a".repeat(64), &"b".repeat(64))
+            .await
+            .unwrap(),
+        Some(approval.clone())
+    );
+
+    let retried = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect("idempotent promotion");
+    assert_eq!(retried, approval);
+}
+
+#[tokio::test]
+async fn rejected_approval_rolls_back_the_promoted_harness_state() {
+    let (store, _dir) = temp_store().await;
+    let mut harness = sample_harness(Uuid::new_v4());
+    harness.status = HarnessStatus::SmokePassed;
+    store.upsert_harness(&harness).await.unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_harness_approval
+         BEFORE INSERT ON harness_approvals
+         BEGIN
+           SELECT RAISE(ABORT, 'rejected approval');
+         END",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    harness.status = HarnessStatus::Promoted;
+    let error = store
+        .promote_harness_with_approval(
+            &harness,
+            HarnessApprovalKind::CleanSmoke,
+            &"c".repeat(64),
+            &"d".repeat(64),
+            Utc::now(),
+        )
+        .await
+        .expect_err("approval failure must abort the transaction");
+
+    assert!(matches!(error, StorageError::Db(_)));
+    assert_eq!(
+        store.get_harness(harness.id).await.unwrap().unwrap().status,
+        HarnessStatus::SmokePassed
+    );
 }
 
 #[tokio::test]

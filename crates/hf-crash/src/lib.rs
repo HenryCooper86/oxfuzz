@@ -7,6 +7,8 @@ pub mod classify;
 pub mod dedup;
 pub mod ingest;
 pub mod minimize;
+#[cfg(feature = "remediation-handoff")]
+pub mod remediation;
 pub mod report;
 
 pub use casr::{casr_command, cluster_from_path, kind_from_short, parse_casrep, severity_from_str};

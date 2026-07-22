@@ -37,6 +37,9 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   run_fuzzer: { method: "POST", path: "/runs/start" },
   run_status: { method: "GET", path: "/runs/{run_id}/status" },
   cancel_run_by_id: { method: "POST", path: "/runs/{run_id}/cancel" },
+  campaign_advice: { method: "POST", path: "/campaign/advice" },
+  campaign_evidence: { method: "POST", path: "/campaign/evidence" },
+  remediation_draft: { method: "POST", path: "/remediation/draft" },
   project_auto_revert_override: { method: "POST", path: "/projects/auto-revert" },
   project_auto_revert_overrides: { method: "GET", path: "/projects/auto-revert/all" },
   effective_auto_revert_policy: { method: "POST", path: "/projects/auto-revert/effective" },
@@ -405,7 +408,9 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       }
       const requestArgs = command === "patch_defectdojo_config" || command === "patch_issue_tracker_config"
         ? typedPatchBody(args)
-        : args;
+        : command === "campaign_advice"
+          ? args?.request as Record<string, unknown> | undefined
+          : args;
       return request<T>(endpoint, requestArgs);
     },
     async listen<T = unknown>(event: string, callback: (event: { payload: T }) => void): Promise<UnlistenFn> {
