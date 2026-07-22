@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Coverage delta tracking, stagnation detection"
 
+[features]
+default = []
+campaign-advisor = []
+
 [dependencies]
 hf-core = { workspace = true }
 async-trait = { workspace = true }

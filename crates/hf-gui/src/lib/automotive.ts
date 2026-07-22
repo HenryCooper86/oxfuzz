@@ -367,6 +367,42 @@ export interface OfflineChangeMap {
   distinct_values: number[];
 }
 
+export interface OfflineFrameIdentity {
+  id: number;
+  extended: boolean;
+}
+
+export interface ProtocolStreamView {
+  channel: string;
+  frame: OfflineFrameIdentity;
+  direction: string | null;
+}
+
+export interface ProtocolStateLabelView {
+  kind: "request" | "positive_response" | "negative_response" | "other";
+  service: number;
+  detail: number | null;
+}
+
+export interface ProtocolStateObservationView {
+  stream: ProtocolStreamView;
+  state: ProtocolStateLabelView;
+}
+
+export interface ProtocolStateTransitionView {
+  stream: ProtocolStreamView;
+  from: ProtocolStateLabelView;
+  to: ProtocolStateLabelView;
+  count: number;
+}
+
+export interface ProtocolStateView {
+  completed_pdus: number;
+  malformed_frames: number;
+  unique_states: ProtocolStateObservationView[];
+  transitions: ProtocolStateTransitionView[];
+}
+
 export interface CaptureImport {
   format: string;
   frame_count: number;
@@ -378,12 +414,13 @@ export interface CaptureImport {
   frames: OfflineFrameView[];
   per_id: OfflineIdStat[];
   change_maps: OfflineChangeMap[];
+  protocol_states: ProtocolStateView;
 }
 
 export interface CaptureDiffView {
-  only_in_first: number[];
-  only_in_second: number[];
-  changed: number[];
+  only_in_first: OfflineFrameIdentity[];
+  only_in_second: OfflineFrameIdentity[];
+  changed: OfflineFrameIdentity[];
 }
 
 export interface ImportAutomotiveCaptureInput {

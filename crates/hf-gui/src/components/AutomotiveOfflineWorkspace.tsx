@@ -10,7 +10,9 @@ import {
   type CaptureImport,
   type OfflineCaptureFormat,
   type OfflineChangeMap,
+  type OfflineFrameIdentity,
   type OfflineFrameView,
+  type ProtocolStateLabelView,
 } from "../lib/automotive";
 import { useToast } from "./ui/toastContext";
 import { AutomotiveSignalGraph } from "./AutomotiveSignalGraph";
@@ -31,6 +33,15 @@ function formatId(id: number, extended: boolean): string {
 
 function formatSeconds(micros: number): string {
   return (micros / 1_000_000).toFixed(6);
+}
+
+function formatProtocolState(state: ProtocolStateLabelView): string {
+  const service = `0x${state.service.toString(16).toUpperCase().padStart(2, "0")}`;
+  const detail =
+    state.detail === null
+      ? ""
+      : ` / 0x${state.detail.toString(16).toUpperCase().padStart(2, "0")}`;
+  return `${state.kind.replaceAll("_", " ")} ${service}${detail}`;
 }
 
 function SnifferRow({ map }: { map: OfflineChangeMap }) {
@@ -217,6 +228,47 @@ export function AutomotiveOfflineWorkspace() {
             ))}
           </div>
 
+          <div className="flex items-center gap-2">
+            <Activity size={15} className="text-accent" />
+            <h3 className="text-12px font-semibold">
+              {t("automotive.offline.protocolStates")}
+            </h3>
+          </div>
+          <p className="text-11px text-text-muted">
+            {t("automotive.offline.protocolStatesHint")}
+          </p>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              [t("automotive.offline.completedPdus"), result.protocol_states.completed_pdus],
+              [t("automotive.offline.uniqueStates"), result.protocol_states.unique_states.length],
+              [
+                t("automotive.offline.uniqueTransitions"),
+                result.protocol_states.transitions.length,
+              ],
+              [t("automotive.offline.malformedFrames"), result.protocol_states.malformed_frames],
+            ].map(([label, value]) => (
+              <div
+                key={String(label)}
+                className="rounded-md border border-border bg-surface-primary p-2"
+              >
+                <div className="font-semibold text-text-primary">{value}</div>
+                <div className="text-11px text-text-muted">{label}</div>
+              </div>
+            ))}
+          </div>
+          {result.protocol_states.transitions.length > 0 && (
+            <div className="flex flex-col gap-1 text-11px">
+              {result.protocol_states.transitions.slice(0, 40).map((transition, index) => (
+                <div
+                  key={`${transition.stream.channel}-${transition.stream.frame.id}-${transition.stream.frame.extended}-${index}`}
+                  className="rounded border border-border bg-surface-primary px-2 py-1 font-mono text-text-secondary"
+                >
+                  {formatId(transition.stream.frame.id, transition.stream.frame.extended)}: {formatProtocolState(transition.from)} → {formatProtocolState(transition.to)} ×{transition.count}
+                </div>
+              ))}
+            </div>
+          )}
+
           <h3 className="text-12px font-semibold">{t("automotive.offline.frameGrid")}</h3>
           {result.truncated && (
             <div className="text-11px text-warning">
@@ -274,19 +326,25 @@ export function AutomotiveOfflineWorkspace() {
         </div>
         {diff && (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 text-11px">
-            {[
+            {([
               [t("automotive.offline.onlyFirst"), diff.only_in_first],
               [t("automotive.offline.onlySecond"), diff.only_in_second],
               [t("automotive.offline.changed"), diff.changed],
-            ].map(([label, ids]) => (
+            ] satisfies Array<[string, OfflineFrameIdentity[]]>).map(([label, ids]) => (
               <div key={String(label)} className="rounded-md border border-border bg-surface-primary p-2">
                 <div className="mb-1 font-semibold text-text-secondary">
-                  {label} <span className="text-text-muted">({(ids as number[]).length})</span>
+                  {label}{" "}
+                  <span className="text-text-muted">
+                    ({ids.length})
+                  </span>
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {(ids as number[]).slice(0, 60).map((id) => (
-                    <span key={id} className="font-mono text-text-muted">
-                      {formatId(id, id > 0x7ff)}
+                  {ids.slice(0, 60).map((identity) => (
+                    <span
+                      key={`${identity.id}-${identity.extended}`}
+                      className="font-mono text-text-muted"
+                    >
+                      {formatId(identity.id, identity.extended)}
                     </span>
                   ))}
                 </div>

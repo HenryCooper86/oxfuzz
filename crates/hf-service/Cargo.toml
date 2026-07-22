@@ -8,8 +8,9 @@ description = "Business logic orchestrating discovery, harness, engine, crash, c
 # Automotive on by default; `--no-default-features` drops the optional
 # hf-automotive dependency and compiles the feature-absent orchestration paths.
 [features]
-default = ["automotive-scapy"]
+default = ["automotive-scapy", "proof-carrying"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
+proof-carrying = ["hf-coverage/campaign-advisor", "hf-crash/remediation-handoff"]
 
 [dependencies]
 hf-core = { workspace = true }
@@ -42,6 +43,7 @@ comrak = { workspace = true }
 # workspace reqwest features so the file upload to /api/v2/import-scan works.
 reqwest = { workspace = true, features = ["multipart"] }
 sha2 = { workspace = true }
+hex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

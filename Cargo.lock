@@ -2604,6 +2604,7 @@ dependencies = [
  "chrono",
  "comrak",
  "futures",
+ "hex",
  "hf-agent",
  "hf-automotive",
  "hf-core",
@@ -2692,14 +2693,10 @@ name = "hf-test-utils"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
  "futures",
  "hf-core",
- "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
- "tracing",
  "uuid",
 ]
 

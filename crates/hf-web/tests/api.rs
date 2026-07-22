@@ -61,6 +61,45 @@ async fn health_returns_ok() {
 }
 
 #[tokio::test]
+async fn campaign_advice_returns_a_read_only_evidence_backed_proposal() {
+    let (status, json) = post_json(
+        "/campaign/advice",
+        serde_json::json!({
+            "current_engine": "LibFuzzer",
+            "enabled_engines": ["LibFuzzer", "AflPlusPlus"],
+            "engine_rates": [
+                {"engine": "LibFuzzer", "usd_per_hour": 1.0},
+                {"engine": "AflPlusPlus", "usd_per_hour": 1.0}
+            ],
+            "observations": [{
+                "run_id": "00000000-0000-0000-0000-000000000001",
+                "sequence": 1,
+                "engine": "LibFuzzer",
+                "duration_secs": 3600,
+                "new_edges": 0,
+                "crashes": 0,
+                "corpus_additions": 0,
+                "model_cost_usd": 0.0
+            }],
+            "budget": {
+                "max_total_cost_usd": 10.0,
+                "min_edges_per_dollar": 1.0,
+                "plateau_runs": 1
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["action"]["kind"], "switch_engine");
+    assert_eq!(json["action"]["to"], "AflPlusPlus");
+    assert_eq!(json["requires_human_approval"], true);
+    assert!(json["evidence"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+}
+
+#[tokio::test]
 async fn discover_returns_json() {
     allow_open_dev_mode();
     let app = hf_web::router::build();

@@ -2,7 +2,7 @@
 
 > An AI fuzzing agent that discovers targets, writes harnesses, drives open-source fuzzing engines, and triages the crashes -- under human-in-the-loop supervision and sandboxed execution.
 
-**Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **Self-Evolving Skills**
+**Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **User-Extensible Skills**
 
 <p align="center">
   <img src="docs/screenshots/hero.png" alt="oxfuzz Dashboard showing operational readiness, harness review, recent runs, and crash handoff" width="900">

@@ -88,6 +88,9 @@ fn populated() -> ReportData {
             binary_rev: None,
             evidence_dir: None,
             context_rev: None,
+            source_rev: None,
+            corpus_rev: None,
+            sandbox_rev: None,
         }),
         crashes: vec![sample_crash()],
         coverage: Some(CoverageSummary {

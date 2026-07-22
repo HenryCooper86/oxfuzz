@@ -352,6 +352,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/start", post(run_start))
         .route("/runs/{id}/status", get(run_status))
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
+        .merge(proof_carrying_routes())
         .route(
             "/projects/auto-revert",
             post(project_auto_revert_override),
@@ -511,6 +512,19 @@ fn automotive_routes() -> Router<AppState> {
     Router::new()
 }
 
+#[cfg(feature = "proof-carrying")]
+fn proof_carrying_routes() -> Router<AppState> {
+    Router::new()
+        .route("/campaign/advice", post(campaign_advice))
+        .route("/campaign/evidence", post(campaign_evidence))
+        .route("/remediation/draft", post(remediation_draft))
+}
+
+#[cfg(not(feature = "proof-carrying"))]
+fn proof_carrying_routes() -> Router<AppState> {
+    Router::new()
+}
+
 /// Bearer-token auth + request audit middleware.
 ///
 /// Enforces [`AuthPolicy`]: with a token configured, every request except
@@ -595,6 +609,76 @@ fn approved_optional_project(
 
 fn public_value<T: Serialize>(value: T) -> serde_json::Value {
     redact_public_json(serde_json::to_value(value).unwrap_or(serde_json::Value::Null))
+}
+
+#[cfg(feature = "proof-carrying")]
+async fn campaign_advice(
+    State(state): State<AppState>,
+    Json(request): Json<hf_service::campaign_intelligence::CampaignAdviceRequest>,
+) -> ApiResult<serde_json::Value> {
+    let advice = state
+        .container
+        .campaign_advice(&request)
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(advice)))
+}
+
+#[cfg(feature = "proof-carrying")]
+#[derive(Debug, Deserialize)]
+struct CampaignEvidenceRequest {
+    run_id: uuid::Uuid,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+}
+
+#[cfg(feature = "proof-carrying")]
+async fn campaign_evidence(
+    State(state): State<AppState>,
+    Json(request): Json<CampaignEvidenceRequest>,
+) -> ApiResult<serde_json::Value> {
+    let evidence = state
+        .container
+        .campaign_evidence_manifest(
+            request.run_id,
+            hf_service::evidence::CampaignEvidencePricing {
+                compute_usd_per_hour: request.compute_usd_per_hour,
+                model_cost_usd: request.model_cost_usd,
+            },
+        )
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(evidence)))
+}
+
+#[cfg(feature = "proof-carrying")]
+#[derive(Debug, Deserialize)]
+struct RemediationDraftRequest {
+    run_id: uuid::Uuid,
+    finding_id: uuid::Uuid,
+    patch: String,
+    compute_usd_per_hour: f64,
+    model_cost_usd: f64,
+}
+
+#[cfg(feature = "proof-carrying")]
+async fn remediation_draft(
+    State(state): State<AppState>,
+    Json(request): Json<RemediationDraftRequest>,
+) -> ApiResult<serde_json::Value> {
+    let handoff = state
+        .container
+        .remediation_draft(
+            request.run_id,
+            request.finding_id,
+            &request.patch,
+            hf_service::evidence::CampaignEvidencePricing {
+                compute_usd_per_hour: request.compute_usd_per_hour,
+                model_cost_usd: request.model_cost_usd,
+            },
+        )
+        .await
+        .map_err(classified_api_error)?;
+    Ok(Json(public_value(handoff)))
 }
 
 #[derive(Debug, Deserialize)]

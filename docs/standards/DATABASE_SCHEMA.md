@@ -42,6 +42,9 @@ listed in their individual sections below.
 | `evidence_dir` | `TEXT` | nullable workspace-relative evidence directory |
 | `run_kind` | `TEXT NOT NULL DEFAULT 'campaign'` | campaign/smoke |
 | `context_rev` | `TEXT` | nullable SHA-256 of source/corpus/runtime context |
+| `source_rev` | `TEXT` | nullable SHA-256 of staged target-source inputs |
+| `corpus_rev` | `TEXT` | nullable SHA-256 of the starting corpus snapshot |
+| `sandbox_rev` | `TEXT` | nullable SHA-256 of the pinned sandbox image reference |
 
 Indexes: `idx_runs_project(project_root)`, `idx_runs_status(status)`.
 
@@ -141,6 +144,25 @@ valid.
 
 Index: `idx_harnesses_target(target_id)`. `target_id` is a logical reference;
 the migration does not declare a SQL foreign key.
+
+### `harness_approvals`
+
+Durable human-promotion provenance for proof-carrying campaign evidence. The
+service writes the approval and promoted harness state in one transaction.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | service-owned approval UUID |
+| `harness_id` | `TEXT NOT NULL` | exact promoted harness |
+| `source_sha256` | `TEXT NOT NULL` | smoke-qualified source revision |
+| `binary_sha256` | `TEXT NOT NULL` | smoke-qualified binary revision |
+| `approval_kind` | `TEXT NOT NULL` | `clean_smoke` or `known_findings` |
+| `approved_at` | `TEXT NOT NULL` | RFC 3339 human approval time |
+
+Unique key: `(harness_id, source_sha256, binary_sha256, approval_kind)`.
+Index: `idx_harness_approvals_harness(harness_id, approved_at DESC)`. Harness
+ids are logical references so historical approval evidence remains readable if
+other project data is cleaned independently.
 
 ### `crashes`
 
@@ -413,6 +435,8 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0017_automotive_consumed_approvals.sql` | creates the single-use physical-bench approval ledger |
 | `0018_guardrail_decisions.sql` | creates the guardrail authorization audit trail |
 | `0019_targets_file_scoped_identity.sql` | adds and backfills `targets.file`; replaces the unique index with `UNIQUE(project_root, symbol, file)` |
+| `0020_harness_approvals.sql` | creates atomic, digest-bound human harness-promotion provenance |
+| `0021_run_provenance_components.sql` | adds independently verifiable source, corpus, and sandbox-reference digests to runs |
 
 ## 7. Read failure contract
 
