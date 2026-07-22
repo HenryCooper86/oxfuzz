@@ -61,6 +61,12 @@ malformed input. They never open an interface or spawn a process, so they add no
 new runtime attack surface and run even when the sidecar is absent. `hf-service`
 calls them directly to service offline operations without a sidecar round-trip.
 
+All per-frame analysis keys include both the numeric arbitration id and its
+standard/extended namespace. ISO-TP/UDS analysis additionally emits bounded
+state observations and transitions per channel/id/direction stream. Repeated
+transitions affect occurrence counts but not novelty, and the output remains
+separate from source coverage.
+
 This layer is the foundation: DBC decode, importers, ISO-TP reassembly, and diff
 are prerequisites for the live and visualization features.
 
