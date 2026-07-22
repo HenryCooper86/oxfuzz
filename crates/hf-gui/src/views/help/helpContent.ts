@@ -80,6 +80,15 @@ const FIRST_RUN = `
 The first time you open oxfuzz you get a short **Setup Wizard**. You can
 re-run it any time from **Settings -> General -> Run Setup Wizard**.
 
+## Installing & updating
+
+Install a packaged build by opening the \`.dmg\` and dragging **oxfuzz** into
+**Applications**. The app is ad-hoc signed (not notarized), so macOS
+**Gatekeeper** blocks the very first launch: **right-click the app and choose
+Open** once (or run \`xattr -cr /Applications/oxfuzz.app\`). To update, replace
+the app in **Applications** with the newer build. Building from source is
+covered in the project README.
+
 ## What you need
 
 | You need | Why |
