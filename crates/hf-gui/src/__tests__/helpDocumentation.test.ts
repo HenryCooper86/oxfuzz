@@ -16,6 +16,17 @@ describe("in-app documentation", () => {
     expect(chineseIds).toEqual(englishIds);
   });
 
+  it("documents installing the packaged app and the Gatekeeper first-launch step in both languages", () => {
+    const englishFirstRun = HELP_SECTIONS.find((section) => section.id === "first-run");
+    const chineseFirstRun = HELP_SECTIONS_ZH.find((section) => section.id === "first-run");
+
+    expect(englishFirstRun?.body).toContain("Applications");
+    expect(englishFirstRun?.body).toContain("Gatekeeper");
+    expect(englishFirstRun?.body).toContain("xattr -cr /Applications/oxfuzz.app");
+    expect(chineseFirstRun?.body).toContain("Gatekeeper");
+    expect(chineseFirstRun?.body).toContain("xattr -cr /Applications/oxfuzz.app");
+  });
+
   it("states that approval never enables generated host execution", () => {
     const englishWelcome = HELP_SECTIONS.find((section) => section.id === "welcome");
     const chineseWelcome = HELP_SECTIONS_ZH.find((section) => section.id === "welcome");
