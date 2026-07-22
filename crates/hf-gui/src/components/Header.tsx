@@ -28,14 +28,25 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
         borderBottom: "1px solid var(--border)",
       }}
     >
-      <div className="flex items-center gap-2" data-tauri-drag-region>
+      <div className="flex items-center gap-3" data-tauri-drag-region>
         {onToggleSidebar && (
           <IconButton size={32} onClick={onToggleSidebar} title="Toggle sidebar" aria-label="Toggle sidebar">
             <PanelLeft size={18} />
           </IconButton>
         )}
+        <span
+          data-tauri-drag-region
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: "13px",
+            fontWeight: 700,
+            letterSpacing: "0.06em",
+          }}
+        >
+          oxfuzz
+        </span>
         {icon && (
-          <span data-tauri-drag-region style={{ color: "var(--accent)" }}>
+          <span data-tauri-drag-region style={{ color: "var(--text-secondary)" }}>
             {icon}
           </span>
         )}
@@ -43,11 +54,9 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
           data-tauri-drag-region
           style={{
             fontFamily: "var(--font-display)",
-            fontSize: "17px",
-            fontWeight: 400,
-            fontStyle: "italic",
-            letterSpacing: "0.01em",
-            opacity: 0.9,
+            fontSize: "14px",
+            fontWeight: 500,
+            color: "var(--text-secondary)",
           }}
         >
           {title}

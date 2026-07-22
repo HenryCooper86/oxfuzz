@@ -10,8 +10,8 @@
 
   /* Text hierarchy */
   --text-primary: #e8e6e1;
-  --text-secondary: #8a8680;
-  --text-muted: #555250;
+  --text-secondary: #aaa59e;
+  --text-muted: #8c8881;
 
   /* Accent -- warm gold */
   --accent: #c8b560;
@@ -37,7 +37,7 @@
   --chart-series-4: #c98500;
 
   /* Borders */
-  --border: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08);
   --border-focus: rgba(255, 255, 255, 0.15);
 
   /* Shadows */
@@ -73,7 +73,7 @@
 
   --text-primary: #1a1917;
   --text-secondary: #6b6560;
-  --text-muted: #9c9894;
+  --text-muted: #6d6761;
 
   --accent: #9a7c2a;
   --accent-hover: #7e6420;
@@ -94,7 +94,7 @@
   --chart-series-3: #1baf7a;
   --chart-series-4: #eda100;
 
-  --border: rgba(0, 0, 0, 0.1);
+  --border: rgba(0, 0, 0, 0.13);
   --border-focus: rgba(0, 0, 0, 0.22);
 
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
@@ -129,6 +129,26 @@ body {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+}
+
+.view-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-lg);
+}
+
+.view-canvas {
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding-bottom: var(--space-xl);
+}
+
+@media (max-width: 768px) {
+  .view-scroll {
+    padding: var(--space-md);
+  }
 }
 
 /* Scrollbars -- thin and discreet */
@@ -282,6 +302,60 @@ button:disabled {
   background: var(--error-subtle);
   color: var(--error);
   border-color: var(--error);
+}
+
+.dashboard-supporting-band {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  align-items: start;
+  gap: var(--space-md);
+}
+
+.dashboard-action-row,
+.dashboard-action-status {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-secondary);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.dashboard-action-row {
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.dashboard-action-row:hover,
+.dashboard-action-row:focus-visible {
+  background: var(--surface-active);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.dashboard-action-status {
+  justify-content: flex-start;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.dashboard-action-status-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+@media (max-width: 1100px) {
+  .dashboard-supporting-band {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* Hairline separators between consecutive settings rows inside a card. */
