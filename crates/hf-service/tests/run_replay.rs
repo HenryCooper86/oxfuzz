@@ -83,6 +83,13 @@ impl RecordingRuntime {
 
 #[async_trait]
 impl RuntimeAdapter for RecordingRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         _cmd: &[String],
