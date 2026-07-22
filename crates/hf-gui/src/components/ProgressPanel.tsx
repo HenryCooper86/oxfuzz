@@ -1,22 +1,41 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Minus, RotateCcw } from "lucide-react";
 import { usePipeline } from "../providers/pipeline";
 import { useI18n } from "../i18nContext";
+import {
+  getInitialProgressPanelOpen,
+  getProgressPercentage,
+  getProgressPanelOpenAfterCompletionChange,
+  getProgressPanelWidth,
+} from "../lib/progressPanel";
 
 export function ProgressPanel() {
   const { coreStages, reset } = usePipeline();
   const { t } = useI18n();
-  const [open, setOpen] = useState(true);
   const total = coreStages.length;
   const doneCount = coreStages.filter((c) => c.done).length;
-  const pct = Math.round((doneCount / total) * 100);
+  const complete = total > 0 && doneCount === total;
+  const [open, setOpen] = useState(() => getInitialProgressPanelOpen(doneCount, total));
+  const previousComplete = useRef(complete);
+  const pct = getProgressPercentage(doneCount, total);
+
+  useEffect(() => {
+    setOpen((currentOpen) =>
+      getProgressPanelOpenAfterCompletionChange(currentOpen, previousComplete.current, complete),
+    );
+    previousComplete.current = complete;
+  }, [complete]);
 
   return (
     <div
       className="flex-shrink-0 border-l border-border flex flex-col"
-      style={{ width: "280px", background: "var(--surface-secondary)", animation: "fadeIn 0.15s ease" }}
+      style={{
+        width: getProgressPanelWidth(open),
+        background: "var(--surface-secondary)",
+        transition: "width 0.2s ease, background 0.2s ease",
+      }}
     >
-      <div style={{ padding: "var(--space-md)" }}>
+      <div hidden={!open} style={{ padding: "var(--space-md)" }}>
         <div
           className="rounded-lg flex flex-col"
           style={{ background: "var(--surface-primary)", border: "1px solid var(--border)", overflow: "hidden" }}
@@ -24,6 +43,8 @@ export function ProgressPanel() {
           {/* Header */}
           <button
             onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            aria-controls="progress-panel-details"
             className="flex items-center justify-between w-full transition-colors duration-150"
             style={{
               padding: "10px 12px",
@@ -39,7 +60,7 @@ export function ProgressPanel() {
                 {doneCount}/{total}
               </span>
             </span>
-            {open ? <ChevronDown size={16} className="text-text-muted" /> : <ChevronRight size={16} className="text-text-muted" />}
+            <ChevronDown size={16} className="text-text-muted" />
           </button>
 
           {/* Progress bar */}
@@ -57,26 +78,24 @@ export function ProgressPanel() {
           </div>
 
           {/* Steps -- the 4 core stages, matching the Fuzzing Workflow. */}
-          {open && (
-            <div style={{ padding: "0 6px 8px" }}>
-              {coreStages.map((stage, i) => (
-                <StepRow
-                  key={stage.id}
-                  index={i + 1}
-                  label={t(`stage.${stage.id}`)}
-                  done={stage.done}
-                  skipped={stage.skipped}
-                  current={stage.current}
-                  // Show sub-progress for a multi-step stage that's underway.
-                  subProgress={
-                    stage.totalSteps > 1 && !stage.done
-                      ? `${stage.doneSteps}/${stage.totalSteps}`
-                      : undefined
-                  }
-                />
-              ))}
-            </div>
-          )}
+          <div id="progress-panel-details" hidden={!open} style={{ padding: "0 6px 8px" }}>
+            {coreStages.map((stage, i) => (
+              <StepRow
+                key={stage.id}
+                index={i + 1}
+                label={t(`stage.${stage.id}`)}
+                done={stage.done}
+                skipped={stage.skipped}
+                current={stage.current}
+                // Show sub-progress for a multi-step stage that's underway.
+                subProgress={
+                  stage.totalSteps > 1 && !stage.done
+                    ? `${stage.doneSteps}/${stage.totalSteps}`
+                    : undefined
+                }
+              />
+            ))}
+          </div>
         </div>
 
         {doneCount > 0 && (
@@ -92,6 +111,24 @@ export function ProgressPanel() {
           </button>
         )}
       </div>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          aria-label={complete ? t("progress.expandCompleteDetails") : t("progress.expandDetails")}
+          aria-expanded={open}
+          aria-controls="progress-panel-details"
+          className="flex flex-col items-center justify-center gap-1.5 w-full h-full transition-colors duration-150"
+          style={{ background: "transparent", border: "none", color: "var(--text-primary)", cursor: "pointer", padding: "var(--space-sm)" }}
+        >
+          <span
+            className="flex items-center justify-center rounded-full"
+            style={{ width: "28px", height: "28px", background: complete ? "var(--accent)" : "var(--surface-active)", color: complete ? "var(--accent-contrast)" : "var(--text-muted)" }}
+          >
+            {complete ? <Check size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+          </span>
+          <span className="text-xs font-semibold">{doneCount}/{total}</span>
+        </button>
+      )}
     </div>
   );
 }

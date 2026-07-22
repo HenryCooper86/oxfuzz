@@ -28,6 +28,10 @@ import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader }
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
 import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
+import {
+  dashboardActionDestination,
+  isDashboardActionInteractive,
+} from "../lib/dashboardActions";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n, type TParams } from "../i18nContext";
@@ -543,11 +547,18 @@ function OverviewTab({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <ReadinessSummary readiness={dashboard.readiness} />
-      <MetricGrid dashboard={dashboard} />
+      <NextActions
+        actions={dashboard.next_actions}
+        items={dashboard.next_action_items}
+        onReport={onReport}
+        onNavigate={onNavigate}
+      />
+      <div className="dashboard-supporting-band">
+        <ReadinessSummary readiness={dashboard.readiness} />
+        <MetricGrid dashboard={dashboard} />
+      </div>
       <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))" }}>
         <section className="flex flex-col gap-4 min-w-0">
-          <NextActions actions={dashboard.next_actions} items={dashboard.next_action_items} onReport={onReport} />
           <HarnessQueue items={dashboard.harness_reviews} onOpen={onNavigate && (() => onNavigate("harness"))} />
           <RecentRuns runs={dashboard.recent_runs} onOpen={onNavigate && (() => onNavigate("runs"))} />
         </section>
@@ -1189,13 +1200,26 @@ function Metric({ icon, label, value, detail, accent }: { icon: React.ReactNode;
   );
 }
 
-function NextActions({ actions, items, onReport }: { actions: string[]; items: ReadinessNote[]; onReport: () => void }) {
+function NextActions({
+  actions,
+  items,
+  onReport,
+  onNavigate,
+}: {
+  actions: string[];
+  items: ReadinessNote[];
+  onReport: () => void;
+  onNavigate?: (view: ViewType) => void;
+}) {
   const { t } = useI18n();
   // Localize from the parallel notes when present; English falls back to the
   // backend prose line-for-line (correct singular/plural preserved).
-  const lines = items.length
-    ? items.map((item, i) => loc(t, `readiness.action.${item.code}`, actions[i] ?? item.code, { n: item.count }))
-    : actions;
+  const entries = items.length
+    ? items.map((item, i) => ({
+        code: item.code,
+        label: loc(t, `readiness.action.${item.code}`, actions[i] ?? item.code, { n: item.count }),
+      }))
+    : actions.map((label) => ({ code: null, label }));
   return (
     <section className="surface-card" style={{ padding: "var(--space-md)" }}>
       <div className="flex items-center justify-between gap-3">
@@ -1206,12 +1230,29 @@ function NextActions({ actions, items, onReport }: { actions: string[]; items: R
         </Button>
       </div>
       <div className="flex flex-col gap-2 mt-3">
-        {lines.map((action) => (
-          <div key={action} className="flex items-start gap-2 text-sm text-text-secondary">
-            <span className="mt-1 rounded-full" style={{ width: 6, height: 6, background: "var(--accent)", flexShrink: 0 }} />
-            <span>{action}</span>
-          </div>
-        ))}
+        {entries.map((entry) => {
+          const destination = entry.code ? dashboardActionDestination(entry.code) : null;
+          if (isDashboardActionInteractive(destination, Boolean(onNavigate))) {
+            return (
+              <button
+                key={`${entry.code}-${entry.label}`}
+                type="button"
+                className="dashboard-action-row"
+                aria-label={t("dashboard.openAction", { action: entry.label })}
+                onClick={() => onNavigate?.(destination)}
+              >
+                <span>{entry.label}</span>
+                <ChevronRight size={16} aria-hidden="true" />
+              </button>
+            );
+          }
+          return (
+            <div key={`${entry.code ?? "status"}-${entry.label}`} className="dashboard-action-status">
+              <span className="dashboard-action-status-dot" aria-hidden="true" />
+              <span>{entry.label}</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
