@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _};
 use std::path::Path;
 
 use hf_core::engine::EngineKind;
@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::container::ServiceContainer;
 
 /// Current evidence-manifest schema.
-pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
 
 /// Lifecycle captured in a proof-carrying manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +251,8 @@ impl ServiceContainer {
         run_id: Uuid,
         pricing: CampaignEvidencePricing,
     ) -> Result<EvidenceManifest, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let managed_workspace_root = crate::container::initialize_workspace_root()?;
         validate_pricing(pricing)?;
         let store = self.store().ok_or_else(|| {
             ClassifiedError::Storage("campaign evidence requires persistent storage".to_owned())
@@ -306,7 +308,7 @@ impl ServiceContainer {
             required_digest(run.context_rev.as_deref(), "comparison context")?;
         let source_revision = required_digest(run.source_rev.as_deref(), "source revision")?;
         let corpus_sha256 = required_digest(run.corpus_rev.as_deref(), "corpus revision")?;
-        let sandbox_image_sha256 = required_digest(run.sandbox_rev.as_deref(), "sandbox revision")?;
+        let sandbox_image_sha256 = required_exact_sandbox_digest(run.sandbox_rev.as_deref())?;
         let approval = store
             .harness_approval(config.harness_id, harness_sha256, binary_sha256)
             .await?
@@ -321,7 +323,13 @@ impl ServiceContainer {
             .await?
             .into_iter()
             .map(|crash| {
-                let (_, reproducer_sha256) = read_regular_file_bounded(&crash.input_path)?;
+                let (_, reproducer_sha256) = read_run_crash_file(
+                    &managed_workspace_root,
+                    Path::new(&run.project_root),
+                    &target.symbol,
+                    run.id,
+                    &crash.input_path,
+                )?;
                 let stack_signature = if is_sha256(&crash.stack_signature) {
                     crash.stack_signature
                 } else {
@@ -356,7 +364,7 @@ impl ServiceContainer {
 
         EvidenceManifest::new(EvidenceManifestBody {
             schema_version: EVIDENCE_SCHEMA_VERSION,
-            manifest_id: Uuid::new_v5(&run.id, b"oxfuzz-evidence-manifest-v1"),
+            manifest_id: Uuid::new_v5(&run.id, b"oxfuzz-evidence-manifest-v2"),
             generated_at: ended_at.to_rfc3339(),
             project: project_display_name(&run.project_root),
             target: target.symbol,
@@ -431,6 +439,12 @@ fn required_digest<'a>(value: Option<&'a str>, label: &str) -> Result<&'a str, C
         .ok_or_else(|| ClassifiedError::Validation(format!("run has no valid {label} SHA-256")))
 }
 
+fn required_exact_sandbox_digest(value: Option<&str>) -> Result<&str, ClassifiedError> {
+    let digest =
+        value.and_then(|value| value.strip_prefix(crate::container::EXACT_DOCKER_IMAGE_REV_PREFIX));
+    required_digest(digest, "exact sandbox image revision")
+}
+
 fn approval_kind_name(kind: HarnessApprovalKind) -> &'static str {
     match kind {
         HarnessApprovalKind::CleanSmoke => "clean_smoke",
@@ -495,85 +509,198 @@ async fn comparable_coverage_delta(
     }))
 }
 
-pub(crate) fn read_regular_file_bounded(path: &Path) -> Result<(Vec<u8>, String), ClassifiedError> {
-    let before = std::fs::symlink_metadata(path).map_err(|error| {
+pub(crate) fn read_run_crash_file(
+    managed_workspace_root: &Path,
+    project: &Path,
+    target: &str,
+    run_id: Uuid,
+    recorded_path: &Path,
+) -> Result<(Vec<u8>, String), ClassifiedError> {
+    let configured_workspace_root = crate::container::workspace_root();
+    let configured_run_root = crate::container::workspace_dir(project, target)
+        .join("runs")
+        .join(run_id.to_string());
+    let run_relative = configured_run_root
+        .strip_prefix(&configured_workspace_root)
+        .map_err(|_| {
+            ClassifiedError::Validation("approved run root escapes managed workspace".to_owned())
+        })?;
+    let crash_relative = recorded_path
+        .strip_prefix(&configured_run_root)
+        .map_err(|_| {
+            ClassifiedError::Validation(format!(
+                "crash reproducer escapes its approved run root: {}",
+                recorded_path.display()
+            ))
+        })?;
+    read_regular_file_bounded(
+        managed_workspace_root,
+        run_relative,
+        crash_relative,
+        recorded_path,
+    )
+}
+
+fn read_regular_file_bounded(
+    managed_workspace_root: &Path,
+    run_relative: &Path,
+    crash_relative: &Path,
+    display_path: &Path,
+) -> Result<(Vec<u8>, String), ClassifiedError> {
+    let file = open_regular_file_beneath(
+        managed_workspace_root,
+        run_relative,
+        crash_relative,
+        display_path,
+    )?;
+    read_open_file_snapshot(file, display_path)
+}
+
+#[cfg(unix)]
+fn open_regular_file_beneath(
+    managed_workspace_root: &Path,
+    run_relative: &Path,
+    crash_relative: &Path,
+    display_path: &Path,
+) -> Result<File, ClassifiedError> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+
+    let components = run_relative
+        .components()
+        .chain(crash_relative.components())
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name),
+            _ => Err(ClassifiedError::Validation(format!(
+                "crash reproducer has an unsafe path component: {}",
+                display_path.display()
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (leaf, parents) = components.split_last().ok_or_else(|| {
         ClassifiedError::Validation(format!(
-            "inspect crash reproducer {}: {error}",
-            path.display()
+            "crash reproducer must be below its approved run root: {}",
+            display_path.display()
         ))
     })?;
-    let maximum = hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes;
-    if !before.file_type().is_file() || before.len() > maximum {
-        return Err(ClassifiedError::Validation(format!(
-            "crash reproducer must be a regular file no larger than {maximum} bytes"
-        )));
-    }
-    let mut file = File::open(path).map_err(|error| {
-        ClassifiedError::Validation(format!("open crash reproducer {}: {error}", path.display()))
+
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = open(managed_workspace_root, directory_flags, Mode::empty()).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "open managed workspace root {} without following links: {error}",
+            managed_workspace_root.display()
+        ))
     })?;
-    let opened = file.metadata().map_err(|error| {
+    let mut directory = File::from(root);
+    for component in parents {
+        let next =
+            openat(&directory, *component, directory_flags, Mode::empty()).map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "open crash reproducer directory beneath {}: {error}",
+                    managed_workspace_root.display()
+                ))
+            })?;
+        directory = File::from(next);
+    }
+
+    let file = openat(
+        &directory,
+        *leaf,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "open crash reproducer {} without following links: {error}",
+            display_path.display()
+        ))
+    })?;
+    Ok(File::from(file))
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_beneath(
+    _managed_workspace_root: &Path,
+    _run_relative: &Path,
+    _crash_relative: &Path,
+    _display_path: &Path,
+) -> Result<File, ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "proof-carrying evidence reads require descriptor-relative filesystem access".to_owned(),
+    ))
+}
+
+fn read_open_file_snapshot(
+    mut file: File,
+    path: &Path,
+) -> Result<(Vec<u8>, String), ClassifiedError> {
+    let maximum = hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes;
+    let before = file.metadata().map_err(|error| {
         ClassifiedError::Validation(format!(
             "inspect open crash reproducer {}: {error}",
             path.display()
         ))
     })?;
-    if !opened.file_type().is_file() || !same_file(&before, &opened) || opened.len() > maximum {
-        return Err(ClassifiedError::Validation(
-            "crash reproducer changed while opening".to_owned(),
-        ));
+    if !before.file_type().is_file() || before.len() > maximum {
+        return Err(ClassifiedError::Validation(format!(
+            "crash reproducer must be a regular file no larger than {maximum} bytes"
+        )));
     }
-    let mut hasher = Sha256::new();
-    let mut data = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
-    let mut observed = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| {
-            ClassifiedError::Validation(format!(
-                "read crash reproducer {}: {error}",
-                path.display()
-            ))
-        })?;
-        if count == 0 {
-            break;
-        }
-        observed = observed.checked_add(count as u64).ok_or_else(|| {
-            ClassifiedError::Validation("crash reproducer size overflowed".to_owned())
-        })?;
-        if observed > maximum {
+
+    let read_bounded = |file: &mut File| -> Result<Vec<u8>, ClassifiedError> {
+        let mut data = Vec::with_capacity(usize::try_from(before.len()).unwrap_or(0));
+        file.take(maximum + 1)
+            .read_to_end(&mut data)
+            .map_err(|error| {
+                ClassifiedError::Validation(format!(
+                    "read crash reproducer {}: {error}",
+                    path.display()
+                ))
+            })?;
+        if data.len() as u64 > maximum {
             return Err(ClassifiedError::Validation(format!(
                 "crash reproducer exceeds {maximum} bytes"
             )));
         }
-        data.extend_from_slice(&buffer[..count]);
-        hasher.update(&buffer[..count]);
-    }
-    let after = std::fs::symlink_metadata(path).map_err(|error| {
+        Ok(data)
+    };
+    let data = read_bounded(&mut file)?;
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
         ClassifiedError::Validation(format!(
-            "reinspect crash reproducer {}: {error}",
+            "rewind crash reproducer {}: {error}",
             path.display()
         ))
     })?;
-    if !after.file_type().is_file()
-        || !same_file(&before, &after)
-        || before.len() != observed
-        || after.len() != observed
-    {
+    let repeated = read_bounded(&mut file)?;
+    let after = file.metadata().map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "reinspect open crash reproducer {}: {error}",
+            path.display()
+        ))
+    })?;
+    if data != repeated || before.len() != data.len() as u64 || !stable_file(&before, &after) {
         return Err(ClassifiedError::Validation(
             "crash reproducer changed during verification".to_owned(),
         ));
     }
-    Ok((data, hex::encode(hasher.finalize())))
+    let digest = hex::encode(Sha256::digest(&data));
+    Ok((data, digest))
 }
 
 #[cfg(unix)]
-fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+fn stable_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt as _;
 
-    left.dev() == right.dev() && left.ino() == right.ino()
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.len() == right.len()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
 }
 
 #[cfg(not(unix))]
-fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+fn stable_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
@@ -642,6 +769,85 @@ fn validate_body(body: &EvidenceManifestBody) -> Result<(), EvidenceError> {
         return Err(EvidenceError::DuplicateFinding);
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod file_read_tests {
+    use super::{read_regular_file_bounded, required_exact_sandbox_digest};
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+
+    #[test]
+    fn bounded_read_accepts_a_nested_regular_file() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("run/out");
+        std::fs::create_dir_all(&directory).unwrap();
+        let artifact = directory.join("crash");
+        std::fs::write(&artifact, b"crash bytes").unwrap();
+
+        let (bytes, digest) = read_regular_file_bounded(
+            root.path(),
+            Path::new("run"),
+            Path::new("out/crash"),
+            &artifact,
+        )
+        .unwrap();
+
+        assert_eq!(bytes, b"crash bytes");
+        assert_eq!(digest, hex::encode(Sha256::digest(b"crash bytes")));
+    }
+
+    #[test]
+    fn bounded_read_rejects_an_intermediate_symlink_inside_the_run_root() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("run/real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("crash"), b"crash bytes").unwrap();
+        symlink(&real, root.path().join("run/alias")).unwrap();
+        let artifact = root.path().join("run/alias/crash");
+
+        let error = read_regular_file_bounded(
+            root.path(),
+            Path::new("run"),
+            Path::new("alias/crash"),
+            &artifact,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("crash reproducer"));
+    }
+
+    #[test]
+    fn bounded_read_rejects_a_symlinked_run_root_ancestor() {
+        let managed = tempfile::tempdir().unwrap();
+        let real = managed.path().join("real");
+        let run_root = real.join("runs/run-id");
+        std::fs::create_dir_all(run_root.join("out")).unwrap();
+        std::fs::write(run_root.join("out/crash"), b"crash bytes").unwrap();
+        symlink(&real, managed.path().join("project")).unwrap();
+        let redirected_run_root = managed.path().join("project/runs/run-id");
+
+        let artifact = redirected_run_root.join("out/crash");
+        let error = read_regular_file_bounded(
+            managed.path(),
+            Path::new("project/runs/run-id"),
+            Path::new("out/crash"),
+            &artifact,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("crash reproducer"));
+    }
+
+    #[test]
+    fn exact_sandbox_digest_rejects_legacy_untagged_values() {
+        let legacy = "a".repeat(64);
+        assert!(required_exact_sandbox_digest(Some(&legacy)).is_err());
+
+        let exact = format!("docker-image-id-sha256:{legacy}");
+        assert_eq!(required_exact_sandbox_digest(Some(&exact)).unwrap(), legacy);
+    }
 }
 
 fn is_sha256(value: &str) -> bool {
