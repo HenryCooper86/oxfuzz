@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { dashboardActionDestination } from "../lib/dashboardActions";
+import {
+  dashboardActionDestination,
+  isDashboardActionInteractive,
+} from "../lib/dashboardActions";
 
 function source(relativePath: string): string {
   return readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -27,6 +30,22 @@ describe("dashboard action destinations", () => {
     expect(dashboardActionDestination("none")).toBeNull();
     expect(dashboardActionDestination("future_action")).toBeNull();
   });
+
+  it("rejects object prototype property names", () => {
+    expect(["constructor", "toString", "__proto__"].map(dashboardActionDestination)).toEqual([
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it("only makes a resolved destination interactive when navigation is available", () => {
+    const destination = dashboardActionDestination("run_discovery");
+
+    expect(isDashboardActionInteractive(destination, true)).toBe(true);
+    expect(isDashboardActionInteractive(destination, false)).toBe(false);
+    expect(isDashboardActionInteractive(null, true)).toBe(false);
+  });
 });
 
 describe("action-first dashboard overview", () => {
@@ -39,15 +58,17 @@ describe("action-first dashboard overview", () => {
     expect(overview).toMatch(/<NextActions[\s\S]*?onNavigate=\{onNavigate\}/);
   });
 
-  it("renders known actions as accessible directional buttons and unknown actions as status rows", () => {
+  it("renders only available destinations as buttons and uses status rows otherwise", () => {
     const dashboard = source("../views/DashboardView.tsx");
     const actions = functionSource(dashboard, "NextActions", "HarnessQueue");
 
     expect(actions).toContain("dashboardActionDestination");
+    expect(actions).toContain("isDashboardActionInteractive(destination, Boolean(onNavigate))");
     expect(actions).toContain("<button");
     expect(actions).toContain('aria-label={t("dashboard.openAction"');
     expect(actions).toContain("<ChevronRight");
     expect(actions).toContain("dashboard-action-status");
+    expect(actions).not.toContain("disabled={!onNavigate}");
   });
 
   it("groups readiness and metrics in a responsive supporting band", () => {

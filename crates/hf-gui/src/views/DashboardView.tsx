@@ -28,7 +28,10 @@ import { Button, EmptyState, Input, LoadingState, Select, Textarea, ViewHeader }
 import { useToast } from "../components/ui/toastContext";
 import { useConfirm } from "../providers/confirm";
 import { getTransport, onDataChanged, openExternal, useDefectDojo } from "../lib";
-import { dashboardActionDestination } from "../lib/dashboardActions";
+import {
+  dashboardActionDestination,
+  isDashboardActionInteractive,
+} from "../lib/dashboardActions";
 import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n, type TParams } from "../i18nContext";
@@ -1229,14 +1232,13 @@ function NextActions({
       <div className="flex flex-col gap-2 mt-3">
         {entries.map((entry) => {
           const destination = entry.code ? dashboardActionDestination(entry.code) : null;
-          if (destination) {
+          if (isDashboardActionInteractive(destination, Boolean(onNavigate))) {
             return (
               <button
                 key={`${entry.code}-${entry.label}`}
                 type="button"
                 className="dashboard-action-row"
                 aria-label={t("dashboard.openAction", { action: entry.label })}
-                disabled={!onNavigate}
                 onClick={() => onNavigate?.(destination)}
               >
                 <span>{entry.label}</span>
