@@ -78,7 +78,27 @@ inside the sandbox.
 
 ## Installing the desktop app
 
-If you have a prebuilt app, just open it. To build it from source:
+### Install from the packaged app (recommended)
+
+If someone handed you a build, install it like any other Mac app:
+
+1. Open `oxfuzz_0.1.0_aarch64.dmg` (double-click it).
+2. Drag **oxfuzz** into your **Applications** folder.
+3. Launch it from Applications or Spotlight.
+
+**First launch -- Gatekeeper.** oxfuzz is ad-hoc signed, not notarized by Apple,
+so the first time you open it macOS warns that it "cannot be opened because the
+developer cannot be verified." That is expected for an internal build. To open
+it, do either of these once:
+
+- **Right-click** (or Control-click) the app in Applications, choose **Open**,
+  then confirm **Open** in the dialog. macOS remembers the choice after that.
+- Or clear the quarantine flag from a terminal:
+  ```bash
+  xattr -cr /Applications/oxfuzz.app
+  ```
+
+### Build it from source
 
 ```bash
 git clone <your-oxfuzz-gitlab-remote>
@@ -87,7 +107,10 @@ cd oxfuzz
 open target/release/bundle/macos/oxfuzz.app
 ```
 
-The first launch builds the sandbox image, which can take a few minutes.
+This produces both the app bundle (`target/release/bundle/macos/oxfuzz.app`) and
+a shareable installer (`target/release/bundle/dmg/oxfuzz_<version>_<arch>.dmg`).
+
+The first launch builds the Docker sandbox image, which can take a few minutes.
 
 ---
 
