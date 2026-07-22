@@ -34,26 +34,6 @@ export function Header({ title, icon, theme, onToggleTheme, actions, onToggleSid
             <PanelLeft size={18} />
           </IconButton>
         )}
-        <span data-tauri-drag-region className="flex items-center gap-2">
-          <img
-            src="/logo.png"
-            alt="oxfuzz"
-            width={18}
-            height={18}
-            data-tauri-drag-region
-            style={{ display: "block", flexShrink: 0 }}
-          />
-          <span
-            style={{
-              fontFamily: "var(--font-display)",
-              fontSize: "13px",
-              fontWeight: 700,
-              letterSpacing: "0.06em",
-            }}
-          >
-            oxfuzz
-          </span>
-        </span>
         {icon && (
           <span data-tauri-drag-region style={{ color: "var(--text-secondary)" }}>
             {icon}
