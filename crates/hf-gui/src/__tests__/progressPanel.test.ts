@@ -39,11 +39,33 @@ describe("progress panel presentation", () => {
     expect(getProgressPanelOpenAfterCompletionChange(false, true, true)).toBe(false);
   });
 
-  it("uses translated accessibility and completion labels in compact mode", () => {
+  it("defines bilingual action labels for expanding compact progress", () => {
+    const i18n = source("../i18n.tsx");
+
+    expect(i18n).toContain('"progress.expandDetails": "Expand progress details"');
+    expect(i18n).toContain(
+      '"progress.expandCompleteDetails": "Expand progress details — all stages complete"',
+    );
+    expect(i18n).toContain('"progress.expandDetails": "展开进度详情"');
+    expect(i18n).toContain(
+      '"progress.expandCompleteDetails": "展开进度详情——所有阶段均已完成"',
+    );
+  });
+
+  it("uses an action-oriented label and stable details relationship in compact mode", () => {
     const panel = source("../components/ProgressPanel.tsx");
 
     expect(panel).toContain(
-      'aria-label={complete ? t("info.allStagesComplete") : t("header.progress")}',
+      'aria-label={complete ? t("progress.expandCompleteDetails") : t("progress.expandDetails")}',
+    );
+    expect(panel).toContain('aria-controls="progress-panel-details"');
+  });
+
+  it("keeps the controlled details region mounted while toggling its visibility", () => {
+    const panel = source("../components/ProgressPanel.tsx");
+
+    expect(panel).toMatch(
+      /<div\s+id="progress-panel-details"\s+hidden=\{!open\}/,
     );
   });
 });

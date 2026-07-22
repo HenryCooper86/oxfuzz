@@ -7,3 +7,19 @@ export const AI_SYSTEM_VIEW_IDS = ["chat", "agents", "skills", "knowledge", "aut
 export function sidebarSectionContainsView(section: readonly ViewType[], activeView: ViewType): boolean {
   return section.includes(activeView);
 }
+
+export function getSidebarSectionOpenAfterNavigation(
+  isOpen: boolean,
+  previousActiveView: ViewType,
+  activeView: ViewType,
+  section: readonly ViewType[],
+): boolean {
+  if (
+    activeView !== previousActiveView &&
+    sidebarSectionContainsView(section, activeView)
+  ) {
+    return true;
+  }
+
+  return isOpen;
+}

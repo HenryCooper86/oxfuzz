@@ -38,15 +38,25 @@ function contrastRatio(first: string, second: string): number {
 }
 
 describe("UI polish foundations", () => {
-  it("keeps secondary and muted text at AA contrast against the primary surface", () => {
+  it("keeps secondary and muted text at AA contrast against every opaque surface", () => {
     const css = source("../styles/index.css");
 
     for (const selector of [":root,\n[data-theme=\"dark\"]", "[data-theme=\"light\"]"]) {
       const block = themeBlock(css, selector);
-      const surface = cssHex(block, "--surface-primary");
 
-      for (const token of ["--text-secondary", "--text-muted"]) {
-        expect(contrastRatio(cssHex(block, token), surface), `${selector} ${token}`).toBeGreaterThanOrEqual(4.5);
+      for (const surfaceToken of [
+        "--surface-primary",
+        "--surface-secondary",
+        "--surface-tertiary",
+      ]) {
+        const surface = cssHex(block, surfaceToken);
+
+        for (const textToken of ["--text-secondary", "--text-muted"]) {
+          expect(
+            contrastRatio(cssHex(block, textToken), surface),
+            `${selector} ${textToken} against ${surfaceToken}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
       }
     }
   });

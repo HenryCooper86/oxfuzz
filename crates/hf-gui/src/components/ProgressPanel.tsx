@@ -35,8 +35,7 @@ export function ProgressPanel() {
         transition: "width 0.2s ease, background 0.2s ease",
       }}
     >
-      {open ? (
-        <div style={{ padding: "var(--space-md)" }}>
+      <div hidden={!open} style={{ padding: "var(--space-md)" }}>
         <div
           className="rounded-lg flex flex-col"
           style={{ background: "var(--surface-primary)", border: "1px solid var(--border)", overflow: "hidden" }}
@@ -61,7 +60,7 @@ export function ProgressPanel() {
                 {doneCount}/{total}
               </span>
             </span>
-            {open ? <ChevronDown size={16} className="text-text-muted" /> : <ChevronRight size={16} className="text-text-muted" />}
+            <ChevronDown size={16} className="text-text-muted" />
           </button>
 
           {/* Progress bar */}
@@ -79,26 +78,24 @@ export function ProgressPanel() {
           </div>
 
           {/* Steps -- the 4 core stages, matching the Fuzzing Workflow. */}
-          {open && (
-            <div id="progress-panel-details" style={{ padding: "0 6px 8px" }}>
-              {coreStages.map((stage, i) => (
-                <StepRow
-                  key={stage.id}
-                  index={i + 1}
-                  label={t(`stage.${stage.id}`)}
-                  done={stage.done}
-                  skipped={stage.skipped}
-                  current={stage.current}
-                  // Show sub-progress for a multi-step stage that's underway.
-                  subProgress={
-                    stage.totalSteps > 1 && !stage.done
-                      ? `${stage.doneSteps}/${stage.totalSteps}`
-                      : undefined
-                  }
-                />
-              ))}
-            </div>
-          )}
+          <div id="progress-panel-details" hidden={!open} style={{ padding: "0 6px 8px" }}>
+            {coreStages.map((stage, i) => (
+              <StepRow
+                key={stage.id}
+                index={i + 1}
+                label={t(`stage.${stage.id}`)}
+                done={stage.done}
+                skipped={stage.skipped}
+                current={stage.current}
+                // Show sub-progress for a multi-step stage that's underway.
+                subProgress={
+                  stage.totalSteps > 1 && !stage.done
+                    ? `${stage.doneSteps}/${stage.totalSteps}`
+                    : undefined
+                }
+              />
+            ))}
+          </div>
         </div>
 
         {doneCount > 0 && (
@@ -113,12 +110,13 @@ export function ProgressPanel() {
             {t("progress.reset")}
           </button>
         )}
-        </div>
-      ) : (
+      </div>
+      {!open && (
         <button
           onClick={() => setOpen(true)}
-          aria-label={complete ? t("info.allStagesComplete") : t("header.progress")}
+          aria-label={complete ? t("progress.expandCompleteDetails") : t("progress.expandDetails")}
           aria-expanded={open}
+          aria-controls="progress-panel-details"
           className="flex flex-col items-center justify-center gap-1.5 w-full h-full transition-colors duration-150"
           style={{ background: "transparent", border: "none", color: "var(--text-primary)", cursor: "pointer", padding: "var(--space-sm)" }}
         >
