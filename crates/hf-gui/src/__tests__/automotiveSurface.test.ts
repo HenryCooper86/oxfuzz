@@ -14,19 +14,22 @@ describe("automotive surface boundaries", () => {
 
   it("exposes automotive navigation and a dedicated typed settings tab", () => {
     expect(source("../types/index.ts")).toContain('| "automotive"');
-    expect(source("../components/Sidebar.tsx")).toContain('onNavigate("automotive")');
+    expect(source("../components/Sidebar.tsx")).toMatch(/view:\s*"automotive"/);
     expect(source("../components/settings/SettingsView.tsx")).toContain(
       "<AutomotiveSettingsTab",
     );
   });
 
-  it("keeps the automotive nav entry always present and visually prominent", () => {
+  it("keeps the automotive nav entry always present as a standard nav row", () => {
     const sidebar = source("../components/Sidebar.tsx");
-    // Automotive is a first-class capability: it renders unconditionally in its
-    // own labelled, accent-highlighted section and is never hidden behind a
-    // runtime `enabled` toggle the way the optional DefectDojo entry is.
-    expect(sidebar).toContain("AutomotiveNavButton");
+    // Automotive is a first-class capability: it renders unconditionally under
+    // its own Vehicle Security label as a standard nav row -- visually
+    // consistent with every other entry -- and is never hidden behind a runtime
+    // `enabled` toggle the way the optional DefectDojo entry is.
+    expect(sidebar).not.toContain("AutomotiveNavButton");
+    expect(sidebar).not.toContain("automotiveTag");
     expect(sidebar).toContain('t("sidebar.vehicle")');
+    expect(sidebar).toMatch(/view:\s*"automotive",\s*icon:\s*CarFront/);
     expect(sidebar).not.toMatch(/automotiveOn\s*&&/);
   });
 
