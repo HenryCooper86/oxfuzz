@@ -3,10 +3,9 @@ import { Send, ShieldAlert } from "lucide-react";
 import { useI18n } from "../i18nContext";
 import {
   executeAutomotiveReplay,
-  type AutomotiveReplayPlan,
-  type AutomotiveReplayStep,
   type AutomotiveSettings,
 } from "../lib/automotive";
+import { buildPeriodicCanReplayPlan } from "../lib/automotiveFrameSender";
 import { useConfirm } from "../providers/confirm";
 import { useToast } from "./ui/toastContext";
 import { Badge, Button, Input, Select } from "./ui";
@@ -15,15 +14,6 @@ interface AutomotiveFrameSenderProps {
   projectRoot: string;
   settings: AutomotiveSettings;
   onOperation: () => void;
-}
-
-/** Normalize a hex payload to lowercase, even-length bytes, or null if invalid. */
-function normalizeHex(input: string): string | null {
-  const cleaned = input.replace(/[\s_]/g, "").toLowerCase();
-  if (cleaned.length === 0 || cleaned.length % 2 !== 0 || !/^[0-9a-f]+$/.test(cleaned)) {
-    return null;
-  }
-  return cleaned;
 }
 
 /**
@@ -52,26 +42,17 @@ export function AutomotiveFrameSender({
 
   async function send() {
     if (!ready || busy) return;
-    const hex = normalizeHex(payload);
-    const id = arbId.trim();
-    if (!hex || !id || count < 1 || intervalMs < 0) {
+    const plan = buildPeriodicCanReplayPlan({
+      arbitrationId: arbId,
+      payload,
+      intervalMs,
+      count,
+      limits: settings.limits,
+    });
+    if (!plan) {
       toast({ title: t("automotive.sender.invalid"), variant: "error" });
       return;
     }
-    const plan: AutomotiveReplayPlan = {
-      protocol: "can",
-      mode: "virtual_can",
-      deterministic_seed: 0,
-      steps: Array.from(
-        { length: count },
-        (_, index): AutomotiveReplayStep => ({
-          sequence: index,
-          delay_micros: index === 0 ? 0 : intervalMs * 1000,
-          action: "send",
-          message: { protocol: "can", payload_hex: hex, fields: { arbitration_id: id } },
-        }),
-      ),
-    };
     const approved = await confirm({
       title: t("automotive.sender.title"),
       message: t("automotive.sender.confirm", { count, interface: iface }),

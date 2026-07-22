@@ -139,6 +139,8 @@ impl CheckpointStorage for MockCheckpointStorage {
 #[derive(Debug, Default)]
 pub struct MockSessionStore {
     sessions: RwLock<HashMap<String, SessionNode>>,
+    context_reset_indexes: RwLock<HashMap<String, u32>>,
+    custom_system_prompts: RwLock<HashMap<String, String>>,
 }
 
 impl MockSessionStore {
@@ -152,21 +154,27 @@ impl MockSessionStore {
 impl SessionStore for MockSessionStore {
     async fn create(&self, options: CreateSessionOptions) -> Result<SessionNode, SessionError> {
         let id = SessionId::new();
-        let root_id = options.parent_id.as_ref().map_or_else(
-            || id.clone(),
-            |pid| {
+        let (root_id, depth, path) = match options.parent_id.as_ref() {
+            Some(parent_id) => {
                 let map = self.sessions.read().unwrap();
-                map.get(&pid.to_string())
-                    .map_or_else(|| pid.clone(), |p| p.root_id.clone())
-            },
-        );
+                let parent =
+                    map.get(&parent_id.to_string())
+                        .ok_or_else(|| SessionError::NotFound {
+                            id: parent_id.to_string(),
+                        })?;
+                let mut path = parent.path.clone();
+                path.push(parent.id.clone());
+                (parent.root_id.clone(), parent.depth + 1, path)
+            }
+            None => (id.clone(), 0, Vec::new()),
+        };
 
         let node = SessionNode {
             id: id.clone(),
             parent_id: options.parent_id,
             root_id,
-            depth: 0,
-            path: vec![id.clone()],
+            depth,
+            path,
             session_type: options.session_type,
             state: SessionState::Active,
             agent_id: options.agent_id,
@@ -206,6 +214,18 @@ impl SessionStore for MockSessionStore {
                     .session_type
                     .as_ref()
                     .is_none_or(|t| s.session_type == *t)
+            })
+            .filter(|s| {
+                filter
+                    .agent_id
+                    .as_ref()
+                    .is_none_or(|agent_id| s.agent_id.as_ref() == Some(agent_id))
+            })
+            .filter(|s| {
+                filter
+                    .root_id
+                    .as_ref()
+                    .is_none_or(|root_id| &s.root_id == root_id)
             })
             .cloned()
             .collect();
@@ -252,18 +272,14 @@ impl SessionStore for MockSessionStore {
 
     async fn ancestors(&self, id: &SessionId) -> Result<Vec<SessionNode>, SessionError> {
         let map = self.sessions.read().unwrap();
-        let mut result = vec![];
-        let mut current_id = Some(id.clone());
-        while let Some(cid) = current_id.take() {
-            if let Some(node) = map.get(&cid.to_string()) {
-                result.push(node.clone());
-                current_id.clone_from(&node.parent_id);
-            } else {
-                break;
-            }
-        }
-        result.reverse();
-        Ok(result)
+        let node = map
+            .get(&id.to_string())
+            .ok_or_else(|| SessionError::NotFound { id: id.to_string() })?;
+        Ok(node
+            .path
+            .iter()
+            .filter_map(|ancestor_id| map.get(&ancestor_id.to_string()).cloned())
+            .collect())
     }
 
     async fn set_title(&self, id: &SessionId, title: String) -> Result<(), SessionError> {
@@ -289,37 +305,85 @@ impl SessionStore for MockSessionStore {
     }
 
     async fn delete(&self, id: &SessionId) -> Result<(), SessionError> {
+        let key = id.to_string();
         let mut map = self.sessions.write().unwrap();
-        if map.remove(&id.to_string()).is_none() {
-            return Err(SessionError::NotFound { id: id.to_string() });
+        if map.remove(&key).is_none() {
+            return Err(SessionError::NotFound { id: key });
         }
+        drop(map);
+        self.context_reset_indexes.write().unwrap().remove(&key);
+        self.custom_system_prompts.write().unwrap().remove(&key);
         Ok(())
     }
 
-    async fn get_context_reset_index(&self, _id: &SessionId) -> Result<Option<u32>, SessionError> {
-        Ok(None)
+    async fn get_context_reset_index(&self, id: &SessionId) -> Result<Option<u32>, SessionError> {
+        let key = id.to_string();
+        if !self.sessions.read().unwrap().contains_key(&key) {
+            return Err(SessionError::NotFound { id: key });
+        }
+        Ok(self
+            .context_reset_indexes
+            .read()
+            .unwrap()
+            .get(&key)
+            .copied())
     }
 
     async fn set_context_reset_index(
         &self,
-        _id: &SessionId,
-        _index: Option<u32>,
+        id: &SessionId,
+        index: Option<u32>,
     ) -> Result<(), SessionError> {
+        let key = id.to_string();
+        if !self.sessions.read().unwrap().contains_key(&key) {
+            return Err(SessionError::NotFound { id: key });
+        }
+        let mut indexes = self.context_reset_indexes.write().unwrap();
+        match index {
+            Some(index) => {
+                indexes.insert(key, index);
+            }
+            None => {
+                indexes.remove(&key);
+            }
+        }
         Ok(())
     }
 
     async fn get_custom_system_prompt(
         &self,
-        _id: &SessionId,
+        id: &SessionId,
     ) -> Result<Option<String>, SessionError> {
-        Ok(None)
+        let key = id.to_string();
+        if !self.sessions.read().unwrap().contains_key(&key) {
+            return Err(SessionError::NotFound { id: key });
+        }
+        Ok(self
+            .custom_system_prompts
+            .read()
+            .unwrap()
+            .get(&key)
+            .cloned())
     }
 
     async fn set_custom_system_prompt(
         &self,
-        _id: &SessionId,
-        _prompt: Option<String>,
+        id: &SessionId,
+        prompt: Option<String>,
     ) -> Result<(), SessionError> {
+        let key = id.to_string();
+        if !self.sessions.read().unwrap().contains_key(&key) {
+            return Err(SessionError::NotFound { id: key });
+        }
+        let mut prompts = self.custom_system_prompts.write().unwrap();
+        match prompt {
+            Some(prompt) => {
+                prompts.insert(key, prompt);
+            }
+            None => {
+                prompts.remove(&key);
+            }
+        }
         Ok(())
     }
 }
@@ -487,6 +551,132 @@ mod tests {
 
         let fetched = store.get(&node.id).await.unwrap();
         assert_eq!(fetched.title, Some("test session".into()));
+    }
+
+    #[tokio::test]
+    async fn mock_session_tree_matches_the_persistent_store_contract() {
+        let store = MockSessionStore::new();
+        let root = store
+            .create(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: Some("root".into()),
+            })
+            .await
+            .unwrap();
+        let child = store
+            .create(CreateSessionOptions {
+                parent_id: Some(root.id.clone()),
+                session_type: SessionType::Child,
+                agent_id: None,
+                title: Some("child".into()),
+            })
+            .await
+            .unwrap();
+        let grandchild = store
+            .create(CreateSessionOptions {
+                parent_id: Some(child.id.clone()),
+                session_type: SessionType::Child,
+                agent_id: None,
+                title: Some("grandchild".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(root.depth, 0);
+        assert!(root.path.is_empty());
+        assert_eq!(child.depth, 1);
+        assert_eq!(child.root_id, root.id);
+        assert_eq!(child.path, vec![root.id.clone()]);
+        assert_eq!(grandchild.depth, 2);
+        assert_eq!(grandchild.root_id, root.id);
+        assert_eq!(grandchild.path, vec![root.id.clone(), child.id.clone()]);
+
+        let ancestors = store.ancestors(&grandchild.id).await.unwrap();
+        assert_eq!(
+            ancestors.iter().map(|node| &node.id).collect::<Vec<_>>(),
+            vec![&root.id, &child.id]
+        );
+        assert!(store.ancestors(&root.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mock_session_store_rejects_a_missing_parent() {
+        let store = MockSessionStore::new();
+        let missing = SessionId::new();
+        let result = store
+            .create(CreateSessionOptions {
+                parent_id: Some(missing.clone()),
+                session_type: SessionType::Child,
+                agent_id: None,
+                title: None,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SessionError::NotFound { id }) if id == missing.to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_session_store_applies_root_filter_and_persists_optional_state() {
+        let store = MockSessionStore::new();
+        let first = store
+            .create(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+        store
+            .create(CreateSessionOptions {
+                parent_id: Some(first.id.clone()),
+                session_type: SessionType::Child,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+        store
+            .create(CreateSessionOptions {
+                parent_id: None,
+                session_type: SessionType::Main,
+                agent_id: None,
+                title: None,
+            })
+            .await
+            .unwrap();
+
+        let filtered = store
+            .list(&SessionFilter {
+                root_id: Some(first.id.clone()),
+                ..SessionFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|node| node.root_id == first.id));
+
+        store
+            .set_context_reset_index(&first.id, Some(7))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_context_reset_index(&first.id).await.unwrap(),
+            Some(7)
+        );
+        store
+            .set_custom_system_prompt(&first.id, Some("test prompt".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_custom_system_prompt(&first.id).await.unwrap(),
+            Some("test prompt".into())
+        );
     }
 
     #[tokio::test]

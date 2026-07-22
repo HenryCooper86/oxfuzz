@@ -12,6 +12,9 @@ pub use summary::{
     parse_llvm_cov_summary, parse_llvm_cov_uncovered, CoverageSummary, UncoveredRegion,
 };
 
+#[cfg(feature = "campaign-advisor")]
+pub mod campaign_advisor;
+
 /// A proposal when coverage stagnates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

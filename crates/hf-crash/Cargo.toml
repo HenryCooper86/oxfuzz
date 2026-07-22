@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Crash ingestion, dedup, minimization, bug report drafting"
 
+[features]
+default = []
+remediation-handoff = []
+
 [dependencies]
 hf-core = { workspace = true }
 async-trait = { workspace = true }
