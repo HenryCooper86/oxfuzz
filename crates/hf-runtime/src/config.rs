@@ -260,24 +260,29 @@ impl SandboxEngines {
     }
 }
 
-/// The `docker image inspect --format {{.Id}}` of the loaded sandbox image, used
-/// to invalidate the engine-probe cache when the image is rebuilt.
-fn sandbox_image_id() -> Option<String> {
+/// The content-addressed `docker image inspect --format {{.Id}}` identity of a
+/// loaded image. Reject malformed output so callers never mistake a mutable
+/// name for immutable provenance.
+pub(crate) fn image_id(image: &str) -> Option<String> {
     let out = run_bounded(
-        std::process::Command::new(docker_bin()).args([
-            "image",
-            "inspect",
-            "--format",
-            "{{.Id}}",
-            SANDBOX_IMAGE,
-        ]),
+        std::process::Command::new(docker_bin())
+            .args(["image", "inspect", "--format", "{{.Id}}", image]),
         DOCKER_PROBE_TIMEOUT,
     )?;
     if !out.status.success() {
         return None;
     }
-    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!id.is_empty()).then_some(id)
+    let id = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    let digest = id.strip_prefix("sha256:")?;
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(id)
+}
+
+/// The loaded sandbox image identity used to invalidate the engine-probe cache
+/// when the image is rebuilt under the same configured tag.
+fn sandbox_image_id() -> Option<String> {
+    image_id(SANDBOX_IMAGE)
 }
 
 /// Map the probe script's stdout (one present-binary name per line) to the

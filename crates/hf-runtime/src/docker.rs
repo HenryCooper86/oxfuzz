@@ -820,7 +820,7 @@ impl DockerRuntime {
 
 use async_trait::async_trait;
 use hf_core::error::ClassifiedError;
-use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
+use hf_core::runtime::{CommandResult, ImmutableImageReference, ResourceLimits, RuntimeAdapter};
 
 #[async_trait]
 impl RuntimeAdapter for DockerRuntime {
@@ -831,6 +831,26 @@ impl RuntimeAdapter for DockerRuntime {
         tokio::task::spawn_blocking(move || crate::config::image_present(&image))
             .await
             .unwrap_or(false)
+    }
+
+    async fn resolve_image_reference(
+        &self,
+        image: &str,
+    ) -> Result<Option<ImmutableImageReference>, ClassifiedError> {
+        let image = image.to_owned();
+        let display = image.clone();
+        tokio::task::spawn_blocking(move || crate::config::image_id(&image))
+            .await
+            .map_err(|error| {
+                ClassifiedError::Sandbox(format!("resolve sandbox image identity: {error}"))
+            })?
+            .ok_or_else(|| {
+                ClassifiedError::Sandbox(format!(
+                    "sandbox image {display} is unavailable or has no immutable image ID"
+                ))
+            })
+            .and_then(ImmutableImageReference::from_sha256_id)
+            .map(Some)
     }
 
     async fn run_command(
@@ -1037,6 +1057,9 @@ mod pinned_image_tests {
         assert!(valid_pinned_image_reference("name:2.7.0"));
         assert!(valid_pinned_image_reference(
             "repo/name@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(valid_pinned_image_reference(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ));
         assert!(!valid_pinned_image_reference("repo/name:latest"));
         assert!(!valid_pinned_image_reference("repo/name"));
