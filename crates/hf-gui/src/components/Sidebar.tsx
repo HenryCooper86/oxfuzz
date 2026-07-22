@@ -218,6 +218,29 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
       {/* Drag region / macOS traffic-light safe area */}
       <div style={{ height: "28px", flexShrink: 0 }} />
 
+      {/* Brand: logo + wordmark. Sits below the traffic-light safe area above so
+          it never collides with the macOS window controls. */}
+      <div className="flex items-center gap-2 flex-shrink-0" style={{ padding: "2px 14px 10px" }}>
+        <img
+          src="/logo.png"
+          alt="oxfuzz"
+          width={20}
+          height={20}
+          style={{ display: "block", flexShrink: 0 }}
+        />
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: "15px",
+            fontWeight: 700,
+            letterSpacing: "0.04em",
+            color: "var(--text-primary)",
+          }}
+        >
+          oxfuzz
+        </span>
+      </div>
+
       {/* Working area: new target + the targets you are fuzzing + the pipeline. */}
       <div className="flex-1 overflow-y-auto" style={{ padding: "6px 8px 0 8px" }}>
         <NewTargetButton onNewTarget={onNewTarget} />
