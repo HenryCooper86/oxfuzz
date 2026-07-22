@@ -52,6 +52,9 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
 [dev-dependencies]
 hf-test-utils = { workspace = true }
 sqlx = { workspace = true }

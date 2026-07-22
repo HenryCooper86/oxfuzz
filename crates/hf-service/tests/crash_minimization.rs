@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use hf_core::engine::{EngineKind, FuzzRunConfig};
+use hf_core::error::ClassifiedError;
 use hf_core::runtime::{
     CommandResult, CommandTermination, ResourceLimits, RuntimeAdapter, SandboxOptions,
 };
@@ -40,6 +41,13 @@ impl MinimizeRuntime {
 
 #[async_trait]
 impl RuntimeAdapter for MinimizeRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         cmd: &[String],

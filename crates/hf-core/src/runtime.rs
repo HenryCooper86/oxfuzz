@@ -69,6 +69,53 @@ impl CommandResult {
 /// A callback invoked with each output line as a streamed command runs.
 pub type LineSink<'a> = dyn Fn(&str) + Send + Sync + 'a;
 
+/// A runtime image pinned by its exact Docker-compatible content ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImmutableImageReference {
+    reference: String,
+    sha256: String,
+}
+
+impl ImmutableImageReference {
+    /// Validate and retain a `sha256:<64 lowercase hex>` image ID.
+    ///
+    /// # Errors
+    /// Returns a sandbox error when `reference` is mutable or malformed.
+    pub fn from_sha256_id(reference: impl Into<String>) -> Result<Self, ClassifiedError> {
+        let reference = reference.into();
+        let Some(sha256) = reference.strip_prefix("sha256:") else {
+            return Err(ClassifiedError::Sandbox(
+                "runtime image identity is not content-addressed".to_owned(),
+            ));
+        };
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ClassifiedError::Sandbox(
+                "runtime image identity has an invalid SHA-256 digest".to_owned(),
+            ));
+        }
+        Ok(Self {
+            sha256: sha256.to_owned(),
+            reference,
+        })
+    }
+
+    /// Exact reference passed to the runtime command.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    /// Lowercase SHA-256 identity persisted as provenance.
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
 /// One explicit bind mount granted to a sandboxed command.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SandboxMount {
@@ -209,6 +256,19 @@ pub trait RuntimeAdapter: Send + Sync {
         true
     }
 
+    /// Resolve a configured image name to the immutable reference that the
+    /// runtime will execute.
+    ///
+    /// Adapters without an image concept return `None`. Proof-carrying callers
+    /// fail closed on that result. Container runtimes must return a validated
+    /// content-addressed reference and fail when the image cannot be resolved.
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<ImmutableImageReference>, ClassifiedError> {
+        Ok(None)
+    }
+
     /// Run a non-streaming command with an explicit sandbox mount/profile.
     /// Adapters without specialized profile support may delegate to
     /// [`run_command`](Self::run_command).
@@ -296,7 +356,7 @@ pub trait RuntimeAdapter: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandResult, CommandTermination};
+    use super::{CommandResult, CommandTermination, ImmutableImageReference};
 
     #[test]
     fn command_result_requires_an_explicit_terminal_outcome() {
@@ -310,5 +370,18 @@ mod tests {
 
         assert_eq!(result.termination, CommandTermination::TimedOut);
         assert!(result.require_completed("test command").is_err());
+    }
+
+    #[test]
+    fn immutable_image_reference_requires_a_lowercase_sha256_id() {
+        let valid = format!("sha256:{}", "a".repeat(64));
+        let identity = ImmutableImageReference::from_sha256_id(valid.clone()).unwrap();
+        assert_eq!(identity.reference(), valid);
+        assert_eq!(identity.sha256(), "a".repeat(64));
+
+        assert!(ImmutableImageReference::from_sha256_id("repo/image:1.0").is_err());
+        assert!(
+            ImmutableImageReference::from_sha256_id(format!("sha256:{}", "A".repeat(64))).is_err()
+        );
     }
 }
