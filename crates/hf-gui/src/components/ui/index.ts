@@ -16,3 +16,4 @@ export { EmptyState } from "./EmptyState";
 export { ErrorState } from "./ErrorState";
 export { Spinner, LoadingState, Skeleton } from "./Loading";
 export { ViewHeader } from "./ViewHeader";
+export { ViewCanvas } from "./ViewCanvas";
