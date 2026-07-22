@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -16,6 +16,7 @@ use hf_crash::remediation::RemediationStatus;
 use hf_service::evidence::{
     CampaignEvidencePricing, EvidenceApproval, EvidenceCost, EvidenceCoverage, EvidenceError,
     EvidenceFinding, EvidenceManifest, EvidenceManifestBody, EvidenceRunConfig, EvidenceRunStatus,
+    EVIDENCE_SCHEMA_VERSION,
 };
 use hf_service::ServiceContainer;
 use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
@@ -25,9 +26,23 @@ fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
 }
 
+fn isolate_workspace() -> &'static Path {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!(
+            "oxfuzz_evidence_it_{}_{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::env::set_var("HF_WORKSPACE_DIR", &root);
+        hf_service::initialize_workspace_root().expect("initialize evidence-test workspace");
+        root
+    })
+}
+
 fn body() -> EvidenceManifestBody {
     EvidenceManifestBody {
-        schema_version: 1,
+        schema_version: EVIDENCE_SCHEMA_VERSION,
         manifest_id: Uuid::from_u128(1),
         generated_at: "2026-07-22T00:00:00Z".to_owned(),
         project: "parser".to_owned(),
@@ -81,6 +96,7 @@ fn body() -> EvidenceManifestBody {
 
 #[test]
 fn manifest_digest_is_canonical_and_detects_mutation() {
+    assert_eq!(EVIDENCE_SCHEMA_VERSION, 2);
     let first = EvidenceManifest::new(body()).expect("valid manifest");
     let mut reordered = body();
     reordered.run_config.environment = BTreeMap::new();
@@ -99,6 +115,17 @@ fn manifest_digest_is_canonical_and_detects_mutation() {
     let mut tampered = first;
     tampered.body.coverage.edges += 1;
     assert_eq!(tampered.verify(), Err(EvidenceError::DigestMismatch));
+}
+
+#[test]
+fn legacy_v1_evidence_is_not_accepted_as_exact_image_provenance() {
+    let mut legacy = body();
+    legacy.schema_version = 1;
+
+    assert_eq!(
+        EvidenceManifest::new(legacy),
+        Err(EvidenceError::UnsupportedSchema)
+    );
 }
 
 #[test]
@@ -130,6 +157,7 @@ fn non_finite_cost_and_nonterminal_runs_fail_closed() {
 
 #[tokio::test]
 async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
+    let workspace_root = isolate_workspace().to_path_buf();
     let directory = tempfile::tempdir().unwrap();
     let store = Store::connect(directory.path().join("evidence.db"))
         .await
@@ -219,7 +247,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
 
     let crash_input = directory.path().join("crash-input");
     std::fs::write(&crash_input, b"crash").unwrap();
-    let crash = Crash {
+    let mut crash = Crash {
         id: Uuid::from_u128(12),
         run_id: run.id,
         target_id,
@@ -227,13 +255,70 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
         stack_signature: digest('1'),
         kind: CrashKind::Asan,
         summary: "overflow".to_owned(),
-        minimized: true,
+        minimized: false,
         bug_report: None,
         casr: None,
     };
+    let store = Arc::new(store);
     store.upsert_crash(&crash).await.unwrap();
 
-    let container = ServiceContainer::stubbed().with_store(Arc::new(store));
+    let container = ServiceContainer::stubbed().with_store(Arc::clone(&store));
+    let error = container
+        .campaign_evidence_manifest(
+            run.id,
+            CampaignEvidencePricing {
+                compute_usd_per_hour: 3.0,
+                model_cost_usd: 0.25,
+            },
+        )
+        .await
+        .expect_err("legacy tag-derived sandbox provenance must fail closed");
+    assert!(error.to_string().contains("exact sandbox image"));
+    sqlx::query("UPDATE runs SET sandbox_rev = ?2 WHERE id = ?1")
+        .bind(run.id.to_string())
+        .bind(format!("docker-image-id-sha256:{}", digest('f')))
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let run_output = hf_service::workspace_dir(directory.path(), "parse_header")
+        .join("runs")
+        .join(run.id.to_string())
+        .join("out");
+    std::fs::create_dir_all(&run_output).unwrap();
+    let error = container
+        .campaign_evidence_manifest(
+            run.id,
+            CampaignEvidencePricing {
+                compute_usd_per_hour: 3.0,
+                model_cost_usd: 0.25,
+            },
+        )
+        .await
+        .expect_err("evidence must not read a crash outside its approved run root");
+    assert!(error.to_string().contains("approved run root"));
+
+    crash.input_path = run_output.join("crash-input");
+    std::fs::write(&crash.input_path, b"crash").unwrap();
+    store.upsert_crash(&crash).await.unwrap();
+
+    let patch = "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-old\n+fixed\n";
+    let error = container
+        .remediation_draft(
+            run.id,
+            crash.id,
+            patch,
+            CampaignEvidencePricing {
+                compute_usd_per_hour: 3.0,
+                model_cost_usd: 0.25,
+            },
+        )
+        .await
+        .expect_err("non-minimized reproducers must not create remediation drafts");
+    assert!(error.to_string().contains("minimized"));
+
+    crash.minimized = true;
+    store.upsert_crash(&crash).await.unwrap();
     let manifest = container
         .campaign_evidence_manifest(
             run.id,
@@ -250,8 +335,8 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     assert_eq!(manifest.body.approval.harness_id, harness_id);
     assert_eq!(manifest.body.findings.len(), 1);
     assert_eq!(manifest.body.cost.compute_cost_usd, 0.05);
+    assert_eq!(manifest.body.sandbox_image_sha256, digest('f'));
 
-    let patch = "--- a/parser.c\n+++ b/parser.c\n@@ -1 +1 @@\n-old\n+fixed\n";
     let bundle = directory.path().join("remediation-bundle");
     let handoff = container
         .export_remediation_draft(
@@ -271,8 +356,16 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
         handoff.binding.evidence_manifest_sha256,
         manifest.manifest_sha256
     );
+    assert_eq!(
+        handoff.binding.sandbox_image_sha256,
+        manifest.body.sandbox_image_sha256
+    );
     assert!(bundle.join("remediation.json").is_file());
     assert!(bundle.join("PATCH.diff").is_file());
     assert_eq!(std::fs::read(bundle.join("reproducer")).unwrap(), b"crash");
     assert!(bundle.join("REMEDIATION.md").is_file());
+
+    drop(container);
+    drop(store);
+    std::fs::remove_dir_all(workspace_root).expect("remove evidence-test workspace");
 }

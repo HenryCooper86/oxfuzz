@@ -284,7 +284,8 @@ pub struct RunRecord {
     pub source_rev: Option<String>,
     /// Digest of the starting corpus snapshot.
     pub corpus_rev: Option<String>,
-    /// Digest of the pinned sandbox image reference.
+    /// Typed exact image identity (`docker-image-id-sha256:<digest>`). Legacy
+    /// untyped values are retained for migration but are not proof-bearing.
     pub sandbox_rev: Option<String>,
 }
 

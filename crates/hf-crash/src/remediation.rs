@@ -9,7 +9,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Current remediation contract version.
-pub const REMEDIATION_SCHEMA_VERSION: u32 = 1;
+pub const REMEDIATION_SCHEMA_VERSION: u32 = 2;
 /// Maximum inline unified-diff size.
 pub const MAX_PATCH_BYTES: usize = 1_048_576;
 
@@ -30,6 +30,9 @@ pub struct RemediationBinding {
     pub harness_sha256: String,
     /// Staged binary identity used for verification.
     pub binary_sha256: String,
+    /// Pinned sandbox image identity required for verification.
+    #[serde(default)]
+    pub sandbox_image_sha256: String,
     /// Proof-carrying campaign evidence manifest identity.
     pub evidence_manifest_sha256: String,
 }
@@ -93,6 +96,9 @@ pub struct RemediationHandoff {
 /// Invalid remediation evidence or state transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RemediationError {
+    /// Handoff schema cannot be safely interpreted by this implementation.
+    #[error("unsupported remediation schema")]
+    UnsupportedSchema,
     /// One of the required SHA-256 values is malformed.
     #[error("remediation contains a malformed SHA-256 digest")]
     InvalidDigest,
@@ -134,6 +140,7 @@ impl RemediationHandoff {
         &mut self,
         evidence: SandboxVerificationEvidence,
     ) -> Result<(), RemediationError> {
+        self.validate_schema()?;
         validate_evidence(&evidence)?;
         if !matches_binding(&self.binding, &evidence) {
             return Err(RemediationError::EvidenceMismatch);
@@ -150,6 +157,7 @@ impl RemediationHandoff {
     /// rejected evidence and [`RemediationError::EvidenceMismatch`] after an
     /// immutable-field mutation.
     pub fn verify_claim(&self) -> Result<(), RemediationError> {
+        self.validate_schema()?;
         validate_binding(&self.binding)?;
         let evidence = self
             .verification
@@ -167,6 +175,14 @@ impl RemediationHandoff {
             Err(RemediationError::NotVerified)
         }
     }
+
+    fn validate_schema(&self) -> Result<(), RemediationError> {
+        if self.schema_version == REMEDIATION_SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(RemediationError::UnsupportedSchema)
+        }
+    }
 }
 
 fn validate_binding(binding: &RemediationBinding) -> Result<(), RemediationError> {
@@ -176,6 +192,7 @@ fn validate_binding(binding: &RemediationBinding) -> Result<(), RemediationError
         binding.reproducer_sha256.as_str(),
         binding.harness_sha256.as_str(),
         binding.binary_sha256.as_str(),
+        binding.sandbox_image_sha256.as_str(),
         binding.evidence_manifest_sha256.as_str(),
     ]
     .iter()
@@ -219,6 +236,7 @@ fn matches_binding(binding: &RemediationBinding, evidence: &SandboxVerificationE
         && binding.reproducer_sha256 == evidence.reproducer_sha256
         && binding.harness_sha256 == evidence.harness_sha256
         && binding.binary_sha256 == evidence.binary_sha256
+        && binding.sandbox_image_sha256 == evidence.sandbox_image_sha256
 }
 
 fn verification_status(evidence: &SandboxVerificationEvidence) -> RemediationStatus {

@@ -55,7 +55,12 @@ invalidates verification.
 The service gathers manifests only from durable records and immutable evidence.
 It never substitutes a mutable active path for run-owned evidence. Legacy runs
 without full provenance return an explicit incomplete-evidence error instead of
-a partially trusted manifest.
+a partially trusted manifest. In storage, exact Docker provenance is tagged as
+`docker-image-id-sha256:<digest>` so a historical hash of a mutable image name
+cannot be mistaken for a resolved image ID. Evidence emits the validated raw
+digest only after removing that exact type marker. This provenance guarantee is
+evidence schema v2; schema-v1 manifests fail verification instead of being
+silently upgraded.
 
 ### 3.1 Promotion provenance
 

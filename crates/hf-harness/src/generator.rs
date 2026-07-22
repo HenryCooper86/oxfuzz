@@ -541,12 +541,39 @@ pub async fn smoke_fuzz_in_paths(
 /// harness, has zero duration/resources, either path escapes the workspace, the
 /// sandbox command fails, or no fuzzer activity is detected.
 pub async fn smoke_fuzz_in_paths_with_config(
+    harness: Harness,
+    rt: &dyn RuntimeAdapter,
+    workspace: &Path,
+    corpus_relative: &Path,
+    output_relative: &Path,
+    config: &hf_core::engine::FuzzRunConfig,
+) -> Result<Harness, ClassifiedError> {
+    smoke_fuzz_in_paths_with_config_and_sandbox_image(
+        harness,
+        rt,
+        workspace,
+        corpus_relative,
+        output_relative,
+        config,
+        None,
+    )
+    .await
+}
+
+/// Run a bounded smoke fuzz using one caller-resolved configuration and an
+/// optional immutable sandbox image reference.
+///
+/// # Errors
+/// Returns `ClassifiedError` under the same conditions as
+/// [`smoke_fuzz_in_paths_with_config`].
+pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     mut harness: Harness,
     rt: &dyn RuntimeAdapter,
     workspace: &Path,
     corpus_relative: &Path,
     output_relative: &Path,
     config: &hf_core::engine::FuzzRunConfig,
+    sandbox_image: Option<String>,
 ) -> Result<Harness, ClassifiedError> {
     let duration_secs = validate_smoke_config(&harness, config)?;
     let safe_relative = |path: &Path| {
@@ -657,6 +684,7 @@ pub async fn smoke_fuzz_in_paths_with_config(
         ],
         workspace_read_only: true,
         max_file_size_bytes: Some(64 * 1024 * 1024),
+        image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
     };
     let result = rt

@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hf_core::engine::EngineKind;
+use hf_core::error::ClassifiedError;
 use hf_core::harness::HarnessStatus;
 use hf_core::runtime::{CommandResult, ResourceLimits, RuntimeAdapter};
 use hf_core::target::TargetLanguage;
@@ -19,6 +20,13 @@ struct QualifyingRuntime;
 
 #[async_trait::async_trait]
 impl RuntimeAdapter for QualifyingRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, ClassifiedError> {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         _cmd: &[String],

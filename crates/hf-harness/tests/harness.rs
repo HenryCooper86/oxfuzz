@@ -13,7 +13,8 @@ use hf_core::target::{
 };
 use hf_core::types::TokenUsage;
 use hf_harness::{
-    compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths, smoke_fuzz_in_paths_with_config,
+    compile, draft, smoke_fuzz, smoke_fuzz_in, smoke_fuzz_in_paths,
+    smoke_fuzz_in_paths_with_config, smoke_fuzz_in_paths_with_config_and_sandbox_image,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -80,6 +81,7 @@ struct ArtifactRuntime;
 struct SmokePolicyRuntime {
     command: std::sync::Mutex<Vec<String>>,
     limits: std::sync::Mutex<Option<ResourceLimits>>,
+    image: std::sync::Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -99,6 +101,17 @@ impl RuntimeAdapter for SmokePolicyRuntime {
             workspace: cwd.to_path_buf(),
             termination: hf_core::runtime::CommandTermination::Completed,
         })
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &Path,
+        limits: &ResourceLimits,
+        opts: &hf_core::runtime::SandboxOptions,
+    ) -> Result<CommandResult, ClassifiedError> {
+        *self.image.lock().unwrap() = opts.image.clone();
+        self.run_command(cmd, cwd, limits).await
     }
 
     async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
@@ -388,6 +401,55 @@ async fn smoke_fuzz_uses_one_resolved_config_for_command_runtime_and_summary() {
         17 + hf_engine::runner::SANDBOX_TIMEOUT_HEADROOM_SECS
     );
     assert_eq!(smoked.smoke_run.unwrap().duration_secs, 17);
+}
+
+#[tokio::test]
+async fn smoke_fuzz_uses_the_resolved_immutable_sandbox_image() {
+    let rt = SmokePolicyRuntime::default();
+    let harness = Harness {
+        id: Uuid::new_v4(),
+        target_id: Uuid::new_v4(),
+        engine: EngineKind::LibFuzzer,
+        source: String::new(),
+        language: TargetLanguage::C,
+        build_cmd: BuildCommand {
+            compiler: "clang".to_owned(),
+            args: vec![],
+            output: PathBuf::from("fuzz"),
+        },
+        sanitizer: Sanitizer::Address,
+        status: HarnessStatus::Compiled,
+        smoke_run: None,
+    };
+    let cfg = FuzzRunConfig {
+        harness_id: harness.id,
+        engine: harness.engine,
+        duration: Some(std::time::Duration::from_secs(1)),
+        max_mem_mb: 128,
+        max_cpus: 1,
+        seed_corpus: None,
+        sanitizer: harness.sanitizer,
+        env: Vec::new(),
+        extra_args: Vec::new(),
+        seed: None,
+        replay_of: None,
+    };
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let image = format!("sha256:{}", "a".repeat(64));
+
+    smoke_fuzz_in_paths_with_config_and_sandbox_image(
+        harness,
+        &rt,
+        workspace.path(),
+        Path::new("runs/smoke/corpus"),
+        Path::new("runs/smoke/out"),
+        &cfg,
+        Some(image.clone()),
+    )
+    .await
+    .expect("configured smoke should succeed");
+
+    assert_eq!(*rt.image.lock().unwrap(), Some(image));
 }
 
 #[tokio::test]
