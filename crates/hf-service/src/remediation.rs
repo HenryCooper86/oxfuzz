@@ -9,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::container::ServiceContainer;
-use crate::evidence::{read_regular_file_bounded, CampaignEvidencePricing};
+use crate::evidence::{read_run_crash_file, CampaignEvidencePricing};
 
 impl ServiceContainer {
     /// Assemble a visibly unverified remediation contract without writing it.
@@ -63,6 +63,8 @@ impl ServiceContainer {
         patch: &str,
         pricing: CampaignEvidencePricing,
     ) -> Result<(RemediationHandoff, Vec<u8>), ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let managed_workspace_root = crate::container::initialize_workspace_root()?;
         let manifest = self.campaign_evidence_manifest(run_id, pricing).await?;
         let finding = manifest
             .body
@@ -74,6 +76,11 @@ impl ServiceContainer {
                     "finding {finding_id} does not belong to run {run_id}"
                 ))
             })?;
+        if !finding.minimized {
+            return Err(ClassifiedError::Validation(
+                "remediation handoff requires a minimized reproducer".to_owned(),
+            ));
+        }
         let store = self.store().ok_or_else(|| {
             ClassifiedError::Storage("remediation export requires persistent storage".to_owned())
         })?;
@@ -85,7 +92,17 @@ impl ServiceContainer {
             .ok_or_else(|| {
                 ClassifiedError::Validation(format!("finding {finding_id} was not found"))
             })?;
-        let (reproducer, reproducer_sha256) = read_regular_file_bounded(&crash.input_path)?;
+        let run = store
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| ClassifiedError::Validation(format!("run {run_id} was not found")))?;
+        let (reproducer, reproducer_sha256) = read_run_crash_file(
+            &managed_workspace_root,
+            Path::new(&run.project_root),
+            &manifest.body.target,
+            run_id,
+            &crash.input_path,
+        )?;
         if reproducer_sha256 != finding.reproducer_sha256 {
             return Err(ClassifiedError::Validation(
                 "crash reproducer changed after evidence assembly".to_owned(),
@@ -100,6 +117,7 @@ impl ServiceContainer {
             reproducer_sha256,
             harness_sha256: manifest.body.harness_sha256.clone(),
             binary_sha256: manifest.body.binary_sha256.clone(),
+            sandbox_image_sha256: manifest.body.sandbox_image_sha256.clone(),
             evidence_manifest_sha256: manifest.manifest_sha256.clone(),
         })
         .map_err(|error| ClassifiedError::Validation(error.to_string()))?;

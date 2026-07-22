@@ -44,7 +44,7 @@ listed in their individual sections below.
 | `context_rev` | `TEXT` | nullable SHA-256 of source/corpus/runtime context |
 | `source_rev` | `TEXT` | nullable SHA-256 of staged target-source inputs |
 | `corpus_rev` | `TEXT` | nullable SHA-256 of the starting corpus snapshot |
-| `sandbox_rev` | `TEXT` | nullable SHA-256 of the pinned sandbox image reference |
+| `sandbox_rev` | `TEXT` | nullable typed exact identity, `docker-image-id-sha256:<digest>`; legacy untyped values are not proof-bearing |
 
 Indexes: `idx_runs_project(project_root)`, `idx_runs_status(status)`.
 

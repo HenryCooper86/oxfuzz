@@ -2,7 +2,7 @@
 
 use hf_crash::remediation::{
     RemediationBinding, RemediationError, RemediationHandoff, RemediationStatus,
-    SandboxVerificationEvidence,
+    SandboxVerificationEvidence, REMEDIATION_SCHEMA_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -25,6 +25,7 @@ fn binding() -> RemediationBinding {
         reproducer_sha256: digest('b'),
         harness_sha256: digest('c'),
         binary_sha256: digest('d'),
+        sandbox_image_sha256: digest('f'),
         evidence_manifest_sha256: digest('e'),
     }
 }
@@ -37,7 +38,7 @@ fn verification(binding: &RemediationBinding) -> SandboxVerificationEvidence {
         reproducer_sha256: binding.reproducer_sha256.clone(),
         harness_sha256: binding.harness_sha256.clone(),
         binary_sha256: binding.binary_sha256.clone(),
-        sandbox_image_sha256: digest('f'),
+        sandbox_image_sha256: binding.sandbox_image_sha256.clone(),
         completed: true,
         original_reproduced: true,
         patched_reproduced: false,
@@ -64,6 +65,20 @@ fn mismatched_evidence_cannot_change_draft_status() {
     let mut handoff = RemediationHandoff::draft(binding()).expect("valid draft");
     let mut evidence = verification(&handoff.binding);
     evidence.patch_sha256 = digest('9');
+
+    assert_eq!(
+        handoff.record_verification(evidence),
+        Err(RemediationError::EvidenceMismatch)
+    );
+    assert_eq!(handoff.status, RemediationStatus::Draft);
+    assert!(handoff.verification.is_none());
+}
+
+#[test]
+fn sandbox_image_mismatch_cannot_verify_the_handoff() {
+    let mut handoff = RemediationHandoff::draft(binding()).expect("valid draft");
+    let mut evidence = verification(&handoff.binding);
+    evidence.sandbox_image_sha256 = digest('9');
 
     assert_eq!(
         handoff.record_verification(evidence),
@@ -108,5 +123,50 @@ fn patch_digest_and_unified_diff_shape_are_validated() {
     assert_eq!(
         RemediationHandoff::draft(prose),
         Err(RemediationError::InvalidPatch)
+    );
+}
+
+#[test]
+fn expanded_binding_uses_schema_v2_and_rejects_other_versions() {
+    let handoff = RemediationHandoff::draft(binding()).expect("valid draft");
+    assert_eq!(REMEDIATION_SCHEMA_VERSION, 2);
+    assert_eq!(handoff.schema_version, 2);
+
+    for schema_version in [1, 3] {
+        let mut incompatible = handoff.clone();
+        incompatible.schema_version = schema_version;
+        let evidence = verification(&incompatible.binding);
+
+        assert_eq!(
+            incompatible.record_verification(evidence),
+            Err(RemediationError::UnsupportedSchema)
+        );
+        assert_eq!(incompatible.status, RemediationStatus::Draft);
+        assert!(incompatible.verification.is_none());
+        assert_eq!(
+            incompatible.verify_claim(),
+            Err(RemediationError::UnsupportedSchema)
+        );
+    }
+}
+
+#[test]
+fn legacy_v1_json_is_readable_but_cannot_be_verified_as_v2() {
+    let handoff = RemediationHandoff::draft(binding()).expect("valid draft");
+    let mut json = serde_json::to_value(handoff).unwrap();
+    json["schema_version"] = serde_json::json!(1);
+    json["binding"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sandbox_image_sha256");
+
+    let mut legacy: RemediationHandoff =
+        serde_json::from_value(json).expect("legacy handoff remains readable for migration");
+    let evidence = verification(&legacy.binding);
+
+    assert!(legacy.binding.sandbox_image_sha256.is_empty());
+    assert_eq!(
+        legacy.record_verification(evidence),
+        Err(RemediationError::UnsupportedSchema)
     );
 }

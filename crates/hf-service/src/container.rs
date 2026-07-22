@@ -41,6 +41,7 @@ const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;
 const GUARDRAIL_DECISION_RETENTION: usize = 1000;
 const WORKSPACE_MANIFEST_FILE: &str = ".oxfuzz-workspace.json";
 const WORKSPACE_MANIFEST_VERSION: u32 = 1;
+pub(crate) const EXACT_DOCKER_IMAGE_REV_PREFIX: &str = "docker-image-id-sha256:";
 
 type WorkspaceOperationGate = tokio::sync::RwLock<()>;
 
@@ -842,6 +843,16 @@ struct RunContextDigests {
     sandbox: String,
 }
 
+fn retain_run_context(run: &mut RunRecord, context: RunContextDigests) {
+    run.context_rev = Some(context.combined);
+    run.source_rev = Some(context.source);
+    run.corpus_rev = Some(context.corpus);
+    run.sandbox_rev = Some(format!(
+        "{EXACT_DOCKER_IMAGE_REV_PREFIX}{}",
+        context.sandbox
+    ));
+}
+
 /// Digest the immutable comparison context for a coverage run: staged target
 /// sources, the starting corpus, and the exact sandbox image identifier.
 ///
@@ -849,7 +860,10 @@ struct RunContextDigests {
 /// `copy_project_sources` plus the corpus. Symlinks and unexpectedly large
 /// trees fail closed so an untrusted workspace cannot turn regression
 /// bookkeeping into an unbounded host traversal.
-fn run_context_digests(workspace: &Path) -> Result<RunContextDigests, ClassifiedError> {
+fn run_context_digests(
+    workspace: &Path,
+    sandbox_image_sha256: &str,
+) -> Result<RunContextDigests, ClassifiedError> {
     use sha2::{Digest, Sha256};
     use std::io::Read as _;
 
@@ -914,6 +928,16 @@ fn run_context_digests(workspace: &Path) -> Result<RunContextDigests, Classified
         Ok(())
     }
 
+    if sandbox_image_sha256.len() != 64
+        || !sandbox_image_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ClassifiedError::Validation(
+            "sandbox image digest must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+
     let mut relative_paths = Vec::new();
     if let Ok(entries) = std::fs::read_dir(workspace) {
         for entry in entries.flatten() {
@@ -948,7 +972,7 @@ fn run_context_digests(workspace: &Path) -> Result<RunContextDigests, Classified
 
     let mut combined_digest = Sha256::new();
     combined_digest.update(b"oxfuzz-run-context-v1\0");
-    combined_digest.update(SANDBOX_IMAGE.as_bytes());
+    combined_digest.update(sandbox_image_sha256.as_bytes());
     combined_digest.update(b"\0");
     let mut source_digest = Sha256::new();
     source_digest.update(b"oxfuzz-run-source-v1\0");
@@ -1009,15 +1033,28 @@ fn run_context_digests(workspace: &Path) -> Result<RunContextDigests, Classified
         combined_digest.update(b"\0");
         component_digest.update(b"\0");
     }
-    let mut sandbox_digest = Sha256::new();
-    sandbox_digest.update(b"oxfuzz-sandbox-reference-v1\0");
-    sandbox_digest.update(SANDBOX_IMAGE.as_bytes());
     Ok(RunContextDigests {
         combined: format!("{:x}", combined_digest.finalize()),
         source: format!("{:x}", source_digest.finalize()),
         corpus: format!("{:x}", corpus_digest.finalize()),
-        sandbox: format!("{:x}", sandbox_digest.finalize()),
+        sandbox: sandbox_image_sha256.to_owned(),
     })
+}
+
+/// Resolve one runtime image reference before persisting or executing a run.
+/// Docker returns a content-addressed `sha256:` ID. Proof-carrying runs reject
+/// adapters without an immutable image identity.
+async fn resolve_run_sandbox_image(
+    runtime: &dyn RuntimeAdapter,
+) -> Result<hf_core::runtime::ImmutableImageReference, ClassifiedError> {
+    runtime
+        .resolve_image_reference(SANDBOX_IMAGE)
+        .await?
+        .ok_or_else(|| {
+            ClassifiedError::Sandbox(
+                "proof-carrying fuzz runs require an immutable sandbox image identity".to_owned(),
+            )
+        })
 }
 
 /// Copy the exact approved source/binary into a run-owned input directory and
@@ -1434,7 +1471,10 @@ fn verify_staged_qualification(
 
 /// Hardened fuzzer profile: immutable primary workspace with only this run's
 /// disposable corpus snapshot and output directory overlaid writable.
-fn run_sandbox_options(artifacts: &RunArtifacts) -> hf_core::runtime::SandboxOptions {
+fn run_sandbox_options(
+    artifacts: &RunArtifacts,
+    sandbox_image: Option<String>,
+) -> hf_core::runtime::SandboxOptions {
     hf_core::runtime::SandboxOptions {
         extra_mounts: vec![
             hf_core::runtime::SandboxMount::writable(
@@ -1448,6 +1488,7 @@ fn run_sandbox_options(artifacts: &RunArtifacts) -> hf_core::runtime::SandboxOpt
         ],
         workspace_read_only: true,
         max_file_size_bytes: Some(64 * 1024 * 1024),
+        image: sandbox_image,
         ..hf_core::runtime::SandboxOptions::default()
     }
 }
@@ -4857,7 +4898,7 @@ impl ServiceContainer {
 
     /// Enter a workspace-backed service operation. Both guards are `Send`, so
     /// callers may retain the lease across sandbox, storage, and provider awaits.
-    async fn acquire_workspace_operation(
+    pub(crate) async fn acquire_workspace_operation(
         &self,
     ) -> Result<WorkspaceOperationLease, ClassifiedError> {
         let root = workspace_root();
@@ -5925,11 +5966,9 @@ impl ServiceContainer {
         smoke_config.seed = Some(hf_engine::seed::derive_run_seed(smoke_record.id));
         smoke_record.config = Some(smoke_config.clone());
         smoke_record.kind = RunKind::Smoke;
-        let context = run_context_digests(&workspace)?;
-        smoke_record.context_rev = Some(context.combined);
-        smoke_record.source_rev = Some(context.source);
-        smoke_record.corpus_rev = Some(context.corpus);
-        smoke_record.sandbox_rev = Some(context.sandbox);
+        let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+        let context = run_context_digests(&workspace, sandbox_image.sha256())?;
+        retain_run_context(&mut smoke_record, context);
         let artifacts = stage_run_artifacts(&workspace, smoke_record.id, &harness.source, &binary)?;
         smoke_record.status = RunStatus::Running;
         smoke_record.harness_rev = Some(artifacts.source_sha256.clone());
@@ -5978,13 +6017,14 @@ impl ServiceContainer {
         }
         let mut staged_harness = harness;
         staged_harness.build_cmd.output = artifacts.binary_host.clone();
-        let mut smoked = match hf_harness::smoke_fuzz_in_paths_with_config(
+        let mut smoked = match hf_harness::smoke_fuzz_in_paths_with_config_and_sandbox_image(
             staged_harness,
             self.runtime.as_ref(),
             &workspace,
             &artifacts.corpus_relative,
             &artifacts.output_relative,
             &smoke_config,
+            Some(sandbox_image.reference().to_owned()),
         )
         .await
         {
@@ -6771,11 +6811,9 @@ impl ServiceContainer {
             None => run_cfg.seed = Some(hf_engine::seed::derive_run_seed(run_record.id)),
         }
         run_record.config = Some(run_cfg.clone());
-        let context = run_context_digests(&workspace)?;
-        run_record.context_rev = Some(context.combined);
-        run_record.source_rev = Some(context.source);
-        run_record.corpus_rev = Some(context.corpus);
-        run_record.sandbox_rev = Some(context.sandbox);
+        let sandbox_image = resolve_run_sandbox_image(self.runtime.as_ref()).await?;
+        let context = run_context_digests(&workspace, sandbox_image.sha256())?;
+        retain_run_context(&mut run_record, context);
         let artifacts = stage_run_artifacts(&workspace, run_record.id, &qualified.source, &binary)?;
         if let Err(error) = verify_staged_qualification(&qualified, &artifacts) {
             if let Some(run_root) = artifacts.output_host.parent() {
@@ -6789,7 +6827,7 @@ impl ServiceContainer {
             }
             return Err(error);
         }
-        let sandbox = run_sandbox_options(&artifacts);
+        let sandbox = run_sandbox_options(&artifacts, Some(sandbox_image.reference().to_owned()));
         run_record.status = RunStatus::Running;
         run_record.harness_rev = Some(artifacts.source_sha256.clone());
         run_record.binary_rev = Some(artifacts.binary_sha256.clone());
@@ -10600,10 +10638,10 @@ mod workspace_tests {
     use super::{
         document_staging_dir, output_budget_status, prepare_managed_workspace_root,
         prepare_managed_workspace_root_with_adoption, project_workspace_dir,
-        read_current_harness_source, run_binary_path, run_context_digests, run_output_dir,
-        run_output_relative, stage_run_artifacts, verify_run_artifacts, workspace_dir,
-        workspace_lock_file, workspace_root_selection, write_current_harness_source, OutputBudget,
-        ServiceContainer, WORKSPACE_MANIFEST_FILE,
+        read_current_harness_source, resolve_run_sandbox_image, run_binary_path,
+        run_context_digests, run_output_dir, run_output_relative, stage_run_artifacts,
+        verify_run_artifacts, workspace_dir, workspace_lock_file, workspace_root_selection,
+        write_current_harness_source, OutputBudget, ServiceContainer, WORKSPACE_MANIFEST_FILE,
     };
     use std::path::{Component, Path};
 
@@ -10974,15 +11012,21 @@ mod workspace_tests {
         std::fs::write(workspace.path().join("src/lib.rs"), "pub fn parse() {}").unwrap();
         std::fs::write(workspace.path().join("corpus/seed"), b"one").unwrap();
 
-        let first = run_context_digests(workspace.path()).unwrap().combined;
+        let first = run_context_digests(workspace.path(), &"a".repeat(64))
+            .unwrap()
+            .combined;
         assert_eq!(
             first,
-            run_context_digests(workspace.path()).unwrap().combined
+            run_context_digests(workspace.path(), &"a".repeat(64))
+                .unwrap()
+                .combined
         );
         std::fs::write(workspace.path().join("corpus/seed"), b"two").unwrap();
         assert_ne!(
             first,
-            run_context_digests(workspace.path()).unwrap().combined
+            run_context_digests(workspace.path(), &"a".repeat(64))
+                .unwrap()
+                .combined
         );
     }
 
@@ -10994,15 +11038,20 @@ mod workspace_tests {
         std::fs::write(workspace.path().join("src/lib.rs"), "pub fn parse() {}").unwrap();
         std::fs::write(workspace.path().join("corpus/seed"), b"one").unwrap();
 
-        let first = run_context_digests(workspace.path()).unwrap();
+        let first = run_context_digests(workspace.path(), &"a".repeat(64)).unwrap();
         std::fs::write(workspace.path().join("corpus/seed"), b"two").unwrap();
-        let second = run_context_digests(workspace.path()).unwrap();
+        let second = run_context_digests(workspace.path(), &"a".repeat(64)).unwrap();
 
         assert_eq!(first.source, second.source);
         assert_ne!(first.corpus, second.corpus);
         assert_ne!(first.combined, second.combined);
         assert_eq!(first.sandbox, second.sandbox);
         assert_eq!(first.sandbox.len(), 64);
+        assert_eq!(first.sandbox, "a".repeat(64));
+
+        let rebuilt_image = run_context_digests(workspace.path(), &"b".repeat(64)).unwrap();
+        assert_ne!(second.combined, rebuilt_image.combined);
+        assert_eq!(rebuilt_image.sandbox, "b".repeat(64));
     }
 
     #[cfg(unix)]
@@ -11020,8 +11069,28 @@ mod workspace_tests {
         )
         .unwrap();
 
-        let error = run_context_digests(workspace.path()).unwrap_err();
+        let error = run_context_digests(workspace.path(), &"a".repeat(64)).unwrap_err();
         assert!(error.to_string().contains("symlink"));
+    }
+
+    #[test]
+    fn comparison_context_rejects_non_digest_sandbox_identity() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let error = run_context_digests(workspace.path(), "oxfuzz/fuzz-sandbox:0.1.0").unwrap_err();
+
+        assert!(error.to_string().contains("sandbox image digest"));
+    }
+
+    #[tokio::test]
+    async fn proof_carrying_runs_reject_runtimes_without_immutable_image_identity() {
+        let error = resolve_run_sandbox_image(&hf_runtime::StubRuntime)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("immutable sandbox image identity"));
     }
 
     #[test]

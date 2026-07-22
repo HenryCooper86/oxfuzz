@@ -183,6 +183,14 @@ struct BlockingRuntime {
 
 #[async_trait::async_trait]
 impl hf_core::runtime::RuntimeAdapter for BlockingRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         _cmd: &[String],
@@ -251,6 +259,14 @@ struct DiscoveryRuntime;
 
 #[async_trait::async_trait]
 impl hf_core::runtime::RuntimeAdapter for DiscoveryRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         _cmd: &[String],
@@ -407,6 +423,10 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
     assert_eq!(run.harness_rev.as_deref().map(str::len), Some(64));
     assert_eq!(run.binary_rev.as_deref().map(str::len), Some(64));
     assert_eq!(
+        run.sandbox_rev.as_deref(),
+        Some(format!("docker-image-id-sha256:{}", "a".repeat(64)).as_str())
+    );
+    assert_eq!(
         run.evidence_dir.as_deref(),
         Some(format!("runs/{run_id}/out").as_str())
     );
@@ -417,6 +437,10 @@ async fn cancel_run_stops_an_in_flight_fuzz_run() {
 
     let profiles = runtime.sandbox_options.lock().unwrap();
     let profile = profiles.last().expect("full run sandbox profile captured");
+    assert_eq!(
+        profile.image.as_deref(),
+        Some(format!("sha256:{}", "a".repeat(64)).as_str())
+    );
     assert!(profile.workspace_read_only);
     assert!(profile
         .extra_mounts
@@ -873,6 +897,14 @@ struct CorpusMinimizeRuntime {
 
 #[async_trait::async_trait]
 impl hf_core::runtime::RuntimeAdapter for CorpusMinimizeRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         _cmd: &[String],

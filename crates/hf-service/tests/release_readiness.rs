@@ -17,6 +17,14 @@ struct SuccessfulRuntime;
 
 #[async_trait::async_trait]
 impl hf_core::runtime::RuntimeAdapter for SuccessfulRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
     async fn run_command(
         &self,
         _cmd: &[String],
