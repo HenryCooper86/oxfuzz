@@ -85,6 +85,8 @@ const en: Dict = {
   // Progress panel
   "progress.title": "Progress",
   "progress.reset": "Reset progress",
+  "progress.expandDetails": "Expand progress details",
+  "progress.expandCompleteDetails": "Expand progress details — all stages complete",
   "stage.discover": "Discover targets",
   "stage.harness": "Generate harness",
   "stage.compile": "Compile in sandbox",
@@ -241,6 +243,8 @@ const zh: Dict = {
   // Progress panel
   "progress.title": "进度",
   "progress.reset": "重置进度",
+  "progress.expandDetails": "展开进度详情",
+  "progress.expandCompleteDetails": "展开进度详情——所有阶段均已完成",
   "stage.discover": "发现目标",
   "stage.harness": "生成测试桩",
   "stage.compile": "在沙箱中编译",

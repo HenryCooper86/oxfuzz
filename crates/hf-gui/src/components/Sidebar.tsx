@@ -4,7 +4,12 @@ import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
-import { AI_SYSTEM_VIEW_IDS, RESULTS_VIEW_IDS, sidebarSectionContainsView } from "../lib/sidebarSections";
+import {
+  AI_SYSTEM_VIEW_IDS,
+  RESULTS_VIEW_IDS,
+  getSidebarSectionOpenAfterNavigation,
+  sidebarSectionContainsView,
+} from "../lib/sidebarSections";
 import { Bot, BookOpen, Bug, Boxes, CarFront, ChevronDown, ChevronRight, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
@@ -101,14 +106,16 @@ function CollapsibleNavSection({
 
   if (activeView !== previousActiveView) {
     setPreviousActiveView(activeView);
-    if (containsActiveView) setIsOpen(true);
+    setIsOpen((open) =>
+      getSidebarSectionOpenAfterNavigation(open, previousActiveView, activeView, viewIds),
+    );
   }
 
   return (
     <section>
       <button
         type="button"
-        onClick={() => setIsOpen((open) => (containsActiveView ? true : !open))}
+        onClick={() => setIsOpen((open) => !open)}
         aria-expanded={isOpen}
         aria-controls={contentId}
         className="flex items-center justify-between w-full rounded-md text-left text-xs font-semibold uppercase text-text-muted hover:bg-accent-subtle"
