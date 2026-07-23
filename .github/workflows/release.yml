@@ -55,7 +55,7 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -73,7 +73,7 @@ jobs:
             libsoup-3.0-dev
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -94,12 +94,16 @@ jobs:
         run: npm ci
         working-directory: crates/hf-gui
 
+      # tauri-action shells out to `npm run tauri build`, so crates/hf-gui must
+      # expose a `tauri` script -- build-app.sh calls node_modules/.bin/tauri
+      # directly, so a missing script is invisible locally but fails CI instantly.
+      #
       # tauri.conf.json already declares `beforeBuildCommand: npm run build`, so
       # the frontend is built by Tauri itself. `bundle.targets: "all"` makes each
       # host emit its native formats. src-tauri defaults to the automotive-scapy
       # and proof-carrying features, so no --features flag is needed.
       - name: Build the app and attach it to the release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
