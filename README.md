@@ -164,7 +164,32 @@ cargo build --release
 ./scripts/build-sandbox.sh
 ```
 
-### The desktop app (macOS)
+### Download a prebuilt app
+
+Prebuilt installers for each release are attached to the
+**[Releases page](https://github.com/HenryCooper86/oxfuzz/releases)**:
+
+| Platform | File |
+| --- | --- |
+| macOS (Apple silicon) | `oxfuzz_*_aarch64.dmg` |
+| macOS (Intel) | `oxfuzz_*_x64.dmg` |
+| Linux | `oxfuzz_*.AppImage`, `.deb`, `.rpm` |
+| Windows | `oxfuzz_*.msi`, `*-setup.exe` |
+
+These builds are unsigned, so the OS warns on first launch -- see the release
+notes for the per-platform steps. Docker must be installed and running before
+any fuzzing starts.
+
+Maintainers cut a release by pushing a version tag; `.github/workflows/release.yml`
+builds every platform and attaches the installers as a draft release to review
+and publish:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+### Building the desktop app yourself (macOS)
 
 ```bash
 ./scripts/build-app.sh
@@ -601,7 +626,27 @@ cargo build --release
 ./scripts/build-sandbox.sh
 ```
 
-### 桌面应用（macOS）
+### 下载预构建的应用
+
+每个版本的安装包都会附在 **[Releases 页面](https://github.com/HenryCooper86/oxfuzz/releases)**：
+
+| 平台 | 文件 |
+| --- | --- |
+| macOS（Apple 芯片） | `oxfuzz_*_aarch64.dmg` |
+| macOS（Intel） | `oxfuzz_*_x64.dmg` |
+| Linux | `oxfuzz_*.AppImage`、`.deb`、`.rpm` |
+| Windows | `oxfuzz_*.msi`、`*-setup.exe` |
+
+这些构建均未签名，因此系统在首次启动时会发出警告 —— 各平台的处理步骤见发布说明。开始任何模糊测试前，Docker 必须已安装并正在运行。
+
+维护者通过推送版本标签来发布；`.github/workflows/release.yml` 会构建所有平台，并将安装包作为草稿 release 附上，供审阅后发布：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+### 自行构建桌面应用（macOS）
 
 ```bash
 ./scripts/build-app.sh
