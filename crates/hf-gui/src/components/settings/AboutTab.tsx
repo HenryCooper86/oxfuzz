@@ -12,7 +12,7 @@ import {
   PROJECT_REPOSITORY_URL,
 } from "../../lib/projectLinks";
 import type { SystemStatus } from "../../types";
-import { Crosshair, Gitlab, BookOpen, ClipboardCheck } from "lucide-react";
+import { Crosshair, Github, BookOpen, ClipboardCheck } from "lucide-react";
 
 const APP_VERSION = "0.1.0";
 
@@ -137,7 +137,7 @@ export function AboutTab() {
             className="text-xs text-accent flex items-center gap-2 hover:underline"
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
           >
-            <Gitlab size={14} /> {t("settings.about.repo")}
+            <Github size={14} /> {t("settings.about.repo")}
           </button>
           <button
             onClick={() => void openExternal(GETTING_STARTED_GUIDE_URL)}
