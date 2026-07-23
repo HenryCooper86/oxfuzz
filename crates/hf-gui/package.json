@@ -17,6 +17,7 @@
     "build:web": "VITE_BACKEND=http tsc -b && VITE_BACKEND=http vite build --outDir dist-web && node scripts/check-bundle-budget.mjs dist-web",
     "check:bundle": "node scripts/check-bundle-budget.mjs dist",
     "lint": "eslint . --max-warnings 0",
+    "tauri": "tauri",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
