@@ -1,0 +1,699 @@
+# Key Page Dependency Trees
+
+These trees trace every local static or dynamic import recursively from each key view. Shared application-shell dependencies are documented separately in `layouts.md`; when designing any normal view, pass the complete shell files alongside the page tree. External package imports are intentionally omitted.
+
+## `dashboard`
+
+Entry: `crates/hf-gui/src/views/DashboardView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/components/AutoRevertBadge.tsx`
+  - `crates/hf-gui/src/i18nContext.ts`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/toastContext.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/providers/confirm.ts`
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/target.ts`
+- `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/types/index.ts`
+
+## `discover`
+
+Entry: `crates/hf-gui/src/views/DiscoverView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/pipeline.ts`
+- `crates/hf-gui/src/providers/target.ts`
+- `crates/hf-gui/src/types/index.ts`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts`
+    - `crates/hf-gui/src/components/ui/toastContext.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/lib/discoverCoverage.ts`
+
+## `harness`
+
+Entry: `crates/hf-gui/src/views/HarnessView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/i18nContext.ts`
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/pipeline.ts`
+- `crates/hf-gui/src/providers/target.ts`
+- `crates/hf-gui/src/types/index.ts`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/toastContext.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/SandboxBanner.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/lib/diff.ts`
+- `crates/hf-gui/src/hooks/useFuzzingSettings.ts`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/fuzzingSettings.ts`
+- `crates/hf-gui/src/lib/fuzzingSettings.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/FuzzingPolicyNotice.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+
+## `run`
+
+Entry: `crates/hf-gui/src/views/RunView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/i18nContext.ts`
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/pipeline.ts`
+- `crates/hf-gui/src/providers/prefs.ts`
+- `crates/hf-gui/src/providers/runOutput.ts`
+- `crates/hf-gui/src/providers/target.ts`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/toastContext.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/SandboxBanner.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/types/index.ts`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/hooks/useFuzzingSettings.ts`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/fuzzingSettings.ts`
+- `crates/hf-gui/src/lib/fuzzingSettings.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/FuzzingPolicyNotice.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+
+## `triage`
+
+Entry: `crates/hf-gui/src/views/TriageView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/pipeline.ts`
+- `crates/hf-gui/src/providers/runOutput.ts`
+- `crates/hf-gui/src/types/index.ts`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts`
+    - `crates/hf-gui/src/components/ui/toastContext.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/PathActions.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/ReportPreview.tsx`
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/Mermaid.tsx`
+  - `crates/hf-gui/src/hooks/useListboxNav.ts`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/reportPreviewCode.ts`
+
+## `automotive`
+
+Entry: `crates/hf-gui/src/views/AutomotiveView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/i18nContext.ts`
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/lib/automotive.ts`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/lib/automotiveSettings.ts`
+  - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/components/ui/toastContext.ts`
+- `crates/hf-gui/src/components/AutomotiveReplayWorkspace.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/confirm.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts`
+    - `crates/hf-gui/src/components/ui/Button.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx`
+    - `crates/hf-gui/src/components/ui/Input.tsx`
+    - `crates/hf-gui/src/components/ui/Badge.tsx`
+    - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+    - `crates/hf-gui/src/components/ui/Select.tsx`
+    - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+    - `crates/hf-gui/src/components/ui/Toast.tsx`
+      - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+      - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+      - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/Switch.tsx`
+    - `crates/hf-gui/src/components/ui/Separator.tsx`
+    - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+    - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+      - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/Loading.tsx`
+      - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/AutomotiveOfflineWorkspace.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/AutomotiveSignalGraph.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/AutomotiveLiveMonitor.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/AutomotiveUdsScan.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/AutomotiveFrameSender.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotiveFrameSender.ts`
+    - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/confirm.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/ReportPreview.tsx`
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/Mermaid.tsx`
+  - `crates/hf-gui/src/hooks/useListboxNav.ts`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/reportPreviewCode.ts`
+
+## `settings`
+
+Entry: `crates/hf-gui/src/components/settings/SettingsView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/i18nContext.ts`
+- `crates/hf-gui/src/components/ui/toastContext.ts`
+- `crates/hf-gui/src/providers/confirm.ts`
+- `crates/hf-gui/src/components/ui/Button.tsx`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/settings/GeneralTab.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/prefs.ts`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx`
+    - `crates/hf-gui/src/components/ui/Separator.tsx` (shared; expanded earlier)
+- `crates/hf-gui/src/components/settings/ProvidersTab.tsx`
+  - `crates/hf-gui/src/components/common/ProviderBrandIcon.tsx`
+  - `crates/hf-gui/src/components/ui/Button.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Input.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Select.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/secretFields.ts`
+  - `crates/hf-gui/src/components/settings/providerTypes.ts`
+- `crates/hf-gui/src/components/settings/providerTypes.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/settings/StorageTab.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx` (shared; expanded earlier)
+- `crates/hf-gui/src/components/settings/IntegrationsTab.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/integrationSettings.ts`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Button.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Input.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/settings/ProtectedValueEditor.tsx`
+    - `crates/hf-gui/src/lib/integrationSettings.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/Button.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/Input.tsx` (shared; expanded earlier)
+- `crates/hf-gui/src/components/settings/IssueTrackerTab.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/integrationSettings.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Button.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Input.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Select.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/settings/ProtectedValueEditor.tsx` (shared; expanded earlier)
+- `crates/hf-gui/src/components/settings/AboutTab.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Button.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Separator.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/projectLinks.ts`
+  - `crates/hf-gui/src/types/index.ts`
+- `crates/hf-gui/src/components/settings/FuzzingTab.tsx`
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/fuzzingSettings.ts`
+- `crates/hf-gui/src/components/settings/AutomotiveSettingsTab.tsx`
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/SettingsGroup.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotive.ts`
+    - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/automotiveSettings.ts`
+    - `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/lib/automotive.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/settings/settingsSections.ts`
+- `crates/hf-gui/src/lib/integrationSettings.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/lib/settingsViewState.ts`
+  - `crates/hf-gui/src/components/settings/settingsSections.ts` (shared; expanded earlier)
+
+## `chat`
+
+Entry: `crates/hf-gui/src/views/ChatView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts`
+    - `crates/hf-gui/src/components/ui/toastContext.ts`
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/providers/confirm.ts`
+- `crates/hf-gui/src/hooks/useListboxNav.ts`
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/prefs.ts`
+- `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/providers/runOutput.ts`
+- `crates/hf-gui/src/views/chatHelpers.ts`
+
+## `artifacts`
+
+Entry: `crates/hf-gui/src/views/ArtifactsView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/components/ui/toastContext.ts`
+- `crates/hf-gui/src/providers/confirm.ts`
+- `crates/hf-gui/src/types/index.ts`
+- `crates/hf-gui/src/components/ui/index.ts`
+  - `crates/hf-gui/src/components/ui/Button.tsx`
+  - `crates/hf-gui/src/components/ui/IconButton.tsx`
+  - `crates/hf-gui/src/components/ui/Input.tsx`
+  - `crates/hf-gui/src/components/ui/Badge.tsx`
+  - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+  - `crates/hf-gui/src/components/ui/Select.tsx`
+  - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+  - `crates/hf-gui/src/components/ui/Toast.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts`
+    - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Switch.tsx`
+  - `crates/hf-gui/src/components/ui/Separator.tsx`
+  - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+  - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/Loading.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+- `crates/hf-gui/src/components/PathActions.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+
+## `workflow`
+
+Entry: `crates/hf-gui/src/views/WorkflowView.tsx`
+
+Dependencies:
+- `crates/hf-gui/src/lib/index.ts`
+  - `crates/hf-gui/src/lib/transport.ts`
+  - `crates/hf-gui/src/lib/tauriTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/httpTransport.ts`
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/sseAdapter.ts`
+      - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/platform.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+    - `crates/hf-gui/src/lib/transport.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/events.ts`
+  - `crates/hf-gui/src/lib/useDefectDojo.ts`
+    - `crates/hf-gui/src/lib/index.ts` (cycle)
+- `crates/hf-gui/src/providers/project.ts`
+- `crates/hf-gui/src/providers/pipeline.ts`
+- `crates/hf-gui/src/types/index.ts`
+- `crates/hf-gui/src/views/DiscoverView.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/project.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/pipeline.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/target.ts`
+  - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts`
+    - `crates/hf-gui/src/components/ui/Button.tsx`
+    - `crates/hf-gui/src/components/ui/IconButton.tsx`
+    - `crates/hf-gui/src/components/ui/Input.tsx`
+    - `crates/hf-gui/src/components/ui/Badge.tsx`
+    - `crates/hf-gui/src/components/ui/SeverityBadge.tsx`
+    - `crates/hf-gui/src/components/ui/Select.tsx`
+    - `crates/hf-gui/src/components/ui/Tooltip.tsx`
+    - `crates/hf-gui/src/components/ui/Toast.tsx`
+      - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+      - `crates/hf-gui/src/i18nContext.ts`
+      - `crates/hf-gui/src/components/ui/toastContext.ts`
+    - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/Switch.tsx`
+    - `crates/hf-gui/src/components/ui/Separator.tsx`
+    - `crates/hf-gui/src/components/ui/EmptyState.tsx`
+    - `crates/hf-gui/src/components/ui/ErrorState.tsx`
+      - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/Loading.tsx`
+      - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/discoverCoverage.ts`
+- `crates/hf-gui/src/views/HarnessView.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/project.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/pipeline.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/target.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/SandboxBanner.tsx`
+    - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/diff.ts`
+  - `crates/hf-gui/src/hooks/useFuzzingSettings.ts`
+    - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/fuzzingSettings.ts`
+  - `crates/hf-gui/src/lib/fuzzingSettings.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/FuzzingPolicyNotice.tsx`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/views/RunView.tsx`
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/project.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/pipeline.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/prefs.ts`
+  - `crates/hf-gui/src/providers/runOutput.ts`
+  - `crates/hf-gui/src/providers/target.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/SandboxBanner.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/hooks/useFuzzingSettings.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/lib/fuzzingSettings.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/FuzzingPolicyNotice.tsx` (shared; expanded earlier)
+- `crates/hf-gui/src/views/TriageView.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/project.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/pipeline.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/runOutput.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/PathActions.tsx`
+    - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/ui/IconButton.tsx` (shared; expanded earlier)
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ReportPreview.tsx`
+    - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/components/Mermaid.tsx`
+    - `crates/hf-gui/src/hooks/useListboxNav.ts`
+    - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+    - `crates/hf-gui/src/lib/reportPreviewCode.ts`
+- `crates/hf-gui/src/views/CorpusView.tsx`
+  - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/confirm.ts`
+  - `crates/hf-gui/src/components/PathActions.tsx` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/project.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/providers/target.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+  - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/components/ui/index.ts` (shared; expanded earlier)
+- `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
+
+
