@@ -60,6 +60,7 @@ coverage/
 .opencode/
 .worktrees/
 .turbo/
+.superdesign/tmp/
 
 ### Fuzzing runtime artifacts
 corpus/
