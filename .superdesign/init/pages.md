@@ -1,6 +1,10 @@
 # Key Page Dependency Trees
 
-These trees trace every local static or dynamic import recursively from each key view. Shared application-shell dependencies are documented separately in `layouts.md`; when designing any normal view, pass the complete shell files alongside the page tree. External package imports are intentionally omitted.
+These trees trace every local static or dynamic import recursively from each key view. Shared application-shell components are listed in `layouts.md`; when designing any normal view, read the shell files alongside the page tree. External package imports are intentionally omitted.
+
+Two entries are shell contracts rather than ordinary imports. `components/ui/ViewCanvas.tsx` reaches every tree through the `ui/index.ts` barrel and supplies the scroll inset and 1440 px content cap for the view -- a redesign that ignores it loses both. `lib/dashboardActions.ts` holds the dashboard's action prioritization logic, so the dashboard's action rows cannot be laid out correctly without reading it.
+
+These trees are hand-derived and have no drift check. Verify against the imports in the entry file before relying on one.
 
 ## `dashboard`
 
@@ -30,8 +34,11 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
 - `crates/hf-gui/src/providers/confirm.ts`
+- `crates/hf-gui/src/lib/dashboardActions.ts`
+  - `crates/hf-gui/src/types/index.ts` (type-only import)
 - `crates/hf-gui/src/lib/index.ts`
   - `crates/hf-gui/src/lib/transport.ts`
   - `crates/hf-gui/src/lib/tauriTransport.ts`
@@ -95,6 +102,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
 - `crates/hf-gui/src/lib/discoverCoverage.ts`
 
@@ -143,6 +151,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/SandboxBanner.tsx`
   - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/types/index.ts` (shared; expanded earlier)
@@ -201,6 +210,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/SandboxBanner.tsx`
   - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/types/index.ts`
@@ -257,6 +267,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/PathActions.tsx`
   - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
@@ -324,6 +335,7 @@ Dependencies:
     - `crates/hf-gui/src/components/ui/Loading.tsx`
       - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
     - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+    - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/AutomotiveOfflineWorkspace.tsx`
   - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
@@ -403,6 +415,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/settings/GeneralTab.tsx`
   - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/providers/prefs.ts`
@@ -521,6 +534,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
 - `crates/hf-gui/src/providers/confirm.ts`
 - `crates/hf-gui/src/hooks/useListboxNav.ts`
@@ -574,6 +588,7 @@ Dependencies:
   - `crates/hf-gui/src/components/ui/Loading.tsx`
     - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+  - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
 - `crates/hf-gui/src/components/PathActions.tsx`
   - `crates/hf-gui/src/lib/index.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/components/ui/toastContext.ts` (shared; expanded earlier)
@@ -630,6 +645,7 @@ Dependencies:
     - `crates/hf-gui/src/components/ui/Loading.tsx`
       - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
     - `crates/hf-gui/src/components/ui/ViewHeader.tsx`
+    - `crates/hf-gui/src/components/ui/ViewCanvas.tsx`
   - `crates/hf-gui/src/i18nContext.ts` (shared; expanded earlier)
   - `crates/hf-gui/src/lib/discoverCoverage.ts`
 - `crates/hf-gui/src/views/HarnessView.tsx`
