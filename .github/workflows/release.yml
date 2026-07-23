@@ -1,0 +1,140 @@
+name: Release desktop app
+
+# Builds the Tauri desktop app on each host OS and attaches the installers to a
+# GitHub Release. Tauri does not cross-compile: Linux bundles need WebKitGTK on
+# a Linux host and Windows bundles need the MSVC toolchain, so each platform
+# gets its own runner.
+#
+# Trigger by pushing a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The release is created as a draft. Check the attached artifacts, then publish
+# it from the Releases page.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Only the automatic token is used; no signing secrets are configured.
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    # Windows has never been built for this workspace. Keep it non-blocking so a
+    # failure there cannot withhold the macOS and Linux downloads. Once a run is
+    # green, drop this line so regressions are caught.
+    continue-on-error: ${{ matrix.platform == 'windows-latest' }}
+    strategy:
+      # One platform failing must not cancel the others mid-release.
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (Apple silicon)
+            platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - label: macOS (Intel)
+            platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - label: Linux (x86_64)
+            # Pinned rather than ubuntu-latest: this sets the glibc floor for the
+            # .deb and .AppImage, and a newer runner would narrow compatibility.
+            platform: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            args: ""
+          - label: Windows (x86_64)
+            platform: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            args: ""
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            file \
+            libssl-dev \
+            libxdo-dev \
+            libsoup-3.0-dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/hf-gui/package-lock.json
+
+      # No toolchain action here on purpose: rust-toolchain.toml pins 1.94.0, and
+      # an action that installs a channel would silently override the pin.
+      # `rustup target add` provisions the pinned toolchain on demand.
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust_target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: crates/hf-gui
+
+      # tauri.conf.json already declares `beforeBuildCommand: npm run build`, so
+      # the frontend is built by Tauri itself. `bundle.targets: "all"` makes each
+      # host emit its native formats. src-tauri defaults to the automotive-scapy
+      # and proof-carrying features, so no --features flag is needed.
+      - name: Build the app and attach it to the release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/hf-gui
+          tagName: ${{ github.ref_name }}
+          releaseName: oxfuzz ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+          releaseBody: |
+            Desktop builds of oxfuzz. Download the file for your platform below.
+
+            | Platform | File |
+            | --- | --- |
+            | macOS (Apple silicon) | `*_aarch64.dmg` |
+            | macOS (Intel) | `*_x64.dmg` |
+            | Linux | `*.AppImage`, `*.deb`, `*.rpm` |
+            | Windows | `*.msi`, `*-setup.exe` |
+
+            ### These builds are not signed
+
+            No code-signing certificates are configured, so the operating system
+            will warn you on first launch. This is expected, not a sign the
+            download is corrupt.
+
+            - **macOS**: Gatekeeper blocks the first run. Right-click the app and
+              choose **Open**, then confirm. Alternatively:
+              `xattr -cr /Applications/oxfuzz.app`
+            - **Windows**: SmartScreen shows a warning. Choose **More info**,
+              then **Run anyway**.
+            - **Linux**: mark the AppImage executable with
+              `chmod +x oxfuzz_*.AppImage` before running it.
+
+            ### Before you start fuzzing
+
+            oxfuzz builds and runs untrusted code, so it requires a sandbox.
+            Docker must be installed and running, and at least one LLM provider
+            must be configured. See the Getting Started guide in the repository.
