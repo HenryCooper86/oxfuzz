@@ -2,8 +2,25 @@
 
 These images are the product evidence rendered by the top-level `README.md`.
 Keep the filenames, content, and descriptions synchronized with the current
-desktop app. The current set was refreshed from the native macOS application on
-2026-07-16 at 1326 x 768 pixels.
+desktop app.
+
+## Status: the set is currently empty and needs recapture
+
+The 2026-07-16 set was removed before the public release. Two independent
+reasons:
+
+1. Four images (`hero`, `discover`, `harness`, `run`) showed an absolute local
+   path containing a developer username and the retired `hobot_fuzz` project
+   name -- exactly what requirement 5 below exists to prevent.
+2. All eight predated the sidebar flattening (41ea503), the sidebar-only
+   branding (4de6c9a), and the header typography fix (225e90a), so they showed
+   a `hobot_fuzz v0.1.0` footer, a removed `LIBRARY` nav section, and italic
+   view titles that no longer exist.
+
+`README.md` currently renders no screenshots. When recapturing, follow the
+requirements below, then restore the image references in both the English and
+Chinese sections of `README.md`. Capture from a project at a neutral path --
+a path under the checked-out repository, not a personal home directory.
 
 ## Capture requirements
 

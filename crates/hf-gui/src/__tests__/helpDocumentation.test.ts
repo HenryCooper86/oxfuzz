@@ -37,21 +37,30 @@ describe("in-app documentation", () => {
     expect(chineseWelcome?.body).toContain("绝不会在主机上执行");
   });
 
-  it("links shipped documentation surfaces to the local GitLab project", () => {
+  it("links shipped documentation surfaces to the public GitHub project", () => {
     const helpView = source("../views/HelpView.tsx");
     const aboutTab = source("../components/settings/AboutTab.tsx");
     const projectLinks = source("../lib/projectLinks.ts");
     const messages = source("../i18n.extra.ts");
 
-    expect(projectLinks).toContain("https://gitlab-ce.orb.local/hobot/oxfuzz");
+    // The public repository is the only repository an external user can reach.
+    // Pin the host positively rather than denying a specific one: this fails for
+    // any non-github.com URL, and avoids naming a private host in a public repo.
+    expect(projectLinks).toContain("https://github.com/hobot/oxfuzz");
+    expect(projectLinks).toMatch(
+      /PROJECT_REPOSITORY_URL = "https:\/\/github\.com\//,
+    );
+    // GitHub blob URLs have no `/-/` infix, unlike GitLab.
+    expect(projectLinks).toContain("/blob/main/docs/guides/GETTING_STARTED.md");
+    expect(projectLinks).not.toContain("/-/blob/");
     expect(helpView).toContain('from "../lib/projectLinks"');
     expect(aboutTab).toContain('from "../../lib/projectLinks"');
-    expect(helpView).toContain("Open the GitLab repository");
-    expect(helpView).toContain("<Gitlab");
-    expect(aboutTab).toContain("<Gitlab");
-    expect(helpView).not.toContain("github.com/hobot/oxfuzz");
-    expect(aboutTab).not.toContain("github.com/hobot/oxfuzz");
-    expect(messages).toContain('"settings.about.repo": "GitLab Project"');
-    expect(messages).toContain('"settings.about.repo": "GitLab 项目"');
+    expect(helpView).toContain("Open the GitHub repository");
+    expect(helpView).toContain("<Github");
+    expect(aboutTab).toContain("<Github");
+    expect(helpView).not.toContain("<Gitlab");
+    expect(aboutTab).not.toContain("<Gitlab");
+    expect(messages).toContain('"settings.about.repo": "GitHub Project"');
+    expect(messages).toContain('"settings.about.repo": "GitHub 项目"');
   });
 });
