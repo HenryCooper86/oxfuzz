@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { BookOpen, Gitlab, LifeBuoy, Search } from "lucide-react";
+import { BookOpen, Github, LifeBuoy, Search } from "lucide-react";
 import { Button, ViewHeader } from "../components/ui";
 import { Mermaid } from "../components/Mermaid";
 import { codeInfo } from "../lib/reportPreviewCode";
@@ -68,8 +68,8 @@ export function HelpView() {
           <Button variant="outline" size="sm" onClick={() => void openExternal(GETTING_STARTED_GUIDE_URL)} title={L("Open the getting-started guide", "打开入门指南")}>
             <LifeBuoy size={14} /> {L("Getting Started", "入门")}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void openExternal(PROJECT_REPOSITORY_URL)} title={L("Open the GitLab repository", "打开 GitLab 仓库")}>
-            <Gitlab size={14} /> GitLab
+          <Button variant="outline" size="sm" onClick={() => void openExternal(PROJECT_REPOSITORY_URL)} title={L("Open the GitHub repository", "打开 GitHub 仓库")}>
+            <Github size={14} /> GitHub
           </Button>
         </div>
       </div>

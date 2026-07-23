@@ -11,9 +11,10 @@ whether a version is supported, include its exact commit SHA in the report.
 
 ## Private reporting
 
-Create a confidential issue in this GitLab project, or contact the repository
-maintainers through an established private channel. Do not post exploit details,
-credentials, private target code, or working reproducers in a public issue.
+Use GitHub's private vulnerability reporting on this repository (Security ->
+Report a vulnerability), or contact the repository maintainers through an
+established private channel. Do not post exploit details, credentials, private
+target code, or working reproducers in a public issue.
 
 Include as much of the following as is safe:
 
