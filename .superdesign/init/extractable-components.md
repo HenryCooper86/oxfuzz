@@ -1,12 +1,22 @@
 # Extractable Superdesign Components
 
+"Extractable props" below are *proposed* parameters for a standalone design
+mockup -- the knobs a static extraction would need to show the component in its
+interesting states. They are not the live component signatures. Several of these
+components take no props at all in the app and read from context or poll a
+status endpoint instead (`ProgressPanel`, `SandboxBanner`).
+
+For real signatures see `components.md` or the source file. Where a proposed
+prop would collide with or misrepresent the real API, that is called out in the
+entry.
+
 ## Layout Components
 
 ## Sidebar
 
 - Source: `crates/hf-gui/src/components/Sidebar.tsx`
 - Category: layout
-- Description: Persistent project-aware navigation for pipeline, library, automotive, support, and settings destinations.
+- Description: Persistent project-aware navigation: brand block, new-target button, then the Recent targets, Pipeline, Results, AI System, Vehicle, and Integrations sections, with Help and Settings pinned in the footer.
 - Extractable props: `activeItem` (string, default: `dashboard`), `showRecentProject` (boolean, default: `true`), `recentProjectName` (string, default: `libfuzzer_fuzzme`)
 - Hardcoded: product structure, section labels, Lucide icon choices, open-project button, footer hint, spacing, colors, and all CSS classes
 
@@ -31,6 +41,7 @@
 - Source: `crates/hf-gui/src/components/ProgressPanel.tsx`
 - Category: layout
 - Description: Right-hand campaign progress rail showing the four fuzzing lifecycle stages.
+- Real signature: no props. It reads `usePipeline()` and derives its open state from stage completion (see `lib/progressPanel.ts`).
 - Extractable props: `currentStep` (string, default: `triage`), `completedCount` (number, default: `4`), `isCollapsed` (boolean, default: `false`)
 - Hardcoded: four workflow stage labels, icons, progress-line styling, and reset affordance
 
@@ -96,8 +107,10 @@
 
 - Source: `crates/hf-gui/src/components/FuzzingPolicyNotice.tsx`
 - Category: basic
-- Description: Explicit policy-load and failure notice for safety-sensitive actions.
-- Extractable props: `loaded` (boolean, default: `true`), `hasError` (boolean, default: `false`)
+- Description: Policy-load failure notice for safety-sensitive actions. It is rendered only where the policy is missing (all three call sites guard on `{!fuzzingSettings && ...}`), so it has no success state to show.
+- Real signature: `{ loaded: boolean; error: string | null }` -- there is no `hasError` prop.
+- Careful: the `loaded` flag reads backwards. `loaded === true` selects the *failure* branch (error border, error text, `AlertTriangle`, `fuzzing.policyUnavailable`); `loaded === false` renders the spinner. A mockup built from "loaded, no error" will show the red banner, not a benign confirmation.
+- Extractable props: `loaded` (boolean, default: `false` for the loading state; set `true` to show the failure banner), `error` (string or null, default: `null`)
 - Hardcoded: policy copy, severity mapping, icons, and notice layout
 
 ## ReportPreview

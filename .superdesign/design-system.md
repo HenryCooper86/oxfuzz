@@ -8,7 +8,7 @@ Primary users are security engineers, fuzzing specialists, and automotive securi
 
 ## Information Architecture
 
-- Persistent left rail: current project, pipeline destinations, library destinations, specialized automotive/support destinations, and settings.
+- Persistent left rail, in order: brand block (logo plus `oxfuzz` wordmark), new-target button, then six labelled sections -- Recent targets (a list, with a per-row remove control and an empty state), Pipeline (dashboard, workflow, and its discover/harness/run/triage/corpus children), Results (projects, artifacts, reports, runs, audit), AI System (chat, agents, skills, knowledge, automation), Vehicle (automotive), and Integrations (DefectDojo, shown only once configured) -- plus a pinned footer carrying Help and Settings. All sections are flat; see the redesign constraints below.
 - Persistent top header: sidebar toggle, active-view identity, progress/diagnostic/observability/info panel controls, and theme control.
 - Main workspace: active route content with a standard 24 px inset on most pages.
 - Optional right rail: four-stage campaign progress and observation panels.
@@ -23,6 +23,14 @@ The current identity is a restrained, technical operations console: near-black n
 
 ## Color Tokens
 
+`crates/hf-gui/src/styles/index.css` is the authoritative source for every token
+below; this list is a design-facing summary of it. If the two disagree, the
+stylesheet is right and this file is stale.
+
+The text tokens carry a deliberate accessibility floor set by commit 366d6f6:
+dark muted `#8c8881` on `#0f0f0f` measures 5.43:1 and light muted `#6d6761` on
+`#ffffff` measures 5.58:1, both clearing WCAG AA. Do not darken them.
+
 ### Dark theme (default)
 
 - Primary surface: `#0f0f0f`
@@ -32,14 +40,14 @@ The current identity is a restrained, technical operations console: near-black n
 - Hover surface: `rgba(255, 255, 255, 0.045)`
 - Active surface: `rgba(255, 255, 255, 0.06)`
 - Primary text: `#e8e6e1`
-- Secondary text: `#8a8680`
-- Muted text: `#555250`
+- Secondary text: `#aaa59e`
+- Muted text: `#8c8881`
 - Accent: `#c8b560`
 - Accent hover: `#d4c26e`
 - Accent subtle: `rgba(200, 181, 96, 0.1)`
 - Accent glow: `rgba(200, 181, 96, 0.15)`
 - Accent contrast: `#0f0f0f`
-- Border: `rgba(255, 255, 255, 0.06)`
+- Border: `rgba(255, 255, 255, 0.08)`
 - Focus border: `rgba(255, 255, 255, 0.15)`
 
 ### Light theme
@@ -48,14 +56,17 @@ The current identity is a restrained, technical operations console: near-black n
 - Secondary surface: `#f5f4f1`
 - Tertiary surface: `#edecea`
 - Code surface: `#f1efed`
+- Hover surface: `rgba(0, 0, 0, 0.04)`
+- Active surface: `rgba(0, 0, 0, 0.06)`
 - Primary text: `#1a1917`
 - Secondary text: `#6b6560`
-- Muted text: `#9c9894`
+- Muted text: `#6d6761`
 - Accent: `#9a7c2a`
 - Accent hover: `#7e6420`
 - Accent subtle: `rgba(154, 124, 42, 0.08)`
+- Accent glow: `rgba(154, 124, 42, 0.12)`
 - Accent contrast: `#ffffff`
-- Border: `rgba(0, 0, 0, 0.1)`
+- Border: `rgba(0, 0, 0, 0.13)`
 - Focus border: `rgba(0, 0, 0, 0.22)`
 
 ### Semantic colors
@@ -84,7 +95,8 @@ The current identity is a restrained, technical operations console: near-black n
 - Dense control gap: 8 px. Related group gap: 16 px. Major-section gap: 24 px.
 - Radius scale: 4 px controls, 8 px cards/inputs, 12 px large panels and modal shells.
 - Borders are one pixel and subtle; use surface shifts before adding more borders.
-- Left navigation is approximately 210 px. Right progress rail is approximately 245 px when expanded.
+- Left navigation is 240 px (`--sidebar-width`, with 240 px as the fallback). The right progress rail is 280 px expanded and 64 px collapsed; a redesign must supply both states.
+- View content sits in a canvas capped at 1440 px and centred (`.view-canvas`), inside a 24 px-inset scroll region (`.view-scroll`). Below 768 px the inset drops to 16 px; below 1100 px the dashboard supporting band collapses from two columns to one.
 - Maintain a clear 44 px minimum pointer target for primary controls even when the visible control is visually compact.
 
 ## Elevation
@@ -114,7 +126,7 @@ The current identity is a restrained, technical operations console: near-black n
 
 ## Accessibility and Safety Constraints
 
-- Meet WCAG AA text contrast, including secondary labels and disabled states; current muted tokens may be used only for truly tertiary information.
+- Meet WCAG AA text contrast, including secondary labels and disabled states. The shipped muted tokens already clear AA (see Color Tokens); any redesign must keep them at or above that ratio rather than reverting to the darker pre-366d6f6 values.
 - Never communicate ready/approved/sandboxed/error state by color alone.
 - Destructive actions require clear labels, red semantics, and confirmation.
 - Execution controls must name the sandbox/engine context and approval prerequisite nearby.
@@ -125,5 +137,8 @@ The current identity is a restrained, technical operations console: near-black n
 
 - Keep the current app shell, product palette, fonts, semantic colors, safety language, and core navigation taxonomy.
 - A conservative polish may improve contrast, typography, density, title duplication, completed-progress behavior, card hierarchy, and empty states without moving major destinations.
-- A structural redesign may regroup the Dashboard around `Needs attention`, `Campaign state`, and `Evidence`, and may collapse secondary destinations or panels, but it must not remove human approval, sandbox status, or provenance cues.
+- A structural redesign may regroup the Dashboard around `Needs attention`, `Campaign state`, and `Evidence`, and may collapse the right-hand progress and observation panels, but it must not remove human approval, sandbox status, or provenance cues.
+- Sidebar navigation stays flat. Collapsible secondary sections were tried in f86383f and deliberately reverted in 41ea503, which deleted `CollapsibleNavSection` and `lib/sidebarSections.ts`; `crates/hf-gui/src/__tests__/sidebarLayout.test.ts` now asserts that machinery is absent. Do not put Results or AI System behind disclosure toggles.
+- Product identity lives in the sidebar brand block only. The header carries no logo or wordmark, and `crates/hf-gui/src/__tests__/branding.test.ts` asserts both halves of that split.
+- The header view title is secondary context, not display type: 14 px, weight 500, `--text-secondary`, never italic (`crates/hf-gui/src/__tests__/uiPolish.test.ts`).
 - Use ONLY the fonts, colors, spacing, radii, shadows, and component styles defined here and in `crates/hf-gui/src/styles/index.css`.
