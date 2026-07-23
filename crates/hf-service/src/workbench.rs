@@ -979,8 +979,8 @@ mod tests {
     #[test]
     fn parses_gitlab_ssh_remote() {
         assert_eq!(
-            remote_to_web_url("git@gitlab-ce.orb.local:hobot/oxfuzz.git"),
-            Some("https://gitlab-ce.orb.local/hobot/oxfuzz".to_owned())
+            remote_to_web_url("git@gitlab.example.com:acme/app.git"),
+            Some("https://gitlab.example.com/acme/app".to_owned())
         );
     }
 
