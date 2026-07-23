@@ -4,23 +4,30 @@ These images are the product evidence rendered by the top-level `README.md`.
 Keep the filenames, content, and descriptions synchronized with the current
 desktop app.
 
-## Status: the set is currently empty and needs recapture
+## Status: seven of eight captured 2026-07-23
 
-The 2026-07-16 set was removed before the public release. Two independent
-reasons:
+The 2026-07-16 set was removed before the public release: four images leaked an
+absolute path containing a developer username and the retired `hobot_fuzz`
+project name, and all eight predated the sidebar flattening (41ea503), the
+sidebar-only branding (4de6c9a), and the header typography fix (225e90a).
 
-1. Four images (`hero`, `discover`, `harness`, `run`) showed an absolute local
-   path containing a developer username and the retired `hobot_fuzz` project
-   name -- exactly what requirement 5 below exists to prevent.
-2. All eight predated the sidebar flattening (41ea503), the sidebar-only
-   branding (4de6c9a), and the header typography fix (225e90a), so they showed
-   a `hobot_fuzz v0.1.0` footer, a removed `LIBRARY` nav section, and italic
-   view titles that no longer exist.
+The current set was recaptured on 2026-07-23 from the native macOS app at
+1326 x 768, using the retained `honggfuzz_magic` campaign rather than starting a
+new one, per requirement 4 below.
 
-`README.md` currently renders no screenshots. When recapturing, follow the
-requirements below, then restore the image references in both the English and
-Chinese sections of `README.md`. Capture from a project at a neutral path --
-a path under the checked-out repository, not a personal home directory.
+**`automotive.png` is still missing.** The Automotive destination sits below the
+sidebar fold and was not reached in that session. `README.md` therefore renders
+no automotive image; add the reference to both language sections when the shot
+is taken.
+
+Two hazards found while capturing, both worth avoiding next time:
+
+- **Settings > General displays the config and data directory paths**, which are
+  absolute and under the operator's home directory. Only the Fuzzing tab is safe
+  to capture. Requirement 5 covers this in spirit; it is called out here by name
+  because it is easy to miss.
+- A text-selection popup from another installed app can float above the window
+  and land in the capture. Check the top-right corner of every image.
 
 ## Capture requirements
 
