@@ -180,9 +180,11 @@ These builds are unsigned, so the OS warns on first launch -- see the release
 notes for the per-platform steps. Docker must be installed and running before
 any fuzzing starts.
 
-Maintainers cut a release by pushing a version tag; `.github/workflows/release.yml`
-builds every platform and attaches the installers as a draft release to review
-and publish:
+Maintainers cut a release by pushing a version tag. `.github/workflows/release.yml`
+builds every platform and publishes the release automatically -- but only after
+all four builds have uploaded, so a release is never public while a platform is
+still missing. If any platform fails, the release stays a draft to retry or
+publish by hand:
 
 ```bash
 git tag v0.1.0
@@ -639,7 +641,7 @@ cargo build --release
 
 这些构建均未签名，因此系统在首次启动时会发出警告 —— 各平台的处理步骤见发布说明。开始任何模糊测试前，Docker 必须已安装并正在运行。
 
-维护者通过推送版本标签来发布；`.github/workflows/release.yml` 会构建所有平台，并将安装包作为草稿 release 附上，供审阅后发布：
+维护者通过推送版本标签来发布。`.github/workflows/release.yml` 会构建所有平台并自动发布 release —— 但只有在四个平台全部上传完成后才会公开，因此不会出现缺少某个平台的公开 release。若任一平台构建失败，release 将保持草稿状态，可重试或手动发布：
 
 ```bash
 git tag v0.1.0
