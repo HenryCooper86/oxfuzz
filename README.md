@@ -7,6 +7,10 @@
 
 **Target Discovery** &middot; **Harness Generation** &middot; **Engine Integration** &middot; **Crash Triage** &middot; **Corpus & Coverage Loop** &middot; **User-Extensible Skills**
 
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="oxfuzz Dashboard showing operational readiness, harness review, recent runs, and crash handoff" width="900">
+</p>
+
 ---
 
 ## New to fuzzing? Start here
@@ -99,25 +103,35 @@ instead of being hidden behind a generic status.
 scans for fuzzable functions, ranking them into a Target Inventory by fit score,
 input surface, complexity, and reachability from entry points.
 
+![Discover -- ranked Target Inventory](docs/screenshots/discover.png)
+
 **2. Generate, qualify, and promote a harness.** Pick a target and the agent
 drafts a harness, compiles it in the sandbox, runs bounded smoke qualification,
 and prepares a seed corpus. You then review and explicitly promote that exact
 revision before any full campaign can start. Regeneration invalidates the prior
 promotion.
 
+![Harness -- promoted revision and five-step sandbox qualification flow](docs/screenshots/harness.png)
+
 **3. Run the fuzzer.** Launch an enabled engine against the promoted harness.
 The Run view shows campaign limits and retained metrics -- executions/sec,
 coverage edges, elapsed time, and findings -- with cooperative cancellation for
 an active sandboxed run.
+
+![Run -- approved target, bounded campaign configuration, and retained metrics](docs/screenshots/run.png)
 
 **4. Triage the crashes.** Crashes are ingested, deduplicated by stack
 signature, minimized, and classified with CASR for severity and exploitability.
 The agent can draft a report from retained evidence for human review, and the
 result can be exported or handed off to DefectDojo.
 
+![Triage -- deduplicated sanitizer crash and exploitability classification](docs/screenshots/triage.png)
+
 **Review retained evidence.** The Artifacts view collects persisted crash
 reproducers and corpus inputs across the selected project in one place. Reports,
 run history, policy audit, and evidence export provide the wider audit trail.
+
+![Artifacts -- crashes and corpus](docs/screenshots/artifacts.png)
 
 ### Talk to it instead
 
@@ -134,6 +148,8 @@ LLM providers, enabled fuzzing engines, run defaults, sandboxed campaign limits,
 storage cleanup, and external integrations. Mandatory sandboxing, blocked
 fuzzer networking, and human promotion before full campaigns are displayed as
 enforced guarantees rather than switches.
+
+![Fuzzing settings -- engine availability, campaign limits, and mandatory protections](docs/screenshots/settings.png)
 
 > The GUI also runs in the browser against the REST API for development:
 > `cd crates/hf-gui && npm run dev:web` (talks to `oxfuzz serve` over HTTP).
@@ -532,6 +548,10 @@ oxfuzz is inspired by and based on **[y-agent](https://github.com/gorgiaxx/y-age
 
 **目标发现** &middot; **测试桩生成** &middot; **引擎集成** &middot; **崩溃三查** &middot; **语料库与覆盖率闭环** &middot; **用户可扩展技能**
 
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="oxfuzz 仪表盘：运营就绪度、测试桩审核、近期运行与崩溃移交" width="900">
+</p>
+
 > 本节是上方英文文档的完整中文镜像，章节结构一一对应。命令、代码块、文件路径、配置键、crate 名称与 CLI 参数均保持原文（不翻译），以便直接复制使用。
 
 ---
@@ -583,13 +603,23 @@ open target/release/bundle/macos/oxfuzz.app
 
 **1. 发现攻击面。** 把 oxfuzz 指向一个 C/C++ 项目，它会扫描可模糊的函数，并按契合度评分、输入面、复杂度与从入口点的可达性，把它们排入目标清单。
 
+![发现 —— 排名后的目标清单](docs/screenshots/discover.png)
+
 **2. 生成、资格化并提升一个测试桩。** 选定一个目标，代理会起草测试桩、在沙箱中编译、运行有界的冒烟资格化，并准备种子语料库。随后你要审核并显式提升那个确切的修订版，之后才能启动任何完整 campaign。重新生成会使先前的提升失效。
+
+![测试桩 —— 已提升的修订版与五步沙箱资格化流程](docs/screenshots/harness.png)
 
 **3. 运行模糊测试。** 用一个已启用的引擎对已提升的测试桩发起运行。Run 视图展示 campaign 限制与保留的指标 —— 每秒执行数、覆盖率边、已用时间与发现 —— 并支持对进行中的沙箱运行进行协作式取消。
 
+![运行 —— 已批准的目标、有界的 campaign 配置与保留的指标](docs/screenshots/run.png)
+
 **4. 三查崩溃。** 崩溃会被摄取、按栈签名去重、最小化，并用 CASR 分类严重度与可利用性。代理可以基于保留的证据起草一份报告供人工审核，结果可导出或移交给 DefectDojo。
 
+![三查 —— 去重后的 sanitizer 崩溃与可利用性分类](docs/screenshots/triage.png)
+
 **审阅保留的证据。** Artifacts 视图把所选项目内持久化的崩溃复现器与语料库输入集中到一处。报告、运行历史、策略审计与证据导出提供更广的审计线索。
+
+![制品 —— 崩溃与语料库](docs/screenshots/artifacts.png)
 
 ### 或者，直接与它对话
 
@@ -598,6 +628,8 @@ open target/release/bundle/macos/oxfuzz.app
 ### 设置
 
 设置面板是操作员配置的唯一真源：LLM 提供方、已启用的模糊测试引擎、运行默认值、沙箱化的 campaign 限制、存储清理与外部集成。强制沙箱、被封禁的模糊器联网，以及完整 campaign 前的人工提升，都以“强制保证”而非“开关”的形式展示。
+
+![模糊测试设置 —— 引擎可用性、campaign 限制与强制保护](docs/screenshots/settings.png)
 
 > 为便于开发，GUI 也可在浏览器中对着 REST API 运行：
 > `cd crates/hf-gui && npm run dev:web`（通过 HTTP 与 `oxfuzz serve` 通信）。
