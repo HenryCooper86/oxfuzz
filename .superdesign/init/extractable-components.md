@@ -108,9 +108,9 @@ entry.
 - Source: `crates/hf-gui/src/components/FuzzingPolicyNotice.tsx`
 - Category: basic
 - Description: Policy-load failure notice for safety-sensitive actions. It is rendered only where the policy is missing (all three call sites guard on `{!fuzzingSettings && ...}`), so it has no success state to show.
-- Real signature: `{ loaded: boolean; error: string | null }` -- there is no `hasError` prop.
-- Careful: the `loaded` flag reads backwards. `loaded === true` selects the *failure* branch (error border, error text, `AlertTriangle`, `fuzzing.policyUnavailable`); `loaded === false` renders the spinner. A mockup built from "loaded, no error" will show the red banner, not a benign confirmation.
-- Extractable props: `loaded` (boolean, default: `false` for the loading state; set `true` to show the failure banner), `error` (string or null, default: `null`)
+- Real signature: `{ state: "loading" | "unavailable"; error: string | null }`.
+- Two states only, both negative: `"loading"` renders the accent-bordered spinner, `"unavailable"` renders the error-bordered `AlertTriangle` with `fuzzing.policyUnavailable`. There is no success state -- callers mount the notice only under `!fuzzingSettings`.
+- Extractable props: `state` (string, default: `unavailable` for the interesting case), `error` (string or null, default: `null`)
 - Hardcoded: policy copy, severity mapping, icons, and notice layout
 
 ## ReportPreview

@@ -184,7 +184,10 @@ export function RunView({
       {!isSyz && <SandboxBanner />}
 
       {!fuzzingSettings && (
-        <FuzzingPolicyNotice loaded={fuzzingPolicyLoaded} error={fuzzingPolicyError} />
+        <FuzzingPolicyNotice
+          state={fuzzingPolicyLoaded ? "unavailable" : "loading"}
+          error={fuzzingPolicyError}
+        />
       )}
 
       <div className="grid grid-cols-2 gap-3">

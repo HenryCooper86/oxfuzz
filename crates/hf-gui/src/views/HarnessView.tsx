@@ -334,7 +334,10 @@ export function HarnessView({
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
       <SandboxBanner />
       {!fuzzingSettings && (
-        <FuzzingPolicyNotice loaded={fuzzingPolicyLoaded} error={fuzzingPolicyError} />
+        <FuzzingPolicyNotice
+          state={fuzzingPolicyLoaded ? "unavailable" : "loading"}
+          error={fuzzingPolicyError}
+        />
       )}
       {!embedded && (
         <>
