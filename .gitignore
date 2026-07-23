@@ -45,6 +45,9 @@ dist/
 build/
 out/
 coverage/
+# Vite output for the browser build (`npm run build:web`). Nothing in the repo
+# consumes it: Tauri ships `dist/`, and no crate embeds or serves this.
+crates/hf-gui/dist-web/
 
 ### Environment / Secrets
 .env
