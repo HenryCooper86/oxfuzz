@@ -1529,7 +1529,10 @@ export function AutomationView() {
       </div>
 
       {!fuzzingSettings && (
-        <FuzzingPolicyNotice loaded={fuzzingPolicyLoaded} error={fuzzingPolicyError} />
+        <FuzzingPolicyNotice
+          state={fuzzingPolicyLoaded ? "unavailable" : "loading"}
+          error={fuzzingPolicyError}
+        />
       )}
 
       {/* New campaign form */}
