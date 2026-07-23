@@ -12,7 +12,7 @@ FROM ${UBUNTU_IMAGE}
 
 LABEL org.opencontainers.image.title="oxfuzz sandbox" \
       org.opencontainers.image.version="0.1.0" \
-      org.opencontainers.image.source="https://github.com/hobot/oxfuzz"
+      org.opencontainers.image.source="https://github.com/HenryCooper86/oxfuzz"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
