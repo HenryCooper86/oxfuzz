@@ -1,8 +1,9 @@
 //! Strict normalization for pinned-version Semgrep CE JSON output.
 
-use std::collections::{hash_map::Entry, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
+use hf_core::target::{TargetCandidate, TargetInventory, TargetLanguage};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -53,6 +54,10 @@ impl SemgrepSeverity {
             Self::Warning => 0.05,
             Self::Error => 0.10,
         }
+    }
+
+    const fn weight(self) -> f64 {
+        self.nominal_weight()
     }
 }
 
@@ -111,6 +116,32 @@ pub struct SemgrepFinding {
     pub nominal_weight: f64,
 }
 
+/// Immutable-base score overlay derived from matched Semgrep rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemgrepTargetScore {
+    /// Stable target candidate identifier.
+    pub target_id: Uuid,
+    /// Candidate fit score observed in the input inventory.
+    pub base_score: f64,
+    /// Distinct-rule Semgrep boost, capped at `0.20`.
+    pub boost: f64,
+    /// Base plus boost, capped at `1.0`.
+    pub effective_score: f64,
+    /// Number of distinct matched rule identifiers.
+    pub matched_rule_count: u32,
+}
+
+/// Normalized findings plus deterministic score overlays for one inventory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemgrepAnalysis {
+    /// All normalized findings, including unmatched and ambiguous findings.
+    pub findings: Vec<SemgrepFinding>,
+    /// One UUID-sorted score row for every candidate.
+    pub scores: Vec<SemgrepTargetScore>,
+    /// Number of candidates with at least one distinct matched rule.
+    pub matched_candidate_count: u32,
+}
+
 /// Rejection reasons for incomplete, unsafe, or unsupported Semgrep output.
 #[derive(Debug, thiserror::Error)]
 pub enum SemgrepValidationError {
@@ -132,6 +163,9 @@ pub enum SemgrepValidationError {
     /// Distinct normalized findings produced the same fingerprint.
     #[error("Semgrep finding fingerprint collision: {0}")]
     FingerprintCollision(String),
+    /// The candidate inventory cannot safely support Semgrep enrichment.
+    #[error("invalid Semgrep target inventory: {0}")]
+    InvalidInventory(String),
 }
 
 #[derive(Deserialize)]
@@ -177,6 +211,132 @@ pub fn parse_findings(
     staged_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<SemgrepFinding>, SemgrepValidationError> {
     parse_findings_with_fingerprint(bytes, staged_paths, fingerprint)
+}
+
+/// Maps normalized findings to uniquely containing C/C++ candidates and scores them.
+pub fn map_and_score(
+    inventory: &TargetInventory,
+    mut findings: Vec<SemgrepFinding>,
+) -> Result<SemgrepAnalysis, SemgrepValidationError> {
+    validate_inventory(inventory)?;
+
+    let mut rule_severities = BTreeMap::<(Uuid, String), SemgrepSeverity>::new();
+    for finding in &mut findings {
+        finding.matched_target_id = uniquely_containing_candidate(inventory, finding);
+        if let Some(target_id) = finding.matched_target_id {
+            rule_severities
+                .entry((target_id, finding.rule_id.clone()))
+                .and_modify(|severity| *severity = (*severity).max(finding.severity))
+                .or_insert(finding.severity);
+        }
+    }
+
+    let mut scores = inventory
+        .candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.id,
+                SemgrepTargetScore {
+                    target_id: candidate.id,
+                    base_score: candidate.fit_score,
+                    boost: 0.0,
+                    effective_score: candidate.fit_score,
+                    matched_rule_count: 0,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for ((target_id, _), severity) in rule_severities {
+        let score = scores
+            .get_mut(&target_id)
+            .expect("matched target must belong to the validated inventory");
+        score.boost += severity.weight();
+        score.matched_rule_count += 1;
+    }
+
+    for score in scores.values_mut() {
+        score.boost = ((score.boost.min(0.20) * 100.0).round()) / 100.0;
+        score.effective_score = (score.base_score + score.boost).min(1.0);
+    }
+
+    let scores = scores.into_values().collect::<Vec<_>>();
+    let matched_candidate_count = scores
+        .iter()
+        .filter(|score| score.matched_rule_count > 0)
+        .count()
+        .try_into()
+        .expect("matched candidate count cannot exceed the normalized finding limit");
+
+    Ok(SemgrepAnalysis {
+        findings,
+        scores,
+        matched_candidate_count,
+    })
+}
+
+fn validate_inventory(inventory: &TargetInventory) -> Result<(), SemgrepValidationError> {
+    let mut candidate_ids = HashSet::with_capacity(inventory.candidates.len());
+    for candidate in &inventory.candidates {
+        if candidate.project_root != inventory.project_root {
+            return Err(invalid_inventory("candidate project roots do not match"));
+        }
+        if !matches!(candidate.language, TargetLanguage::C | TargetLanguage::Cpp) {
+            return Err(invalid_inventory(
+                "only C and C++ candidates can be enriched",
+            ));
+        }
+        if candidate.location.end_line.is_none() || candidate.location.end_col.is_none() {
+            return Err(invalid_inventory("candidate source spans must be complete"));
+        }
+        if !candidate.fit_score.is_finite() || !(0.0..=1.0).contains(&candidate.fit_score) {
+            return Err(invalid_inventory(
+                "candidate base scores must be finite and between zero and one",
+            ));
+        }
+        if !candidate_ids.insert(candidate.id) {
+            return Err(invalid_inventory("candidate identifiers must be unique"));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_inventory(reason: &str) -> SemgrepValidationError {
+    SemgrepValidationError::InvalidInventory(String::from(reason))
+}
+
+fn uniquely_containing_candidate(
+    inventory: &TargetInventory,
+    finding: &SemgrepFinding,
+) -> Option<Uuid> {
+    let mut matches = inventory.candidates.iter().filter(|candidate| {
+        candidate_relative_path(candidate) == finding.relative_path
+            && contains_start(candidate, finding)
+    });
+    let candidate_id = matches.next()?.id;
+    matches.next().is_none().then_some(candidate_id)
+}
+
+fn candidate_relative_path(candidate: &TargetCandidate) -> &Path {
+    candidate
+        .location
+        .file
+        .strip_prefix(&candidate.project_root)
+        .unwrap_or(&candidate.location.file)
+}
+
+fn contains_start(candidate: &TargetCandidate, finding: &SemgrepFinding) -> bool {
+    let Some(end_line) = candidate.location.end_line else {
+        return false;
+    };
+    let Some(end_col) = candidate.location.end_col else {
+        return false;
+    };
+    let start = (candidate.location.line, candidate.location.col);
+    let end = (end_line, end_col);
+    let point = (finding.range.start_line, finding.range.start_col);
+    start <= point && point <= end
 }
 
 fn parse_findings_with_fingerprint<F>(
@@ -359,12 +519,19 @@ fn hash_field(hasher: &mut Sha256, value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::path::{Path, PathBuf};
 
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetInventory, TargetKind,
+        TargetLanguage,
+    };
+    use uuid::Uuid;
+
     use super::{
-        parse_findings, parse_findings_with_fingerprint, SemgrepSeverity, SemgrepValidationError,
-        MAX_FINDINGS, MAX_MESSAGE_BYTES, MAX_RULE_ID_BYTES,
+        map_and_score, parse_findings, parse_findings_with_fingerprint, SemgrepFinding,
+        SemgrepRange, SemgrepSeverity, SemgrepValidationError, MAX_FINDINGS, MAX_MESSAGE_BYTES,
+        MAX_RULE_ID_BYTES,
     };
 
     const VALID: &[u8] = include_bytes!("../tests/fixtures/semgrep/valid.json");
@@ -401,6 +568,539 @@ mod tests {
             "paths": {"scanned": [scanned], "skipped": []}
         }))
         .expect("literal test document should serialize")
+    }
+
+    fn candidate(
+        id: &str,
+        project_root: &str,
+        language: TargetLanguage,
+        file: &str,
+        span: (u32, u32, Option<u32>, Option<u32>),
+        fit_score: f64,
+    ) -> TargetCandidate {
+        TargetCandidate {
+            id: Uuid::parse_str(id).expect("literal candidate UUID should parse"),
+            project_root: PathBuf::from(project_root),
+            language,
+            symbol: format!("target_{}", &id[..8]),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: PathBuf::from(file),
+                line: span.0,
+                col: span.1,
+                end_line: span.2,
+                end_col: span.3,
+            },
+            signature: Some(String::from("int target(const uint8_t *data, size_t size)")),
+            input_surface: InputSurface::Bytes,
+            complexity: 4,
+            fit_score,
+            sanitizers: vec![Sanitizer::Address],
+            rationale: String::from("literal test candidate"),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 4,
+        }
+    }
+
+    fn inventory(project_root: &str, candidates: Vec<TargetCandidate>) -> TargetInventory {
+        TargetInventory {
+            project_root: PathBuf::from(project_root),
+            candidates,
+            call_graph: HashMap::new(),
+        }
+    }
+
+    fn finding(
+        fingerprint: &str,
+        rule_id: &str,
+        severity: SemgrepSeverity,
+        path: &str,
+        start_line: u32,
+        start_col: u32,
+    ) -> SemgrepFinding {
+        let nominal_weight = match severity {
+            SemgrepSeverity::Error => 0.10,
+            SemgrepSeverity::Warning => 0.05,
+            SemgrepSeverity::Info => 0.01,
+        };
+        SemgrepFinding {
+            fingerprint: String::from(fingerprint),
+            rule_id: String::from(rule_id),
+            severity,
+            message: String::from("literal normalized finding"),
+            relative_path: PathBuf::from(path),
+            range: SemgrepRange {
+                start_line,
+                start_col,
+                end_line: start_line,
+                end_col: start_col,
+            },
+            matched_target_id: None,
+            nominal_weight,
+        }
+    }
+
+    // Production break caught: using non-inclusive or non-unique span containment, or fuzzy paths.
+    #[test]
+    fn map_findings_requires_exact_path_and_one_inclusive_containing_span() {
+        let parse_packet_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000020").expect("UUID should parse");
+        let inventory = inventory(
+            "/work/project",
+            vec![
+                candidate(
+                    "00000000-0000-0000-0000-000000000020",
+                    "/work/project",
+                    TargetLanguage::C,
+                    "/work/project/src/parser.c",
+                    (10, 2, Some(20), Some(30)),
+                    0.40,
+                ),
+                candidate(
+                    "00000000-0000-0000-0000-000000000030",
+                    "/work/project",
+                    TargetLanguage::C,
+                    "/work/project/src/parser.c",
+                    (15, 1, Some(19), Some(40)),
+                    0.30,
+                ),
+            ],
+        );
+        let findings = vec![
+            finding(
+                "unique",
+                "rule.unique",
+                SemgrepSeverity::Warning,
+                "src/parser.c",
+                12,
+                4,
+            ),
+            finding(
+                "file-level",
+                "rule.file",
+                SemgrepSeverity::Info,
+                "src/parser.c",
+                2,
+                1,
+            ),
+            finding(
+                "ambiguous",
+                "rule.ambiguous",
+                SemgrepSeverity::Error,
+                "src/parser.c",
+                18,
+                3,
+            ),
+            finding(
+                "wrong-path",
+                "rule.path",
+                SemgrepSeverity::Error,
+                "src/parser.cc",
+                12,
+                4,
+            ),
+            finding(
+                "at-start",
+                "rule.start",
+                SemgrepSeverity::Info,
+                "src/parser.c",
+                10,
+                2,
+            ),
+            finding(
+                "at-end",
+                "rule.end",
+                SemgrepSeverity::Info,
+                "src/parser.c",
+                20,
+                30,
+            ),
+        ];
+
+        let analysis =
+            map_and_score(&inventory, findings).expect("complete C inventory should map");
+
+        assert_eq!(
+            analysis.findings[0].matched_target_id,
+            Some(parse_packet_id)
+        );
+        assert_eq!(analysis.findings[1].matched_target_id, None);
+        assert_eq!(analysis.findings[2].matched_target_id, None);
+        assert_eq!(analysis.findings[3].matched_target_id, None);
+        assert_eq!(
+            analysis.findings[4].matched_target_id,
+            Some(parse_packet_id)
+        );
+        assert_eq!(
+            analysis.findings[5].matched_target_id,
+            Some(parse_packet_id)
+        );
+        assert_eq!(analysis.matched_candidate_count, 1);
+    }
+
+    // Production break caught: allowing a non-C/C++ candidate into Semgrep containment.
+    #[test]
+    fn map_rejects_non_c_or_cpp_candidates() {
+        let rust_candidate = candidate(
+            "00000000-0000-0000-0000-000000000001",
+            "/work/project",
+            TargetLanguage::Rust,
+            "/work/project/src/parser.rs",
+            (1, 1, Some(5), Some(1)),
+            0.50,
+        );
+
+        assert!(map_and_score(
+            &inventory("/work/project", vec![rust_candidate]),
+            Vec::new()
+        )
+        .is_err());
+    }
+
+    // Production break caught: mapping candidates from a root other than the inventory root.
+    #[test]
+    fn map_rejects_mixed_project_roots() {
+        let foreign_candidate = candidate(
+            "00000000-0000-0000-0000-000000000001",
+            "/other/project",
+            TargetLanguage::C,
+            "/other/project/src/parser.c",
+            (1, 1, Some(5), Some(1)),
+            0.50,
+        );
+
+        assert!(map_and_score(
+            &inventory("/work/project", vec![foreign_candidate]),
+            Vec::new()
+        )
+        .is_err());
+    }
+
+    // Production break caught: treating a partly absent candidate end coordinate as complete.
+    #[test]
+    fn map_rejects_incomplete_candidate_spans() {
+        for span in [(1, 1, None, Some(1)), (1, 1, Some(5), None)] {
+            let incomplete_candidate = candidate(
+                "00000000-0000-0000-0000-000000000001",
+                "/work/project",
+                TargetLanguage::C,
+                "/work/project/src/parser.c",
+                span,
+                0.50,
+            );
+
+            assert!(map_and_score(
+                &inventory("/work/project", vec![incomplete_candidate]),
+                Vec::new()
+            )
+            .is_err());
+        }
+    }
+
+    // Production break caught: collapsing two candidates with one UUID into a single score row.
+    #[test]
+    fn map_rejects_duplicate_candidate_ids() {
+        let candidate = candidate(
+            "00000000-0000-0000-0000-000000000001",
+            "/work/project",
+            TargetLanguage::C,
+            "/work/project/src/parser.c",
+            (1, 1, Some(5), Some(1)),
+            0.50,
+        );
+
+        assert!(map_and_score(
+            &inventory("/work/project", vec![candidate.clone(), candidate]),
+            Vec::new()
+        )
+        .is_err());
+    }
+
+    // Production break caught: accepting NaN, infinity, or a base outside the documented range.
+    #[test]
+    fn map_rejects_non_finite_or_out_of_range_base_scores() {
+        for invalid_score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01, 1.01] {
+            let candidate = candidate(
+                "00000000-0000-0000-0000-000000000001",
+                "/work/project",
+                TargetLanguage::Cpp,
+                "/work/project/src/parser.cc",
+                (1, 1, Some(5), Some(1)),
+                invalid_score,
+            );
+            assert!(
+                map_and_score(&inventory("/work/project", vec![candidate]), Vec::new()).is_err(),
+                "invalid base score must be rejected"
+            );
+        }
+    }
+
+    // Production break caught: counting locations instead of distinct rules or retaining low severity.
+    #[test]
+    fn score_deduplicates_rule_locations_and_uses_highest_severity() {
+        let target_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("UUID should parse");
+        let inventory = inventory(
+            "/work/project",
+            vec![candidate(
+                "00000000-0000-0000-0000-000000000001",
+                "/work/project",
+                TargetLanguage::C,
+                "/work/project/src/parser.c",
+                (1, 1, Some(50), Some(1)),
+                0.50,
+            )],
+        );
+        let findings = vec![
+            finding(
+                "error-low",
+                "rule.error",
+                SemgrepSeverity::Info,
+                "src/parser.c",
+                2,
+                1,
+            ),
+            finding(
+                "error-high",
+                "rule.error",
+                SemgrepSeverity::Error,
+                "src/parser.c",
+                3,
+                1,
+            ),
+            finding(
+                "error-repeat",
+                "rule.error",
+                SemgrepSeverity::Warning,
+                "src/parser.c",
+                4,
+                1,
+            ),
+            finding(
+                "warning",
+                "rule.warning",
+                SemgrepSeverity::Warning,
+                "src/parser.c",
+                5,
+                1,
+            ),
+            finding(
+                "info",
+                "rule.info",
+                SemgrepSeverity::Info,
+                "src/parser.c",
+                6,
+                1,
+            ),
+        ];
+
+        let analysis = map_and_score(&inventory, findings).expect("valid findings should score");
+        let score = analysis
+            .scores
+            .iter()
+            .find(|score| score.target_id == target_id)
+            .expect("candidate score should exist");
+
+        assert_eq!(score.matched_rule_count, 3);
+        assert_eq!(score.boost, 0.16);
+        assert_eq!(score.effective_score, 0.66);
+    }
+
+    // Production break caught: omitting the required zero-overlay row for an unmatched candidate.
+    #[test]
+    fn score_emits_one_row_for_every_candidate() {
+        let matched_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").expect("UUID should parse");
+        let zero_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000003").expect("UUID should parse");
+        let inventory = inventory(
+            "/work/project",
+            vec![
+                candidate(
+                    "00000000-0000-0000-0000-000000000002",
+                    "/work/project",
+                    TargetLanguage::C,
+                    "/work/project/src/parser.c",
+                    (1, 1, Some(20), Some(1)),
+                    0.50,
+                ),
+                candidate(
+                    "00000000-0000-0000-0000-000000000003",
+                    "/work/project",
+                    TargetLanguage::Cpp,
+                    "/work/project/src/other.cc",
+                    (1, 1, Some(20), Some(1)),
+                    0.25,
+                ),
+            ],
+        );
+        let findings = vec![finding(
+            "matched",
+            "rule.matched",
+            SemgrepSeverity::Info,
+            "src/parser.c",
+            2,
+            1,
+        )];
+
+        let analysis = map_and_score(&inventory, findings).expect("valid findings should score");
+        let matched = analysis
+            .scores
+            .iter()
+            .find(|score| score.target_id == matched_id)
+            .expect("matched candidate score should exist");
+        let zero = analysis
+            .scores
+            .iter()
+            .find(|score| score.target_id == zero_id)
+            .expect("unmatched candidate score should exist");
+
+        assert_eq!(analysis.scores.len(), 2);
+        assert_eq!(matched.boost, 0.01);
+        assert_eq!(zero.base_score, 0.25);
+        assert_eq!(zero.boost, 0.0);
+        assert_eq!(zero.effective_score, 0.25);
+        assert_eq!(zero.matched_rule_count, 0);
+    }
+
+    // Production break caught: allowing summed boosts or effective scores above their ceilings.
+    #[test]
+    fn score_caps_boost_and_effective_score() {
+        let capped_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").expect("UUID should parse");
+        let inventory = inventory(
+            "/work/project",
+            vec![candidate(
+                "00000000-0000-0000-0000-000000000002",
+                "/work/project",
+                TargetLanguage::C,
+                "/work/project/src/parser.c",
+                (1, 1, Some(20), Some(1)),
+                0.90,
+            )],
+        );
+        let findings = vec![
+            finding(
+                "first",
+                "rule.first",
+                SemgrepSeverity::Error,
+                "src/parser.c",
+                2,
+                1,
+            ),
+            finding(
+                "second",
+                "rule.second",
+                SemgrepSeverity::Error,
+                "src/parser.c",
+                3,
+                1,
+            ),
+            finding(
+                "third",
+                "rule.third",
+                SemgrepSeverity::Warning,
+                "src/parser.c",
+                4,
+                1,
+            ),
+        ];
+
+        let analysis = map_and_score(&inventory, findings).expect("valid findings should score");
+        let capped = analysis
+            .scores
+            .iter()
+            .find(|score| score.target_id == capped_id)
+            .expect("capped candidate score should exist");
+
+        assert_eq!(capped.matched_rule_count, 3);
+        assert_eq!(capped.boost, 0.20);
+        assert_eq!(capped.effective_score, 1.0);
+    }
+
+    // Production break caught: carrying prior overlays into later scoring calls.
+    #[test]
+    fn score_repeated_calls_recompute_from_immutable_fit_score() {
+        let inventory = inventory(
+            "/work/project",
+            vec![candidate(
+                "00000000-0000-0000-0000-000000000001",
+                "/work/project",
+                TargetLanguage::C,
+                "/work/project/src/parser.c",
+                (1, 1, Some(20), Some(1)),
+                0.50,
+            )],
+        );
+        let findings = vec![finding(
+            "repeat",
+            "rule.repeat",
+            SemgrepSeverity::Error,
+            "src/parser.c",
+            2,
+            1,
+        )];
+
+        let first =
+            map_and_score(&inventory, findings.clone()).expect("first scoring call should succeed");
+        let second =
+            map_and_score(&inventory, findings).expect("second scoring call should succeed");
+
+        assert_eq!(inventory.candidates[0].fit_score, 0.50);
+        assert_eq!(first.scores[0].base_score, 0.50);
+        assert_eq!(first.scores[0].effective_score, 0.60);
+        assert_eq!(second.scores[0].base_score, 0.50);
+        assert_eq!(second.scores[0].effective_score, 0.60);
+    }
+
+    // Production break caught: preserving scanner order instead of persistence-stable UUID order.
+    #[test]
+    fn score_rows_are_sorted_by_target_uuid() {
+        let inventory = inventory(
+            "/work/project",
+            vec![
+                candidate(
+                    "00000000-0000-0000-0000-000000000030",
+                    "/work/project",
+                    TargetLanguage::C,
+                    "/work/project/src/third.c",
+                    (1, 1, Some(5), Some(1)),
+                    0.30,
+                ),
+                candidate(
+                    "00000000-0000-0000-0000-000000000010",
+                    "/work/project",
+                    TargetLanguage::C,
+                    "/work/project/src/first.c",
+                    (1, 1, Some(5), Some(1)),
+                    0.10,
+                ),
+                candidate(
+                    "00000000-0000-0000-0000-000000000020",
+                    "/work/project",
+                    TargetLanguage::Cpp,
+                    "/work/project/src/second.cc",
+                    (1, 1, Some(5), Some(1)),
+                    0.20,
+                ),
+            ],
+        );
+
+        let analysis = map_and_score(&inventory, Vec::new()).expect("valid inventory should score");
+        let ordered_ids = analysis
+            .scores
+            .iter()
+            .map(|score| score.target_id.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_ids,
+            vec![
+                String::from("00000000-0000-0000-0000-000000000010"),
+                String::from("00000000-0000-0000-0000-000000000020"),
+                String::from("00000000-0000-0000-0000-000000000030"),
+            ]
+        );
     }
 
     // Production break caught: dropping severity/path normalization or assigning the wrong weight.
