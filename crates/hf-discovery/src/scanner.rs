@@ -110,6 +110,116 @@ fn exts_for(lang: TargetLanguage) -> &'static [&'static str] {
     lang.extensions()
 }
 
+/// Return the canonical C/C++ discovery source set as sorted project-relative paths.
+///
+/// The walk deliberately uses the same hidden-file and git-ignore semantics as
+/// normal target discovery. Paths are retained only when they name a regular,
+/// non-symlink file that resolves beneath `canonical_root`.
+///
+/// # Errors
+/// Returns a validation error for an unsupported language, a non-canonical
+/// project root, or an unsafe source path. Walker failures are surfaced rather
+/// than returning a partial source set.
+pub fn discoverable_source_files(
+    canonical_root: &Path,
+    lang: TargetLanguage,
+) -> Result<Vec<PathBuf>, ClassifiedError> {
+    if !matches!(lang, TargetLanguage::C | TargetLanguage::Cpp) {
+        return Err(ClassifiedError::Validation(format!(
+            "Semgrep source discovery does not support {}",
+            lang.as_str()
+        )));
+    }
+    let resolved_root = std::fs::canonicalize(canonical_root).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "resolve project root {}: {error}",
+            canonical_root.display()
+        ))
+    })?;
+    if resolved_root != canonical_root {
+        return Err(ClassifiedError::Validation(format!(
+            "project root is not canonical: {}",
+            canonical_root.display()
+        )));
+    }
+    let root_metadata = std::fs::symlink_metadata(canonical_root).map_err(|error| {
+        ClassifiedError::Validation(format!(
+            "inspect project root {}: {error}",
+            canonical_root.display()
+        ))
+    })?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "project root is not a regular directory: {}",
+            canonical_root.display()
+        )));
+    }
+
+    let walker = WalkBuilder::new(canonical_root)
+        .hidden(true)
+        .git_ignore(true)
+        .build();
+    let extensions = exts_for(lang);
+    let mut relative_paths = Vec::new();
+    for entry in walker {
+        let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !extensions.contains(&extension) {
+            continue;
+        }
+        let relative = path.strip_prefix(canonical_root).map_err(|_| {
+            ClassifiedError::Validation(format!(
+                "discovered source escaped project root: {}",
+                path.display()
+            ))
+        })?;
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ClassifiedError::Validation(format!(
+                "discovered source has an unsafe relative path: {}",
+                relative.display()
+            )));
+        }
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "inspect discovered source {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(ClassifiedError::Validation(format!(
+                "discovered source is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let resolved = std::fs::canonicalize(path).map_err(|error| {
+            ClassifiedError::Validation(format!(
+                "resolve discovered source {}: {error}",
+                path.display()
+            ))
+        })?;
+        if resolved != path || !resolved.starts_with(canonical_root) {
+            return Err(ClassifiedError::Validation(format!(
+                "discovered source escaped its canonical project root: {}",
+                path.display()
+            )));
+        }
+        relative_paths.push(relative.to_path_buf());
+    }
+    relative_paths.sort();
+    Ok(relative_paths)
+}
+
 type ScanResult = (
     Vec<TargetCandidate>,
     std::collections::HashMap<String, Vec<String>>,
@@ -773,9 +883,6 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         _ => {}
     }
 
-    let exts = exts_for(lang);
-    let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
-
     let mut candidates = Vec::new();
     // Call graph accumulated across all files: function name -> direct callees,
     // and function name -> complexity (membership = project-defined).
@@ -783,23 +890,13 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         std::collections::HashMap::new();
     let mut complexity_map: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
-    for entry in walker {
-        let entry = entry.map_err(|e| ClassifiedError::Internal(e.to_string()))?;
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if !exts.contains(&ext) {
-            continue;
-        }
+    for relative in discoverable_source_files(root, lang)? {
+        let path = root.join(relative);
         // Non-UTF-8 or unreadable sources are common in the wild (Latin-1
         // comments, permission gaps); skip the file rather than aborting the
         // whole project scan. tree-sitter requires `&str`, so a genuinely
         // non-UTF-8 file can only be skipped here regardless.
-        let src = match std::fs::read_to_string(path) {
+        let src = match std::fs::read_to_string(&path) {
             Ok(src) => src,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping unreadable source file");
@@ -811,7 +908,7 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         })?;
         extract_functions(
             &tree,
-            path,
+            &path,
             &src,
             lang,
             &mut candidates,
@@ -1119,9 +1216,15 @@ fn compute_fit_score(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_functions, extract_go_functions, extract_python_functions};
+    use super::{
+        discoverable_source_files, extract_functions, extract_go_functions,
+        extract_python_functions,
+    };
     use hf_core::target::{InputSurface, TargetCandidate, TargetKind, TargetLanguage};
-    use std::{collections::HashMap, path::Path};
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
     use tree_sitter::Parser as TsParser;
 
     fn go_candidates(src: &str) -> Vec<TargetCandidate> {
@@ -1153,6 +1256,82 @@ mod tests {
             &mut HashMap::new(),
         );
         out
+    }
+
+    #[test]
+    fn c_and_cpp_source_selection_is_sorted_and_language_specific() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "z.h",
+            "a.c",
+            "one.cc",
+            "two.cpp",
+            "three.cxx",
+            "four.hpp",
+            "five.hh",
+            "skip.rs",
+        ] {
+            std::fs::write(dir.path().join(name), b"source").unwrap();
+        }
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(
+            discoverable_source_files(&canonical, TargetLanguage::C).unwrap(),
+            vec![PathBuf::from("a.c"), PathBuf::from("z.h")]
+        );
+        assert_eq!(
+            discoverable_source_files(&canonical, TargetLanguage::Cpp).unwrap(),
+            vec![
+                PathBuf::from("five.hh"),
+                PathBuf::from("four.hpp"),
+                PathBuf::from("one.cc"),
+                PathBuf::from("three.cxx"),
+                PathBuf::from("two.cpp"),
+            ]
+        );
+        assert!(
+            discoverable_source_files(&canonical, TargetLanguage::Rust).is_err(),
+            "Semgrep source selection accepts only C and C++"
+        );
+    }
+
+    #[tokio::test]
+    async fn centralized_c_walk_preserves_candidate_ids_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.c"),
+            b"int parse_a(const char *s) { return s[0]; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.c"),
+            b"int parse_b(const char *s) { return s[0]; }\n",
+        )
+        .unwrap();
+
+        let first = super::discover(dir.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+        let second = super::discover(dir.path(), TargetLanguage::C)
+            .await
+            .unwrap();
+        let first_identity: Vec<_> = first
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.symbol.clone(), candidate.id))
+            .collect();
+        let second_identity: Vec<_> = second
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.symbol.clone(), candidate.id))
+            .collect();
+        assert_eq!(
+            first_identity,
+            vec![
+                ("parse_a".to_owned(), first_identity[0].1),
+                ("parse_b".to_owned(), first_identity[1].1),
+            ]
+        );
+        assert_eq!(second_identity, first_identity);
     }
 
     #[test]
