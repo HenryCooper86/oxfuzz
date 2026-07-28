@@ -153,7 +153,7 @@ finding, and target-score overlay records.
 | `started_at` | `TEXT NOT NULL` | RFC 3339 |
 | `ended_at` | `TEXT` | terminal timestamp |
 | `output_sha256` | `TEXT` | normalized output digest |
-| `finding_count` | `INTEGER` | terminal finding count |
+| `finding_count` | `INTEGER` | terminal finding count, at most 50,000 |
 | `matched_candidate_count` | `INTEGER` | terminal matched-candidate count |
 | `duration_ms` | `INTEGER` | terminal duration |
 | `failure_code` | `TEXT` | nullable bounded redacted code |
@@ -189,9 +189,9 @@ WHERE status = 'done';
 | --- | --- | --- |
 | `scan_id` | `TEXT NOT NULL REFERENCES semgrep_enrichment_runs(id) ON DELETE CASCADE` | parent scan |
 | `fingerprint` | `TEXT NOT NULL` | service-owned deterministic fingerprint |
-| `rule_id` | `TEXT NOT NULL` | normalized rule id |
+| `rule_id` | `TEXT NOT NULL` | normalized rule id, at most 512 bytes |
 | `severity` | `TEXT NOT NULL CHECK (severity IN ('error','warning','info'))` | normalized severity |
-| `message` | `TEXT NOT NULL` | bounded advisory message |
+| `message` | `TEXT NOT NULL` | advisory message, at most 4,096 bytes |
 | `relative_file` | `TEXT NOT NULL` | normalized project-relative path |
 | `start_line` | `INTEGER NOT NULL CHECK (start_line > 0)` | one-based |
 | `start_col` | `INTEGER NOT NULL CHECK (start_col > 0)` | one-based |
@@ -202,7 +202,10 @@ WHERE status = 'done';
 
 Primary key: `(scan_id, fingerprint)`. The `scan_id` foreign key cascades when
 the parent run is deleted. `target_id` is deliberately a nullable logical
-reference so unmatched findings remain visible.
+reference so unmatched findings remain visible. Upstream fingerprints, raw
+source snippets, metavariable captures, absolute host paths, credentials or
+login state, and arbitrary upstream Semgrep JSON are prohibited from durable
+records.
 
 #### `semgrep_target_scores`
 
@@ -224,6 +227,9 @@ Successful publication is one transaction: verify that the parent is
 update exactly one parent to `done` with all terminal fields; then commit. Any
 insert or update failure rolls back the entire transaction. A separate
 compensation marks the run `failed` if publication cannot complete safely.
+Storage publication alone does not make an overlay visible: `hf-service`
+requires both the database row and its recovery journal to be terminal before
+returning it to a ranking consumer.
 
 Transitions to `failed` or `cancelled` delete finding and score children in the
 same transaction before updating the parent, so those terminal states prohibit

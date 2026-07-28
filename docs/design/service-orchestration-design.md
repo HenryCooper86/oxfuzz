@@ -329,6 +329,9 @@ asynchronous start, status, cancel, and result operations; start completes
 admission, inserts a durable running operation, registers cooperative
 cancellation, and returns the operation UUID without awaiting Semgrep. One
 project may have only one active Semgrep scan, and a second start fails busy.
+The `semgrep-enrichment` feature is enabled by default in normal product crates;
+`--no-default-features` excludes the integration and every Semgrep presentation
+entrypoint.
 
 The service takes the shared workspace lease for the complete operation and
 creates a source snapshot from the canonical C/C++ discovery set. Every input
@@ -344,6 +347,12 @@ are:
 Exceeding a bound fails the whole operation; a partial project is never
 scanned. The snapshot is mounted read-only, and its deterministic SHA-256 is
 the enrichment revision.
+
+After output validation and immediately before `ready_to_commit`, the service
+re-walks and re-hashes the current eligible source set under the same bounds.
+Any added, removed, changed, unstable, or newly ineligible source changes the
+revision and rejects the operation atomically before publication. No finding
+or score row is published for that scan.
 
 The durable publication sequence is:
 
@@ -366,15 +375,21 @@ transaction deletes that scan's findings and scores and marks the run
 `failed`. Startup recovery performs the same fail-closed repair for interrupted
 non-terminal runs and unclosed `ready_to_commit` runs, then cleans only the
 validated operation-owned staging directory. Failed and explicitly cancelled
-runs publish no finding or score rows.
+runs publish no finding or score rows. If compensation itself cannot be made
+durable, the journal remains unclosed so startup recovery can repair the run.
 
 Every ranking consumer asks `hf-service` for `SemgrepInventoryView`; clients do
-not join or rescore results. An overlay is current only when the eligible
-source digest matches its scan revision and every stored base score matches the
-current candidate base score. A mismatch makes it stale: the historical scan
-remains queryable, but effective ranking immediately uses base scores only.
-Repeated successful scans recompute from the current immutable base inventory
-and never compound prior boosts.
+not join or rescore results. A result reader accepts an overlay only when the
+database row is terminal `done` and the corresponding recovery journal is
+terminal and closed. Until both conditions hold, including while compensation
+is incomplete, the overlay is invisible and ranking uses base scores only.
+
+After that publication gate, an overlay is current only when the eligible
+source digest matches its scan revision and every stored base score matches
+the current candidate base score. A mismatch makes it stale: the historical
+scan remains queryable, but effective ranking immediately uses base scores
+only. Repeated successful scans recompute from the current immutable base
+inventory and never compound prior boosts.
 
 ## 5. Sub-Agents
 

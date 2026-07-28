@@ -141,6 +141,12 @@ uses this fixed resource profile:
 - 600 seconds wall-clock time; and
 - 64 MiB `RLIMIT_FSIZE`.
 
+After the 64 MiB raw-output ceiling, normalization accepts at most 50,000
+findings, 512 bytes per rule identifier, and 4,096 bytes per message. Raw
+source snippets, metavariable captures, upstream fingerprints, credentials or
+login state, absolute host paths, and arbitrary upstream Semgrep JSON cannot
+cross the normalized result boundary.
+
 Timeout, cancellation, non-zero exit, missing or oversized output, and forced
 teardown are explicit non-success outcomes. `hf-service` validates the bounded
 output before any result is published.
