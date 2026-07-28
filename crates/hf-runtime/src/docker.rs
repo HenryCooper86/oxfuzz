@@ -348,7 +348,10 @@ pub fn build_exec_args_with(
     for capability in capabilities {
         args.push(format!("--cap-add={}", capability.as_docker_name()));
     }
-    args.push(format!("--pids-limit={}", cfg.max_pids));
+    args.push(format!(
+        "--pids-limit={}",
+        opts.max_pids.unwrap_or(cfg.max_pids)
+    ));
 
     // CASR's crash analysis uses ptrace, which needs SYS_PTRACE and an
     // unconfined seccomp profile. Granted per-call (triage only); even then the
@@ -497,6 +500,14 @@ impl DockerRuntime {
         &self,
         opts: &hf_core::runtime::SandboxOptions,
     ) -> Result<hf_core::runtime::SandboxOptions, ClassifiedError> {
+        if let Some(max_pids) = opts.max_pids {
+            if max_pids == 0 || max_pids > self.cfg.max_pids {
+                return Err(ClassifiedError::Sandbox(format!(
+                    "sandbox PID limit must be between 1 and {}",
+                    self.cfg.max_pids
+                )));
+            }
+        }
         if opts
             .image
             .as_deref()
