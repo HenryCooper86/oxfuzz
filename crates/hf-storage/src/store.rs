@@ -321,6 +321,138 @@ impl RunRecord {
     }
 }
 
+/// Lifecycle status of one explicit Semgrep enrichment operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemgrepRunStatus {
+    /// The bounded source snapshot is being prepared.
+    Staging,
+    /// The pinned scanner is executing in the sandbox.
+    Scanning,
+    /// Scanner output is being parsed and mapped.
+    Validating,
+    /// The normalized overlay is ready for atomic publication.
+    Persisting,
+    /// The complete overlay was published.
+    Done,
+    /// The operation terminated with a sanitized failure.
+    Failed,
+    /// The operator cancelled the operation.
+    Cancelled,
+}
+
+/// Normalized Semgrep finding severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemgrepFindingSeverity {
+    /// Highest supported advisory severity.
+    Error,
+    /// Medium supported advisory severity.
+    Warning,
+    /// Informational advisory severity.
+    Info,
+}
+
+/// Durable parent record for one Semgrep enrichment operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemgrepRunRecord {
+    /// Service-owned operation identifier.
+    pub id: Uuid,
+    /// Canonical project root.
+    pub project_root: String,
+    /// First-release language identifier (`c` or `cpp`).
+    pub language: String,
+    /// Digest of the staged eligible source snapshot.
+    pub source_sha256: Option<String>,
+    /// Pinned sandbox image reference.
+    pub sandbox_image: String,
+    /// Resolved sandbox image digest.
+    pub sandbox_image_sha256: String,
+    /// Pinned Semgrep version.
+    pub semgrep_version: String,
+    /// Pinned rule repository revision.
+    pub rules_commit: String,
+    /// Digest of the bundled rules tree.
+    pub rules_tree_sha256: String,
+    /// Typed scanner command schema version.
+    pub command_schema_version: u32,
+    /// Current operation lifecycle status.
+    pub status: SemgrepRunStatus,
+    /// Time the operation was durably admitted.
+    pub started_at: DateTime<Utc>,
+    /// Terminal timestamp.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Digest of normalized scanner output.
+    pub output_sha256: Option<String>,
+    /// Number of normalized findings.
+    pub finding_count: Option<u32>,
+    /// Number of candidates matched by at least one distinct rule.
+    pub matched_candidate_count: Option<u32>,
+    /// End-to-end operation duration in milliseconds.
+    pub duration_ms: Option<u64>,
+    /// Bounded sanitized terminal failure code.
+    pub failure_code: Option<String>,
+    /// Bounded sanitized terminal failure message.
+    pub failure_message: Option<String>,
+}
+
+/// One normalized advisory Semgrep finding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemgrepFindingRecord {
+    /// Parent operation identifier.
+    pub scan_id: Uuid,
+    /// Service-owned deterministic finding digest.
+    pub fingerprint: String,
+    /// Normalized rule identifier.
+    pub rule_id: String,
+    /// Normalized advisory severity.
+    pub severity: SemgrepFindingSeverity,
+    /// Bounded advisory message.
+    pub message: String,
+    /// Normalized project-relative source path.
+    pub relative_file: String,
+    /// One-based start line.
+    pub start_line: u32,
+    /// One-based start column.
+    pub start_col: u32,
+    /// One-based end line.
+    pub end_line: u32,
+    /// One-based end column.
+    pub end_col: u32,
+    /// Matched logical target, when mapping was unambiguous.
+    pub target_id: Option<Uuid>,
+    /// Nominal severity weight retained for presentation.
+    pub nominal_weight: f64,
+}
+
+/// One candidate's base score and capped Semgrep overlay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemgrepTargetScoreRecord {
+    /// Parent operation identifier.
+    pub scan_id: Uuid,
+    /// Logical target identifier.
+    pub target_id: Uuid,
+    /// Immutable base score observed at scan time.
+    pub base_score: f64,
+    /// Capped advisory boost.
+    pub boost: f64,
+    /// Capped effective score.
+    pub effective_score: f64,
+    /// Number of distinct matched rules.
+    pub matched_rule_count: u32,
+}
+
+/// Atomically published Semgrep parent and normalized children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemgrepPublication {
+    /// Operation metadata and terminal aggregate fields.
+    pub run: SemgrepRunRecord,
+    /// Every normalized finding, including unmatched findings.
+    pub findings: Vec<SemgrepFindingRecord>,
+    /// Every candidate score row for the scanned inventory.
+    pub scores: Vec<SemgrepTargetScoreRecord>,
+}
+
 /// A SQLite-backed persistence store.
 #[derive(Clone)]
 pub struct Store {
@@ -445,6 +577,368 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // -- Semgrep enrichment ------------------------------------------------
+
+    /// Insert a newly admitted Semgrep operation in the staging phase.
+    ///
+    /// # Errors
+    /// Returns an error for malformed fields, a non-staging record, or a SQL
+    /// failure such as an already-active operation for the project.
+    pub async fn insert_semgrep_run(&self, run: &SemgrepRunRecord) -> Result<(), StorageError> {
+        validate_semgrep_run(run)?;
+        if run.status != SemgrepRunStatus::Staging
+            || run.source_sha256.is_some()
+            || run.ended_at.is_some()
+            || run.output_sha256.is_some()
+            || run.finding_count.is_some()
+            || run.matched_candidate_count.is_some()
+            || run.duration_ms.is_some()
+            || run.failure_code.is_some()
+            || run.failure_message.is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "a new Semgrep run must contain only staging-phase fields".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO semgrep_enrichment_runs
+                (id, project_root, language, source_sha256, sandbox_image,
+                 sandbox_image_sha256, semgrep_version, rules_commit, rules_tree_sha256,
+                 command_schema_version, status, started_at, ended_at, output_sha256,
+                 finding_count, matched_candidate_count, duration_ms, failure_code,
+                 failure_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     ?15, ?16, ?17, ?18, ?19)",
+        )
+        .bind(run.id.to_string())
+        .bind(&run.project_root)
+        .bind(&run.language)
+        .bind(run.source_sha256.as_deref())
+        .bind(&run.sandbox_image)
+        .bind(&run.sandbox_image_sha256)
+        .bind(&run.semgrep_version)
+        .bind(&run.rules_commit)
+        .bind(&run.rules_tree_sha256)
+        .bind(i64::from(run.command_schema_version))
+        .bind(enum_str(&run.status))
+        .bind(run.started_at.to_rfc3339())
+        .bind(run.ended_at.map(|value| value.to_rfc3339()))
+        .bind(run.output_sha256.as_deref())
+        .bind(run.finding_count.map(i64::from))
+        .bind(run.matched_candidate_count.map(i64::from))
+        .bind(run.duration_ms.map(to_i64).transpose()?)
+        .bind(run.failure_code.as_deref())
+        .bind(run.failure_message.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Compare-and-set one valid non-terminal Semgrep phase transition.
+    ///
+    /// The source digest is required when staging completes and cannot be
+    /// changed by later transitions.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid transition, malformed digest, missing
+    /// expected row, or SQL failure.
+    pub async fn set_semgrep_phase(
+        &self,
+        id: Uuid,
+        expected: SemgrepRunStatus,
+        next: SemgrepRunStatus,
+        source_sha256: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let valid = matches!(
+            (expected, next),
+            (SemgrepRunStatus::Staging, SemgrepRunStatus::Scanning)
+                | (SemgrepRunStatus::Scanning, SemgrepRunStatus::Validating)
+                | (SemgrepRunStatus::Validating, SemgrepRunStatus::Persisting)
+        );
+        if !valid {
+            return Err(StorageError::InvalidData(
+                "invalid Semgrep phase transition".to_owned(),
+            ));
+        }
+        if expected == SemgrepRunStatus::Staging {
+            let source_sha256 = source_sha256.ok_or_else(|| {
+                StorageError::InvalidData("staging completion requires a source SHA-256".to_owned())
+            })?;
+            require_sha256("source_sha256", source_sha256)?;
+        } else if source_sha256.is_some() {
+            return Err(StorageError::InvalidData(
+                "source SHA-256 can only be set when staging completes".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE semgrep_enrichment_runs
+             SET status = ?3, source_sha256 = COALESCE(?4, source_sha256)
+             WHERE id = ?1 AND status = ?2",
+        )
+        .bind(id.to_string())
+        .bind(enum_str(&expected))
+        .bind(enum_str(&next))
+        .bind(source_sha256)
+        .execute(&self.pool)
+        .await?;
+        require_one_semgrep_run(result.rows_affected(), id, expected)
+    }
+
+    /// Publish a complete Semgrep overlay in one database transaction.
+    ///
+    /// # Errors
+    /// Returns an error for malformed or inconsistent records, a parent not in
+    /// `persisting`, or any SQL failure. All writes are rolled back together.
+    pub async fn publish_semgrep_run(
+        &self,
+        publication: &SemgrepPublication,
+    ) -> Result<(), StorageError> {
+        validate_semgrep_publication(publication)?;
+        let mut tx = self.pool.begin().await?;
+        let persisted_row = sqlx::query(SEMGREP_RUN_SELECT)
+            .bind(publication.run.id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(persisted_row) = persisted_row else {
+            return Err(StorageError::NotFound(format!(
+                "persisting Semgrep run {}",
+                publication.run.id
+            )));
+        };
+        let persisted = semgrep_run_from_row(&persisted_row)?;
+        if persisted.status != SemgrepRunStatus::Persisting {
+            return Err(StorageError::NotFound(format!(
+                "persisting Semgrep run {}",
+                publication.run.id
+            )));
+        }
+        require_same_semgrep_identity(&persisted, &publication.run)?;
+
+        for finding in &publication.findings {
+            sqlx::query(
+                "INSERT INTO semgrep_findings
+                    (scan_id, fingerprint, rule_id, severity, message, relative_file,
+                     start_line, start_col, end_line, end_col, target_id, nominal_weight)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )
+            .bind(finding.scan_id.to_string())
+            .bind(&finding.fingerprint)
+            .bind(&finding.rule_id)
+            .bind(enum_str(&finding.severity))
+            .bind(&finding.message)
+            .bind(&finding.relative_file)
+            .bind(i64::from(finding.start_line))
+            .bind(i64::from(finding.start_col))
+            .bind(i64::from(finding.end_line))
+            .bind(i64::from(finding.end_col))
+            .bind(finding.target_id.map(|value| value.to_string()))
+            .bind(finding.nominal_weight)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for score in &publication.scores {
+            sqlx::query(
+                "INSERT INTO semgrep_target_scores
+                    (scan_id, target_id, base_score, boost, effective_score,
+                     matched_rule_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(score.scan_id.to_string())
+            .bind(score.target_id.to_string())
+            .bind(score.base_score)
+            .bind(score.boost)
+            .bind(score.effective_score)
+            .bind(i64::from(score.matched_rule_count))
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let run = &publication.run;
+        let result = sqlx::query(
+            "UPDATE semgrep_enrichment_runs
+             SET status = 'done', source_sha256 = ?2, ended_at = ?3, output_sha256 = ?4,
+                 finding_count = ?5, matched_candidate_count = ?6, duration_ms = ?7,
+                 failure_code = NULL, failure_message = NULL
+             WHERE id = ?1 AND status = 'persisting'",
+        )
+        .bind(run.id.to_string())
+        .bind(run.source_sha256.as_deref())
+        .bind(run.ended_at.map(|value| value.to_rfc3339()))
+        .bind(run.output_sha256.as_deref())
+        .bind(run.finding_count.map(i64::from))
+        .bind(run.matched_candidate_count.map(i64::from))
+        .bind(run.duration_ms.map(to_i64).transpose()?)
+        .execute(&mut *tx)
+        .await?;
+        require_one_semgrep_run(result.rows_affected(), run.id, SemgrepRunStatus::Persisting)?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Terminate an active Semgrep run as failed or cancelled.
+    ///
+    /// Children are deleted before the parent transition in the same
+    /// transaction, so neither terminal state can retain a partial overlay.
+    ///
+    /// # Errors
+    /// Returns an error for an unsupported status, malformed failure fields, a
+    /// missing/non-active row, or a SQL failure.
+    pub async fn fail_semgrep_run(
+        &self,
+        id: Uuid,
+        status: SemgrepRunStatus,
+        failure_code: &str,
+        failure_message: &str,
+        ended_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        if !matches!(
+            status,
+            SemgrepRunStatus::Failed | SemgrepRunStatus::Cancelled
+        ) {
+            return Err(StorageError::InvalidData(
+                "Semgrep failure requires failed or cancelled status".to_owned(),
+            ));
+        }
+        validate_failure(failure_code, failure_message)?;
+        terminate_semgrep_run(
+            &self.pool,
+            id,
+            status,
+            failure_code,
+            failure_message,
+            ended_at,
+            false,
+        )
+        .await
+    }
+
+    /// Compensate a published overlay whose recovery journal could not commit.
+    ///
+    /// # Errors
+    /// Returns an error for malformed failure fields, a missing/non-done row,
+    /// or a SQL failure.
+    pub async fn compensate_semgrep_publication(
+        &self,
+        id: Uuid,
+        failure_code: &str,
+        failure_message: &str,
+        ended_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        validate_failure(failure_code, failure_message)?;
+        terminate_semgrep_run(
+            &self.pool,
+            id,
+            SemgrepRunStatus::Failed,
+            failure_code,
+            failure_message,
+            ended_at,
+            true,
+        )
+        .await
+    }
+
+    /// Load one Semgrep operation parent by id.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn semgrep_run(&self, id: Uuid) -> Result<Option<SemgrepRunRecord>, StorageError> {
+        let row = sqlx::query(SEMGREP_RUN_SELECT)
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(semgrep_run_from_row).transpose()
+    }
+
+    /// Load one Semgrep parent and its normalized children.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn semgrep_publication(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<SemgrepPublication>, StorageError> {
+        let Some(run) = self.semgrep_run(id).await? else {
+            return Ok(None);
+        };
+        let finding_rows = sqlx::query(
+            "SELECT scan_id, fingerprint, rule_id, severity, message, relative_file,
+                    start_line, start_col, end_line, end_col, target_id, nominal_weight
+             FROM semgrep_findings WHERE scan_id = ?1 ORDER BY fingerprint",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let score_rows = sqlx::query(
+            "SELECT scan_id, target_id, base_score, boost, effective_score, matched_rule_count
+             FROM semgrep_target_scores WHERE scan_id = ?1 ORDER BY target_id",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let findings = finding_rows
+            .iter()
+            .map(semgrep_finding_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let scores = score_rows
+            .iter()
+            .map(semgrep_score_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let publication = SemgrepPublication {
+            run,
+            findings,
+            scores,
+        };
+        match publication.run.status {
+            SemgrepRunStatus::Done => validate_semgrep_publication(&publication)?,
+            SemgrepRunStatus::Failed | SemgrepRunStatus::Cancelled => {
+                if !publication.findings.is_empty() || !publication.scores.is_empty() {
+                    return Err(StorageError::InvalidData(
+                        "terminal unsuccessful Semgrep run retained children".to_owned(),
+                    ));
+                }
+            }
+            _ => {
+                if !publication.findings.is_empty() || !publication.scores.is_empty() {
+                    return Err(StorageError::InvalidData(
+                        "active Semgrep run retained published children".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(Some(publication))
+    }
+
+    /// Load the newest complete Semgrep publication for a project/language.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn latest_semgrep_publication(
+        &self,
+        project_root: &str,
+        language: &str,
+    ) -> Result<Option<SemgrepPublication>, StorageError> {
+        if !matches!(language, "c" | "cpp") {
+            return Err(StorageError::InvalidData(
+                "Semgrep language must be c or cpp".to_owned(),
+            ));
+        }
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM semgrep_enrichment_runs
+             WHERE project_root = ?1 AND language = ?2 AND status = 'done'
+             ORDER BY ended_at DESC, id DESC LIMIT 1",
+        )
+        .bind(project_root)
+        .bind(language)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let id = Uuid::parse_str(&id)
+            .map_err(|error| StorageError::InvalidData(format!("Semgrep run id: {error}")))?;
+        self.semgrep_publication(id).await
     }
 
     // -- automotive operations --------------------------------------------
@@ -1235,6 +1729,9 @@ impl Store {
             "corpus_entries",
             "harnesses",
             "runs",
+            "semgrep_findings",
+            "semgrep_target_scores",
+            "semgrep_enrichment_runs",
             "targets",
             "auto_revert_events",
             "automotive_state_corpus",
@@ -1262,6 +1759,28 @@ impl Store {
     /// Returns an error on a SQL failure.
     pub async fn delete_project(&self, project_root: &str) -> Result<(), StorageError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM semgrep_findings
+             WHERE scan_id IN (
+                 SELECT id FROM semgrep_enrichment_runs WHERE project_root = ?1
+             )",
+        )
+        .bind(project_root)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM semgrep_target_scores
+             WHERE scan_id IN (
+                 SELECT id FROM semgrep_enrichment_runs WHERE project_root = ?1
+             )",
+        )
+        .bind(project_root)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM semgrep_enrichment_runs WHERE project_root = ?1")
+            .bind(project_root)
+            .execute(&mut *tx)
+            .await?;
         let target_ids: Vec<String> =
             sqlx::query_scalar("SELECT id FROM targets WHERE project_root = ?1")
                 .bind(project_root)
@@ -2138,12 +2657,508 @@ impl Store {
 
 // -- helpers ----------------------------------------------------------------
 
+const SEMGREP_RUN_SELECT: &str = "SELECT id, project_root, language, source_sha256,
+    sandbox_image, sandbox_image_sha256, semgrep_version, rules_commit, rules_tree_sha256,
+    command_schema_version, status, started_at, ended_at, output_sha256, finding_count,
+    matched_candidate_count, duration_ms, failure_code, failure_message
+    FROM semgrep_enrichment_runs WHERE id = ?1";
+
 /// Serialize an enum to its bare serde string name (no surrounding quotes).
 fn enum_str<T: Serialize>(v: &T) -> String {
     serde_json::to_value(v)
         .ok()
         .and_then(|val| val.as_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+fn validate_semgrep_run(run: &SemgrepRunRecord) -> Result<(), StorageError> {
+    if run.project_root.trim().is_empty()
+        || run.sandbox_image.trim().is_empty()
+        || run.semgrep_version.trim().is_empty()
+    {
+        return Err(StorageError::InvalidData(
+            "Semgrep project, image, and version must not be empty".to_owned(),
+        ));
+    }
+    if !matches!(run.language.as_str(), "c" | "cpp") {
+        return Err(StorageError::InvalidData(
+            "Semgrep language must be c or cpp".to_owned(),
+        ));
+    }
+    if run.command_schema_version != 1 {
+        return Err(StorageError::InvalidData(
+            "unsupported Semgrep command schema version".to_owned(),
+        ));
+    }
+    require_sha256("sandbox_image_sha256", &run.sandbox_image_sha256)?;
+    require_sha256("rules_tree_sha256", &run.rules_tree_sha256)?;
+    if run.rules_commit.len() != 40
+        || !run
+            .rules_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StorageError::InvalidData(
+            "rules_commit must be a lowercase 40-character Git hash".to_owned(),
+        ));
+    }
+    for (field, value) in [
+        ("source_sha256", run.source_sha256.as_deref()),
+        ("output_sha256", run.output_sha256.as_deref()),
+    ] {
+        if let Some(value) = value {
+            require_sha256(field, value)?;
+        }
+    }
+    if run.finding_count.is_some_and(|count| count > 50_000) {
+        return Err(StorageError::InvalidData(
+            "Semgrep finding count exceeds 50,000".to_owned(),
+        ));
+    }
+    if let (Some(started_at), Some(ended_at)) = (Some(run.started_at), run.ended_at) {
+        if ended_at < started_at {
+            return Err(StorageError::InvalidData(
+                "Semgrep end time precedes start time".to_owned(),
+            ));
+        }
+    }
+    if let Some(code) = &run.failure_code {
+        validate_failure_piece("failure_code", code, 64)?;
+    }
+    if let Some(message) = &run.failure_message {
+        validate_failure_piece("failure_message", message, 1_024)?;
+    }
+
+    match run.status {
+        SemgrepRunStatus::Staging => {
+            if run.source_sha256.is_some() {
+                return Err(StorageError::InvalidData(
+                    "staging Semgrep run cannot have a source digest".to_owned(),
+                ));
+            }
+            require_nonterminal_run(run)?;
+        }
+        SemgrepRunStatus::Scanning
+        | SemgrepRunStatus::Validating
+        | SemgrepRunStatus::Persisting => {
+            if run.source_sha256.is_none() {
+                return Err(StorageError::InvalidData(
+                    "post-staging Semgrep run requires a source digest".to_owned(),
+                ));
+            }
+            require_nonterminal_run(run)?;
+        }
+        SemgrepRunStatus::Done => {
+            if run.source_sha256.is_none()
+                || run.ended_at.is_none()
+                || run.output_sha256.is_none()
+                || run.finding_count.is_none()
+                || run.matched_candidate_count.is_none()
+                || run.duration_ms.is_none()
+                || run.failure_code.is_some()
+                || run.failure_message.is_some()
+            {
+                return Err(StorageError::InvalidData(
+                    "done Semgrep run has incomplete terminal fields".to_owned(),
+                ));
+            }
+        }
+        SemgrepRunStatus::Failed | SemgrepRunStatus::Cancelled => {
+            if run.ended_at.is_none()
+                || run.failure_code.is_none()
+                || run.failure_message.is_none()
+                || run.output_sha256.is_some()
+                || run.finding_count.is_some()
+                || run.matched_candidate_count.is_some()
+                || run.duration_ms.is_some()
+            {
+                return Err(StorageError::InvalidData(
+                    "failed or cancelled Semgrep run has inconsistent terminal fields".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_nonterminal_run(run: &SemgrepRunRecord) -> Result<(), StorageError> {
+    if run.ended_at.is_some()
+        || run.output_sha256.is_some()
+        || run.finding_count.is_some()
+        || run.matched_candidate_count.is_some()
+        || run.duration_ms.is_some()
+        || run.failure_code.is_some()
+        || run.failure_message.is_some()
+    {
+        return Err(StorageError::InvalidData(
+            "active Semgrep run has terminal fields".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_semgrep_publication(publication: &SemgrepPublication) -> Result<(), StorageError> {
+    validate_semgrep_run(&publication.run)?;
+    if publication.run.status != SemgrepRunStatus::Done {
+        return Err(StorageError::InvalidData(
+            "Semgrep publication parent must be done".to_owned(),
+        ));
+    }
+    let finding_count = u32::try_from(publication.findings.len())
+        .map_err(|_| StorageError::InvalidData("too many Semgrep findings".to_owned()))?;
+    let matched_candidate_count = u32::try_from(
+        publication
+            .scores
+            .iter()
+            .filter(|score| score.matched_rule_count > 0)
+            .count(),
+    )
+    .map_err(|_| StorageError::InvalidData("too many Semgrep scores".to_owned()))?;
+    if publication.run.finding_count != Some(finding_count)
+        || publication.run.matched_candidate_count != Some(matched_candidate_count)
+    {
+        return Err(StorageError::InvalidData(
+            "Semgrep terminal counts do not match publication children".to_owned(),
+        ));
+    }
+    for finding in &publication.findings {
+        if finding.scan_id != publication.run.id {
+            return Err(StorageError::InvalidData(
+                "Semgrep finding belongs to another scan".to_owned(),
+            ));
+        }
+        validate_semgrep_finding(finding)?;
+    }
+    for score in &publication.scores {
+        if score.scan_id != publication.run.id {
+            return Err(StorageError::InvalidData(
+                "Semgrep score belongs to another scan".to_owned(),
+            ));
+        }
+        validate_semgrep_score(score)?;
+    }
+    Ok(())
+}
+
+fn require_same_semgrep_identity(
+    persisted: &SemgrepRunRecord,
+    publication: &SemgrepRunRecord,
+) -> Result<(), StorageError> {
+    if persisted.id != publication.id
+        || persisted.project_root != publication.project_root
+        || persisted.language != publication.language
+        || persisted.source_sha256 != publication.source_sha256
+        || persisted.sandbox_image != publication.sandbox_image
+        || persisted.sandbox_image_sha256 != publication.sandbox_image_sha256
+        || persisted.semgrep_version != publication.semgrep_version
+        || persisted.rules_commit != publication.rules_commit
+        || persisted.rules_tree_sha256 != publication.rules_tree_sha256
+        || persisted.command_schema_version != publication.command_schema_version
+        || persisted.started_at != publication.started_at
+    {
+        return Err(StorageError::InvalidData(
+            "Semgrep publication identity differs from its persisted parent".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_semgrep_finding(finding: &SemgrepFindingRecord) -> Result<(), StorageError> {
+    require_sha256("finding fingerprint", &finding.fingerprint)?;
+    if finding.rule_id.is_empty() || finding.rule_id.len() > 512 {
+        return Err(StorageError::InvalidData(
+            "Semgrep rule id must be 1..=512 bytes".to_owned(),
+        ));
+    }
+    if finding.message.len() > 4_096 {
+        return Err(StorageError::InvalidData(
+            "Semgrep message exceeds 4,096 bytes".to_owned(),
+        ));
+    }
+    validate_relative_path(&finding.relative_file)?;
+    if finding.start_line == 0
+        || finding.start_col == 0
+        || finding.end_line == 0
+        || finding.end_col == 0
+        || (finding.end_line, finding.end_col) < (finding.start_line, finding.start_col)
+    {
+        return Err(StorageError::InvalidData(
+            "Semgrep coordinates are invalid".to_owned(),
+        ));
+    }
+    let expected_weight: f64 = match finding.severity {
+        SemgrepFindingSeverity::Error => 0.10,
+        SemgrepFindingSeverity::Warning => 0.05,
+        SemgrepFindingSeverity::Info => 0.01,
+    };
+    if finding.nominal_weight.to_bits() != expected_weight.to_bits() {
+        return Err(StorageError::InvalidData(
+            "Semgrep nominal weight does not match severity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_semgrep_score(score: &SemgrepTargetScoreRecord) -> Result<(), StorageError> {
+    if !score.base_score.is_finite()
+        || !score.boost.is_finite()
+        || !score.effective_score.is_finite()
+        || !(0.0..=1.0).contains(&score.base_score)
+        || !(0.0..=0.20).contains(&score.boost)
+        || !(0.0..=1.0).contains(&score.effective_score)
+    {
+        return Err(StorageError::InvalidData(
+            "Semgrep score contains an invalid weight".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_relative_path(value: &str) -> Result<(), StorageError> {
+    let bytes = value.as_bytes();
+    let has_drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.contains('\\')
+        || value.contains('\0')
+        || has_drive_prefix
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(StorageError::InvalidData(
+            "Semgrep source path is not normalized and relative".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_failure(code: &str, message: &str) -> Result<(), StorageError> {
+    validate_failure_piece("failure_code", code, 64)?;
+    validate_failure_piece("failure_message", message, 1_024)
+}
+
+fn validate_failure_piece(field: &str, value: &str, max_len: usize) -> Result<(), StorageError> {
+    if value.is_empty() || value.len() > max_len || value.contains('\0') {
+        return Err(StorageError::InvalidData(format!(
+            "Semgrep {field} must be 1..={max_len} bytes without NUL"
+        )));
+    }
+    Ok(())
+}
+
+fn require_sha256(field: &str, value: &str) -> Result<(), StorageError> {
+    if is_sha256(value) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(format!(
+            "Semgrep {field} must be a lowercase SHA-256"
+        )))
+    }
+}
+
+fn to_i64(value: u64) -> Result<i64, StorageError> {
+    i64::try_from(value)
+        .map_err(|_| StorageError::InvalidData("Semgrep duration exceeds i64".to_owned()))
+}
+
+fn semgrep_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SemgrepRunRecord, StorageError> {
+    let id = Uuid::parse_str(&row.try_get::<String, _>("id")?)
+        .map_err(|error| StorageError::InvalidData(format!("Semgrep run id: {error}")))?;
+    let command_schema_version = u32::try_from(row.try_get::<i64, _>("command_schema_version")?)
+        .map_err(|_| StorageError::InvalidData("invalid Semgrep schema version".to_owned()))?;
+    let finding_count = optional_u32(row, "finding_count")?;
+    let matched_candidate_count = optional_u32(row, "matched_candidate_count")?;
+    let duration_ms = optional_u64(row, "duration_ms")?;
+    let run = SemgrepRunRecord {
+        id,
+        project_root: row.try_get("project_root")?,
+        language: row.try_get("language")?,
+        source_sha256: row.try_get("source_sha256")?,
+        sandbox_image: row.try_get("sandbox_image")?,
+        sandbox_image_sha256: row.try_get("sandbox_image_sha256")?,
+        semgrep_version: row.try_get("semgrep_version")?,
+        rules_commit: row.try_get("rules_commit")?,
+        rules_tree_sha256: row.try_get("rules_tree_sha256")?,
+        command_schema_version,
+        status: enum_from(&row.try_get::<String, _>("status")?)?,
+        started_at: ts(&row.try_get::<String, _>("started_at")?)?,
+        ended_at: row
+            .try_get::<Option<String>, _>("ended_at")?
+            .as_deref()
+            .map(ts)
+            .transpose()?,
+        output_sha256: row.try_get("output_sha256")?,
+        finding_count,
+        matched_candidate_count,
+        duration_ms,
+        failure_code: row.try_get("failure_code")?,
+        failure_message: row.try_get("failure_message")?,
+    };
+    validate_semgrep_run(&run)?;
+    Ok(run)
+}
+
+fn semgrep_finding_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<SemgrepFindingRecord, StorageError> {
+    let target_id = row
+        .try_get::<Option<String>, _>("target_id")?
+        .map(|value| {
+            Uuid::parse_str(&value)
+                .map_err(|error| StorageError::InvalidData(format!("Semgrep target id: {error}")))
+        })
+        .transpose()?;
+    let finding = SemgrepFindingRecord {
+        scan_id: Uuid::parse_str(&row.try_get::<String, _>("scan_id")?)
+            .map_err(|error| StorageError::InvalidData(format!("Semgrep scan id: {error}")))?,
+        fingerprint: row.try_get("fingerprint")?,
+        rule_id: row.try_get("rule_id")?,
+        severity: enum_from(&row.try_get::<String, _>("severity")?)?,
+        message: row.try_get("message")?,
+        relative_file: row.try_get("relative_file")?,
+        start_line: positive_u32(row, "start_line")?,
+        start_col: positive_u32(row, "start_col")?,
+        end_line: positive_u32(row, "end_line")?,
+        end_col: positive_u32(row, "end_col")?,
+        target_id,
+        nominal_weight: row.try_get("nominal_weight")?,
+    };
+    validate_semgrep_finding(&finding)?;
+    Ok(finding)
+}
+
+fn semgrep_score_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<SemgrepTargetScoreRecord, StorageError> {
+    let score = SemgrepTargetScoreRecord {
+        scan_id: Uuid::parse_str(&row.try_get::<String, _>("scan_id")?)
+            .map_err(|error| StorageError::InvalidData(format!("Semgrep scan id: {error}")))?,
+        target_id: Uuid::parse_str(&row.try_get::<String, _>("target_id")?)
+            .map_err(|error| StorageError::InvalidData(format!("Semgrep target id: {error}")))?,
+        base_score: row.try_get("base_score")?,
+        boost: row.try_get("boost")?,
+        effective_score: row.try_get("effective_score")?,
+        matched_rule_count: u32::try_from(row.try_get::<i64, _>("matched_rule_count")?).map_err(
+            |_| StorageError::InvalidData("invalid Semgrep matched-rule count".to_owned()),
+        )?,
+    };
+    validate_semgrep_score(&score)?;
+    Ok(score)
+}
+
+fn positive_u32(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<u32, StorageError> {
+    let value = u32::try_from(row.try_get::<i64, _>(column)?)
+        .map_err(|_| StorageError::InvalidData(format!("invalid Semgrep {column}")))?;
+    if value == 0 {
+        Err(StorageError::InvalidData(format!(
+            "invalid Semgrep {column}"
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+fn optional_u32(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<u32>, StorageError> {
+    row.try_get::<Option<i64>, _>(column)?
+        .map(|value| {
+            u32::try_from(value)
+                .map_err(|_| StorageError::InvalidData(format!("invalid Semgrep {column}")))
+        })
+        .transpose()
+}
+
+fn optional_u64(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<u64>, StorageError> {
+    row.try_get::<Option<i64>, _>(column)?
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| StorageError::InvalidData(format!("invalid Semgrep {column}")))
+        })
+        .transpose()
+}
+
+async fn terminate_semgrep_run(
+    pool: &SqlitePool,
+    id: Uuid,
+    status: SemgrepRunStatus,
+    failure_code: &str,
+    failure_message: &str,
+    ended_at: DateTime<Utc>,
+    require_done: bool,
+) -> Result<(), StorageError> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query("SELECT status, started_at FROM semgrep_enrichment_runs WHERE id = ?1")
+        .bind(id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else {
+        return Err(StorageError::NotFound(format!("Semgrep run {id}")));
+    };
+    let existing_status: SemgrepRunStatus = enum_from(&row.try_get::<String, _>("status")?)?;
+    let allowed = if require_done {
+        existing_status == SemgrepRunStatus::Done
+    } else {
+        matches!(
+            existing_status,
+            SemgrepRunStatus::Staging
+                | SemgrepRunStatus::Scanning
+                | SemgrepRunStatus::Validating
+                | SemgrepRunStatus::Persisting
+        )
+    };
+    if !allowed {
+        return Err(StorageError::NotFound(format!("Semgrep run {id}")));
+    }
+    let started_at = ts(&row.try_get::<String, _>("started_at")?)?;
+    if ended_at < started_at {
+        return Err(StorageError::InvalidData(
+            "Semgrep end time precedes start time".to_owned(),
+        ));
+    }
+    sqlx::query("DELETE FROM semgrep_findings WHERE scan_id = ?1")
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM semgrep_target_scores WHERE scan_id = ?1")
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let result = sqlx::query(
+        "UPDATE semgrep_enrichment_runs
+         SET status = ?2, ended_at = ?3, output_sha256 = NULL, finding_count = NULL,
+             matched_candidate_count = NULL, duration_ms = NULL, failure_code = ?4,
+             failure_message = ?5
+         WHERE id = ?1 AND status = ?6",
+    )
+    .bind(id.to_string())
+    .bind(enum_str(&status))
+    .bind(ended_at.to_rfc3339())
+    .bind(failure_code)
+    .bind(failure_message)
+    .bind(enum_str(&existing_status))
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(StorageError::NotFound(format!("Semgrep run {id}")));
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+fn require_one_semgrep_run(
+    rows_affected: u64,
+    id: Uuid,
+    expected: SemgrepRunStatus,
+) -> Result<(), StorageError> {
+    if rows_affected == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::NotFound(format!(
+            "{} Semgrep run {id}",
+            enum_str(&expected)
+        )))
+    }
 }
 
 fn automotive_operation_from_row(
