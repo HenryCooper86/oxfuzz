@@ -72,6 +72,22 @@ validate_destination_path() {
     done
 }
 
+validate_directory_destination() {
+    local destination="$1"
+    if [[ -L "$destination" || ( -e "$destination" && ! -d "$destination" ) ]]; then
+        echo "destination is not a real directory: ${destination}" >&2
+        exit 1
+    fi
+}
+
+validate_regular_file_destination() {
+    local destination="$1"
+    if [[ -L "$destination" || ( -e "$destination" && ! -f "$destination" ) ]]; then
+        echo "destination is not a regular file: ${destination}" >&2
+        exit 1
+    fi
+}
+
 validate_destination_paths() {
     if [[ "$RULES_PARENT" != "${REPOSITORY_ROOT}/third_party/semgrep-rules/rules" ||
           "$RULES_TARGET" != "$RULES_PARENT/c" ||
@@ -95,6 +111,55 @@ validate_destination_paths() {
         "$SEMGREP_METADATA_ROOT/UPSTREAM.md"; do
         validate_destination_path "$destination"
     done
+
+    for destination in \
+        "$RULES_METADATA_ROOT" \
+        "$RULES_PARENT" \
+        "$RULES_TARGET" \
+        "$RULES_STAGING" \
+        "$SEMGREP_METADATA_ROOT"; do
+        validate_directory_destination "$destination"
+    done
+
+    for destination in \
+        "$RULES_METADATA_ROOT/LICENSE" \
+        "$RULES_METADATA_ROOT/COMMIT" \
+        "$RULES_METADATA_ROOT/RULES_SHA256" \
+        "$RULES_METADATA_ROOT/UPSTREAM.md" \
+        "$SEMGREP_METADATA_ROOT/LICENSE" \
+        "$SEMGREP_METADATA_ROOT/UPSTREAM.md"; do
+        validate_regular_file_destination "$destination"
+    done
+}
+
+validate_upstream_license() {
+    local repository="$1"
+    local name="$2"
+    local license="${repository}/LICENSE"
+    if [[ ! -f "$license" || -L "$license" ]]; then
+        echo "${name} LICENSE is not a regular non-symlink file" >&2
+        exit 1
+    fi
+
+    local entry
+    entry="$(git -C "$repository" ls-files --stage -- LICENSE)"
+    if [[ -z "$entry" || "$entry" == *$'\n'* ]]; then
+        echo "${name} LICENSE does not have one Git index entry" >&2
+        exit 1
+    fi
+
+    local mode
+    local object
+    local stage
+    local path
+    IFS=$' \t' read -r mode object stage path <<< "$entry"
+    if [[ ( "$mode" != "100644" && "$mode" != "100755" ) ||
+          "$stage" != "0" ||
+          "$path" != "LICENSE" ||
+          "$(git -C "$repository" cat-file -t "$object")" != "blob" ]]; then
+        echo "${name} LICENSE is not a regular Git blob" >&2
+        exit 1
+    fi
 }
 
 rules_repository=""
@@ -129,7 +194,7 @@ if [[ "$resolved_rules_commit" != "$RULES_COMMIT" ]]; then
     exit 1
 fi
 test -d "$rules_repository/rules/c"
-test -f "$rules_repository/LICENSE"
+validate_upstream_license "$rules_repository" "rules upstream"
 upstream_rules_symlink="$(find "$rules_repository/rules/c" -type l -print -quit)"
 if [[ -n "$upstream_rules_symlink" ]]; then
     echo "refusing symlink in upstream rules/c: ${upstream_rules_symlink}" >&2
@@ -151,7 +216,7 @@ if [[ "$(git -C "$semgrep_repository" rev-parse HEAD)" != "$resolved_semgrep_com
     echo "Semgrep checkout does not match the resolved tag commit" >&2
     exit 1
 fi
-test -f "$semgrep_repository/LICENSE"
+validate_upstream_license "$semgrep_repository" "Semgrep upstream"
 
 validate_destination_paths
 mkdir -p "$RULES_PARENT" "$SEMGREP_METADATA_ROOT"
