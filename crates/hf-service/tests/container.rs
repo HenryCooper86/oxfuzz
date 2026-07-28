@@ -93,6 +93,8 @@ fn stored_target(project: &std::path::Path, symbol: &str) -> hf_core::target::Ta
             file: std::path::PathBuf::from(format!("{symbol}.c")),
             line: 1,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some(format!("int {symbol}(const char *, size_t)")),
         input_surface: hf_core::target::InputSurface::Bytes,

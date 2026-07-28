@@ -334,6 +334,8 @@ fn sample_target(project: &str) -> TargetCandidate {
             file: PathBuf::from("src/json.c"),
             line: 12,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some("int parse_value(const char*)".to_owned()),
         input_surface: InputSurface::Bytes,

@@ -105,6 +105,8 @@ async fn fixture(name: &str) -> Fixture {
             file: PathBuf::from("parse.c"),
             line: 1,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: None,
         input_surface: InputSurface::Bytes,

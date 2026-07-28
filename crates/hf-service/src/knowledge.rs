@@ -575,6 +575,8 @@ mod tests {
                 file: PathBuf::from("parse.c"),
                 line: 1,
                 col: 1,
+                end_line: None,
+                end_col: None,
             },
             signature: Some("int parse_header(const char *buf, unsigned long len)".to_owned()),
             input_surface: InputSurface::Bytes,
