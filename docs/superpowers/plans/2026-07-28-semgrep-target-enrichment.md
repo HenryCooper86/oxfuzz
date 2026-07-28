@@ -26,7 +26,7 @@
 - No generated harness or real fuzzer is run on the host. Normal tests use fake/recording runtimes; the real Semgrep smoke gate runs only inside Docker.
 - All Rust production changes follow Red -> Green -> Refactor and contain no inline lint suppression.
 - Every `cargo test` command in this plan uses the repository-mandated filtered output form.
-- Execute shell blocks containing a `cargo test` pipeline with `set -o pipefail` enabled so a failing test cannot be hidden by `grep` or `head`.
+- Execute shell blocks containing a `cargo test` pipeline with `set -o pipefail` enabled. Wrap the filter as `{ grep -v '…' || true; }` so an empty clean-output stream succeeds while Cargo failures still propagate through the pipeline.
 - Each task ends in one English commit containing only that task's concern.
 
 ## File and Interface Map
@@ -192,8 +192,8 @@ fn c_candidate_span_covers_the_complete_definition() {
 Run:
 
 ```bash
-cargo test -p hf-core source_location_reads_legacy_json_without_end_coordinates 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-discovery c_candidate_span_covers_the_complete_definition 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-core source_location_reads_legacy_json_without_end_coordinates 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-discovery c_candidate_span_covers_the_complete_definition 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because the end fields do not exist and the C scanner records only the identifier start.
@@ -221,8 +221,8 @@ Set `end_line: None, end_col: None` in Rust, Go, Python, reachability, core, ser
 Run:
 
 ```bash
-cargo test -p hf-core 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-discovery 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-core 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-discovery 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -344,7 +344,7 @@ The valid fixture shape is:
 Run:
 
 ```bash
-cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests::parse_ 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests::parse_ 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because `hf_discovery::semgrep` does not exist.
@@ -402,7 +402,7 @@ Fingerprint with a leading `0x01` byte, then length-prefixed rule id, lowercase 
 Run:
 
 ```bash
-cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 cargo check -p hf-discovery --no-default-features
 ```
 
@@ -480,8 +480,8 @@ Also prove:
 Run:
 
 ```bash
-cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests::map_ 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests::score_ 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests::map_ 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-discovery --features semgrep-enrichment semgrep::tests::score_ 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because mapping/scoring interfaces do not exist.
@@ -519,7 +519,7 @@ Reject non-C/C++ candidates, mixed project roots, any incomplete candidate span,
 Run:
 
 ```bash
-cargo test -p hf-discovery --features semgrep-enrichment 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-discovery --features semgrep-enrichment 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -571,7 +571,7 @@ Add validation cases for `Some(0)` and `Some(513)` returning `ClassifiedError::S
 Run:
 
 ```bash
-cargo test -p hf-runtime specialized_profile_can_tighten_but_not_expand_pid_limit 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-runtime specialized_profile_can_tighten_but_not_expand_pid_limit 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because `SandboxOptions.max_pids` does not exist.
@@ -607,7 +607,7 @@ Update every explicit `SandboxOptions` literal with `..SandboxOptions::default()
 Run:
 
 ```bash
-cargo test -p hf-runtime 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-runtime 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -869,7 +869,7 @@ Add tests that:
 Run:
 
 ```bash
-cargo test -p hf-storage semgrep_ 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-storage semgrep_ 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because migration 0022 and Semgrep store methods do not exist.
@@ -964,7 +964,7 @@ CREATE TABLE semgrep_target_scores (
 Run:
 
 ```bash
-cargo test -p hf-storage 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-storage 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -1047,7 +1047,7 @@ Test:
 Run:
 
 ```bash
-cargo test -p hf-service --features semgrep-enrichment semgrep_recovery::tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep_recovery::tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because `semgrep_recovery` does not exist.
@@ -1088,7 +1088,7 @@ Set version `1`, maximum file size 64 KiB, maximum line size 16 KiB, and exactly
 Run:
 
 ```bash
-cargo test -p hf-service --features semgrep-enrichment semgrep_recovery::tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep_recovery::tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -1186,7 +1186,7 @@ Test:
 Run:
 
 ```bash
-cargo test -p hf-service --features semgrep-enrichment semgrep::snapshot_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::snapshot_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because snapshot interfaces do not exist.
@@ -1236,7 +1236,7 @@ Gate `pub mod semgrep;` and all Semgrep re-exports with `#[cfg(feature = "semgre
 Run:
 
 ```bash
-cargo test -p hf-service --features semgrep-enrichment semgrep::snapshot_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::snapshot_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 cargo check -p hf-service --no-default-features
 ```
 
@@ -1337,8 +1337,8 @@ Service tests must assert:
 Run:
 
 ```bash
-cargo test -p hf-guardrails analyze_source 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-service --features semgrep-enrichment semgrep::lifecycle_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-guardrails analyze_source 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::lifecycle_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because the action and service lifecycle do not exist.
@@ -1398,8 +1398,8 @@ Map failures to stable codes such as `unsupported_language`, `inventory_missing`
 Run:
 
 ```bash
-cargo test -p hf-guardrails 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-service --features semgrep-enrichment semgrep::lifecycle_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-guardrails 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::lifecycle_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -1524,8 +1524,8 @@ Cover:
 Run:
 
 ```bash
-cargo test -p hf-service --features semgrep-enrichment semgrep::publication_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-service --features semgrep-enrichment semgrep::effective_inventory_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::publication_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::effective_inventory_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because publication/effective inventory is incomplete.
@@ -1601,9 +1601,9 @@ A sticky journal/recovery error makes new starts fail closed. Status remains rea
 Run:
 
 ```bash
-cargo test -p hf-service --features semgrep-enrichment semgrep::publication_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-service --features semgrep-enrichment semgrep::effective_inventory_tests 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-service --features semgrep-enrichment 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::publication_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment semgrep::effective_inventory_tests 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: PASS.
@@ -1666,8 +1666,8 @@ REST tests must use a persistent service container with a recording runtime and 
 Run:
 
 ```bash
-cargo test -p hf-cli cli_parses_semgrep_opt_in 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-web --features semgrep-enrichment semgrep_ 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-cli cli_parses_semgrep_opt_in 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-web --features semgrep-enrichment semgrep_ 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
 Expected: FAIL because the flag/routes do not exist.
@@ -1725,8 +1725,8 @@ Handlers parse/marshal only and use `classified_api_error`; they do not poll or 
 Run:
 
 ```bash
-cargo test -p hf-cli 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
-cargo test -p hf-web --features semgrep-enrichment 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-cli 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-web --features semgrep-enrichment 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 cargo check -p hf-cli --no-default-features
 cargo check -p hf-web --no-default-features
 ```
@@ -1924,7 +1924,7 @@ Run:
 npm --prefix crates/hf-gui test
 npm --prefix crates/hf-gui run build
 npm --prefix crates/hf-gui run lint
-cargo test -p hf-gui --features semgrep-enrichment 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test -p hf-gui --features semgrep-enrichment 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 cargo check -p hf-gui --no-default-features
 ```
 
@@ -2022,7 +2022,7 @@ cargo fmt --all
 cargo clippy --fix --allow-dirty --workspace -- -D warnings
 cargo clippy --workspace -- -D warnings
 cargo check --workspace
-cargo test --workspace 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' | head -200
+cargo test --workspace 2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 cargo doc --workspace --no-deps
 ```
 
