@@ -311,6 +311,105 @@ async fn semgrep_failure_rejects_an_end_time_before_admission() {
 }
 
 #[tokio::test]
+async fn semgrep_score_write_validation_enforces_capped_formula_and_match_consistency() {
+    let invalid_scores = [
+        ("inconsistent effective score", 0.6, 0.05, 0.8, 1),
+        ("boost without a matched rule", 0.6, 0.05, 0.65, 0),
+        (
+            "sub-epsilon boost without a matched rule",
+            0.6,
+            f64::EPSILON / 2.0,
+            0.6,
+            0,
+        ),
+        ("non-canonical half-step boost", 0.6, 0.005, 0.605, 1),
+        ("matched rule without a boost", 0.6, 0.0, 0.6, 1),
+        ("non-finite boost", 0.6, f64::INFINITY, 0.65, 1),
+        ("non-finite effective score", 0.6, 0.05, f64::NAN, 1),
+    ];
+    for (case, base_score, boost, effective_score, matched_rule_count) in invalid_scores {
+        let (store, _dir) = temp_store().await;
+        let mut run = semgrep_staging_run(&format!("/projects/{case}"), Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        let mut publication = semgrep_publication(run, 1, 1);
+        publication.run.matched_candidate_count = Some(u32::from(matched_rule_count > 0));
+        let overlay = &mut publication.scores[0];
+        overlay.base_score = base_score;
+        overlay.boost = boost;
+        overlay.effective_score = effective_score;
+        overlay.matched_rule_count = matched_rule_count;
+
+        assert!(
+            matches!(
+                store.publish_semgrep_run(&publication).await,
+                Err(StorageError::InvalidData(_))
+            ),
+            "{case} unexpectedly persisted"
+        );
+    }
+
+    for (project, base_score, boost, effective_score) in [
+        ("/projects/capped-score", 0.95, 0.10, 1.0),
+        ("/projects/floating-score", 0.10, 0.20, 0.30),
+        ("/projects/aggregate-boost", 0.60, 0.10 + 0.05, 0.75),
+    ] {
+        let (store, _dir) = temp_store().await;
+        let mut run = semgrep_staging_run(project, Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        let mut publication = semgrep_publication(run, 1, 1);
+        let overlay = &mut publication.scores[0];
+        overlay.base_score = base_score;
+        overlay.boost = boost;
+        overlay.effective_score = effective_score;
+        store.publish_semgrep_run(&publication).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn semgrep_finding_relative_path_enforces_exact_byte_limit_on_write_and_read() {
+    let (store, _dir) = temp_store().await;
+    let mut run = semgrep_staging_run("/projects/path-boundary", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+    let mut publication = semgrep_publication(run, 1, 1);
+    publication.findings[0].relative_file = "a".repeat(4_096);
+    store.publish_semgrep_run(&publication).await.unwrap();
+    assert_eq!(
+        store
+            .semgrep_publication(publication.run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .findings[0]
+            .relative_file
+            .len(),
+        4_096
+    );
+
+    let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query("UPDATE semgrep_findings SET relative_file = ?2 WHERE scan_id = ?1")
+        .bind(publication.run.id.to_string())
+        .bind("b".repeat(4_097))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        store.semgrep_publication(publication.run.id).await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    let (store, _dir) = temp_store().await;
+    let mut run = semgrep_staging_run("/projects/path-overflow", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+    let mut publication = semgrep_publication(run, 1, 1);
+    publication.findings[0].relative_file = "a".repeat(4_097);
+    assert!(matches!(
+        store.publish_semgrep_run(&publication).await,
+        Err(StorageError::InvalidData(_))
+    ));
+}
+
+#[tokio::test]
 async fn semgrep_failure_cancellation_and_compensation_remove_children() {
     let (store, _dir) = temp_store().await;
     let mut published = semgrep_staging_run("/projects/published", Utc::now());
@@ -520,6 +619,11 @@ async fn semgrep_typed_reads_reject_malformed_persisted_fields() {
     let malformed_score_fields = [
         ("target_id", "'not-a-uuid'"),
         ("base_score", "1.5"),
+        ("boost", "9e999"),
+        ("effective_score", "9e999"),
+        ("effective_score", "0.8"),
+        ("boost", "0.0"),
+        ("matched_rule_count", "0"),
         ("matched_rule_count", "-1"),
     ];
     for (column, value) in malformed_score_fields {

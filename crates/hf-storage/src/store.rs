@@ -2911,6 +2911,31 @@ fn validate_semgrep_score(score: &SemgrepTargetScoreRecord) -> Result<(), Storag
             "Semgrep score contains an invalid weight".to_owned(),
         ));
     }
+    let boost_units = score.boost / 0.01;
+    let rounded_boost_units = boost_units.round();
+    let boost_unit_scale = boost_units.abs().max(1.0);
+    if (boost_units - rounded_boost_units).abs() > f64::EPSILON * 16.0 * boost_unit_scale {
+        return Err(StorageError::InvalidData(
+            "Semgrep boost is not a canonical 0.01 increment".to_owned(),
+        ));
+    }
+    let expected_effective = (score.base_score + score.boost).min(1.0);
+    let comparison_scale = score
+        .effective_score
+        .abs()
+        .max(expected_effective.abs())
+        .max(1.0);
+    if (score.effective_score - expected_effective).abs() > f64::EPSILON * 8.0 * comparison_scale {
+        return Err(StorageError::InvalidData(
+            "Semgrep effective score does not equal the capped base plus boost".to_owned(),
+        ));
+    }
+    let boost_is_zero = score.boost.abs().to_bits() == 0.0_f64.to_bits();
+    if (score.matched_rule_count == 0) != boost_is_zero {
+        return Err(StorageError::InvalidData(
+            "Semgrep boost and matched-rule count are inconsistent".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -2918,6 +2943,7 @@ fn validate_relative_path(value: &str) -> Result<(), StorageError> {
     let bytes = value.as_bytes();
     let has_drive_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if value.is_empty()
+        || value.len() > 4_096
         || value.starts_with('/')
         || value.starts_with('\\')
         || value.contains('\\')
