@@ -45,9 +45,14 @@ The initial sandbox build pins:
 The sandbox image records a deterministic SHA-256 tree digest of the installed
 rules. The digest covers lexicographically ordered, length-prefixed
 `(relative_path, file_bytes)` pairs for every regular file in `rules/c`. The
-build fails if the checked-out commit differs, rule validation fails, the
-tested Semgrep version differs, or the fixture scan does not produce the
-expected rule identifiers.
+build fails if the checked-out commit differs, the complete local rules
+configuration cannot be loaded and executed, the tested Semgrep version
+differs, or the fixture scan does not produce the expected rule identifiers.
+Semgrep CE `1.169.0`'s dedicated `scan --validate` path is not used because it
+unconditionally fetches the registry-hosted `p/semgrep-rule-lints` pack.
+Instead, the network-disabled fixed-wrapper scan validates the bundled
+configuration by loading and executing every local rule against the fixed
+fixtures.
 
 The Semgrep Community Edition executable is a separate process licensed under
 LGPL-2.1. The `0xdea/semgrep-rules` content is MIT-licensed. Distribution
@@ -472,7 +477,8 @@ A real container-only test:
 1. asserts Semgrep `1.169.0`;
 2. asserts rules commit
    `4d66ecf30bfb1809a984085f2c86a8c3915bfc71`;
-3. validates the bundled rules;
+3. validates the bundled rules by loading and executing the complete local
+   configuration without the registry-dependent `scan --validate` path;
 4. scans a fixed vulnerable and clean C fixture with networking disabled; and
 5. asserts the expected normalized rule identifiers.
 
