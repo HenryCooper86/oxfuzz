@@ -249,9 +249,9 @@ pub fn map_and_score(
         .collect::<BTreeMap<_, _>>();
 
     for ((target_id, _), severity) in rule_severities {
-        let score = scores
-            .get_mut(&target_id)
-            .expect("matched target must belong to the validated inventory");
+        let score = scores.get_mut(&target_id).ok_or_else(|| {
+            invalid_inventory("mapped target is absent from the validated inventory")
+        })?;
         score.boost += severity.weight();
         score.matched_rule_count += 1;
     }
@@ -267,7 +267,7 @@ pub fn map_and_score(
         .filter(|score| score.matched_rule_count > 0)
         .count()
         .try_into()
-        .expect("matched candidate count cannot exceed the normalized finding limit");
+        .map_err(|_| invalid_inventory("candidate count exceeds the supported u32 range"))?;
 
     Ok(SemgrepAnalysis {
         findings,
