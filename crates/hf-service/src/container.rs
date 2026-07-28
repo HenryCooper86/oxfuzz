@@ -4453,7 +4453,58 @@ impl ServiceContainer {
         project: Option<&Path>,
         target: Option<&str>,
     ) -> Result<crate::workbench::WorkbenchDashboard, ClassifiedError> {
-        crate::workbench::dashboard(self.store.as_deref(), project, target).await
+        #[cfg(feature = "semgrep-enrichment")]
+        let mut effective_score_by_target = std::collections::HashMap::new();
+        #[cfg(not(feature = "semgrep-enrichment"))]
+        let effective_score_by_target = std::collections::HashMap::new();
+        #[cfg(feature = "semgrep-enrichment")]
+        if let (Some(store), Some(project)) = (self.store.as_deref(), project) {
+            let identity = project_lookup_identity(project);
+            let project_targets = store
+                .list_all_targets()
+                .await?
+                .into_iter()
+                .filter(|candidate| stored_project_matches(&candidate.project_root, &identity))
+                .collect::<Vec<_>>();
+            effective_score_by_target.extend(
+                project_targets
+                    .iter()
+                    .map(|candidate| (candidate.id, candidate.fit_score)),
+            );
+            for language in [TargetLanguage::C, TargetLanguage::Cpp] {
+                let candidates = project_targets
+                    .iter()
+                    .filter(|candidate| candidate.language == language)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if candidates.is_empty() {
+                    continue;
+                }
+                let effective = self
+                    .effective_inventory(
+                        TargetInventory {
+                            project_root: identity.clone(),
+                            candidates,
+                            call_graph: std::collections::HashMap::new(),
+                        },
+                        language,
+                    )
+                    .await?;
+                effective_score_by_target.extend(
+                    effective
+                        .candidates
+                        .into_iter()
+                        .map(|target| (target.candidate.id, target.effective_score)),
+                );
+            }
+        }
+        crate::workbench::dashboard(
+            self.store.as_deref(),
+            project,
+            target,
+            effective_score_by_target,
+        )
+        .await
     }
 
     /// Generated harnesses that need human review or promotion.
@@ -4687,6 +4738,34 @@ impl ServiceContainer {
                 None
             }
         };
+        #[cfg(feature = "semgrep-enrichment")]
+        let semgrep = Arc::new(crate::semgrep::SemgrepCoordinator::persistent(
+            crate::init::user_app_dir().join("semgrep-journal"),
+        ));
+        #[cfg(feature = "semgrep-enrichment")]
+        if let Some(store) = &store {
+            match initialize_workspace_root() {
+                Ok(workspace) => {
+                    if semgrep
+                        .recover_interrupted(store, &workspace)
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!(
+                            failure_code = "semgrep_recovery_degraded",
+                            "Semgrep recovery is degraded"
+                        );
+                    }
+                }
+                Err(error) => {
+                    semgrep.mark_recovery_degraded(&error);
+                    tracing::error!(
+                        failure_code = "semgrep_recovery_workspace_degraded",
+                        "Semgrep recovery workspace is degraded"
+                    );
+                }
+            }
+        }
         let (session_manager, checkpoint_manager) = match store.as_ref().map(build_session_managers)
         {
             Some((sessions, checkpoints)) => (Some(sessions), Some(checkpoints)),
@@ -4743,9 +4822,7 @@ impl ServiceContainer {
             diagnostics,
             run_journal,
             #[cfg(feature = "semgrep-enrichment")]
-            semgrep: Arc::new(crate::semgrep::SemgrepCoordinator::persistent(
-                crate::init::user_app_dir().join("semgrep-journal"),
-            )),
+            semgrep,
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -5192,12 +5269,42 @@ impl ServiceContainer {
             .list_all_targets()
             .await
             .map_err(ClassifiedError::from)?;
-
-        let mut schedulable = Vec::new();
-        for candidate in targets
+        let project_targets = targets
             .into_iter()
             .filter(|candidate| stored_project_matches(&candidate.project_root, &identity))
-        {
+            .collect::<Vec<_>>();
+        #[cfg(feature = "semgrep-enrichment")]
+        let mut effective_score_by_target = project_targets
+            .iter()
+            .map(|candidate| (candidate.id, candidate.fit_score))
+            .collect::<std::collections::HashMap<_, _>>();
+        #[cfg(feature = "semgrep-enrichment")]
+        for language in [TargetLanguage::C, TargetLanguage::Cpp] {
+            let candidates = project_targets
+                .iter()
+                .filter(|candidate| candidate.language == language)
+                .cloned()
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            let effective = self
+                .effective_inventory(
+                    TargetInventory {
+                        project_root: identity.clone(),
+                        candidates,
+                        call_graph: std::collections::HashMap::new(),
+                    },
+                    language,
+                )
+                .await?;
+            for target in effective.candidates {
+                effective_score_by_target.insert(target.candidate.id, target.effective_score);
+            }
+        }
+
+        let mut schedulable = Vec::new();
+        for candidate in project_targets {
             let harnesses = store
                 .list_harnesses(candidate.id)
                 .await
@@ -5209,6 +5316,12 @@ impl ServiceContainer {
                     target: candidate.symbol.clone(),
                     engine: harness.engine.as_str().to_owned(),
                     language: harness.language.as_str().to_owned(),
+                    #[cfg(feature = "semgrep-enrichment")]
+                    fit_score: effective_score_by_target
+                        .get(&candidate.id)
+                        .copied()
+                        .unwrap_or(candidate.fit_score),
+                    #[cfg(not(feature = "semgrep-enrichment"))]
                     fit_score: candidate.fit_score,
                 });
             }
@@ -5766,13 +5879,28 @@ impl ServiceContainer {
         let inv = self.discover(project, lang).await?;
         let target = match target.filter(|t| !t.is_empty()) {
             Some(t) => t.to_owned(),
-            None => inv
-                .ranked()
-                .first()
-                .map(|c| c.symbol.clone())
-                .ok_or_else(|| {
-                    ClassifiedError::Validation("no fuzzable targets discovered".to_owned())
-                })?,
+            None => {
+                #[cfg(feature = "semgrep-enrichment")]
+                {
+                    let effective = self.effective_inventory(inv, lang).await?;
+                    effective
+                        .candidates
+                        .first()
+                        .map(|candidate| candidate.candidate.symbol.clone())
+                        .ok_or_else(|| {
+                            ClassifiedError::Validation("no fuzzable targets discovered".to_owned())
+                        })?
+                }
+                #[cfg(not(feature = "semgrep-enrichment"))]
+                {
+                    inv.ranked()
+                        .first()
+                        .map(|candidate| candidate.symbol.clone())
+                        .ok_or_else(|| {
+                            ClassifiedError::Validation("no fuzzable targets discovered".to_owned())
+                        })?
+                }
+            }
         };
 
         // 2. Scheduled/agent campaigns may use only a revision a human already
@@ -10309,6 +10437,294 @@ fn describe_proposal(proposal: &hf_coverage::StagnationProposal) -> &'static str
             "consider adding seeds, a dictionary, or a custom mutator"
         }
         hf_coverage::StagnationProposal::Stop => "consider stopping this target",
+    }
+}
+
+#[cfg(all(test, feature = "semgrep-enrichment"))]
+mod semgrep_ranking_consumer_tests {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use hf_core::harness::{BuildCommand, Harness};
+    use hf_core::target::{
+        InputSurface, SourceLocation, TargetInventory, TargetKind, TargetLanguage,
+    };
+    use hf_storage::Store;
+
+    use super::*;
+
+    fn candidate(
+        project: &Path,
+        symbol: &str,
+        relative_file: &str,
+        base_score: f64,
+    ) -> TargetCandidate {
+        TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: project.to_path_buf(),
+            language: TargetLanguage::C,
+            symbol: symbol.to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: project.join(relative_file),
+                line: 1,
+                col: 1,
+                end_line: Some(1),
+                end_col: Some(40),
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            fit_score: base_score,
+            sanitizers: Vec::new(),
+            rationale: symbol.to_owned(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 1,
+        }
+    }
+
+    fn inventory(project: &Path) -> TargetInventory {
+        TargetInventory {
+            project_root: project.to_path_buf(),
+            candidates: vec![
+                candidate(project, "high_base", "high.c", 0.55),
+                candidate(project, "boosted", "boosted.c", 0.5),
+            ],
+            call_graph: HashMap::new(),
+        }
+    }
+
+    fn promoted_harness(target: &TargetCandidate) -> Harness {
+        Harness {
+            id: Uuid::new_v4(),
+            target_id: target.id,
+            engine: EngineKind::LibFuzzer,
+            source: format!("// {}", target.symbol),
+            language: target.language,
+            build_cmd: BuildCommand {
+                compiler: "clang".to_owned(),
+                args: Vec::new(),
+                output: PathBuf::from("harness"),
+            },
+            sanitizer: Sanitizer::Address,
+            status: HarnessStatus::Promoted,
+            smoke_run: None,
+        }
+    }
+
+    async fn semgrep_run_count(store: &Store) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM semgrep_enrichment_runs")
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    fn assert_f64_eq(left: f64, right: f64) {
+        assert_eq!(left.to_bits(), right.to_bits());
+    }
+
+    #[tokio::test]
+    async fn schedulable_targets_use_effective_scores_without_starting_semgrep() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("high.c"),
+            "int high_base(char *p) { return p[0]; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("boosted.c"),
+            "int boosted(char *p) { return p[0]; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "pub fn rust_target(data: &[u8]) {}\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let inventory = inventory(&project);
+        let high_base = inventory.candidates[0].clone();
+        let boosted = inventory.candidates[1].clone();
+        let rust_target = TargetCandidate {
+            id: Uuid::new_v4(),
+            language: TargetLanguage::Rust,
+            symbol: "rust_target".to_owned(),
+            location: SourceLocation {
+                file: project.join("lib.rs"),
+                line: 1,
+                col: 1,
+                end_line: Some(1),
+                end_col: Some(36),
+            },
+            fit_score: 0.63,
+            ..high_base.clone()
+        };
+        let store = Arc::new(
+            Store::connect(root.path().join("scheduler.db"))
+                .await
+                .unwrap(),
+        );
+        store.save_inventory(&inventory, Utc::now()).await.unwrap();
+        store
+            .save_inventory(
+                &TargetInventory {
+                    project_root: project.clone(),
+                    candidates: vec![rust_target.clone()],
+                    call_graph: HashMap::new(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_harness(&promoted_harness(&high_base))
+            .await
+            .unwrap();
+        store
+            .upsert_harness(&promoted_harness(&boosted))
+            .await
+            .unwrap();
+        store
+            .upsert_harness(&promoted_harness(&rust_target))
+            .await
+            .unwrap();
+        let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store));
+        service
+            .semgrep_test_publish_inventory(&inventory, HashMap::from([(boosted.id, 0.2)]))
+            .await
+            .unwrap();
+        let before = semgrep_run_count(&store).await;
+
+        let targets = service.schedulable_targets(&project).await.unwrap();
+
+        let scores = targets
+            .into_iter()
+            .map(|target| (target.target, target.fit_score))
+            .collect::<HashMap<_, _>>();
+        assert_f64_eq(*scores.get("high_base").unwrap(), 0.55);
+        assert_f64_eq(*scores.get("boosted").unwrap(), 0.7);
+        assert_f64_eq(*scores.get("rust_target").unwrap(), 0.63);
+        assert_eq!(semgrep_run_count(&store).await, before);
+    }
+
+    #[tokio::test]
+    async fn service_workbench_orders_by_effective_score_and_retains_base_score() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("high.c"),
+            "int high_base(char *p) { return p[0]; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("boosted.c"),
+            "int boosted(char *p) { return p[0]; }\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let inventory = inventory(&project);
+        let boosted_id = inventory.candidates[1].id;
+        let store = Arc::new(
+            Store::connect(root.path().join("workbench.db"))
+                .await
+                .unwrap(),
+        );
+        store.save_inventory(&inventory, Utc::now()).await.unwrap();
+        let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store));
+        service
+            .semgrep_test_publish_inventory(&inventory, HashMap::from([(boosted_id, 0.2)]))
+            .await
+            .unwrap();
+        let before = semgrep_run_count(&store).await;
+
+        let dashboard = service
+            .workbench_dashboard(Some(&project), None)
+            .await
+            .unwrap();
+
+        assert_eq!(dashboard.top_targets[0].id, boosted_id.to_string());
+        assert_f64_eq(dashboard.top_targets[0].fit_score, 0.5);
+        assert_f64_eq(dashboard.top_targets[1].fit_score, 0.55);
+        assert_eq!(semgrep_run_count(&store).await, before);
+    }
+
+    #[tokio::test]
+    async fn campaign_uses_overlay_only_for_implicit_target_selection() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("parser.c"),
+            "int parse_complex(const unsigned char *data, int size) {\n\
+             if (size > 2 && data[0] == 1) { return data[1]; }\n\
+             return 0;\n\
+             }\n\
+             int parse_simple(const unsigned char *data, int size) {\n\
+             return size > 0 ? data[0] : 0;\n\
+             }\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let inventory = hf_discovery::discover(&project, TargetLanguage::C)
+            .await
+            .unwrap();
+        assert!(inventory.candidates.len() >= 2);
+        let base_first = inventory.ranked()[0].clone();
+        let boosted = inventory
+            .ranked()
+            .into_iter()
+            .find(|candidate| candidate.id != base_first.id)
+            .unwrap()
+            .clone();
+        assert!(base_first.fit_score < 1.0);
+        let store = Arc::new(
+            Store::connect(root.path().join("campaign.db"))
+                .await
+                .unwrap(),
+        );
+        store.save_inventory(&inventory, Utc::now()).await.unwrap();
+        let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store));
+        service
+            .semgrep_test_publish_inventory(&inventory, HashMap::from([(boosted.id, 0.2)]))
+            .await
+            .unwrap();
+        let before = semgrep_run_count(&store).await;
+
+        let implicit = service
+            .run_campaign(
+                &project,
+                None,
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                1,
+                1,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        let explicit = service
+            .run_campaign(
+                &project,
+                Some(&base_first.symbol),
+                EngineKind::LibFuzzer,
+                TargetLanguage::C,
+                1,
+                1,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            implicit.contains(&format!("'{}'", boosted.symbol)),
+            "implicit target error did not name boosted candidate: {implicit}"
+        );
+        assert!(
+            explicit.contains(&format!("'{}'", base_first.symbol)),
+            "explicit target changed under overlay: {explicit}"
+        );
+        assert_eq!(semgrep_run_count(&store).await, before);
     }
 }
 

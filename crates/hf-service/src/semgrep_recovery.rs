@@ -1,8 +1,9 @@
 //! Durable, fail-closed recovery evidence for Semgrep enrichment publication.
 //!
-//! Each operation owns one bounded JSONL file. Its only valid lifecycle is
-//! `open -> ready_to_commit -> close`; the terminal file is retained so result
-//! readers can require both database and journal completion.
+//! Each operation owns one bounded JSONL file. A successful publication follows
+//! `open -> ready_to_commit -> close`; an unsuccessful operation follows
+//! `open -> abort` or `open -> ready_to_commit -> abort`. Only a durable `close`
+//! proves publication, and terminal journal files are retained for replay.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -33,6 +34,18 @@ pub struct SemgrepReadyRecord {
     pub rules_tree_sha256: String,
     /// Version of the fixed Semgrep command contract.
     pub command_schema_version: u32,
+}
+
+/// Bounded terminal category for an unsuccessful Semgrep journal lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemgrepAbortKind {
+    /// The operation failed before a successful publication close.
+    Failed,
+    /// The operator cancelled the operation.
+    Cancelled,
+    /// Startup recovery repaired the interrupted operation.
+    Recovered,
 }
 
 /// A Semgrep operation whose journal does not contain a durable close record.
@@ -69,6 +82,12 @@ enum SemgrepJournalEvent {
         operation_id: Uuid,
         timestamp: DateTime<Utc>,
     },
+    Abort {
+        version: u32,
+        operation_id: Uuid,
+        terminal_kind: SemgrepAbortKind,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +102,11 @@ enum OperationLifecycle {
         ready: SemgrepReadyRecord,
     },
     Closed,
+    Aborted,
 }
+
+#[cfg(test)]
+type AppendRaceHook = Arc<dyn Fn(AppendRacePoint) + Send + Sync>;
 
 /// A bounded per-operation journal for Semgrep publication recovery.
 pub struct SemgrepJournal {
@@ -93,7 +116,9 @@ pub struct SemgrepJournal {
     shared_state: Arc<SharedJournalState>,
     memory_events: Mutex<BTreeMap<Uuid, Vec<SemgrepJournalEvent>>>,
     #[cfg(test)]
-    race_hook: Mutex<Option<Arc<dyn Fn(AppendRacePoint) + Send + Sync>>>,
+    race_hook: Mutex<Option<AppendRaceHook>>,
+    #[cfg(test)]
+    append_failure: Mutex<Option<AppendFailurePoint>>,
 }
 
 struct SharedJournalState {
@@ -116,6 +141,8 @@ impl SemgrepJournal {
             memory_events: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             race_hook: Mutex::new(None),
+            #[cfg(test)]
+            append_failure: Mutex::new(None),
         }
     }
 
@@ -174,6 +201,8 @@ impl SemgrepJournal {
             memory_events: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             race_hook: Mutex::new(None),
+            #[cfg(test)]
+            append_failure: Mutex::new(None),
         }
     }
 
@@ -247,6 +276,29 @@ impl SemgrepJournal {
         })
     }
 
+    /// Durably terminalize an unsuccessful operation without publication.
+    ///
+    /// This transition never fabricates ready-to-commit provenance and never
+    /// satisfies [`Self::is_closed`].
+    pub fn abort(
+        &self,
+        operation_id: Uuid,
+        terminal_kind: SemgrepAbortKind,
+    ) -> Result<(), ClassifiedError> {
+        let event = SemgrepJournalEvent::Abort {
+            version: JOURNAL_VERSION,
+            operation_id,
+            terminal_kind,
+            timestamp: Utc::now(),
+        };
+        self.append_transition(operation_id, event, |state| {
+            matches!(
+                state,
+                OperationLifecycle::Open { .. } | OperationLifecycle::Ready { .. }
+            )
+        })
+    }
+
     /// Return whether the operation has its own complete, valid lifecycle.
     pub fn is_closed(&self, operation_id: Uuid) -> Result<bool, ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
@@ -294,7 +346,7 @@ impl SemgrepJournal {
                     staging_dir_name,
                     ready: Some(ready),
                 }),
-                OperationLifecycle::Closed => None,
+                OperationLifecycle::Closed | OperationLifecycle::Aborted => None,
             })
             .collect())
     }
@@ -389,8 +441,13 @@ impl SemgrepJournal {
         self.run_test_race_hook(AppendRacePoint::BeforeIdentityCheck);
         verify_operation_path_identity(directory, operation_id, file)
             .map_err(|error| self.record_durability_failure(&error))?;
+        #[cfg(test)]
+        self.inject_test_append_failure(AppendFailurePoint::BeforeWrite)?;
         append_and_sync(file, &line)
             .and_then(|()| {
+                #[cfg(test)]
+                self.inject_test_append_failure(AppendFailurePoint::AfterFileSync)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
                 #[cfg(test)]
                 self.run_test_race_hook(AppendRacePoint::AfterFileSync);
                 verify_operation_path_identity(directory, operation_id, file)
@@ -474,6 +531,23 @@ impl SemgrepJournal {
     }
 
     #[cfg(test)]
+    pub(crate) fn install_test_append_failure(&self, point: AppendFailurePoint) {
+        *lock_recover(&self.append_failure) = Some(point);
+    }
+
+    #[cfg(test)]
+    fn inject_test_append_failure(&self, point: AppendFailurePoint) -> Result<(), ClassifiedError> {
+        let mut failure = lock_recover(&self.append_failure);
+        if failure.as_ref() == Some(&point) {
+            *failure = None;
+            return Err(
+                self.record_durability_failure(&io::Error::other("injected append failure"))
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn run_test_race_hook(&self, point: AppendRacePoint) {
         let hook = lock_recover(&self.race_hook).clone();
         if let Some(hook) = hook {
@@ -486,6 +560,13 @@ impl SemgrepJournal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppendRacePoint {
     BeforeIdentityCheck,
+    AfterFileSync,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppendFailurePoint {
+    BeforeWrite,
     AfterFileSync,
 }
 
@@ -581,8 +662,29 @@ fn replay_events(
             validate_event_identity(*close_version, *close_operation_id, expected_operation_id)?;
             Ok(OperationLifecycle::Closed)
         }
+        [_, SemgrepJournalEvent::Abort {
+            version,
+            operation_id,
+            ..
+        }] => {
+            validate_event_identity(*version, *operation_id, expected_operation_id)?;
+            Ok(OperationLifecycle::Aborted)
+        }
+        [_, SemgrepJournalEvent::ReadyToCommit {
+            version: ready_version,
+            operation_id: ready_operation_id,
+            ..
+        }, SemgrepJournalEvent::Abort {
+            version: abort_version,
+            operation_id: abort_operation_id,
+            ..
+        }] => {
+            validate_event_identity(*ready_version, *ready_operation_id, expected_operation_id)?;
+            validate_event_identity(*abort_version, *abort_operation_id, expected_operation_id)?;
+            Ok(OperationLifecycle::Aborted)
+        }
         _ => Err(invalid_data(
-            "journal records do not follow open, ready_to_commit, close",
+            "journal records do not follow open, optional ready_to_commit, and close or abort",
         )),
     }
 }
@@ -972,7 +1074,8 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_and_sync, AppendRacePoint, DurableWrite, SemgrepJournal, SemgrepReadyRecord,
+        append_and_sync, AppendFailurePoint, AppendRacePoint, DurableWrite, SemgrepAbortKind,
+        SemgrepJournal, SemgrepReadyRecord,
     };
     use hf_core::error::ClassifiedError;
     use std::io::{self, Write};
@@ -1062,6 +1165,86 @@ mod tests {
             .find(|operation| operation.operation_id == ready_id)
             .unwrap();
         assert_eq!(ready.ready.as_ref(), Some(&ready_record()));
+    }
+
+    #[test]
+    fn open_and_ready_operations_abort_as_terminal_non_publications() {
+        let directory = tempfile::tempdir().unwrap();
+        let open_id = Uuid::new_v4();
+        let ready_id = Uuid::new_v4();
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        begin(&journal, open_id);
+        begin(&journal, ready_id);
+        journal.ready_to_commit(ready_id, &ready_record()).unwrap();
+
+        journal.abort(open_id, SemgrepAbortKind::Failed).unwrap();
+        journal
+            .abort(ready_id, SemgrepAbortKind::Cancelled)
+            .unwrap();
+        drop(journal);
+
+        let reopened = SemgrepJournal::open(directory.path().to_path_buf());
+        assert!(reopened.interrupted().unwrap().is_empty());
+        for operation_id in [open_id, ready_id] {
+            assert!(!reopened.is_closed(operation_id).unwrap());
+            assert!(reopened
+                .ready_to_commit(operation_id, &ready_record())
+                .is_err());
+            assert!(reopened.close(operation_id).is_err());
+            assert!(reopened
+                .abort(operation_id, SemgrepAbortKind::Recovered)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn abort_rejects_unbounded_terminal_categories_at_the_type_boundary() {
+        assert_eq!(
+            serde_json::to_string(&SemgrepAbortKind::Recovered).unwrap(),
+            "\"recovered\""
+        );
+        assert!(serde_json::from_str::<SemgrepAbortKind>("\"other\"").is_err());
+    }
+
+    #[test]
+    fn close_error_before_write_replays_ready_for_compensation() {
+        let directory = tempfile::tempdir().unwrap();
+        let operation_id = Uuid::new_v4();
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        begin(&journal, operation_id);
+        journal
+            .ready_to_commit(operation_id, &ready_record())
+            .unwrap();
+        journal.install_test_append_failure(AppendFailurePoint::BeforeWrite);
+
+        assert!(journal.close(operation_id).is_err());
+        drop(journal);
+
+        let interrupted = SemgrepJournal::open(directory.path().to_path_buf())
+            .interrupted()
+            .unwrap();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].operation_id, operation_id);
+        assert_eq!(interrupted[0].ready.as_ref(), Some(&ready_record()));
+    }
+
+    #[test]
+    fn close_error_after_file_sync_replays_successful_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let operation_id = Uuid::new_v4();
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        begin(&journal, operation_id);
+        journal
+            .ready_to_commit(operation_id, &ready_record())
+            .unwrap();
+        journal.install_test_append_failure(AppendFailurePoint::AfterFileSync);
+
+        assert!(journal.close(operation_id).is_err());
+        drop(journal);
+
+        let reopened = SemgrepJournal::open(directory.path().to_path_buf());
+        assert!(reopened.is_closed(operation_id).unwrap());
+        assert!(reopened.interrupted().unwrap().is_empty());
     }
 
     #[test]

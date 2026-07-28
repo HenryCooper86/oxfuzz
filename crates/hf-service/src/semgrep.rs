@@ -11,10 +11,13 @@ use hf_core::error::ClassifiedError;
 use hf_core::runtime::{
     CommandTermination, ResourceLimits, SandboxMount, SandboxNetworkMode, SandboxOptions,
 };
-use hf_core::target::TargetLanguage;
+use hf_core::target::{TargetCandidate, TargetInventory, TargetLanguage};
 use hf_guardrails::Action;
 use hf_runtime::SANDBOX_IMAGE;
-use hf_storage::{SemgrepRunRecord, SemgrepRunStatus};
+use hf_storage::{
+    SemgrepFindingRecord, SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord,
+    SemgrepRunStatus, SemgrepTargetScoreRecord,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -54,6 +57,86 @@ pub enum SemgrepOperationState {
     Cancelled,
 }
 
+/// Staleness state of the selected Semgrep score overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemgrepOverlayState {
+    /// No completed Semgrep publication was selected.
+    None,
+    /// The selected publication is current and its scores are applied.
+    Current,
+    /// Eligible source no longer matches the scanned source revision.
+    StaleSource,
+    /// Candidate identity or immutable base scores no longer match.
+    StaleBase,
+    /// Successful publication cannot be proven by the recovery journal.
+    IncompleteJournal,
+}
+
+/// One candidate with immutable base and separately exposed Semgrep scoring.
+#[derive(Debug, Clone, Serialize)]
+pub struct SemgrepTargetView {
+    /// Original candidate. Its `fit_score` remains the immutable base score.
+    #[serde(flatten)]
+    pub candidate: TargetCandidate,
+    /// Immutable discovery or LLM-ranked base score.
+    pub base_score: f64,
+    /// Capped Semgrep score contribution.
+    pub semgrep_boost: f64,
+    /// Base plus current capped Semgrep contribution.
+    pub effective_score: f64,
+    /// Number of distinct matched rules contributing to the boost.
+    pub semgrep_matched_rule_count: u32,
+}
+
+/// Presentation-safe normalized Semgrep finding.
+#[derive(Debug, Clone, Serialize)]
+pub struct SemgrepFindingView {
+    /// Service-owned deterministic finding fingerprint.
+    pub fingerprint: String,
+    /// Bounded Semgrep rule identifier.
+    pub rule_id: String,
+    /// Canonical lower-case advisory severity.
+    pub severity: String,
+    /// Bounded normalized advisory message.
+    pub message: String,
+    /// Project-relative source path.
+    pub relative_file: PathBuf,
+    /// One-based start line.
+    pub start_line: u32,
+    /// One-based start column.
+    pub start_col: u32,
+    /// One-based end line.
+    pub end_line: u32,
+    /// One-based end column.
+    pub end_col: u32,
+    /// Unambiguously matched target, when one exists.
+    pub matched_target_id: Option<Uuid>,
+    /// Nominal advisory severity weight.
+    pub nominal_weight: f64,
+}
+
+/// Effective target inventory with optional Semgrep publication evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct SemgrepInventoryView {
+    /// Canonical project root.
+    pub project_root: PathBuf,
+    /// Inventory language.
+    pub language: TargetLanguage,
+    /// Selected Semgrep operation, when one exists.
+    pub scan_id: Option<Uuid>,
+    /// Selected scan source revision, when one exists.
+    pub source_sha256: Option<String>,
+    /// Whether the selected overlay is current or stale.
+    pub overlay_state: SemgrepOverlayState,
+    /// Deterministically ordered candidate views.
+    pub candidates: Vec<SemgrepTargetView>,
+    /// Normalized findings retained for the selected publication.
+    pub findings: Vec<SemgrepFindingView>,
+    /// Read-only scanner call graph.
+    pub call_graph: HashMap<String, Vec<String>>,
+}
+
 /// Presentation-safe status for one service-owned Semgrep operation.
 #[derive(Debug, Clone, Serialize)]
 pub struct SemgrepOperationView {
@@ -75,6 +158,8 @@ pub struct SemgrepOperationView {
     pub failure_code: Option<String>,
     /// Bounded redacted terminal failure message.
     pub failure_message: Option<String>,
+    /// Exact historical inventory result for a successfully completed UUID.
+    pub result: Option<SemgrepInventoryView>,
 }
 
 /// Result of requesting cooperative cancellation for an operation UUID.
@@ -93,8 +178,11 @@ pub enum SemgrepCancelOutcome {
 pub(crate) struct SemgrepCoordinator {
     active: Mutex<HashMap<PathBuf, (Uuid, CancellationToken)>>,
     journal: Arc<crate::semgrep_recovery::SemgrepJournal>,
+    recovery_error: Mutex<Option<String>>,
     #[cfg(test)]
     completion_pause: Mutex<Option<CompletionPause>>,
+    #[cfg(test)]
+    cleanup_failure: Mutex<bool>,
 }
 
 #[cfg(test)]
@@ -102,6 +190,8 @@ pub(crate) struct SemgrepCoordinator {
 enum CompletionPausePoint {
     BeforeClaim,
     AfterClaim,
+    AfterPublicationFailure,
+    BeforeClose,
 }
 
 #[cfg(test)]
@@ -117,8 +207,11 @@ impl SemgrepCoordinator {
         Self {
             active: Mutex::new(HashMap::new()),
             journal: Arc::new(crate::semgrep_recovery::SemgrepJournal::in_memory()),
+            recovery_error: Mutex::new(None),
             #[cfg(test)]
             completion_pause: Mutex::new(None),
+            #[cfg(test)]
+            cleanup_failure: Mutex::new(false),
         }
     }
 
@@ -126,8 +219,11 @@ impl SemgrepCoordinator {
         Self {
             active: Mutex::new(HashMap::new()),
             journal: Arc::new(crate::semgrep_recovery::SemgrepJournal::open(directory)),
+            recovery_error: Mutex::new(None),
             #[cfg(test)]
             completion_pause: Mutex::new(None),
+            #[cfg(test)]
+            cleanup_failure: Mutex::new(false),
         }
     }
 
@@ -144,6 +240,119 @@ impl SemgrepCoordinator {
             return Err(semgrep_validation("busy"));
         }
         active.insert(project.to_path_buf(), (operation_id, cancellation));
+        Ok(())
+    }
+
+    fn ensure_recovery_healthy(&self) -> Result<(), ClassifiedError> {
+        let degraded = self.journal.durability_error().is_some()
+            || self
+                .recovery_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+        if degraded {
+            return Err(ClassifiedError::Storage(
+                "Semgrep recovery is degraded".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_recovery_degraded(&self, error: impl std::fmt::Display) {
+        let mut recovery_error = self
+            .recovery_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        recovery_error.get_or_insert_with(|| bounded_bytes(&error.to_string(), 1_024));
+    }
+
+    pub(crate) async fn recover_interrupted(
+        &self,
+        store: &hf_storage::Store,
+        managed_workspace: &Path,
+    ) -> Result<(), ClassifiedError> {
+        let interrupted = self.journal.interrupted().inspect_err(|error| {
+            self.mark_recovery_degraded(error);
+        })?;
+        for operation in interrupted {
+            if let Err(error) = self.recover_one(store, managed_workspace, &operation).await {
+                self.mark_recovery_degraded(&error);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn recover_one(
+        &self,
+        store: &hf_storage::Store,
+        managed_workspace: &Path,
+        operation: &crate::semgrep_recovery::InterruptedSemgrepOperation,
+    ) -> Result<(), ClassifiedError> {
+        let run = store
+            .semgrep_run(operation.operation_id)
+            .await?
+            .ok_or_else(|| {
+                ClassifiedError::Storage(
+                    "Semgrep journal references a missing operation".to_owned(),
+                )
+            })?;
+        if !canonical_stored_project(Path::new(&run.project_root), &operation.project_root)
+            || operation.staging_dir_name != operation.operation_id.to_string()
+        {
+            return Err(ClassifiedError::Storage(
+                "Semgrep recovery identity does not match its operation".to_owned(),
+            ));
+        }
+        match run.status {
+            SemgrepRunStatus::Staging
+            | SemgrepRunStatus::Scanning
+            | SemgrepRunStatus::Validating
+            | SemgrepRunStatus::Persisting => {
+                store
+                    .fail_semgrep_run(
+                        operation.operation_id,
+                        SemgrepRunStatus::Failed,
+                        "recovered",
+                        "Interrupted Semgrep operation was repaired at startup",
+                        Utc::now(),
+                    )
+                    .await?;
+            }
+            SemgrepRunStatus::Done => {
+                store
+                    .compensate_semgrep_publication(
+                        operation.operation_id,
+                        "recovered",
+                        "Unclosed Semgrep publication was repaired at startup",
+                        Utc::now(),
+                    )
+                    .await?;
+            }
+            SemgrepRunStatus::Failed | SemgrepRunStatus::Cancelled => {
+                let publication = store
+                    .semgrep_publication(operation.operation_id)
+                    .await?
+                    .ok_or_else(|| {
+                        ClassifiedError::Storage(
+                            "Semgrep terminal operation disappeared during recovery".to_owned(),
+                        )
+                    })?;
+                if !publication.findings.is_empty() || !publication.scores.is_empty() {
+                    return Err(ClassifiedError::Storage(
+                        "Semgrep terminal operation retained publication children".to_owned(),
+                    ));
+                }
+            }
+        }
+        let operation_root = managed_workspace
+            .join("semgrep")
+            .join(operation.operation_id.to_string());
+        cleanup_operation_root_in(managed_workspace, &operation_root)?;
+        self.journal.abort(
+            operation.operation_id,
+            crate::semgrep_recovery::SemgrepAbortKind::Recovered,
+        )?;
         Ok(())
     }
 
@@ -235,6 +444,23 @@ impl SemgrepCoordinator {
         }
         (reached, release)
     }
+
+    #[cfg(test)]
+    fn install_test_cleanup_failure(&self) {
+        *self
+            .cleanup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    }
+
+    #[cfg(test)]
+    fn take_test_cleanup_failure(&self) -> bool {
+        let mut failure = self
+            .cleanup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *failure)
+    }
 }
 
 struct ActiveSemgrepGuard {
@@ -250,6 +476,126 @@ impl Drop for ActiveSemgrepGuard {
 }
 
 impl crate::ServiceContainer {
+    #[cfg(test)]
+    pub(crate) async fn semgrep_test_publish_inventory(
+        &self,
+        inventory: &TargetInventory,
+        boost_by_target: HashMap<Uuid, f64>,
+    ) -> Result<Uuid, ClassifiedError> {
+        let store = self.store().cloned().ok_or_else(|| {
+            ClassifiedError::Validation("Semgrep test publication requires a store".to_owned())
+        })?;
+        let language = inventory
+            .candidates
+            .first()
+            .map(|candidate| candidate.language)
+            .ok_or_else(|| semgrep_validation("inventory_missing"))?;
+        let operation_id = Uuid::new_v4();
+        let source_sha256 = digest_live_sources(&inventory.project_root, language)?;
+        let started_at = Utc::now();
+        let run = SemgrepRunRecord {
+            id: operation_id,
+            project_root: inventory.project_root.to_string_lossy().into_owned(),
+            language: language.as_str().to_owned(),
+            source_sha256: None,
+            sandbox_image: SANDBOX_IMAGE.to_owned(),
+            sandbox_image_sha256: "1".repeat(64),
+            semgrep_version: SEMGREP_VERSION.to_owned(),
+            rules_commit: RULES_COMMIT.to_owned(),
+            rules_tree_sha256: rules_tree_sha256().to_owned(),
+            command_schema_version: COMMAND_SCHEMA_VERSION,
+            status: SemgrepRunStatus::Staging,
+            started_at,
+            ended_at: None,
+            output_sha256: None,
+            finding_count: None,
+            matched_candidate_count: None,
+            duration_ms: None,
+            failure_code: None,
+            failure_message: None,
+        };
+        store.insert_semgrep_run(&run).await?;
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Staging,
+                SemgrepRunStatus::Scanning,
+                Some(&source_sha256),
+            )
+            .await?;
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Scanning,
+                SemgrepRunStatus::Validating,
+                None,
+            )
+            .await?;
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Validating,
+                SemgrepRunStatus::Persisting,
+                None,
+            )
+            .await?;
+        self.semgrep.journal.begin(
+            operation_id,
+            &inventory.project_root,
+            &operation_id.to_string(),
+        )?;
+        let output_sha256 = "3".repeat(64);
+        self.semgrep.journal.ready_to_commit(
+            operation_id,
+            &crate::semgrep_recovery::SemgrepReadyRecord {
+                source_sha256: source_sha256.clone(),
+                output_sha256: output_sha256.clone(),
+                sandbox_image_sha256: "1".repeat(64),
+                rules_tree_sha256: rules_tree_sha256().to_owned(),
+                command_schema_version: COMMAND_SCHEMA_VERSION,
+            },
+        )?;
+        let scores = inventory
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let boost = boost_by_target.get(&candidate.id).copied().unwrap_or(0.0);
+                SemgrepTargetScoreRecord {
+                    scan_id: operation_id,
+                    target_id: candidate.id,
+                    base_score: candidate.fit_score,
+                    boost,
+                    effective_score: (candidate.fit_score + boost).min(1.0),
+                    matched_rule_count: u32::from(boost > 0.0),
+                }
+            })
+            .collect::<Vec<_>>();
+        let matched_candidate_count = u32::try_from(
+            scores
+                .iter()
+                .filter(|score| score.matched_rule_count > 0)
+                .count(),
+        )
+        .map_err(|_| ClassifiedError::Storage("Semgrep test count overflowed".to_owned()))?;
+        let publication = SemgrepPublication {
+            run: SemgrepRunRecord {
+                source_sha256: Some(source_sha256),
+                status: SemgrepRunStatus::Done,
+                ended_at: Some(Utc::now()),
+                output_sha256: Some(output_sha256),
+                finding_count: Some(0),
+                matched_candidate_count: Some(matched_candidate_count),
+                duration_ms: Some(1),
+                ..run
+            },
+            findings: Vec::new(),
+            scores,
+        };
+        store.publish_semgrep_run(&publication).await?;
+        self.semgrep.journal.close(operation_id)?;
+        Ok(operation_id)
+    }
+
     /// Admit and start one explicit Semgrep enrichment without awaiting it.
     ///
     /// # Errors
@@ -271,6 +617,7 @@ impl crate::ServiceContainer {
             )
         })?;
         require_persisted_inventory(&store, &canonical_project, language).await?;
+        self.semgrep.ensure_recovery_healthy()?;
 
         self.authorize_recorded(
             Action::AnalyzeSource {
@@ -395,6 +742,11 @@ impl crate::ServiceContainer {
         let Some(run) = store.semgrep_run(operation_id).await? else {
             return Ok(None);
         };
+        let result = if run.status == SemgrepRunStatus::Done {
+            self.semgrep_result(operation_id).await?
+        } else {
+            None
+        };
         Ok(Some(SemgrepOperationView {
             operation_id: run.id,
             project_root: run.project_root,
@@ -405,7 +757,169 @@ impl crate::ServiceContainer {
             ended_at: run.ended_at.map(|value| value.to_rfc3339()),
             failure_code: run.failure_code,
             failure_message: run.failure_message,
+            result,
         }))
+    }
+
+    /// Build effective ranking from the latest completed publication only.
+    ///
+    /// This read never starts Semgrep and leaves candidate base scores
+    /// immutable.
+    pub async fn effective_inventory(
+        &self,
+        inventory: TargetInventory,
+        language: TargetLanguage,
+    ) -> Result<SemgrepInventoryView, ClassifiedError> {
+        if !matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
+            return Ok(base_inventory_view(inventory, language));
+        }
+        let publication = match self.store() {
+            Some(store) => {
+                store
+                    .latest_semgrep_publication(
+                        &inventory.project_root.to_string_lossy(),
+                        language.as_str(),
+                    )
+                    .await?
+            }
+            None => None,
+        };
+        Ok(self.inventory_with_publication(inventory, language, publication, true))
+    }
+
+    /// Read the exact historical result for one completed operation UUID.
+    ///
+    /// This never substitutes a newer publication.
+    pub async fn semgrep_result(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<SemgrepInventoryView>, ClassifiedError> {
+        let Some(store) = self.store() else {
+            return Ok(None);
+        };
+        let Some(publication) = store.semgrep_publication(operation_id).await? else {
+            return Ok(None);
+        };
+        if publication.run.status != SemgrepRunStatus::Done {
+            return Ok(None);
+        }
+        let language = publication
+            .run
+            .language
+            .parse::<TargetLanguage>()
+            .map_err(|_| semgrep_validation("unsupported_language"))?;
+        let project = PathBuf::from(&publication.run.project_root);
+        let mut inventory = load_persisted_inventory(store, &project, language).await?;
+        let persisted_ids = inventory
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id)
+            .collect::<BTreeSet<_>>();
+        let scanner_ids_verified =
+            hf_discovery::discover(&project, language)
+                .await
+                .is_ok_and(|scanned| {
+                    let scanned_ids = scanned
+                        .candidates
+                        .iter()
+                        .map(|candidate| candidate.id)
+                        .collect::<BTreeSet<_>>();
+                    if persisted_ids == scanned_ids {
+                        inventory.call_graph = scanned.call_graph;
+                        true
+                    } else {
+                        false
+                    }
+                });
+        Ok(Some(self.inventory_with_publication(
+            inventory,
+            language,
+            Some(publication),
+            scanner_ids_verified,
+        )))
+    }
+
+    fn inventory_with_publication(
+        &self,
+        inventory: TargetInventory,
+        language: TargetLanguage,
+        publication: Option<SemgrepPublication>,
+        scanner_ids_verified: bool,
+    ) -> SemgrepInventoryView {
+        let Some(publication) = publication else {
+            return base_inventory_view(inventory, language);
+        };
+        let mut view = base_inventory_view(inventory, language);
+        view.scan_id = Some(publication.run.id);
+        view.source_sha256
+            .clone_from(&publication.run.source_sha256);
+        view.findings = publication
+            .findings
+            .iter()
+            .map(semgrep_finding_view)
+            .collect();
+
+        let journal_closed = self
+            .semgrep
+            .journal
+            .is_closed(publication.run.id)
+            .unwrap_or(false);
+        if !journal_closed {
+            view.overlay_state = SemgrepOverlayState::IncompleteJournal;
+            return view;
+        }
+        let live_source = digest_live_sources(&view.project_root, language);
+        if live_source.as_ref().ok() != publication.run.source_sha256.as_ref() {
+            view.overlay_state = SemgrepOverlayState::StaleSource;
+            return view;
+        }
+        if !scanner_ids_verified {
+            view.overlay_state = SemgrepOverlayState::StaleBase;
+            return view;
+        }
+
+        let candidate_ids = view
+            .candidates
+            .iter()
+            .map(|candidate| candidate.candidate.id)
+            .collect::<BTreeSet<_>>();
+        let score_ids = publication
+            .scores
+            .iter()
+            .map(|score| score.target_id)
+            .collect::<BTreeSet<_>>();
+        let base_by_id = view
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.candidate.id, candidate.base_score))
+            .collect::<HashMap<_, _>>();
+        if publication.scores.len() != view.candidates.len()
+            || score_ids != candidate_ids
+            || publication.scores.iter().any(|score| {
+                base_by_id
+                    .get(&score.target_id)
+                    .is_none_or(|base| base.to_bits() != score.base_score.to_bits())
+            })
+        {
+            view.overlay_state = SemgrepOverlayState::StaleBase;
+            return view;
+        }
+
+        let scores = publication
+            .scores
+            .iter()
+            .map(|score| (score.target_id, score))
+            .collect::<HashMap<_, _>>();
+        for target in &mut view.candidates {
+            if let Some(score) = scores.get(&target.candidate.id) {
+                target.semgrep_boost = score.boost;
+                target.effective_score = score.effective_score;
+                target.semgrep_matched_rule_count = score.matched_rule_count;
+            }
+        }
+        view.overlay_state = SemgrepOverlayState::Current;
+        sort_semgrep_targets(&mut view.candidates);
+        view
     }
 
     /// Request cooperative cancellation for one service-owned operation UUID.
@@ -472,7 +986,16 @@ impl crate::ServiceContainer {
             code = "cancelled";
             message = "Semgrep enrichment was cancelled";
         }
-        fail_semgrep_operation(store, operation_id, status, code, message, operation_root).await;
+        fail_semgrep_operation(
+            store,
+            &self.semgrep,
+            operation_id,
+            status,
+            code,
+            message,
+            operation_root,
+        )
+        .await;
     }
 
     async fn run_semgrep_scan(
@@ -518,6 +1041,20 @@ impl crate::ServiceContainer {
             .await;
             return;
         }
+        let Ok(inventory) = load_persisted_inventory(&store, &canonical_project, language).await
+        else {
+            self.finish_semgrep_failure(
+                &store,
+                &canonical_project,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "inventory_missing",
+                "Semgrep persisted inventory could not be loaded",
+                None,
+            )
+            .await;
+            return;
+        };
 
         let staging_started = std::time::Instant::now();
         let Ok(snapshot) = stage_source_snapshot(&canonical_project, language, operation_id) else {
@@ -705,25 +1242,29 @@ impl crate::ServiceContainer {
             .await;
             return;
         }
-        if let Err(failure) = read_semgrep_output(&snapshot.output_dir) {
-            self.finish_semgrep_failure(
-                &store,
-                &canonical_project,
-                operation_id,
-                SemgrepRunStatus::Failed,
-                failure.code,
-                failure.message,
-                Some(&snapshot.operation_root),
-            )
-            .await;
-            return;
-        }
+        let output_bytes = match read_semgrep_output(&snapshot.output_dir) {
+            Ok(bytes) => bytes,
+            Err(failure) => {
+                self.finish_semgrep_failure(
+                    &store,
+                    &canonical_project,
+                    operation_id,
+                    SemgrepRunStatus::Failed,
+                    failure.code,
+                    failure.message,
+                    Some(&snapshot.operation_root),
+                )
+                .await;
+                return;
+            }
+        };
         if self
             .claim_semgrep_completion(&canonical_project, operation_id)
             .await
         {
             fail_semgrep_operation(
                 &store,
+                &self.semgrep,
                 operation_id,
                 SemgrepRunStatus::Cancelled,
                 "cancelled",
@@ -745,6 +1286,7 @@ impl crate::ServiceContainer {
         {
             fail_semgrep_operation(
                 &store,
+                &self.semgrep,
                 operation_id,
                 SemgrepRunStatus::Failed,
                 "persistence_failed",
@@ -752,6 +1294,194 @@ impl crate::ServiceContainer {
                 Some(&snapshot.operation_root),
             )
             .await;
+            return;
+        }
+        self.complete_semgrep_publication(
+            &store,
+            operation_id,
+            &canonical_project,
+            language,
+            &inventory,
+            &snapshot,
+            &output_bytes,
+        )
+        .await;
+    }
+
+    async fn complete_semgrep_publication(
+        &self,
+        store: &hf_storage::Store,
+        operation_id: Uuid,
+        canonical_project: &Path,
+        language: TargetLanguage,
+        inventory: &TargetInventory,
+        snapshot: &SourceSnapshot,
+        output_bytes: &[u8],
+    ) {
+        let output_sha256 = sha256_bytes(output_bytes);
+        let Ok(findings) =
+            hf_discovery::semgrep::parse_findings(output_bytes, &snapshot.relative_paths)
+        else {
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "output_invalid",
+                "Semgrep output failed strict validation",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        };
+        let Ok(analysis) = hf_discovery::semgrep::map_and_score(inventory, findings) else {
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "mapping_failed",
+                "Semgrep findings could not be mapped to the persisted inventory",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        };
+        if !matches!(
+            digest_live_sources(canonical_project, language),
+            Ok(digest) if digest == snapshot.source_sha256
+        ) {
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "source_changed",
+                "Eligible source changed before Semgrep publication",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        }
+        if set_semgrep_phase_with_retry(
+            store,
+            operation_id,
+            SemgrepRunStatus::Validating,
+            SemgrepRunStatus::Persisting,
+            None,
+        )
+        .await
+        .is_err()
+        {
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "persistence_failed",
+                "Semgrep persisting phase could not be recorded",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        }
+
+        let ready = crate::semgrep_recovery::SemgrepReadyRecord {
+            source_sha256: snapshot.source_sha256.clone(),
+            output_sha256: output_sha256.clone(),
+            sandbox_image_sha256: if let Ok(Some(run)) = store.semgrep_run(operation_id).await {
+                run.sandbox_image_sha256
+            } else {
+                self.semgrep
+                    .mark_recovery_degraded("Semgrep provenance could not be reloaded");
+                return;
+            },
+            rules_tree_sha256: rules_tree_sha256().to_owned(),
+            command_schema_version: COMMAND_SCHEMA_VERSION,
+        };
+        if let Err(error) = self.semgrep.journal.ready_to_commit(operation_id, &ready) {
+            self.semgrep.mark_recovery_degraded(&error);
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "journal_failed",
+                "Semgrep recovery journal could not record validated provenance",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        }
+
+        let Ok(publication) =
+            build_semgrep_publication(store, operation_id, analysis, output_sha256).await
+        else {
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "persistence_failed",
+                "Semgrep publication records could not be built",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        };
+        if store.publish_semgrep_run(&publication).await.is_err() {
+            #[cfg(test)]
+            self.semgrep
+                .pause_completion(CompletionPausePoint::AfterPublicationFailure)
+                .await;
+            fail_semgrep_operation(
+                store,
+                &self.semgrep,
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "persistence_failed",
+                "Semgrep publication transaction failed",
+                Some(&snapshot.operation_root),
+            )
+            .await;
+            return;
+        }
+        #[cfg(test)]
+        let cleanup_result = if self.semgrep.take_test_cleanup_failure() {
+            Err(snapshot_validation("injected Semgrep cleanup failure"))
+        } else {
+            cleanup_operation_root(&snapshot.operation_root)
+        };
+        #[cfg(not(test))]
+        let cleanup_result = cleanup_operation_root(&snapshot.operation_root);
+        if let Err(cleanup_error) = cleanup_result {
+            self.semgrep.mark_recovery_degraded(&cleanup_error);
+            if store
+                .compensate_semgrep_publication(
+                    operation_id,
+                    "cleanup_failed",
+                    "Semgrep staged artifacts could not be removed safely",
+                    Utc::now(),
+                )
+                .await
+                .is_err()
+            {
+                self.semgrep
+                    .mark_recovery_degraded("Semgrep cleanup compensation failed");
+            }
+            tracing::error!(
+                operation_id = %operation_id,
+                failure_code = "cleanup_failed",
+                "Semgrep publication cleanup failed and recovery is degraded"
+            );
+            return;
+        }
+        #[cfg(test)]
+        self.semgrep
+            .pause_completion(CompletionPausePoint::BeforeClose)
+            .await;
+        if let Err(error) = self.semgrep.journal.close(operation_id) {
+            self.semgrep.mark_recovery_degraded(error);
         }
     }
 }
@@ -759,6 +1489,75 @@ impl crate::ServiceContainer {
 struct OutputFailure {
     code: &'static str,
     message: &'static str,
+}
+
+async fn build_semgrep_publication(
+    store: &hf_storage::Store,
+    operation_id: Uuid,
+    analysis: hf_discovery::semgrep::SemgrepAnalysis,
+    output_sha256: String,
+) -> Result<SemgrepPublication, ClassifiedError> {
+    let mut run = store
+        .semgrep_run(operation_id)
+        .await?
+        .ok_or_else(|| ClassifiedError::Storage("Semgrep operation disappeared".to_owned()))?;
+    let ended_at = Utc::now();
+    let duration_ms = ended_at
+        .signed_duration_since(run.started_at)
+        .num_milliseconds()
+        .max(0)
+        .try_into()
+        .map_err(|_| ClassifiedError::Storage("Semgrep duration overflowed".to_owned()))?;
+    let finding_count = u32::try_from(analysis.findings.len())
+        .map_err(|_| ClassifiedError::Storage("Semgrep finding count overflowed".to_owned()))?;
+    run.status = SemgrepRunStatus::Done;
+    run.ended_at = Some(ended_at);
+    run.output_sha256 = Some(output_sha256);
+    run.finding_count = Some(finding_count);
+    run.matched_candidate_count = Some(analysis.matched_candidate_count);
+    run.duration_ms = Some(duration_ms);
+    run.failure_code = None;
+    run.failure_message = None;
+
+    let findings = analysis
+        .findings
+        .into_iter()
+        .map(|finding| SemgrepFindingRecord {
+            scan_id: operation_id,
+            fingerprint: finding.fingerprint,
+            rule_id: finding.rule_id,
+            severity: match finding.severity {
+                hf_discovery::semgrep::SemgrepSeverity::Error => SemgrepFindingSeverity::Error,
+                hf_discovery::semgrep::SemgrepSeverity::Warning => SemgrepFindingSeverity::Warning,
+                hf_discovery::semgrep::SemgrepSeverity::Info => SemgrepFindingSeverity::Info,
+            },
+            message: finding.message,
+            relative_file: finding.relative_path.to_string_lossy().into_owned(),
+            start_line: finding.range.start_line,
+            start_col: finding.range.start_col,
+            end_line: finding.range.end_line,
+            end_col: finding.range.end_col,
+            target_id: finding.matched_target_id,
+            nominal_weight: finding.nominal_weight,
+        })
+        .collect();
+    let scores = analysis
+        .scores
+        .into_iter()
+        .map(|score| SemgrepTargetScoreRecord {
+            scan_id: operation_id,
+            target_id: score.target_id,
+            base_score: score.base_score,
+            boost: score.boost,
+            effective_score: score.effective_score,
+            matched_rule_count: score.matched_rule_count,
+        })
+        .collect();
+    Ok(SemgrepPublication {
+        run,
+        findings,
+        scores,
+    })
 }
 
 async fn require_persisted_inventory(
@@ -785,6 +1584,30 @@ async fn require_persisted_inventory(
     Ok(())
 }
 
+async fn load_persisted_inventory(
+    store: &hf_storage::Store,
+    canonical_project: &Path,
+    language: TargetLanguage,
+) -> Result<TargetInventory, ClassifiedError> {
+    let candidates = store
+        .list_all_targets()
+        .await?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.language == language
+                && canonical_stored_project(&candidate.project_root, canonical_project)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(semgrep_validation("inventory_missing"));
+    }
+    Ok(TargetInventory {
+        project_root: canonical_project.to_path_buf(),
+        candidates,
+        call_graph: HashMap::new(),
+    })
+}
+
 fn canonical_stored_project(stored: &Path, canonical: &Path) -> bool {
     stored == canonical || std::fs::canonicalize(stored).is_ok_and(|resolved| resolved == canonical)
 }
@@ -809,6 +1632,74 @@ fn operation_state(status: SemgrepRunStatus) -> SemgrepOperationState {
         SemgrepRunStatus::Done => SemgrepOperationState::Done,
         SemgrepRunStatus::Failed => SemgrepOperationState::Failed,
         SemgrepRunStatus::Cancelled => SemgrepOperationState::Cancelled,
+    }
+}
+
+fn base_inventory_view(
+    inventory: TargetInventory,
+    language: TargetLanguage,
+) -> SemgrepInventoryView {
+    let mut candidates = inventory
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            let base_score = candidate.fit_score;
+            SemgrepTargetView {
+                candidate,
+                base_score,
+                semgrep_boost: 0.0,
+                effective_score: base_score,
+                semgrep_matched_rule_count: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+    sort_semgrep_targets(&mut candidates);
+    SemgrepInventoryView {
+        project_root: inventory.project_root,
+        language,
+        scan_id: None,
+        source_sha256: None,
+        overlay_state: SemgrepOverlayState::None,
+        candidates,
+        findings: Vec::new(),
+        call_graph: inventory.call_graph,
+    }
+}
+
+fn sort_semgrep_targets(candidates: &mut [SemgrepTargetView]) {
+    candidates.sort_by(|left, right| {
+        right
+            .effective_score
+            .total_cmp(&left.effective_score)
+            .then_with(|| right.base_score.total_cmp(&left.base_score))
+            .then_with(|| {
+                left.candidate
+                    .relative_file()
+                    .cmp(&right.candidate.relative_file())
+            })
+            .then_with(|| left.candidate.symbol.cmp(&right.candidate.symbol))
+            .then_with(|| left.candidate.id.cmp(&right.candidate.id))
+    });
+}
+
+fn semgrep_finding_view(finding: &SemgrepFindingRecord) -> SemgrepFindingView {
+    SemgrepFindingView {
+        fingerprint: finding.fingerprint.clone(),
+        rule_id: finding.rule_id.clone(),
+        severity: match finding.severity {
+            SemgrepFindingSeverity::Error => "error",
+            SemgrepFindingSeverity::Warning => "warning",
+            SemgrepFindingSeverity::Info => "info",
+        }
+        .to_owned(),
+        message: finding.message.clone(),
+        relative_file: PathBuf::from(&finding.relative_file),
+        start_line: finding.start_line,
+        start_col: finding.start_col,
+        end_line: finding.end_line,
+        end_col: finding.end_col,
+        matched_target_id: finding.target_id,
+        nominal_weight: finding.nominal_weight,
     }
 }
 
@@ -849,27 +1740,25 @@ fn bounded_bytes(value: &str, max_bytes: usize) -> String {
 
 async fn fail_semgrep_operation(
     store: &hf_storage::Store,
+    coordinator: &SemgrepCoordinator,
     operation_id: Uuid,
-    mut status: SemgrepRunStatus,
-    mut code: &str,
-    mut message: &str,
+    status: SemgrepRunStatus,
+    code: &str,
+    message: &str,
     operation_root: Option<&Path>,
 ) {
-    if let Some(operation_root) = operation_root {
-        if cleanup_operation_root(operation_root).is_err() {
-            status = SemgrepRunStatus::Failed;
-            code = "cleanup_failed";
-            message = "Semgrep staged artifacts could not be removed safely";
-        }
-    }
     let code = bounded_bytes(code, 64);
     let message = bounded_bytes(message, 1_024);
+    let mut persisted = false;
     for attempt in 0..20_u32 {
         match store
             .fail_semgrep_run(operation_id, status, &code, &message, Utc::now())
             .await
         {
-            Ok(()) => return,
+            Ok(()) => {
+                persisted = true;
+                break;
+            }
             Err(error) if storage_is_busy(&error) && attempt < 19 => {
                 tokio::time::sleep(std::time::Duration::from_millis(
                     5_u64.saturating_mul(u64::from(attempt + 1)),
@@ -879,11 +1768,37 @@ async fn fail_semgrep_operation(
             Err(_) => break,
         }
     }
-    tracing::error!(
-        operation_id = %operation_id,
-        failure_code = "persistence_failed",
-        "Semgrep terminal state could not be persisted"
-    );
+    if !persisted {
+        coordinator.mark_recovery_degraded("Semgrep terminal state could not be persisted");
+        tracing::error!(
+            operation_id = %operation_id,
+            failure_code = "persistence_failed",
+            "Semgrep terminal state could not be persisted"
+        );
+        return;
+    }
+
+    let owned_operation_root = match operation_root {
+        Some(path) => path.to_path_buf(),
+        None => match crate::container::initialize_workspace_root() {
+            Ok(workspace) => workspace.join("semgrep").join(operation_id.to_string()),
+            Err(error) => {
+                coordinator.mark_recovery_degraded(error);
+                return;
+            }
+        },
+    };
+    if let Err(error) = cleanup_operation_root(&owned_operation_root) {
+        coordinator.mark_recovery_degraded(error);
+        return;
+    }
+    let abort_kind = match status {
+        SemgrepRunStatus::Cancelled => crate::semgrep_recovery::SemgrepAbortKind::Cancelled,
+        _ => crate::semgrep_recovery::SemgrepAbortKind::Failed,
+    };
+    if let Err(error) = coordinator.journal.abort(operation_id, abort_kind) {
+        coordinator.mark_recovery_degraded(error);
+    }
 }
 
 async fn set_semgrep_phase_with_retry(
@@ -1884,12 +2799,28 @@ where
 {
     let workspace = validate_canonical_directory(managed_workspace, "managed workspace")?;
     let semgrep_root = workspace.join("semgrep");
-    let semgrep_metadata = std::fs::symlink_metadata(&semgrep_root).map_err(|error| {
-        snapshot_validation(format!(
-            "inspect Semgrep workspace {}: {error}",
-            semgrep_root.display()
-        ))
-    })?;
+    let operation_name = operation_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| snapshot_validation("Semgrep operation path has no UTF-8 UUID"))?;
+    let operation_id = Uuid::parse_str(operation_name)
+        .map_err(|_| snapshot_validation("Semgrep operation path is not UUID-owned"))?;
+    let expected = semgrep_root.join(operation_id.to_string());
+    if operation_root != expected {
+        return Err(snapshot_validation(
+            "Semgrep cleanup target is not the exact owned operation directory",
+        ));
+    }
+    let semgrep_metadata = match std::fs::symlink_metadata(&semgrep_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(snapshot_validation(format!(
+                "inspect Semgrep workspace {}: {error}",
+                semgrep_root.display()
+            )));
+        }
+    };
     if !semgrep_metadata.file_type().is_dir() {
         return Err(snapshot_validation(
             "Semgrep workspace is not a regular directory",
@@ -1906,24 +2837,18 @@ where
             "Semgrep workspace has an ambiguous ancestor",
         ));
     }
-    let operation_name = operation_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| snapshot_validation("Semgrep operation path has no UTF-8 UUID"))?;
-    let operation_id = Uuid::parse_str(operation_name)
-        .map_err(|_| snapshot_validation("Semgrep operation path is not UUID-owned"))?;
-    let expected = semgrep_root.join(operation_id.to_string());
-    if operation_root != expected {
-        return Err(snapshot_validation(
-            "Semgrep cleanup target is not the exact owned operation directory",
-        ));
-    }
-    let metadata = std::fs::symlink_metadata(operation_root).map_err(|error| {
-        snapshot_validation(format!(
-            "inspect Semgrep operation directory {}: {error}",
-            operation_root.display()
-        ))
-    })?;
+    let metadata = match std::fs::symlink_metadata(operation_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return verify_absent_operation_path(&semgrep_root, &semgrep_metadata, operation_name);
+        }
+        Err(error) => {
+            return Err(snapshot_validation(format!(
+                "inspect Semgrep operation directory {}: {error}",
+                operation_root.display()
+            )));
+        }
+    };
     if !metadata.file_type().is_dir() {
         return Err(snapshot_validation(
             "Semgrep cleanup target is not a regular directory",
@@ -1942,6 +2867,48 @@ where
     }
     before_remove();
     remove_owned_operation_nofollow(&semgrep_root, operation_name, &semgrep_metadata, &metadata)
+}
+
+#[cfg(unix)]
+fn verify_absent_operation_path(
+    semgrep_root: &Path,
+    expected_semgrep: &std::fs::Metadata,
+    operation_name: &str,
+) -> Result<(), ClassifiedError> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let semgrep = File::from(open(semgrep_root, flags, Mode::empty()).map_err(|error| {
+        snapshot_validation(format!("open Semgrep workspace without links: {error}"))
+    })?);
+    let open_semgrep = semgrep.metadata().map_err(|error| {
+        snapshot_validation(format!("reinspect open Semgrep workspace: {error}"))
+    })?;
+    if !same_directory_identity(expected_semgrep, &open_semgrep) {
+        return Err(snapshot_validation(
+            "Semgrep workspace changed while proving operation absence",
+        ));
+    }
+    match openat(&semgrep, operation_name, flags, Mode::empty()) {
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Ok(_) => Err(snapshot_validation(
+            "Semgrep operation appeared while proving its absence",
+        )),
+        Err(error) => Err(snapshot_validation(format!(
+            "inspect Semgrep operation absence without links: {error}"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn verify_absent_operation_path(
+    _semgrep_root: &Path,
+    _expected_semgrep: &std::fs::Metadata,
+    _operation_name: &str,
+) -> Result<(), ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep cleanup requires descriptor-relative filesystem access".to_owned(),
+    ))
 }
 
 #[cfg(unix)]
@@ -2000,9 +2967,15 @@ fn remove_owned_operation_nofollow(
             "Semgrep operation pathname changed during cleanup",
         ));
     }
-    unlinkat(&semgrep, operation_name, AtFlags::REMOVEDIR).map_err(|error| {
-        snapshot_validation(format!("remove owned Semgrep operation directory: {error}"))
-    })
+    unlinkat(&semgrep, operation_name, AtFlags::REMOVEDIR)
+        .map_err(|error| {
+            snapshot_validation(format!("remove owned Semgrep operation directory: {error}"))
+        })
+        .and_then(|()| {
+            semgrep.sync_all().map_err(|error| {
+                snapshot_validation(format!("sync Semgrep workspace after cleanup: {error}"))
+            })
+        })
 }
 
 #[cfg(unix)]
@@ -2089,6 +3062,778 @@ fn append_error_context(error: ClassifiedError, context: &str) -> ClassifiedErro
         ClassifiedError::Validation(message) => ClassifiedError::Validation(append(message)),
         ClassifiedError::Internal(message) => ClassifiedError::Internal(append(message)),
         ClassifiedError::Timeout => ClassifiedError::Timeout,
+    }
+}
+
+#[cfg(test)]
+macro_rules! assert_f64_eq {
+    ($left:expr, $right:expr) => {
+        assert_eq!($left.to_bits(), f64::to_bits($right));
+    };
+}
+
+#[cfg(test)]
+mod effective_inventory_tests {
+    use std::path::{Path, PathBuf};
+
+    use chrono::Utc;
+    use hf_core::target::{
+        InputSurface, SourceLocation, TargetCandidate, TargetInventory, TargetKind, TargetLanguage,
+    };
+    use hf_storage::{
+        SemgrepFindingRecord, SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord,
+        SemgrepRunStatus, SemgrepTargetScoreRecord,
+    };
+    use uuid::Uuid;
+
+    use super::{
+        digest_live_sources, sort_semgrep_targets, SemgrepOverlayState, SemgrepTargetView,
+        COMMAND_SCHEMA_VERSION, RULES_COMMIT, SEMGREP_VERSION,
+    };
+    use crate::ServiceContainer;
+
+    fn candidate(project: &Path, id: Uuid, symbol: &str, base_score: f64) -> TargetCandidate {
+        TargetCandidate {
+            id,
+            project_root: project.to_path_buf(),
+            language: TargetLanguage::C,
+            symbol: symbol.to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: project.join("parser.c"),
+                line: 1,
+                col: 1,
+                end_line: Some(1),
+                end_col: Some(80),
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            fit_score: base_score,
+            sanitizers: Vec::new(),
+            rationale: "persisted".to_owned(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 1,
+        }
+    }
+
+    fn inventory(project: &Path, candidate: TargetCandidate) -> TargetInventory {
+        TargetInventory {
+            project_root: project.to_path_buf(),
+            candidates: vec![candidate],
+            call_graph: std::collections::HashMap::new(),
+        }
+    }
+
+    fn publication(
+        project: &Path,
+        target_id: Uuid,
+        source_sha256: String,
+        base_score: f64,
+    ) -> SemgrepPublication {
+        let scan_id = Uuid::new_v4();
+        SemgrepPublication {
+            run: SemgrepRunRecord {
+                id: scan_id,
+                project_root: project.to_string_lossy().into_owned(),
+                language: "c".to_owned(),
+                source_sha256: Some(source_sha256),
+                sandbox_image: "image".to_owned(),
+                sandbox_image_sha256: "1".repeat(64),
+                semgrep_version: SEMGREP_VERSION.to_owned(),
+                rules_commit: RULES_COMMIT.to_owned(),
+                rules_tree_sha256: "2".repeat(64),
+                command_schema_version: COMMAND_SCHEMA_VERSION,
+                status: SemgrepRunStatus::Done,
+                started_at: Utc::now(),
+                ended_at: Some(Utc::now()),
+                output_sha256: Some("3".repeat(64)),
+                finding_count: Some(2),
+                matched_candidate_count: Some(1),
+                duration_ms: Some(1),
+                failure_code: None,
+                failure_message: None,
+            },
+            findings: vec![
+                SemgrepFindingRecord {
+                    scan_id,
+                    fingerprint: "4".repeat(64),
+                    rule_id: "matched.rule".to_owned(),
+                    severity: SemgrepFindingSeverity::Warning,
+                    message: "matched signal".to_owned(),
+                    relative_file: "parser.c".to_owned(),
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 4,
+                    target_id: Some(target_id),
+                    nominal_weight: 0.05,
+                },
+                SemgrepFindingRecord {
+                    scan_id,
+                    fingerprint: "5".repeat(64),
+                    rule_id: "unmatched.rule".to_owned(),
+                    severity: SemgrepFindingSeverity::Info,
+                    message: "unmatched signal".to_owned(),
+                    relative_file: "parser.c".to_owned(),
+                    start_line: 1,
+                    start_col: 6,
+                    end_line: 1,
+                    end_col: 9,
+                    target_id: None,
+                    nominal_weight: 0.01,
+                },
+            ],
+            scores: vec![SemgrepTargetScoreRecord {
+                scan_id,
+                target_id,
+                base_score,
+                boost: 0.05,
+                effective_score: base_score + 0.05,
+                matched_rule_count: 1,
+            }],
+        }
+    }
+
+    fn close_publication_journal(service: &ServiceContainer, publication: &SemgrepPublication) {
+        let scan_id = publication.run.id;
+        service
+            .semgrep
+            .journal
+            .begin(
+                scan_id,
+                Path::new(&publication.run.project_root),
+                &scan_id.to_string(),
+            )
+            .unwrap();
+        service
+            .semgrep
+            .journal
+            .ready_to_commit(
+                scan_id,
+                &crate::semgrep_recovery::SemgrepReadyRecord {
+                    source_sha256: publication.run.source_sha256.clone().unwrap(),
+                    output_sha256: publication.run.output_sha256.clone().unwrap(),
+                    sandbox_image_sha256: publication.run.sandbox_image_sha256.clone(),
+                    rules_tree_sha256: publication.run.rules_tree_sha256.clone(),
+                    command_schema_version: COMMAND_SCHEMA_VERSION,
+                },
+            )
+            .unwrap();
+        service.semgrep.journal.close(scan_id).unwrap();
+    }
+
+    #[test]
+    fn current_and_stale_views_keep_base_immutable_and_findings_queryable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("parser.c"),
+            b"int parse(const char *p) { return p[0]; }\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let target_id = Uuid::new_v4();
+        let base_candidate = candidate(&project, target_id, "parse", 0.5);
+        let publication = publication(
+            &project,
+            target_id,
+            digest_live_sources(&project, TargetLanguage::C).unwrap(),
+            0.5,
+        );
+        let service = ServiceContainer::stubbed();
+        close_publication_journal(&service, &publication);
+
+        let current = service.inventory_with_publication(
+            inventory(&project, base_candidate.clone()),
+            TargetLanguage::C,
+            Some(publication.clone()),
+            true,
+        );
+        assert_eq!(current.overlay_state, SemgrepOverlayState::Current);
+        assert_f64_eq!(current.candidates[0].candidate.fit_score, 0.5);
+        assert_f64_eq!(current.candidates[0].base_score, 0.5);
+        assert_f64_eq!(current.candidates[0].semgrep_boost, 0.05);
+        assert_f64_eq!(current.candidates[0].effective_score, 0.55);
+        assert_eq!(current.findings.len(), 2);
+        assert!(current
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+
+        let unverified = service.inventory_with_publication(
+            inventory(&project, base_candidate.clone()),
+            TargetLanguage::C,
+            Some(publication.clone()),
+            false,
+        );
+        assert_eq!(unverified.overlay_state, SemgrepOverlayState::StaleBase);
+        assert_f64_eq!(unverified.candidates[0].effective_score, 0.5);
+        assert_eq!(unverified.findings.len(), 2);
+        assert!(unverified
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+
+        let mut reranked = base_candidate;
+        reranked.fit_score = 0.7;
+        let stale_base = service.inventory_with_publication(
+            inventory(&project, reranked),
+            TargetLanguage::C,
+            Some(publication.clone()),
+            true,
+        );
+        assert_eq!(stale_base.overlay_state, SemgrepOverlayState::StaleBase);
+        assert_f64_eq!(stale_base.candidates[0].effective_score, 0.7);
+        assert_f64_eq!(stale_base.candidates[0].semgrep_boost, 0.0);
+        assert_eq!(stale_base.findings.len(), 2);
+        assert!(stale_base
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+
+        std::fs::write(
+            project.join("parser.c"),
+            b"int changed(void) { return 0; }\n",
+        )
+        .unwrap();
+        let stale_source = service.inventory_with_publication(
+            inventory(&project, candidate(&project, target_id, "parse", 0.5)),
+            TargetLanguage::C,
+            Some(publication),
+            true,
+        );
+        assert_eq!(stale_source.overlay_state, SemgrepOverlayState::StaleSource);
+        assert_f64_eq!(stale_source.candidates[0].effective_score, 0.5);
+        assert_eq!(stale_source.findings.len(), 2);
+        assert!(stale_source
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+    }
+
+    #[test]
+    fn missing_or_open_journal_is_incomplete_and_base_only() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("parser.c"),
+            b"int parse(char *p) { return *p; }\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let target_id = Uuid::new_v4();
+        let candidate = candidate(&project, target_id, "parse", 0.4);
+        let publication = publication(
+            &project,
+            target_id,
+            digest_live_sources(&project, TargetLanguage::C).unwrap(),
+            0.4,
+        );
+        let service = ServiceContainer::stubbed();
+
+        let view = service.inventory_with_publication(
+            inventory(&project, candidate),
+            TargetLanguage::C,
+            Some(publication),
+            true,
+        );
+        assert_eq!(view.overlay_state, SemgrepOverlayState::IncompleteJournal);
+        assert_f64_eq!(view.candidates[0].effective_score, 0.4);
+        assert_eq!(view.findings.len(), 2);
+        assert!(view
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+    }
+
+    #[test]
+    fn score_count_and_target_id_mismatches_are_stale_base() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("parser.c"),
+            b"int parse(char *p) { return *p; }\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let target_id = Uuid::new_v4();
+        let base_candidate = candidate(&project, target_id, "parse", 0.4);
+        let publication = publication(
+            &project,
+            target_id,
+            digest_live_sources(&project, TargetLanguage::C).unwrap(),
+            0.4,
+        );
+        let service = ServiceContainer::stubbed();
+        close_publication_journal(&service, &publication);
+
+        let mut count_mismatch = publication.clone();
+        count_mismatch.scores.clear();
+        let count_view = service.inventory_with_publication(
+            inventory(&project, base_candidate.clone()),
+            TargetLanguage::C,
+            Some(count_mismatch),
+            true,
+        );
+        assert_eq!(count_view.overlay_state, SemgrepOverlayState::StaleBase);
+        assert_f64_eq!(count_view.candidates[0].semgrep_boost, 0.0);
+
+        let mut id_mismatch = publication;
+        id_mismatch.scores[0].target_id = Uuid::new_v4();
+        let id_view = service.inventory_with_publication(
+            inventory(&project, base_candidate),
+            TargetLanguage::C,
+            Some(id_mismatch),
+            true,
+        );
+        assert_eq!(id_view.overlay_state, SemgrepOverlayState::StaleBase);
+        assert_f64_eq!(id_view.candidates[0].semgrep_boost, 0.0);
+    }
+
+    fn ordered_view(
+        project: &Path,
+        id: u128,
+        symbol: &str,
+        relative_file: &str,
+        base_score: f64,
+        effective_score: f64,
+    ) -> SemgrepTargetView {
+        let mut candidate = candidate(project, Uuid::from_u128(id), symbol, base_score);
+        candidate.location.file = project.join(relative_file);
+        SemgrepTargetView {
+            candidate,
+            base_score,
+            semgrep_boost: effective_score - base_score,
+            effective_score,
+            semgrep_matched_rule_count: 1,
+        }
+    }
+
+    #[test]
+    fn total_order_uses_every_approved_key_in_sequence() {
+        let project = PathBuf::from("/project");
+        let mut views = vec![
+            ordered_view(&project, 3, "omega", "c.c", 0.6, 0.8),
+            ordered_view(&project, 1, "zeta", "b.c", 0.6, 0.8),
+            ordered_view(&project, 8, "base_wins", "z.c", 0.7, 0.8),
+            ordered_view(&project, 9, "effective_wins", "z.c", 0.1, 0.9),
+            ordered_view(&project, 7, "z_file_wins", "a.c", 0.6, 0.8),
+            ordered_view(&project, 6, "alpha", "b.c", 0.6, 0.8),
+            ordered_view(&project, 2, "omega", "c.c", 0.6, 0.8),
+        ];
+
+        sort_semgrep_targets(&mut views);
+
+        let ids = views
+            .iter()
+            .map(|view| view.candidate.id.as_u128())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![9, 8, 7, 6, 1, 2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use hf_discovery::semgrep::{SemgrepAnalysis, SemgrepTargetScore};
+    use hf_storage::{SemgrepRunRecord, SemgrepRunStatus, Store};
+    use uuid::Uuid;
+
+    use super::build_semgrep_publication;
+
+    #[test]
+    fn recovery_health_error_redacts_private_cause() {
+        let coordinator = super::SemgrepCoordinator::in_memory();
+        coordinator.mark_recovery_degraded("/private/secret/workspace/semgrep");
+
+        let error = coordinator
+            .ensure_recovery_healthy()
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Semgrep recovery is degraded"));
+        assert!(!error.contains("/private/secret/workspace"));
+        assert!(!error.contains("semgrep-journal"));
+    }
+
+    #[tokio::test]
+    async fn publication_builder_uses_checked_terminal_aggregates() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::connect(root.path().join("publication.db"))
+            .await
+            .unwrap();
+        let operation_id = Uuid::new_v4();
+        let started_at = chrono::Utc::now();
+        let run = SemgrepRunRecord {
+            id: operation_id,
+            project_root: root.path().to_string_lossy().into_owned(),
+            language: "c".to_owned(),
+            source_sha256: None,
+            sandbox_image: "image".to_owned(),
+            sandbox_image_sha256: "1".repeat(64),
+            semgrep_version: super::SEMGREP_VERSION.to_owned(),
+            rules_commit: super::RULES_COMMIT.to_owned(),
+            rules_tree_sha256: "2".repeat(64),
+            command_schema_version: super::COMMAND_SCHEMA_VERSION,
+            status: SemgrepRunStatus::Staging,
+            started_at,
+            ended_at: None,
+            output_sha256: None,
+            finding_count: None,
+            matched_candidate_count: None,
+            duration_ms: None,
+            failure_code: None,
+            failure_message: None,
+        };
+        store.insert_semgrep_run(&run).await.unwrap();
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Staging,
+                SemgrepRunStatus::Scanning,
+                Some(&"3".repeat(64)),
+            )
+            .await
+            .unwrap();
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Scanning,
+                SemgrepRunStatus::Validating,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Validating,
+                SemgrepRunStatus::Persisting,
+                None,
+            )
+            .await
+            .unwrap();
+        let target_id = Uuid::new_v4();
+        let publication = build_semgrep_publication(
+            &store,
+            operation_id,
+            SemgrepAnalysis {
+                findings: Vec::new(),
+                scores: vec![SemgrepTargetScore {
+                    target_id,
+                    base_score: 0.4,
+                    boost: 0.0,
+                    effective_score: 0.4,
+                    matched_rule_count: 0,
+                }],
+                matched_candidate_count: 0,
+            },
+            "4".repeat(64),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(publication.run.status, SemgrepRunStatus::Done);
+        assert_eq!(publication.run.finding_count, Some(0));
+        assert_eq!(publication.run.matched_candidate_count, Some(0));
+        assert_eq!(publication.scores[0].scan_id, operation_id);
+        assert!(publication.run.duration_ms.is_some());
+    }
+
+    fn staging_run(operation_id: Uuid, project: &std::path::Path) -> SemgrepRunRecord {
+        SemgrepRunRecord {
+            id: operation_id,
+            project_root: project.to_string_lossy().into_owned(),
+            language: "c".to_owned(),
+            source_sha256: None,
+            sandbox_image: "image".to_owned(),
+            sandbox_image_sha256: "1".repeat(64),
+            semgrep_version: super::SEMGREP_VERSION.to_owned(),
+            rules_commit: super::RULES_COMMIT.to_owned(),
+            rules_tree_sha256: "2".repeat(64),
+            command_schema_version: super::COMMAND_SCHEMA_VERSION,
+            status: SemgrepRunStatus::Staging,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+            output_sha256: None,
+            finding_count: None,
+            matched_candidate_count: None,
+            duration_ms: None,
+            failure_code: None,
+            failure_message: None,
+        }
+    }
+
+    async fn advance_to(store: &Store, operation_id: Uuid, status: SemgrepRunStatus) {
+        if status == SemgrepRunStatus::Staging {
+            return;
+        }
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Staging,
+                SemgrepRunStatus::Scanning,
+                Some(&"3".repeat(64)),
+            )
+            .await
+            .unwrap();
+        if status == SemgrepRunStatus::Scanning {
+            return;
+        }
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Scanning,
+                SemgrepRunStatus::Validating,
+                None,
+            )
+            .await
+            .unwrap();
+        if status == SemgrepRunStatus::Validating {
+            return;
+        }
+        store
+            .set_semgrep_phase(
+                operation_id,
+                SemgrepRunStatus::Validating,
+                SemgrepRunStatus::Persisting,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_repairs_every_interrupted_phase_and_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(root.path()).unwrap();
+        let store = Store::connect(workspace.join("recovery.db")).await.unwrap();
+        let coordinator = super::SemgrepCoordinator::persistent(workspace.join("journal"));
+        let mut expected_terminal = Vec::new();
+
+        for status in [
+            SemgrepRunStatus::Staging,
+            SemgrepRunStatus::Scanning,
+            SemgrepRunStatus::Validating,
+            SemgrepRunStatus::Persisting,
+        ] {
+            let operation_id = Uuid::new_v4();
+            expected_terminal.push((operation_id, SemgrepRunStatus::Failed));
+            let project = workspace.join(format!("project-{operation_id}"));
+            std::fs::create_dir(&project).unwrap();
+            store
+                .insert_semgrep_run(&staging_run(operation_id, &project))
+                .await
+                .unwrap();
+            advance_to(&store, operation_id, status).await;
+            coordinator
+                .journal
+                .begin(operation_id, &project, &operation_id.to_string())
+                .unwrap();
+            let operation_root = workspace.join("semgrep").join(operation_id.to_string());
+            std::fs::create_dir_all(&operation_root).unwrap();
+            std::fs::write(operation_root.join("owned"), b"data").unwrap();
+        }
+
+        let done_id = Uuid::new_v4();
+        expected_terminal.push((done_id, SemgrepRunStatus::Failed));
+        let project = workspace.join(format!("project-{done_id}"));
+        std::fs::create_dir(&project).unwrap();
+        store
+            .insert_semgrep_run(&staging_run(done_id, &project))
+            .await
+            .unwrap();
+        advance_to(&store, done_id, SemgrepRunStatus::Persisting).await;
+        coordinator
+            .journal
+            .begin(done_id, &project, &done_id.to_string())
+            .unwrap();
+        let ready = crate::semgrep_recovery::SemgrepReadyRecord {
+            source_sha256: "3".repeat(64),
+            output_sha256: "4".repeat(64),
+            sandbox_image_sha256: "1".repeat(64),
+            rules_tree_sha256: "2".repeat(64),
+            command_schema_version: super::COMMAND_SCHEMA_VERSION,
+        };
+        coordinator
+            .journal
+            .ready_to_commit(done_id, &ready)
+            .unwrap();
+        let publication = build_semgrep_publication(
+            &store,
+            done_id,
+            SemgrepAnalysis {
+                findings: Vec::new(),
+                scores: Vec::new(),
+                matched_candidate_count: 0,
+            },
+            ready.output_sha256.clone(),
+        )
+        .await
+        .unwrap();
+        store.publish_semgrep_run(&publication).await.unwrap();
+        std::fs::create_dir_all(workspace.join("semgrep").join(done_id.to_string())).unwrap();
+
+        for status in [SemgrepRunStatus::Failed, SemgrepRunStatus::Cancelled] {
+            let operation_id = Uuid::new_v4();
+            expected_terminal.push((operation_id, status));
+            let project = workspace.join(format!("project-{operation_id}"));
+            std::fs::create_dir(&project).unwrap();
+            store
+                .insert_semgrep_run(&staging_run(operation_id, &project))
+                .await
+                .unwrap();
+            coordinator
+                .journal
+                .begin(operation_id, &project, &operation_id.to_string())
+                .unwrap();
+            store
+                .fail_semgrep_run(
+                    operation_id,
+                    status,
+                    "interrupted_abort",
+                    "terminal database state preceded abort",
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap();
+            let publication = store
+                .semgrep_publication(operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(publication.findings.is_empty());
+            assert!(publication.scores.is_empty());
+            std::fs::create_dir_all(workspace.join("semgrep").join(operation_id.to_string()))
+                .unwrap();
+        }
+
+        let closed_id = Uuid::new_v4();
+        let closed_project = workspace.join(format!("project-{closed_id}"));
+        std::fs::create_dir(&closed_project).unwrap();
+        store
+            .insert_semgrep_run(&staging_run(closed_id, &closed_project))
+            .await
+            .unwrap();
+        advance_to(&store, closed_id, SemgrepRunStatus::Persisting).await;
+        coordinator
+            .journal
+            .begin(closed_id, &closed_project, &closed_id.to_string())
+            .unwrap();
+        coordinator
+            .journal
+            .ready_to_commit(closed_id, &ready)
+            .unwrap();
+        let closed_publication = build_semgrep_publication(
+            &store,
+            closed_id,
+            SemgrepAnalysis {
+                findings: Vec::new(),
+                scores: Vec::new(),
+                matched_candidate_count: 0,
+            },
+            ready.output_sha256.clone(),
+        )
+        .await
+        .unwrap();
+        store
+            .publish_semgrep_run(&closed_publication)
+            .await
+            .unwrap();
+        coordinator.journal.close(closed_id).unwrap();
+
+        let sibling_id = Uuid::new_v4();
+        let sibling = workspace.join("semgrep").join(sibling_id.to_string());
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("must-survive"), b"sibling").unwrap();
+
+        drop(coordinator);
+        let coordinator = super::SemgrepCoordinator::persistent(workspace.join("journal"));
+        coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .unwrap();
+        coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .unwrap();
+
+        assert!(coordinator.journal.interrupted().unwrap().is_empty());
+        for (operation_id, expected_status) in expected_terminal {
+            let run = store.semgrep_run(operation_id).await.unwrap().unwrap();
+            assert_eq!(run.status, expected_status);
+            let publication = store
+                .semgrep_publication(operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(publication.findings.is_empty());
+            assert!(publication.scores.is_empty());
+            assert!(!workspace
+                .join("semgrep")
+                .join(operation_id.to_string())
+                .exists());
+            assert!(!coordinator.journal.is_closed(operation_id).unwrap());
+        }
+        assert_eq!(
+            store.semgrep_run(closed_id).await.unwrap().unwrap().status,
+            SemgrepRunStatus::Done,
+            "replayed Closed+Done must preserve the successful publication"
+        );
+        assert_eq!(
+            std::fs::read(sibling.join("must-survive")).unwrap(),
+            b"sibling",
+            "recovery removed another operation UUID directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_terminal_rows_with_publication_children() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(root.path()).unwrap();
+        let project = workspace.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let store = Store::connect(workspace.join("corrupt-terminal.db"))
+            .await
+            .unwrap();
+        let coordinator = super::SemgrepCoordinator::persistent(workspace.join("journal"));
+        let operation_id = Uuid::new_v4();
+        store
+            .insert_semgrep_run(&staging_run(operation_id, &project))
+            .await
+            .unwrap();
+        coordinator
+            .journal
+            .begin(operation_id, &project, &operation_id.to_string())
+            .unwrap();
+        store
+            .fail_semgrep_run(
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "failed",
+                "failed before abort",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO semgrep_findings
+             (scan_id, fingerprint, rule_id, severity, message, relative_file,
+              start_line, start_col, end_line, end_col, target_id, nominal_weight)
+             VALUES (?1, ?2, 'rule', 'warning', 'signal', 'parser.c',
+                     1, 1, 1, 2, NULL, 0.05)",
+        )
+        .bind(operation_id.to_string())
+        .bind("5".repeat(64))
+        .execute(store.pool())
+        .await
+        .unwrap();
+        let operation_root = workspace.join("semgrep").join(operation_id.to_string());
+        std::fs::create_dir_all(&operation_root).unwrap();
+
+        assert!(coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .is_err());
+        assert!(operation_root.exists());
+        assert_eq!(coordinator.journal.interrupted().unwrap().len(), 1);
     }
 }
 
@@ -2670,6 +4415,20 @@ mod snapshot_tests {
         );
     }
 
+    #[test]
+    fn cleanup_treats_absent_semgrep_parent_and_uuid_child_as_idempotent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
+        let operation = canonical_workspace
+            .join("semgrep")
+            .join(Uuid::new_v4().to_string());
+
+        cleanup_operation_root_in(&canonical_workspace, &operation).unwrap();
+
+        std::fs::create_dir(canonical_workspace.join("semgrep")).unwrap();
+        cleanup_operation_root_in(&canonical_workspace, &operation).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_rejects_symlinked_ancestors_and_targets() {
@@ -2757,7 +4516,10 @@ mod lifecycle_tests {
     use tracing::{Event, Metadata, Subscriber};
     use uuid::Uuid;
 
-    use super::{CompletionPausePoint, SemgrepCancelOutcome, SemgrepOperationState};
+    use super::{
+        CompletionPausePoint, SemgrepCancelOutcome, SemgrepOperationState, SemgrepOverlayState,
+    };
+    use crate::semgrep_recovery::AppendFailurePoint;
     use crate::ServiceContainer;
 
     const IMAGE_ID: &str =
@@ -2918,7 +4680,22 @@ mod lifecycle_tests {
                     #[cfg(not(unix))]
                     std::fs::write(output, b"{}").unwrap();
                 }
-                _ => std::fs::write(output, b"{\"results\":[]}").unwrap(),
+                _ => std::fs::write(
+                    output,
+                    br#"{
+                        "version":"1.169.0",
+                        "results":[{
+                            "check_id":"cpp.lang.security.signal",
+                            "path":"parser.c",
+                            "start":{"line":1,"col":1},
+                            "end":{"line":1,"col":4},
+                            "extra":{"message":"advisory signal","severity":"WARNING"}
+                        }],
+                        "errors":[],
+                        "paths":{"scanned":["parser.c"],"skipped":[]}
+                    }"#,
+                )
+                .unwrap(),
             }
         }
     }
@@ -3062,10 +4839,19 @@ mod lifecycle_tests {
     }
 
     async fn save_inventory(store: &Store, project: &Path, complete_span: bool) {
-        store
-            .save_inventory(&inventory(project, complete_span), Utc::now())
-            .await
-            .unwrap();
+        let inventory = if complete_span {
+            let mut inventory = hf_discovery::discover(project, TargetLanguage::C)
+                .await
+                .unwrap();
+            for candidate in &mut inventory.candidates {
+                candidate.fit_score = 0.5;
+                candidate.rationale = "fixture".to_owned();
+            }
+            inventory
+        } else {
+            inventory(project, false)
+        };
+        store.save_inventory(&inventory, Utc::now()).await.unwrap();
     }
 
     async fn wait_for_state(service: &ServiceContainer, id: Uuid, expected: SemgrepOperationState) {
@@ -3094,6 +4880,26 @@ mod lifecycle_tests {
         tokio::time::timeout(Duration::from_secs(5), reached.notified())
             .await
             .expect("worker must reach the completion pause");
+    }
+
+    async fn wait_for_recovery_degraded(service: &ServiceContainer) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service.semgrep.ensure_recovery_healthy().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker must mark Semgrep recovery degraded");
+    }
+
+    async fn wait_for_worker_exit(service: &ServiceContainer) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&service.semgrep) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Semgrep worker must release the coordinator");
     }
 
     #[tokio::test]
@@ -3419,7 +5225,7 @@ mod lifecycle_tests {
         )
         .unwrap();
         let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(7)));
-        let (service, store) = persistent_service(root.path(), runtime).await;
+        let (service, store) = persistent_service(root.path(), runtime.clone()).await;
         save_inventory(&store, &project, true).await;
         let captured = Arc::new(Mutex::new(String::new()));
         let subscriber = CaptureSubscriber::new(Arc::clone(&captured));
@@ -3454,7 +5260,7 @@ mod lifecycle_tests {
         let root = tempfile::tempdir().unwrap();
         let project = project_fixture(root.path(), "project");
         let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
-        let (service, store) = persistent_service(root.path(), runtime).await;
+        let (service, store) = persistent_service(root.path(), runtime.clone()).await;
         save_inventory(&store, &project, true).await;
         let (reached, release) = service
             .semgrep
@@ -3472,6 +5278,426 @@ mod lifecycle_tests {
         release.notify_one();
 
         wait_for_state(&service, id, SemgrepOperationState::Cancelled).await;
+    }
+
+    #[tokio::test]
+    async fn source_mutation_after_completion_claim_fails_before_ready() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterClaim);
+
+        let id = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+        std::fs::write(
+            project.join("parser.c"),
+            b"int parse(const char *input) { return input[1]; }\n",
+        )
+        .unwrap();
+        release.notify_one();
+
+        wait_for_state(&service, id, SemgrepOperationState::Failed).await;
+        let run = store.semgrep_publication(id).await.unwrap().unwrap();
+        assert_eq!(run.run.failure_code.as_deref(), Some("source_changed"));
+        assert!(run.findings.is_empty());
+        assert!(run.scores.is_empty());
+        assert!(!service.semgrep.journal.is_closed(id).unwrap());
+        assert!(service.semgrep.journal.interrupted().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn publication_transaction_rolls_back_before_separate_failure_cleanup() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime.clone()).await;
+        save_inventory(&store, &project, true).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_semgrep_score
+             BEFORE INSERT ON semgrep_target_scores
+             BEGIN
+               SELECT RAISE(ABORT, 'injected publication failure');
+             END",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterPublicationFailure);
+
+        let id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        let rolled_back = store.semgrep_publication(id).await.unwrap().unwrap();
+        assert_eq!(rolled_back.run.status, SemgrepRunStatus::Persisting);
+        assert!(rolled_back.findings.is_empty());
+        assert!(rolled_back.scores.is_empty());
+        let interrupted = service.semgrep.journal.interrupted().unwrap();
+        assert_eq!(interrupted.len(), 1);
+        assert!(
+            interrupted[0].ready.is_some(),
+            "ready provenance must precede the attempted transaction"
+        );
+        let operation_root = runtime.calls()[0].cwd.clone();
+        assert!(operation_root.exists());
+
+        release.notify_one();
+        wait_for_state(&service, id, SemgrepOperationState::Failed).await;
+
+        let failed = store.semgrep_publication(id).await.unwrap().unwrap();
+        assert_eq!(
+            failed.run.failure_code.as_deref(),
+            Some("persistence_failed")
+        );
+        assert!(failed.findings.is_empty());
+        assert!(failed.scores.is_empty());
+        assert!(!operation_root.exists());
+        assert!(service.semgrep.journal.interrupted().unwrap().is_empty());
+        assert!(!service.semgrep.journal.is_closed(id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_compensates_publication_and_reads_base_only() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), Arc::clone(&runtime)).await;
+        save_inventory(&store, &project, true).await;
+        service.semgrep.install_test_cleanup_failure();
+
+        let id = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_state(&service, id, SemgrepOperationState::Failed).await;
+
+        let publication = store.semgrep_publication(id).await.unwrap().unwrap();
+        assert_eq!(
+            publication.run.failure_code.as_deref(),
+            Some("cleanup_failed")
+        );
+        assert!(publication.findings.is_empty());
+        assert!(publication.scores.is_empty());
+        assert_eq!(service.semgrep.journal.interrupted().unwrap().len(), 1);
+        assert!(service.semgrep.ensure_recovery_healthy().is_err());
+        let effective = service
+            .effective_inventory(
+                hf_discovery::discover(&project, TargetLanguage::C)
+                    .await
+                    .unwrap(),
+                TargetLanguage::C,
+            )
+            .await
+            .unwrap();
+        assert_eq!(effective.overlay_state, SemgrepOverlayState::None);
+        assert_f64_eq!(effective.candidates[0].semgrep_boost, 0.0);
+        assert!(service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("recovery is degraded"));
+        let operation_root = runtime.calls()[0].cwd.clone();
+        service
+            .semgrep
+            .recover_interrupted(&store, &crate::workspace_root())
+            .await
+            .unwrap();
+        assert!(!operation_root.exists());
+        assert!(service.semgrep.journal.interrupted().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compensation_failure_keeps_ready_publication_fail_closed() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime.clone()).await;
+        save_inventory(&store, &project, true).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_cleanup_compensation
+             BEFORE UPDATE ON semgrep_enrichment_runs
+             WHEN NEW.failure_code = 'cleanup_failed'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected compensation failure');
+             END",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        service.semgrep.install_test_cleanup_failure();
+
+        let id = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_recovery_degraded(&service).await;
+        wait_for_worker_exit(&service).await;
+
+        let publication = store.semgrep_publication(id).await.unwrap().unwrap();
+        assert_eq!(publication.run.status, SemgrepRunStatus::Done);
+        assert_eq!(publication.findings.len(), 1);
+        assert_eq!(publication.scores.len(), 1);
+        assert_eq!(service.semgrep.journal.interrupted().unwrap().len(), 1);
+        let exact = service.semgrep_result(id).await.unwrap().unwrap();
+        assert_eq!(exact.overlay_state, SemgrepOverlayState::IncompleteJournal);
+        assert_f64_eq!(exact.candidates[0].semgrep_boost, 0.0);
+        assert!(service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("recovery is degraded"));
+        sqlx::query("DROP TRIGGER reject_cleanup_compensation")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let operation_root = runtime.calls()[0].cwd.clone();
+        service
+            .semgrep
+            .recover_interrupted(&store, &crate::workspace_root())
+            .await
+            .unwrap();
+        assert!(!operation_root.exists());
+        assert!(service.semgrep.journal.interrupted().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_append_errors_are_incomplete_until_restart_replay() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        for (failure, closed_after_restart) in [
+            (AppendFailurePoint::BeforeWrite, false),
+            (AppendFailurePoint::AfterFileSync, true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let project = project_fixture(root.path(), "project");
+            let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+            let (mut service, store) = persistent_service(root.path(), runtime.clone()).await;
+            let journal_dir = root.path().join("semgrep-journal");
+            service.semgrep = Arc::new(super::SemgrepCoordinator::persistent(journal_dir.clone()));
+            save_inventory(&store, &project, true).await;
+            let (reached, release) = service
+                .semgrep
+                .install_completion_pause(CompletionPausePoint::BeforeClose);
+
+            let id = service
+                .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+                .await
+                .unwrap();
+            wait_for_pause(&reached).await;
+            let operation_root = runtime.calls()[0].cwd.clone();
+            assert!(
+                !operation_root.exists(),
+                "owned staging must be durably cleaned before close"
+            );
+            service.semgrep.journal.install_test_append_failure(failure);
+            release.notify_one();
+            wait_for_recovery_degraded(&service).await;
+            wait_for_worker_exit(&service).await;
+
+            let same_process = service.semgrep_result(id).await.unwrap().unwrap();
+            assert_eq!(
+                same_process.overlay_state,
+                SemgrepOverlayState::IncompleteJournal
+            );
+            assert_f64_eq!(same_process.candidates[0].semgrep_boost, 0.0);
+            assert!(service
+                .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("recovery is degraded"));
+
+            drop(service);
+            let coordinator = Arc::new(super::SemgrepCoordinator::persistent(journal_dir.clone()));
+            coordinator
+                .recover_interrupted(&store, &crate::workspace_root())
+                .await
+                .unwrap();
+            let run = store.semgrep_run(id).await.unwrap().unwrap();
+            assert_eq!(
+                run.status,
+                if closed_after_restart {
+                    SemgrepRunStatus::Done
+                } else {
+                    SemgrepRunStatus::Failed
+                }
+            );
+            assert_eq!(
+                coordinator.journal.is_closed(id).unwrap(),
+                closed_after_restart
+            );
+            assert!(coordinator.journal.interrupted().unwrap().is_empty());
+
+            let mut restarted = ServiceContainer::new(
+                Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0))),
+                None,
+            )
+            .with_store(Arc::clone(&store));
+            restarted.semgrep = coordinator;
+            if closed_after_restart {
+                let exact = restarted.semgrep_result(id).await.unwrap().unwrap();
+                assert_eq!(exact.overlay_state, SemgrepOverlayState::Current);
+                assert_f64_eq!(exact.candidates[0].semgrep_boost, 0.05);
+            } else {
+                assert!(restarted.semgrep_result(id).await.unwrap().is_none());
+                let repaired = store.semgrep_publication(id).await.unwrap().unwrap();
+                assert!(repaired.findings.is_empty());
+                assert!(repaired.scores.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_result_uses_persisted_llm_base_score() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        let mut persisted = hf_discovery::discover(&project, TargetLanguage::C)
+            .await
+            .unwrap();
+        persisted.candidates[0].fit_score = 0.83;
+        persisted.candidates[0].rationale = "LLM-ranked".to_owned();
+        store.save_inventory(&persisted, Utc::now()).await.unwrap();
+
+        let id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_state(&service, id, SemgrepOperationState::Done).await;
+        let result = service.semgrep_result(id).await.unwrap().unwrap();
+        assert_eq!(result.overlay_state, super::SemgrepOverlayState::Current);
+        assert_f64_eq!(result.candidates[0].base_score, 0.83);
+        assert_f64_eq!(result.candidates[0].semgrep_boost, 0.05);
+        assert_f64_eq!(result.candidates[0].effective_score, 0.88);
+        assert_f64_eq!(result.candidates[0].candidate.fit_score, 0.83);
+    }
+
+    #[tokio::test]
+    async fn exact_results_are_isolated_and_rescans_do_not_compound() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Block));
+        let (service, store) = persistent_service(root.path(), runtime.clone()).await;
+        save_inventory(&store, &project, true).await;
+
+        let first = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        runtime.wait_started().await;
+        runtime.release.notify_one();
+        wait_for_state(&service, first, SemgrepOperationState::Done).await;
+
+        let second = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        runtime.wait_started().await;
+        runtime.release.notify_one();
+        wait_for_state(&service, second, SemgrepOperationState::Done).await;
+        sqlx::query(
+            "UPDATE semgrep_findings
+             SET message = 'second scan signal'
+             WHERE scan_id = ?1",
+        )
+        .bind(second.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE semgrep_target_scores
+             SET boost = 0.10, effective_score = 0.60
+             WHERE scan_id = ?1",
+        )
+        .bind(second.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let first_result = service.semgrep_result(first).await.unwrap().unwrap();
+        let second_result = service.semgrep_result(second).await.unwrap().unwrap();
+        assert_eq!(first_result.scan_id, Some(first));
+        assert_eq!(second_result.scan_id, Some(second));
+        assert_f64_eq!(first_result.candidates[0].effective_score, 0.55);
+        assert_f64_eq!(second_result.candidates[0].effective_score, 0.60);
+        assert_f64_eq!(first_result.candidates[0].base_score, 0.5);
+        assert_f64_eq!(second_result.candidates[0].base_score, 0.5);
+        assert_eq!(first_result.findings[0].message, "advisory signal");
+        assert_eq!(second_result.findings[0].message, "second scan signal");
+    }
+
+    #[tokio::test]
+    async fn failed_new_scan_does_not_replace_latest_success() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let success_runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Block));
+        let (mut service, store) = persistent_service(root.path(), success_runtime.clone()).await;
+        let journal_dir = root.path().join("semgrep-journal");
+        service.semgrep = Arc::new(super::SemgrepCoordinator::persistent(journal_dir.clone()));
+        save_inventory(&store, &project, true).await;
+
+        let successful = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        success_runtime.wait_started().await;
+        success_runtime.release.notify_one();
+        wait_for_state(&service, successful, SemgrepOperationState::Done).await;
+
+        let failure_runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(7)));
+        let mut failing_service =
+            ServiceContainer::new(failure_runtime, None).with_store(Arc::clone(&store));
+        failing_service.semgrep = Arc::new(super::SemgrepCoordinator::persistent(journal_dir));
+        let failed = failing_service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_state(&failing_service, failed, SemgrepOperationState::Failed).await;
+        assert_eq!(
+            store.semgrep_run(failed).await.unwrap().unwrap().status,
+            SemgrepRunStatus::Failed
+        );
+
+        let scanned = hf_discovery::discover(&project, TargetLanguage::C)
+            .await
+            .unwrap();
+        let current = failing_service
+            .effective_inventory(
+                TargetInventory {
+                    project_root: project.clone(),
+                    candidates: store
+                        .list_targets(&project.to_string_lossy())
+                        .await
+                        .unwrap(),
+                    call_graph: scanned.call_graph,
+                },
+                TargetLanguage::C,
+            )
+            .await
+            .unwrap();
+        assert_eq!(current.scan_id, Some(successful));
+        assert_eq!(current.overlay_state, super::SemgrepOverlayState::Current);
+        assert_f64_eq!(current.candidates[0].effective_score, 0.55);
     }
 
     #[tokio::test]
@@ -3538,7 +5764,7 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn valid_output_advances_only_to_validating_and_uuids_are_service_owned() {
+    async fn valid_output_publishes_atomically_and_uuids_are_service_owned() {
         let _test_guard = lifecycle_test_lock().lock().await;
         let root = tempfile::tempdir().unwrap();
         let project = project_fixture(root.path(), "project");
@@ -3557,14 +5783,28 @@ mod lifecycle_tests {
             .start_semgrep_enrichment(project, TargetLanguage::C)
             .await
             .unwrap();
-        wait_for_state(&service, id, SemgrepOperationState::Validating).await;
+        wait_for_state(&service, id, SemgrepOperationState::Done).await;
         let view = service.semgrep_operation(id).await.unwrap().unwrap();
         assert!(!view.active);
+        let result = view.result.unwrap();
+        assert_eq!(result.overlay_state, super::SemgrepOverlayState::Current);
+        assert_eq!(result.scan_id, Some(id));
+        assert_f64_eq!(result.candidates[0].base_score, 0.5);
+        assert_f64_eq!(result.candidates[0].candidate.fit_score, 0.5);
         assert_eq!(
             service.request_semgrep_cancel(id).await.unwrap(),
             SemgrepCancelOutcome::Inactive
         );
-        let operation_root = runtime.calls().first().unwrap().cwd.clone();
-        super::cleanup_operation_root(&operation_root).unwrap();
+        let publication = store.semgrep_publication(id).await.unwrap().unwrap();
+        assert_eq!(publication.findings.len(), 1);
+        assert_eq!(publication.scores.len(), 1);
+        assert_f64_eq!(publication.scores[0].base_score, 0.5);
+        assert_f64_eq!(publication.scores[0].boost, 0.05);
+        assert_f64_eq!(publication.scores[0].effective_score, 0.55);
+        assert!(service.semgrep.journal.is_closed(id).unwrap());
+        assert!(
+            !runtime.calls().first().unwrap().cwd.exists(),
+            "success must clean staging before the successful close"
+        );
     }
 }
