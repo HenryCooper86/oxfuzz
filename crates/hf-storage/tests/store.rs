@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use hf_core::corpus::{CorpusEntry, CorpusSource};
 use hf_core::crash::{Crash, CrashKind};
 use hf_core::engine::EngineKind;
@@ -13,7 +13,9 @@ use hf_core::target::{
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind, ProjectAutoRevert,
-    RunKind, RunRecord, RunStatus, StorageError, Store,
+    RunKind, RunRecord, RunStatus, SemgrepFindingRecord, SemgrepFindingSeverity,
+    SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError,
+    Store,
 };
 use uuid::Uuid;
 
@@ -22,6 +24,531 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+fn semgrep_staging_run(project_root: &str, started_at: chrono::DateTime<Utc>) -> SemgrepRunRecord {
+    SemgrepRunRecord {
+        id: Uuid::new_v4(),
+        project_root: project_root.to_owned(),
+        language: "c".to_owned(),
+        source_sha256: None,
+        sandbox_image: "oxfuzz-semgrep:1.169.0".to_owned(),
+        sandbox_image_sha256: "11".repeat(32),
+        semgrep_version: "1.169.0".to_owned(),
+        rules_commit: "4d66ecf30bfb1809a984085f2c86a8c3915bfc71".to_owned(),
+        rules_tree_sha256: "22".repeat(32),
+        command_schema_version: 1,
+        status: SemgrepRunStatus::Staging,
+        started_at,
+        ended_at: None,
+        output_sha256: None,
+        finding_count: None,
+        matched_candidate_count: None,
+        duration_ms: None,
+        failure_code: None,
+        failure_message: None,
+    }
+}
+
+fn semgrep_publication(
+    mut run: SemgrepRunRecord,
+    finding_count: usize,
+    score_count: usize,
+) -> SemgrepPublication {
+    run.status = SemgrepRunStatus::Done;
+    run.source_sha256 = Some("33".repeat(32));
+    run.ended_at = Some(run.started_at + Duration::milliseconds(250));
+    run.output_sha256 = Some("44".repeat(32));
+    run.finding_count = Some(u32::try_from(finding_count).unwrap());
+    run.matched_candidate_count = Some(u32::try_from(score_count).unwrap());
+    run.duration_ms = Some(250);
+    let findings = (0..finding_count)
+        .map(|index| SemgrepFindingRecord {
+            scan_id: run.id,
+            fingerprint: format!("{index:064x}"),
+            rule_id: format!("raptor.rule-{index}"),
+            severity: SemgrepFindingSeverity::Warning,
+            message: format!("advisory finding {index}"),
+            relative_file: format!("src/parser-{index}.c"),
+            start_line: u32::try_from(index + 1).unwrap(),
+            start_col: 1,
+            end_line: u32::try_from(index + 1).unwrap(),
+            end_col: 5,
+            target_id: (index < score_count).then(Uuid::new_v4),
+            nominal_weight: 0.05,
+        })
+        .collect();
+    let mut scores = (0..score_count)
+        .map(|index| SemgrepTargetScoreRecord {
+            scan_id: run.id,
+            target_id: Uuid::new_v4(),
+            base_score: 0.6,
+            boost: 0.05,
+            effective_score: 0.65,
+            matched_rule_count: u32::try_from(index + 1).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    scores.sort_by_key(|score| score.target_id);
+    SemgrepPublication {
+        run,
+        findings,
+        scores,
+    }
+}
+
+async fn advance_semgrep_to_persisting(store: &Store, run: &mut SemgrepRunRecord) {
+    store.insert_semgrep_run(run).await.unwrap();
+    store
+        .set_semgrep_phase(
+            run.id,
+            SemgrepRunStatus::Staging,
+            SemgrepRunStatus::Scanning,
+            Some(&"33".repeat(32)),
+        )
+        .await
+        .unwrap();
+    store
+        .set_semgrep_phase(
+            run.id,
+            SemgrepRunStatus::Scanning,
+            SemgrepRunStatus::Validating,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .set_semgrep_phase(
+            run.id,
+            SemgrepRunStatus::Validating,
+            SemgrepRunStatus::Persisting,
+            None,
+        )
+        .await
+        .unwrap();
+    run.status = SemgrepRunStatus::Persisting;
+    run.source_sha256 = Some("33".repeat(32));
+}
+
+#[tokio::test]
+async fn semgrep_phase_compare_and_set_and_active_project_index_are_enforced() {
+    let (store, _dir) = temp_store().await;
+    let started_at = Utc::now();
+    let mut run = semgrep_staging_run("/projects/parser", started_at);
+    store.insert_semgrep_run(&run).await.unwrap();
+    assert_eq!(store.semgrep_run(run.id).await.unwrap(), Some(run.clone()));
+
+    let invalid = store
+        .set_semgrep_phase(
+            run.id,
+            SemgrepRunStatus::Scanning,
+            SemgrepRunStatus::Validating,
+            None,
+        )
+        .await;
+    assert!(matches!(invalid, Err(StorageError::NotFound(_))));
+    store
+        .set_semgrep_phase(
+            run.id,
+            SemgrepRunStatus::Staging,
+            SemgrepRunStatus::Scanning,
+            Some(&"33".repeat(32)),
+        )
+        .await
+        .unwrap();
+    run.status = SemgrepRunStatus::Scanning;
+    run.source_sha256 = Some("33".repeat(32));
+    assert_eq!(store.semgrep_run(run.id).await.unwrap(), Some(run));
+
+    let duplicate = semgrep_staging_run("/projects/parser", started_at + Duration::seconds(1));
+    assert!(matches!(
+        store.insert_semgrep_run(&duplicate).await,
+        Err(StorageError::Db(_))
+    ));
+}
+
+#[tokio::test]
+async fn semgrep_publication_persists_complete_overlay_and_latest_done_run() {
+    let (store, _dir) = temp_store().await;
+    let mut older = semgrep_staging_run("/projects/parser", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut older).await;
+    let older_publication = semgrep_publication(older, 2, 1);
+    store.publish_semgrep_run(&older_publication).await.unwrap();
+    assert_eq!(
+        store
+            .semgrep_publication(older_publication.run.id)
+            .await
+            .unwrap(),
+        Some(older_publication.clone())
+    );
+
+    let persisted = store
+        .semgrep_run(older_publication.run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.status, SemgrepRunStatus::Done);
+    assert_eq!(persisted.source_sha256, Some("33".repeat(32)));
+    assert_eq!(persisted.output_sha256, Some("44".repeat(32)));
+    assert_eq!(persisted.finding_count, Some(2));
+    assert_eq!(persisted.matched_candidate_count, Some(1));
+    assert_eq!(persisted.duration_ms, Some(250));
+
+    let mut newer = semgrep_staging_run("/projects/parser", Utc::now() + Duration::seconds(10));
+    advance_semgrep_to_persisting(&store, &mut newer).await;
+    let newer_publication = semgrep_publication(newer, 1, 1);
+    store.publish_semgrep_run(&newer_publication).await.unwrap();
+    assert_eq!(
+        store
+            .latest_semgrep_publication("/projects/parser", "c")
+            .await
+            .unwrap(),
+        Some(newer_publication)
+    );
+    assert!(store
+        .latest_semgrep_publication("/projects/parser", "cpp")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn semgrep_publication_rolls_back_every_child_when_second_finding_fails() {
+    let (store, _dir) = temp_store().await;
+    let mut run = semgrep_staging_run("/projects/parser", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+    sqlx::query(
+        "CREATE TRIGGER reject_second_semgrep_finding
+         BEFORE INSERT ON semgrep_findings
+         WHEN NEW.rule_id = 'raptor.rule-1'
+         BEGIN
+             SELECT RAISE(ABORT, 'injected second finding failure');
+         END",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let publication = semgrep_publication(run, 2, 1);
+
+    assert!(matches!(
+        store.publish_semgrep_run(&publication).await,
+        Err(StorageError::Db(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM semgrep_findings WHERE scan_id = ?1")
+            .bind(publication.run.id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM semgrep_target_scores WHERE scan_id = ?1"
+        )
+        .bind(publication.run.id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .semgrep_run(publication.run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SemgrepRunStatus::Persisting
+    );
+}
+
+#[tokio::test]
+async fn semgrep_publication_rejects_changed_parent_identity() {
+    let (store, _dir) = temp_store().await;
+    let mut run = semgrep_staging_run("/projects/parser", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut run).await;
+    let mut publication = semgrep_publication(run, 1, 1);
+    publication.run.project_root = "/projects/substituted".to_owned();
+
+    assert!(matches!(
+        store.publish_semgrep_run(&publication).await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        store
+            .semgrep_run(publication.run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SemgrepRunStatus::Persisting
+    );
+}
+
+#[tokio::test]
+async fn semgrep_failure_rejects_an_end_time_before_admission() {
+    let (store, _dir) = temp_store().await;
+    let started_at = Utc::now();
+    let run = semgrep_staging_run("/projects/parser", started_at);
+    store.insert_semgrep_run(&run).await.unwrap();
+
+    assert!(matches!(
+        store
+            .fail_semgrep_run(
+                run.id,
+                SemgrepRunStatus::Failed,
+                "failure",
+                "invalid terminal timestamp",
+                started_at - Duration::milliseconds(1),
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        store.semgrep_run(run.id).await.unwrap().unwrap().status,
+        SemgrepRunStatus::Staging
+    );
+}
+
+#[tokio::test]
+async fn semgrep_failure_cancellation_and_compensation_remove_children() {
+    let (store, _dir) = temp_store().await;
+    let mut published = semgrep_staging_run("/projects/published", Utc::now());
+    advance_semgrep_to_persisting(&store, &mut published).await;
+    let publication = semgrep_publication(published, 2, 2);
+    store.publish_semgrep_run(&publication).await.unwrap();
+    store
+        .compensate_semgrep_publication(
+            publication.run.id,
+            "journal_commit_failed",
+            "terminal journal record could not be written",
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let compensated = store
+        .semgrep_publication(publication.run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(compensated.run.status, SemgrepRunStatus::Failed);
+    assert!(compensated.findings.is_empty());
+    assert!(compensated.scores.is_empty());
+
+    for (project, status) in [
+        ("/projects/failed", SemgrepRunStatus::Failed),
+        ("/projects/cancelled", SemgrepRunStatus::Cancelled),
+    ] {
+        let mut run = semgrep_staging_run(project, Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        sqlx::query(
+            "INSERT INTO semgrep_findings
+                (scan_id, fingerprint, rule_id, severity, message, relative_file,
+                 start_line, start_col, end_line, end_col, target_id, nominal_weight)
+             VALUES (?1, ?2, 'raptor.injected', 'info', 'partial child', 'src/partial.c',
+                     1, 1, 1, 2, NULL, 0.01)",
+        )
+        .bind(run.id.to_string())
+        .bind("55".repeat(32))
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO semgrep_target_scores
+                (scan_id, target_id, base_score, boost, effective_score, matched_rule_count)
+             VALUES (?1, ?2, 0.5, 0.0, 0.5, 0)",
+        )
+        .bind(run.id.to_string())
+        .bind(Uuid::new_v4().to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        store
+            .fail_semgrep_run(
+                run.id,
+                status,
+                "operator",
+                "operation terminated",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let terminal = store.semgrep_publication(run.id).await.unwrap().unwrap();
+        assert_eq!(terminal.run.status, status);
+        assert!(terminal.findings.is_empty());
+        assert!(terminal.scores.is_empty());
+    }
+    assert!(matches!(
+        store
+            .fail_semgrep_run(
+                Uuid::new_v4(),
+                SemgrepRunStatus::Done,
+                "invalid",
+                "done is not a failure state",
+                Utc::now(),
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+}
+
+#[tokio::test]
+async fn semgrep_records_follow_project_and_knowledge_cleanup() {
+    let (store, _dir) = temp_store().await;
+    for project in ["/projects/delete", "/projects/keep"] {
+        let mut run = semgrep_staging_run(project, Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        let publication = semgrep_publication(run, 1, 1);
+        store.publish_semgrep_run(&publication).await.unwrap();
+    }
+
+    store.delete_project("/projects/delete").await.unwrap();
+    assert!(store
+        .latest_semgrep_publication("/projects/delete", "c")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .latest_semgrep_publication("/projects/keep", "c")
+        .await
+        .unwrap()
+        .is_some());
+
+    store.clear_knowledge().await.unwrap();
+    assert!(store
+        .latest_semgrep_publication("/projects/keep", "c")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn semgrep_typed_reads_reject_malformed_persisted_fields() {
+    let malformed_run_fields = [
+        ("id", "'not-a-uuid'"),
+        ("status", "'unknown'"),
+        ("started_at", "'not-a-timestamp'"),
+        ("source_sha256", "'short'"),
+        ("finding_count", "-1"),
+    ];
+    for (column, value) in malformed_run_fields {
+        let (store, _dir) = temp_store().await;
+        let mut run = semgrep_staging_run("/projects/malformed", Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        let publication = if column == "id" {
+            semgrep_publication(run, 0, 0)
+        } else {
+            semgrep_publication(run, 1, 1)
+        };
+        store.publish_semgrep_run(&publication).await.unwrap();
+        let mut connection = store.pool().acquire().await.unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "UPDATE semgrep_enrichment_runs SET {column} = {value} WHERE id = ?1"
+        ))
+        .bind(publication.run.id.to_string())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        drop(connection);
+        let result = if column == "id" {
+            let malformed_id =
+                sqlx::query_scalar::<_, String>("SELECT id FROM semgrep_enrichment_runs")
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            let row = sqlx::query("SELECT id FROM semgrep_enrichment_runs WHERE id = ?1")
+                .bind(malformed_id)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(sqlx::Row::get::<String, _>(&row, "id"), "not-a-uuid");
+            store
+                .latest_semgrep_publication("/projects/malformed", "c")
+                .await
+        } else {
+            store.semgrep_publication(publication.run.id).await
+        };
+        assert!(
+            matches!(
+                result,
+                Err(StorageError::InvalidData(_)
+                    | StorageError::Timestamp(_)
+                    | StorageError::Serde(_))
+            ),
+            "{column} unexpectedly decoded"
+        );
+    }
+
+    let malformed_finding_fields = [
+        ("severity", "'unknown'"),
+        ("start_line", "0"),
+        ("nominal_weight", "0.02"),
+        ("target_id", "'not-a-uuid'"),
+    ];
+    for (column, value) in malformed_finding_fields {
+        let (store, _dir) = temp_store().await;
+        let mut run = semgrep_staging_run("/projects/malformed-finding", Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        let publication = semgrep_publication(run, 1, 1);
+        store.publish_semgrep_run(&publication).await.unwrap();
+        let mut connection = store.pool().acquire().await.unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "UPDATE semgrep_findings SET {column} = {value} WHERE scan_id = ?1"
+        ))
+        .bind(publication.run.id.to_string())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        drop(connection);
+        assert!(
+            matches!(
+                store.semgrep_publication(publication.run.id).await,
+                Err(StorageError::InvalidData(_) | StorageError::Serde(_))
+            ),
+            "{column} unexpectedly decoded"
+        );
+    }
+
+    let malformed_score_fields = [
+        ("target_id", "'not-a-uuid'"),
+        ("base_score", "1.5"),
+        ("matched_rule_count", "-1"),
+    ];
+    for (column, value) in malformed_score_fields {
+        let (store, _dir) = temp_store().await;
+        let mut run = semgrep_staging_run("/projects/malformed-score", Utc::now());
+        advance_semgrep_to_persisting(&store, &mut run).await;
+        let publication = semgrep_publication(run, 1, 1);
+        store.publish_semgrep_run(&publication).await.unwrap();
+        let mut connection = store.pool().acquire().await.unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "UPDATE semgrep_target_scores SET {column} = {value} WHERE scan_id = ?1"
+        ))
+        .bind(publication.run.id.to_string())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        drop(connection);
+        assert!(
+            matches!(
+                store.semgrep_publication(publication.run.id).await,
+                Err(StorageError::InvalidData(_))
+            ),
+            "{column} unexpectedly decoded"
+        );
+    }
 }
 
 #[tokio::test]
@@ -287,7 +814,10 @@ async fn database_standard_has_exact_migrated_table_and_column_parity() {
 
     let mut documented_tables = standard
         .lines()
-        .filter_map(|line| line.strip_prefix("### `"))
+        .filter_map(|line| {
+            line.strip_prefix("### `")
+                .or_else(|| line.strip_prefix("#### `"))
+        })
         .filter_map(|line| line.strip_suffix('`'))
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -295,12 +825,21 @@ async fn database_standard_has_exact_migrated_table_and_column_parity() {
     assert_eq!(documented_tables, tables, "documented table set drifted");
 
     for table in tables {
-        let heading = format!("### `{table}`");
-        let section_start = standard.find(&heading).expect("documented table heading");
+        let level_three_heading = format!("### `{table}`");
+        let level_four_heading = format!("#### `{table}`");
+        let (heading, section_start) = standard
+            .find(&level_three_heading)
+            .map(|start| (level_three_heading, start))
+            .or_else(|| {
+                standard
+                    .find(&level_four_heading)
+                    .map(|start| (level_four_heading, start))
+            })
+            .expect("documented table heading");
         let after_heading = &standard[section_start + heading.len()..];
         let next_h2 = after_heading.find("\n## ");
-        let next_h3 = after_heading.find("\n### ");
-        let section_end = match (next_h2, next_h3) {
+        let next_h3_or_h4 = after_heading.find("\n###");
+        let section_end = match (next_h2, next_h3_or_h4) {
             (Some(h2), Some(h3)) => h2.min(h3),
             (Some(end), None) | (None, Some(end)) => end,
             (None, None) => after_heading.len(),
