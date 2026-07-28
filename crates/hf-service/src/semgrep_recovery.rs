@@ -90,8 +90,14 @@ pub struct SemgrepJournal {
     persistent: bool,
     directory: Option<PathBuf>,
     directory_handle: Option<Arc<File>>,
-    directory_lock: Arc<Mutex<()>>,
+    shared_state: Arc<SharedJournalState>,
     memory_events: Mutex<BTreeMap<Uuid, Vec<SemgrepJournalEvent>>>,
+    #[cfg(test)]
+    race_hook: Mutex<Option<Arc<dyn Fn(AppendRacePoint) + Send + Sync>>>,
+}
+
+struct SharedJournalState {
+    operation_lock: Mutex<()>,
     durability_error: Mutex<Option<String>>,
 }
 
@@ -103,9 +109,13 @@ impl SemgrepJournal {
             persistent: false,
             directory: None,
             directory_handle: None,
-            directory_lock: Arc::new(Mutex::new(())),
+            shared_state: Arc::new(SharedJournalState {
+                operation_lock: Mutex::new(()),
+                durability_error: Mutex::new(None),
+            }),
             memory_events: Mutex::new(BTreeMap::new()),
-            durability_error: Mutex::new(None),
+            #[cfg(test)]
+            race_hook: Mutex::new(None),
         }
     }
 
@@ -120,8 +130,8 @@ impl SemgrepJournal {
             .as_ref()
             .cloned()
             .unwrap_or_else(|_| directory.clone());
-        let directory_lock = journal_lock_for_directory(&lock_key);
-        let _guard = lock_recover(&directory_lock);
+        let shared_state = journal_state_for_directory(&lock_key);
+        let _guard = lock_recover(&shared_state.operation_lock);
 
         let (normalized, handle, durability_error) = match normalized {
             Ok(normalized) => match open_or_create_directory_nofollow(&normalized) {
@@ -151,20 +161,26 @@ impl SemgrepJournal {
             ),
         };
 
+        if let Some(error) = durability_error {
+            let mut sticky = lock_recover(&shared_state.durability_error);
+            sticky.get_or_insert(error);
+        }
+
         Self {
             persistent: true,
             directory: normalized,
             directory_handle: handle,
-            directory_lock: Arc::clone(&directory_lock),
+            shared_state: Arc::clone(&shared_state),
             memory_events: Mutex::new(BTreeMap::new()),
-            durability_error: Mutex::new(durability_error),
+            #[cfg(test)]
+            race_hook: Mutex::new(None),
         }
     }
 
     /// Return the first replay or append error recorded by this journal.
     #[must_use]
     pub fn durability_error(&self) -> Option<String> {
-        lock_recover(&self.durability_error).clone()
+        lock_recover(&self.shared_state.durability_error).clone()
     }
 
     /// Durably begin an operation.
@@ -186,8 +202,8 @@ impl SemgrepJournal {
             staging_dir_name: staging_dir_name.to_owned(),
             timestamp: Utc::now(),
         };
-        let _guard = lock_recover(&self.directory_lock);
-        self.ensure_healthy()?;
+        let _guard = lock_recover(&self.shared_state.operation_lock);
+        self.ensure_revalidated()?;
         serialize_event(&event).map_err(|error| self.record_durability_failure(&error))?;
 
         if self.persistent {
@@ -233,16 +249,16 @@ impl SemgrepJournal {
 
     /// Return whether the operation has its own complete, valid lifecycle.
     pub fn is_closed(&self, operation_id: Uuid) -> Result<bool, ClassifiedError> {
-        let _guard = lock_recover(&self.directory_lock);
-        self.ensure_healthy()?;
+        let _guard = lock_recover(&self.shared_state.operation_lock);
+        self.ensure_revalidated()?;
         let lifecycle = self.read_lifecycle(operation_id)?;
         Ok(matches!(lifecycle, Some(OperationLifecycle::Closed)))
     }
 
     /// Return all valid operations that began but did not durably close.
     pub fn interrupted(&self) -> Result<Vec<InterruptedSemgrepOperation>, ClassifiedError> {
-        let _guard = lock_recover(&self.directory_lock);
-        self.ensure_healthy()?;
+        let _guard = lock_recover(&self.shared_state.operation_lock);
+        self.ensure_revalidated()?;
         let lifecycles = if self.persistent {
             let handle = self.directory_handle()?;
             read_all_journals(handle).map_err(|error| self.record_durability_failure(&error))?
@@ -289,8 +305,8 @@ impl SemgrepJournal {
         event: SemgrepJournalEvent,
         allowed: impl FnOnce(&OperationLifecycle) -> bool,
     ) -> Result<(), ClassifiedError> {
-        let _guard = lock_recover(&self.directory_lock);
-        self.ensure_healthy()?;
+        let _guard = lock_recover(&self.shared_state.operation_lock);
+        self.ensure_revalidated()?;
         serialize_event(&event).map_err(|error| self.record_durability_failure(&error))?;
 
         if self.persistent {
@@ -313,7 +329,7 @@ impl SemgrepJournal {
                     "event is out of lifecycle order",
                 ));
             }
-            self.append_to_file(handle, &mut file, &event)
+            self.append_to_file(handle, &mut file, operation_id, &event)
         } else {
             let mut events = lock_recover(&self.memory_events);
             let Some(existing) = events.get_mut(&operation_id) else {
@@ -346,13 +362,14 @@ impl SemgrepJournal {
                     self.record_durability_failure(&error)
                 }
             })?;
-        self.append_to_file(handle, &mut file, event)
+        self.append_to_file(handle, &mut file, operation_id, event)
     }
 
     fn append_to_file(
         &self,
         directory: &File,
         file: &mut File,
+        operation_id: Uuid,
         event: &SemgrepJournalEvent,
     ) -> Result<(), ClassifiedError> {
         let line =
@@ -368,7 +385,16 @@ impl SemgrepJournal {
                 format!("journal exceeds the {MAX_JOURNAL_BYTES}-byte limit"),
             )));
         }
+        #[cfg(test)]
+        self.run_test_race_hook(AppendRacePoint::BeforeIdentityCheck);
+        verify_operation_path_identity(directory, operation_id, file)
+            .map_err(|error| self.record_durability_failure(&error))?;
         append_and_sync(file, &line)
+            .and_then(|()| {
+                #[cfg(test)]
+                self.run_test_race_hook(AppendRacePoint::AfterFileSync);
+                verify_operation_path_identity(directory, operation_id, file)
+            })
             .and_then(|()| directory.sync_all())
             .map_err(|error| self.record_durability_failure(&error))
     }
@@ -414,6 +440,16 @@ impl SemgrepJournal {
         }
     }
 
+    fn ensure_revalidated(&self) -> Result<(), ClassifiedError> {
+        self.ensure_healthy()?;
+        if self.persistent {
+            let handle = self.directory_handle()?;
+            validate_all_journals(handle)
+                .map_err(|error| self.record_durability_failure(&error))?;
+        }
+        Ok(())
+    }
+
     fn current_durability_error(&self) -> ClassifiedError {
         ClassifiedError::Storage(
             self.durability_error()
@@ -427,10 +463,30 @@ impl SemgrepJournal {
             .as_deref()
             .map_or_else(|| "<memory>".to_owned(), |path| path.display().to_string());
         let message = format!("Semgrep journal durability failed in {directory}: {error}");
-        let mut durability_error = lock_recover(&self.durability_error);
+        let mut durability_error = lock_recover(&self.shared_state.durability_error);
         let sticky = durability_error.get_or_insert(message).clone();
         ClassifiedError::Storage(sticky)
     }
+
+    #[cfg(test)]
+    fn install_test_race_hook(&self, hook: impl Fn(AppendRacePoint) + Send + Sync + 'static) {
+        *lock_recover(&self.race_hook) = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_test_race_hook(&self, point: AppendRacePoint) {
+        let hook = lock_recover(&self.race_hook).clone();
+        if let Some(hook) = hook {
+            hook(point);
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendRacePoint {
+    BeforeIdentityCheck,
+    AfterFileSync,
 }
 
 fn invalid_transition(operation_id: Uuid, detail: &str) -> ClassifiedError {
@@ -735,6 +791,50 @@ fn operation_file_name(operation_id: Uuid) -> String {
     format!("{operation_id}.jsonl")
 }
 
+#[cfg(unix)]
+fn verify_operation_path_identity(
+    directory: &File,
+    operation_id: Uuid,
+    file: &File,
+) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{statat, AtFlags, FileType};
+
+    let descriptor = file.metadata()?;
+    let path = statat(
+        directory,
+        operation_file_name(operation_id),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    let descriptor_is_linked_regular = descriptor.file_type().is_file() && descriptor.nlink() == 1;
+    let path_is_linked_regular =
+        FileType::from_raw_mode(path.st_mode) == FileType::RegularFile && path.st_nlink == 1;
+    if !descriptor_is_linked_regular
+        || !path_is_linked_regular
+        || descriptor.dev() != path.st_dev as u64
+        || descriptor.ino() != path.st_ino as u64
+        || descriptor.nlink() != u64::from(path.st_nlink)
+    {
+        return Err(invalid_data(
+            "journal pathname no longer names the opened regular file",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_operation_path_identity(
+    _directory: &File,
+    _operation_id: Uuid,
+    _file: &File,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Semgrep journals require descriptor-relative filesystem identity checks",
+    ))
+}
+
 fn normalize_directory_path(directory: &Path) -> io::Result<PathBuf> {
     if directory.as_os_str().is_empty() {
         return Err(io::Error::new(
@@ -844,18 +944,22 @@ fn open_or_create_directory_nofollow(_directory: &Path) -> io::Result<File> {
     ))
 }
 
-fn journal_lock_for_directory(directory: &Path) -> Arc<Mutex<()>> {
-    static JOURNAL_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+fn journal_state_for_directory(directory: &Path) -> Arc<SharedJournalState> {
+    static JOURNAL_STATES: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedJournalState>>>> =
+        OnceLock::new();
 
-    let locks = JOURNAL_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut locks = lock_recover(locks);
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(directory).and_then(Weak::upgrade) {
-        return lock;
+    let states = JOURNAL_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut states = lock_recover(states);
+    states.retain(|_, state| state.strong_count() > 0);
+    if let Some(state) = states.get(directory).and_then(Weak::upgrade) {
+        return state;
     }
-    let lock = Arc::new(Mutex::new(()));
-    locks.insert(directory.to_path_buf(), Arc::downgrade(&lock));
-    lock
+    let state = Arc::new(SharedJournalState {
+        operation_lock: Mutex::new(()),
+        durability_error: Mutex::new(None),
+    });
+    states.insert(directory.to_path_buf(), Arc::downgrade(&state));
+    state
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -867,7 +971,10 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_and_sync, DurableWrite, SemgrepJournal, SemgrepReadyRecord};
+    use super::{
+        append_and_sync, AppendRacePoint, DurableWrite, SemgrepJournal, SemgrepReadyRecord,
+    };
+    use hf_core::error::ClassifiedError;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
@@ -1102,6 +1209,50 @@ mod tests {
         assert!(reopened.is_closed(closed_id).is_err());
     }
 
+    #[test]
+    fn open_instances_share_corruption_health_and_revalidate_before_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let closed_id = Uuid::new_v4();
+        let interrupted_id = Uuid::new_v4();
+        let first = SemgrepJournal::open(directory.path().to_path_buf());
+        let second = SemgrepJournal::open(directory.path().to_path_buf());
+        begin(&first, closed_id);
+        close(&first, closed_id);
+        begin(&first, interrupted_id);
+
+        let corrupt_id = Uuid::new_v4();
+        std::fs::write(
+            directory.path().join(format!("{corrupt_id}.jsonl")),
+            b"{broken}\n",
+        )
+        .unwrap();
+
+        let observed_error = second.is_closed(closed_id).unwrap_err();
+        let sticky = second
+            .durability_error()
+            .expect("the observing instance must become degraded");
+        assert!(matches!(
+            observed_error,
+            ClassifiedError::Storage(ref message) if message == &sticky
+        ));
+        assert_eq!(first.durability_error().as_deref(), Some(sticky.as_str()));
+        let new_id = Uuid::new_v4();
+        let begin_error = first
+            .begin(new_id, Path::new("/project"), &new_id.to_string())
+            .unwrap_err();
+        let ready_error = first
+            .ready_to_commit(interrupted_id, &ready_record())
+            .unwrap_err();
+        let close_error = first.close(interrupted_id).unwrap_err();
+        for error in [begin_error, ready_error, close_error] {
+            assert!(matches!(
+                error,
+                ClassifiedError::Storage(ref message) if message == &sticky
+            ));
+        }
+        assert_eq!(first.durability_error().as_deref(), Some(sticky.as_str()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn operation_file_symlink_is_never_followed() {
@@ -1151,6 +1302,105 @@ mod tests {
             )
             .is_err());
         assert!(std::fs::read_dir(actual).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum PathRace {
+        Unlink,
+        ReplaceRegular,
+        ReplaceSymlink,
+    }
+
+    #[cfg(unix)]
+    fn install_path_race(
+        journal: &SemgrepJournal,
+        operation_path: PathBuf,
+        point: AppendRacePoint,
+        race: PathRace,
+    ) {
+        use std::os::unix::fs::symlink;
+
+        journal.install_test_race_hook(move |actual| {
+            if actual != point {
+                return;
+            }
+            std::fs::remove_file(&operation_path).unwrap();
+            match race {
+                PathRace::Unlink => {}
+                PathRace::ReplaceRegular => {
+                    std::fs::write(&operation_path, b"replacement\n").unwrap();
+                }
+                PathRace::ReplaceSymlink => {
+                    let target = operation_path.with_extension("target");
+                    std::fs::write(&target, b"target").unwrap();
+                    symlink(target, &operation_path).unwrap();
+                }
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_rejects_unlink_regular_and_symlink_replacement_races() {
+        let cases = [
+            (PathRace::Unlink, AppendRacePoint::BeforeIdentityCheck),
+            (PathRace::ReplaceRegular, AppendRacePoint::AfterFileSync),
+            (PathRace::ReplaceSymlink, AppendRacePoint::AfterFileSync),
+        ];
+        for (race, point) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let operation_id = Uuid::new_v4();
+            let journal = SemgrepJournal::open(directory.path().to_path_buf());
+            install_path_race(
+                &journal,
+                directory.path().join(format!("{operation_id}.jsonl")),
+                point,
+                race,
+            );
+
+            assert!(journal
+                .begin(
+                    operation_id,
+                    Path::new("/project"),
+                    &operation_id.to_string(),
+                )
+                .is_err());
+            assert!(journal.durability_error().is_some());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_rejects_unlink_regular_and_symlink_replacement_races() {
+        let cases = [
+            (PathRace::Unlink, AppendRacePoint::AfterFileSync),
+            (
+                PathRace::ReplaceRegular,
+                AppendRacePoint::BeforeIdentityCheck,
+            ),
+            (
+                PathRace::ReplaceSymlink,
+                AppendRacePoint::BeforeIdentityCheck,
+            ),
+        ];
+        for (race, point) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let operation_id = Uuid::new_v4();
+            let journal = SemgrepJournal::open(directory.path().to_path_buf());
+            begin(&journal, operation_id);
+            install_path_race(
+                &journal,
+                directory.path().join(format!("{operation_id}.jsonl")),
+                point,
+                race,
+            );
+
+            assert!(journal
+                .ready_to_commit(operation_id, &ready_record())
+                .is_err());
+            assert!(journal.durability_error().is_some());
+        }
     }
 
     #[test]
