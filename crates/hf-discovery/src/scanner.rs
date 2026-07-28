@@ -263,6 +263,8 @@ fn extract_rust_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>
                 file: path.to_path_buf(),
                 line: (idx + 1) as u32,
                 col: 1,
+                end_line: None,
+                end_col: None,
             },
             signature: Some(signature),
             input_surface,
@@ -371,6 +373,8 @@ fn extract_go_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidate>) 
                 file: path.to_path_buf(),
                 line: (idx + 1) as u32,
                 col: 1,
+                end_line: None,
+                end_col: None,
             },
             signature: Some(signature),
             input_surface,
@@ -516,6 +520,8 @@ fn extract_python_functions(src: &str, path: &Path, out: &mut Vec<TargetCandidat
                 file: path.to_path_buf(),
                 line: (idx + 1) as u32,
                 col: (indent + 1) as u32,
+                end_line: None,
+                end_col: None,
             },
             signature: Some(signature),
             input_surface,
@@ -895,11 +901,14 @@ fn extract_functions(
                 .collect::<Vec<_>>()
                 .join(" "),
         );
-        let start = name_node.start_position();
+        let start = node.start_position();
+        let end = node.end_position();
         let location = SourceLocation {
             file: path.to_path_buf(),
-            line: (start.row + 1) as u32,
-            col: (start.column + 1) as u32,
+            line: u32::try_from(start.row + 1).unwrap_or(u32::MAX),
+            col: u32::try_from(start.column + 1).unwrap_or(u32::MAX),
+            end_line: Some(u32::try_from(end.row + 1).unwrap_or(u32::MAX)),
+            end_col: Some(u32::try_from(end.column + 1).unwrap_or(u32::MAX)),
         };
         out.push(TargetCandidate {
             id: Uuid::new_v4(),
@@ -1110,9 +1119,10 @@ fn compute_fit_score(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_go_functions, extract_python_functions};
+    use super::{extract_functions, extract_go_functions, extract_python_functions};
     use hf_core::target::{InputSurface, TargetCandidate, TargetKind, TargetLanguage};
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path};
+    use tree_sitter::Parser as TsParser;
 
     fn go_candidates(src: &str) -> Vec<TargetCandidate> {
         let mut out = Vec::new();
@@ -1124,6 +1134,38 @@ mod tests {
         let mut out = Vec::new();
         extract_python_functions(src, Path::new("codec.py"), &mut out);
         out
+    }
+
+    fn c_candidates(src: &str) -> Vec<TargetCandidate> {
+        let mut parser = TsParser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut out = Vec::new();
+        extract_functions(
+            &tree,
+            Path::new("parser.c"),
+            src,
+            TargetLanguage::C,
+            &mut out,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        );
+        out
+    }
+
+    #[test]
+    fn c_candidate_span_covers_the_complete_definition() {
+        let candidates = c_candidates(
+            "int parse_packet(const unsigned char *data) {\n\
+             if (data[0]) { return 1; }\n\
+             return 0;\n\
+         }\n",
+        );
+        let span = &candidates[0].location;
+        assert_eq!((span.line, span.col), (1, 1));
+        assert_eq!((span.end_line, span.end_col), (Some(4), Some(2)));
     }
 
     #[test]
