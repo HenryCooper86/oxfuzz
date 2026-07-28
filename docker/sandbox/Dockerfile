@@ -178,6 +178,7 @@ COPY docker/sandbox/semgrep/scan.sh /usr/local/bin/oxfuzz-semgrep-scan
 # The network-disabled fixed-wrapper fixture scan is the authoritative gate.
 RUN chmod 0755 /usr/local/bin/oxfuzz-semgrep-scan /opt/oxfuzz/semgrep-tree-digest.py \
     && test "$(semgrep --version --disable-version-check)" = "${SEMGREP_VERSION}" \
+    && test -z "$(find /opt/oxfuzz/semgrep-rules/rules/c -type l -print -quit)" \
     && test "$(python3 /opt/oxfuzz/semgrep-tree-digest.py /opt/oxfuzz/semgrep-rules/rules/c)" = \
        "$(cat /opt/oxfuzz/semgrep-rules/RULES_SHA256)"
 
