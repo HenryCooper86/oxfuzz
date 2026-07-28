@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 pub enum Action {
     /// Scan a project for fuzzing targets (read-only).
     Discover,
+    /// Analyze project source with one service-owned static analyzer.
+    AnalyzeSource {
+        /// Stable analyzer identifier.
+        analyzer: String,
+    },
     /// Ask the LLM to draft harness source (no execution).
     DraftHarness,
     /// Compile untrusted harness + target source in the sandbox.
@@ -79,6 +84,7 @@ impl Action {
     pub fn kind(&self) -> &'static str {
         match self {
             Action::Discover => "discover",
+            Action::AnalyzeSource { .. } => "analyze_source",
             Action::DraftHarness => "draft_harness",
             Action::CompileHarness => "compile_harness",
             Action::RunHarness => "run_harness",
@@ -100,6 +106,7 @@ impl Action {
     pub fn label(&self) -> String {
         match self {
             Action::Discover => "discover targets".to_owned(),
+            Action::AnalyzeSource { analyzer } => format!("analyze source with {analyzer}"),
             Action::DraftHarness => "draft harness".to_owned(),
             Action::CompileHarness => "compile harness in sandbox".to_owned(),
             Action::RunHarness => "run harness (smoke fuzz)".to_owned(),
@@ -138,6 +145,7 @@ impl Action {
                 RiskTier::Low
             }
             Action::CompileHarness
+            | Action::AnalyzeSource { .. }
             | Action::Triage
             | Action::AutomotiveOffline { .. }
             | Action::AgentTool { .. } => RiskTier::Medium,
