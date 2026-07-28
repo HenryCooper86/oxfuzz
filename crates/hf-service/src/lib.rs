@@ -40,6 +40,8 @@ pub mod repro;
 pub mod sarif;
 pub mod scheduler;
 #[cfg(feature = "semgrep-enrichment")]
+pub mod semgrep;
+#[cfg(feature = "semgrep-enrichment")]
 pub mod semgrep_recovery;
 pub mod system;
 mod syzkaller;
