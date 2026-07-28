@@ -1,0 +1,9 @@
+{
+  "version": "1.169.0",
+  "results": [],
+  "errors": [],
+  "paths": {
+    "scanned": ["src/parser.c"],
+    "skipped": [{"path": "vendor/generated.c", "reason": "ignored"}]
+  }
+}
