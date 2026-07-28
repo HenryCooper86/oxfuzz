@@ -1217,7 +1217,12 @@ Expected: FAIL because snapshot interfaces do not exist.
 
 - [ ] **Step 3: Centralize the discovery file walk**
 
-Refactor `scan_c` to call `discoverable_source_files`, which uses:
+Centralize the C/C++ walk configuration, extension filtering, and safe-file
+selection in shared helpers used by both `scan_c` and
+`discoverable_source_files`. The public snapshot selector returns sorted
+relative paths, while `scan_c` preserves the legacy `ignore::Walk` iteration
+order so ordinary discovery output remains byte-for-byte/order compatible.
+Both paths use:
 
 ```rust
 let walker = WalkBuilder::new(canonical_root)
@@ -1226,7 +1231,15 @@ let walker = WalkBuilder::new(canonical_root)
     .build();
 ```
 
-Preserve the existing discovery walker behavior exactly, including its ignore semantics. Build outputs, runtime workspaces, and vendor trees are excluded when hidden or ignored by that walker; add fixtures with `.gitignore` entries to prove it. Filter by `TargetLanguage::extensions()`, regular file type, and canonical-root containment, then sort normalized relative paths lexicographically. The function supports only C/C++ and returns validation error for other languages. Add a regression asserting that refactoring the walker does not change the candidates, IDs, or order returned by normal discovery without Semgrep.
+Preserve the existing discovery walker behavior exactly, including its ignore
+semantics and legacy iteration order. Build outputs, runtime workspaces, and
+vendor trees are excluded when hidden or ignored by that walker; add fixtures
+with `.gitignore` entries to prove it. Filter by
+`TargetLanguage::extensions()`, regular file type, and canonical-root
+containment. Sort only the public snapshot manifest lexicographically. The
+function supports only C/C++ and returns validation error for other languages.
+Add a true pre-refactor-oracle regression covering every candidate field, ID,
+and order returned by normal discovery without Semgrep.
 
 - [ ] **Step 4: Implement stable snapshotting**
 
