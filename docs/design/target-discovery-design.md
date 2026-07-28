@@ -72,6 +72,18 @@ access the network, stage source, mutate storage, or authorize another action.
 Normalized findings are advisory static-analysis signals, not confirmed
 vulnerabilities or fuzzing crashes.
 
+`hf-discovery` defines the `semgrep-enrichment` feature, and the corresponding
+`hf-service` feature enables it. Normal product crates enable the feature by
+default. Building with `--no-default-features` excludes the integration and its
+presentation entrypoints. Compile-time availability never starts a scan.
+
+Normalization accepts at most 50,000 findings. A rule identifier is limited to
+512 bytes, and a message is limited to 4,096 bytes. Any limit breach rejects
+the entire result. Each durable fingerprint is service-owned and deterministic;
+upstream fingerprints, raw source snippets, metavariable captures, absolute
+host paths, credentials or login state, and arbitrary upstream Semgrep JSON
+are never persisted or returned.
+
 A finding maps to a candidate only when its normalized relative path exactly
 matches the candidate definition path, the candidate belongs to the scanned
 C/C++ inventory revision, and the finding start coordinate is contained by
