@@ -10341,6 +10341,8 @@ mod target_resolution_tests {
                 file: PathBuf::from(file),
                 line: 1,
                 col: 1,
+                end_line: None,
+                end_col: None,
             },
             signature: None,
             input_surface: InputSurface::Bytes,
