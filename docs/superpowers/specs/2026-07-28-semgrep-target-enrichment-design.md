@@ -311,17 +311,43 @@ cleanup.
 Before starting background work, the service appends a synced recovery-journal
 entry naming the operation and project. After validation, it syncs a
 `ready_to_commit` entry containing the provenance and output digest before the
-database publication transaction. It syncs the journal close before removing
-staged artifacts.
+database publication transaction. After database publication, it durably
+removes the exact staged artifacts and syncs their parent, then appends the
+successful journal close. The journal remains `ready_to_commit` until cleanup
+succeeds.
 
-If the final journal close fails after database publication, a compensation
-transaction removes that scan's finding/score rows and marks the run `failed`.
+The journal has two different terminal outcomes. `close` is accepted only
+after `ready_to_commit` and is the sole evidence of a successful publication.
+`abort` is accepted from `open` or `ready_to_commit` only after the
+failed/cancelled database transition or recovery compensation is durable and
+the operation-owned staging directory is safely removed. It records a bounded
+terminal category without fabricating publication provenance. An aborted
+journal is no longer interrupted but never passes the successful-close check.
+
+If cleanup fails after database publication, a compensation transaction
+removes that scan's finding/score rows and marks the run `failed`. A close
+append error is indeterminate because the close record may already be synced.
+The current process marks recovery degraded and exposes only an
+`IncompleteJournal` base-only view; it does not compensate solely because
+`close` returned an error. On restart, a valid replayed close preserves the
+successful publication, while a replayed ready state triggers compensation.
 Startup recovery performs the same fail-closed repair for an interrupted
-non-terminal or unclosed `ready_to_commit` operation, then cleans only its
-validated operation-owned staging directory.
+non-terminal, unclosed `ready_to_commit`, or already-failed/cancelled
+operation whose abort was interrupted, then cleans only its validated
+operation-owned staging directory and appends the terminal abort.
+If compensation, cleanup, or abort cannot complete, the journal remains
+interrupted and new starts fail closed so recovery can retry.
 
-After success, the service removes the source snapshot and raw JSON output.
-Their digests and normalized durable records remain. Failed and cancelled
+Recovery cleanup treats descriptor-proven absence of the exact UUID child as
+idempotent success, covering a crash after cleanup but before close or abort.
+It still rejects a missing or ambiguous managed root, symlinked or replaced
+ancestors, and every path that is not exactly
+`workspace/semgrep/<operation-uuid>`.
+An absent `semgrep` child beneath the validated managed workspace is also
+idempotent absence for a failure that occurred before staging created it.
+
+After successful cleanup and close, only the digests and normalized durable
+records remain. Failed and cancelled
 operations also remove staged artifacts after recording terminal state.
 
 ## 12. Atomic Persistence
@@ -369,8 +395,14 @@ run has no finding or score rows.
 
 If the compensation write itself cannot be made durable, recovery leaves the
 operation unclosed and repairs it on the next service startup. A result reader
-accepts an overlay only when both the database row and recovery journal are
-terminal, so incomplete compensation cannot publish it.
+accepts an overlay only when the database row is `done` and the recovery
+journal has the successful close outcome; an abort is never sufficient. Thus
+incomplete compensation cannot publish an overlay.
+
+A missing, interrupted, aborted, corrupt, or otherwise unverifiable journal is
+reported as `IncompleteJournal` for reads. Historical findings and the parent
+operation remain readable, but the view uses base-only scores. Sticky journal
+or recovery degradation still blocks every new start.
 
 Repeated successful scans never compound: every score is recomputed from the
 current base inventory and the current scan's distinct rules.
@@ -514,5 +546,12 @@ Normal unit, integration, and workspace tests do not run Semgrep.
   compounding.
 - **Keeping partial output after failure** -- creates rankings with incomplete
   and potentially misleading evidence.
+- **Fabricating `ready_to_commit` to close a failed operation** -- falsely
+  claims validated publication provenance; a distinct terminal abort preserves
+  recovery evidence without passing the successful-publication gate.
+- **Immediately compensating every `close` error** -- an append can report an
+  error after the close record is synced; current reads fail closed and restart
+  replay reconciles the durable state instead of undoing an indeterminate
+  success.
 - **Treating a Semgrep match as a vulnerability** -- static patterns are
   research signals, not proof of exploitability.

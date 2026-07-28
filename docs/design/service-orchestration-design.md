@@ -360,29 +360,58 @@ The durable publication sequence is:
 synced WAL open
 -> synced ready_to_commit
 -> one database publication transaction
--> synced WAL close
 -> staged-artifact cleanup
+-> synced WAL close
 ```
 
 The WAL open is durable before background work begins. After validation, the
 `ready_to_commit` record contains the provenance and output digest. The
 database transaction publishes every finding and target score together with
-the terminal `done` run. Only after a synced WAL close may the source snapshot
-and raw output be removed.
+the terminal `done` run. The service then durably removes the source snapshot
+and raw output and only afterward appends the synced successful close. Keeping
+the journal in `ready_to_commit` through cleanup means a cleanup, close, or
+compensation failure remains recoverable and cannot expose a
+`done`-plus-closed overlay.
 
-If WAL close or cleanup fails after database publication, a compensation
-transaction deletes that scan's findings and scores and marks the run
-`failed`. Startup recovery performs the same fail-closed repair for interrupted
-non-terminal runs and unclosed `ready_to_commit` runs, then cleans only the
-validated operation-owned staging directory. Failed and explicitly cancelled
-runs publish no finding or score rows. If compensation itself cannot be made
+The successful close record is deliberately distinct from a terminal abort
+record. After a failed/cancelled database transition or a recovery
+compensation is durable, the service may append a synced abort from either the
+open or ready state. An abort contains only the terminal category, never
+invented ready-to-commit provenance, and never satisfies the successful-close
+gate used by result readers. If cleanup, compensation, or the abort append
+fails, the journal stays interrupted so recovery can retry and new starts fail
+closed.
+
+If cleanup fails after database publication, a compensation transaction
+deletes that scan's findings and scores and marks the run `failed`. A close
+append error is indeterminate because the record may already have been synced;
+the service marks recovery degraded, exposes only an `IncompleteJournal`
+base-only view, and does not compensate solely from that return value. On
+restart, a valid replayed close preserves the successful publication, while a
+replayed ready state triggers compensation. Startup recovery performs the same
+fail-closed repair for interrupted non-terminal runs, unclosed
+`ready_to_commit` runs, and already-failed or cancelled rows whose abort was
+interrupted, then cleans only the validated operation-owned staging directory
+before appending the terminal abort. Failed and explicitly cancelled runs
+publish no finding or score rows. If compensation or cleanup cannot be made
 durable, the journal remains unclosed so startup recovery can repair the run.
+
+Recovery cleanup is idempotent. Descriptor-relative validation must prove
+either that the exact `workspace/semgrep/<operation-uuid>` directory was
+removed and its parent synced or that this exact UUID child is already absent
+beneath validated, non-symlink ancestors. An absent staging directory is
+expected after a crash between cleanup and close; ambiguous or replaced
+ancestors remain errors. An absent `semgrep` child beneath the validated
+managed workspace is also proven absence for an operation that failed before
+staging created that parent.
 
 Every ranking consumer asks `hf-service` for `SemgrepInventoryView`; clients do
 not join or rescore results. A result reader accepts an overlay only when the
 database row is terminal `done` and the corresponding recovery journal is
-terminal and closed. Until both conditions hold, including while compensation
-is incomplete, the overlay is invisible and ranking uses base scores only.
+successfully closed. A missing, interrupted, aborted, corrupt, or otherwise
+unverifiable journal maps to `IncompleteJournal`: status and historical
+findings remain readable, but ranking uses base scores only. New starts still
+fail closed on sticky journal or recovery degradation.
 
 After that publication gate, an overlay is current only when the eligible
 source digest matches its scan revision and every stored base score matches
