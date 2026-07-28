@@ -86,7 +86,10 @@ pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
 pub use report_store::ReportDraft;
 #[cfg(feature = "semgrep-enrichment")]
-pub use semgrep::{SemgrepCancelOutcome, SemgrepOperationState, SemgrepOperationView};
+pub use semgrep::{
+    SemgrepCancelOutcome, SemgrepFindingView, SemgrepInventoryView, SemgrepOperationState,
+    SemgrepOperationView, SemgrepOverlayState, SemgrepTargetView,
+};
 pub use system::{system_status, SystemStatus};
 pub use workbench::{
     CrashReviewItem, HarnessReviewItem, IssueExport, WorkbenchDashboard, WorkbenchReadiness,
