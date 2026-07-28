@@ -1,0 +1,12 @@
+{
+  "version": "1.169.0",
+  "results": [{
+    "check_id": "c.lang.security.audit.dangerous-function-usage",
+    "path": "src/parser.c",
+    "start": {"line": 8, "col": 5, "offset": 90},
+    "end": {"line": 8, "col": 17, "offset": 102},
+    "extra": {"message": "dangerous copy", "severity": "ERROR"}
+  }],
+  "errors": [],
+  "paths": {"scanned": ["src/parser.c"], "skipped": []}
+}
