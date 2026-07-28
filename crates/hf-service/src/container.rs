@@ -57,7 +57,7 @@ pub(crate) struct WorkspaceOperationLease {
     _system_guard: File,
 }
 
-struct WorkspaceCleanupLease {
+pub(crate) struct WorkspaceCleanupLease {
     _process_guard: tokio::sync::OwnedRwLockWriteGuard<()>,
     _system_guard: File,
 }
@@ -2583,6 +2583,8 @@ pub struct ServiceContainer {
     guardrails: Guardrails,
     diagnostics: Arc<crate::diagnostics::DiagnosticsRecorder>,
     run_journal: Arc<crate::recovery::RunJournal>,
+    #[cfg(feature = "semgrep-enrichment")]
+    pub(crate) semgrep: Arc<crate::semgrep::SemgrepCoordinator>,
     /// Cancellation tokens for in-flight fuzz runs, keyed by run id. A run
     /// registers its token on start and removes it on completion;
     /// [`Self::cancel_run`] fires the token to stop the run cooperatively.
@@ -2847,6 +2849,8 @@ impl ServiceContainer {
                 build_cost_map(),
             )),
             run_journal: Arc::new(crate::recovery::RunJournal::in_memory()),
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep: Arc::new(crate::semgrep::SemgrepCoordinator::in_memory()),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -4738,6 +4742,10 @@ impl ServiceContainer {
             checkpoint_manager,
             diagnostics,
             run_journal,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep: Arc::new(crate::semgrep::SemgrepCoordinator::persistent(
+                crate::init::user_app_dir().join("semgrep-journal"),
+            )),
             active_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_agents: Arc::new(std::sync::Mutex::new(Vec::new())),
             session_turn_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -4794,9 +4802,14 @@ impl ServiceContainer {
 
     /// Runtime adapter used by service-owned optional subsystems.
     #[must_use]
-    #[cfg(feature = "automotive-scapy")]
+    #[cfg(any(feature = "automotive-scapy", feature = "semgrep-enrichment"))]
     pub(crate) fn runtime_adapter(&self) -> &Arc<dyn RuntimeAdapter> {
         &self.runtime
+    }
+
+    #[cfg(feature = "semgrep-enrichment")]
+    pub(crate) fn semgrep_runtime(&self) -> &Arc<dyn RuntimeAdapter> {
+        self.runtime_adapter()
     }
 
     /// Clear all learned knowledge across every project: discovered targets and
@@ -4961,6 +4974,13 @@ impl ServiceContainer {
             _process_guard: process_guard,
             _system_guard: system_guard,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semgrep_test_workspace_cleanup_lease(
+        root: &Path,
+    ) -> Result<WorkspaceCleanupLease, ClassifiedError> {
+        Self::try_acquire_workspace_cleanup(root)
     }
 
     /// Delete every on-disk fuzz workspace (compiled harnesses, corpora, crash
