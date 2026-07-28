@@ -21,7 +21,10 @@
 - Result limits are 50,000 findings, 512 bytes per rule identifier, and 4,096 bytes per message.
 - Score weights are Error `0.10`, Warning `0.05`, and Info `0.01`; deduplicate by `(candidate_id, rule_id)`, cap the Semgrep boost at `0.20`, and cap effective score at `1.0`.
 - Never mutate `TargetCandidate.fit_score`; it remains the base score.
-- Any staging, execution, validation, mapping, revision, persistence, journal, or cleanup failure is atomic and publishes no findings or score overlay.
+- Any staging, execution, validation, mapping, revision, persistence,
+  confirmed journal, or cleanup failure is atomic and publishes no findings or
+  score overlay. An indeterminate terminal journal append remains invisible
+  until restart replay proves a successful close or triggers repair.
 - No raw snippets, metavariables, upstream fingerprints, credentials, absolute host paths, or arbitrary Semgrep JSON are persisted or returned.
 - No generated harness or real fuzzer is run on the host. Normal tests use fake/recording runtimes; the real Semgrep smoke gate runs only inside Docker.
 - All Rust production changes follow Red -> Green -> Refactor and contain no inline lint suppression.
@@ -39,7 +42,7 @@
 | Runtime profile | `crates/hf-core/src/runtime.rs`, `crates/hf-runtime/src/docker.rs` | Per-operation PIDs tightening in the existing structured sandbox options. |
 | Bundled toolchain | `third_party/semgrep-rules/**`, `docker/sandbox/semgrep/scan.sh`, `scripts/update-semgrep-rules.sh`, `scripts/semgrep-tree-digest.py`, `docker/sandbox/Dockerfile`, `scripts/build-sandbox.sh` | Reviewed rule snapshot, license provenance, fixed command wrapper, image build verification, and container-only smoke gate. |
 | Storage | `crates/hf-storage/migrations/0022_semgrep_enrichment.sql`, `crates/hf-storage/src/store.rs`, `crates/hf-storage/src/lib.rs`, `crates/hf-storage/tests/store.rs` | Durable operation records, findings, scores, atomic publish/compensation, and latest-overlay reads. |
-| Recovery | `crates/hf-service/src/semgrep_recovery.rs` | Synced per-operation JSONL journal with open, ready-to-commit, and close records. |
+| Recovery | `crates/hf-service/src/semgrep_recovery.rs` | Synced per-operation JSONL journal with open, ready-to-commit, successful-close, and terminal-abort records. |
 | Service | `crates/hf-service/src/semgrep.rs`, `crates/hf-service/src/container.rs`, `crates/hf-service/src/lib.rs`, `crates/hf-service/src/agent.rs`, `crates/hf-service/src/scheduler.rs`, `crates/hf-service/src/workbench.rs` | Admission, staging, runtime invocation, cancellation, atomic completion, recovery, staleness, DTOs, and all effective-ranking consumers. |
 | Feature wiring | `crates/hf-discovery/Cargo.toml`, `crates/hf-service/Cargo.toml`, `crates/hf-cli/Cargo.toml`, `crates/hf-web/Cargo.toml`, `crates/hf-gui/src-tauri/Cargo.toml` | Compile-time inclusion in normal products and exclusion from no-default builds. |
 | Presentations | `crates/hf-cli/src/main.rs`, `crates/hf-web/src/router.rs`, `crates/hf-web/tests/api.rs`, `crates/hf-gui/src-tauri/src/commands.rs`, `crates/hf-gui/src-tauri/src/lib.rs`, `crates/hf-gui/src/lib/httpTransport.ts`, `crates/hf-gui/src/types/index.ts`, `crates/hf-gui/src/views/DiscoverView.tsx` | Explicit start/status/cancel/result transport and advisory rendering without scoring logic. |
@@ -1457,6 +1460,7 @@ git commit -m "feat: run cancellable Semgrep enrichment in sandbox"
 
 **Files:**
 - Modify: `crates/hf-service/src/semgrep.rs`
+- Modify: `crates/hf-service/src/semgrep_recovery.rs`
 - Modify: `crates/hf-service/src/container.rs`
 - Modify: `crates/hf-service/src/lib.rs`
 - Modify: `crates/hf-service/src/agent.rs`
@@ -1542,10 +1546,22 @@ Cover:
 - source mutation before `ready_to_commit` fails with no children;
 - `ready_to_commit` is synced before `publish_semgrep_run`;
 - publication failure rolls back and a separate failure transaction leaves no children;
-- journal close failure after DB publication runs compensation and marks failed;
-- compensation failure leaves the journal unclosed and the result reader rejects it;
-- startup repairs every interrupted staging/scanning/validating/persisting/done-but-unclosed row, deletes its children, marks failed, closes repaired journal, and removes only its UUID staging directory;
-- success removes raw source/output only after journal close;
+- a close append error after DB publication is treated as indeterminate:
+  current reads are `IncompleteJournal`, new starts fail closed, replayed
+  `close` preserves success, and replayed `ready_to_commit` is compensated;
+- injected pre-write and post-file-sync close errors prove both replay branches:
+  no same-process overlay is visible; restart compensates a replayed ready
+  journal and preserves a replayed successful close;
+- cleanup compensation failure leaves the journal unclosed and the result reader rejects it;
+- startup repairs every interrupted staging/scanning/validating/persisting/done-but-unclosed row and every failed/cancelled-but-unaborted row; active/done repairs delete children through the existing failure/compensation transactions, already-terminal rows must verify child-free, and every successful repair terminalizes the journal with `recovered` after idempotent exact-UUID cleanup;
+- ordinary failed/cancelled operations and repaired interrupted operations append
+  a synced terminal abort only after their database terminal state and cleanup
+  are durable; abort never fabricates ready provenance or satisfies
+  `is_closed`;
+- `open -> abort` and `open -> ready_to_commit -> abort` survive reopen as
+  terminal non-publications, disappear from `interrupted()`, remain
+  `is_closed() == false`, and reject every later transition;
+- success durably removes raw source/output before the successful journal close;
 - cleanup failure compensates the publication;
 - a current source digest + exact candidate-ID set + exact base scores applies the overlay;
 - source mismatch, candidate-set mismatch, any base-score mismatch, or unclosed journal returns base-only scores with the matching stale state;
@@ -1582,23 +1598,53 @@ if digest_live_sources(project, language)? != snapshot.source_sha256 {
 store.set_semgrep_phase(id, Validating, Persisting, None).await?;
 journal.ready_to_commit(id, &ready_record)?;
 store.publish_semgrep_run(&publication).await?;
-if let Err(error) = journal.close(id) {
-    store.compensate_semgrep_publication(
-        id, "journal_failed", &redact(error), Utc::now()
-    ).await?;
+if let Err(error) = cleanup_operation_root(&snapshot.operation_root) {
+    semgrep.mark_recovery_degraded(&error);
+    if let Err(compensation) = store.compensate_semgrep_publication(
+        id, "cleanup_failed", &redact(&error), Utc::now()
+    ).await {
+        semgrep.mark_recovery_degraded(&compensation);
+        return Err(compensation);
+    }
     return Err(error);
 }
-cleanup_operation_root(&snapshot.operation_root)?;
+if let Err(error) = journal.close(id) {
+    semgrep.mark_recovery_degraded(&error);
+    return Err(error);
+}
 ```
 
-If cleanup fails after close, run `compensate_semgrep_publication`; retain the closed journal as evidence that compensation is required/was attempted and return `cleanup_failed`.
+Keep the journal in `ready_to_commit` until cleanup succeeds. If cleanup fails,
+run `compensate_semgrep_publication`, return `cleanup_failed`, and leave the
+journal interrupted for recovery. If compensation itself fails, the still-open
+ready journal prevents result readers from exposing the `done` row. A close
+append error after cleanup is indeterminate because its record may already be
+synced: mark recovery degraded and defer to restart replay. A valid replayed
+close preserves success; a replayed ready state is compensated and treats
+descriptor-proven absence of the exact UUID staging child as idempotent cleanup
+success. An absent `semgrep` parent beneath the validated managed workspace is
+also idempotent absence for pre-staging failures. Cleanup must sync the modified
+Semgrep parent before close or abort.
+
+Extend the Task 8 journal in this task with a versioned `Abort` record and
+`abort(operation_id, terminal_kind)` API. `Abort` is valid from `open` or
+`ready_to_commit`, records only `failed`, `cancelled`, or `recovered`, and is a
+terminal non-publication outcome. `interrupted()` excludes aborted operations,
+while `is_closed()` remains true only for the successful
+`open -> ready_to_commit -> close` sequence. Append abort only after the
+failed/cancelled database transaction and exact operation-directory cleanup
+succeed. If database compensation, cleanup, or abort fails, leave the journal
+interrupted and mark recovery degraded so new starts fail closed.
+An abort append error is likewise indeterminate: the already-terminal database
+row remains non-publishing, current starts stay blocked, and restart replay
+either observes the abort or retries the interrupted cleanup/abort.
 
 - [ ] **Step 4: Implement effective overlay validation and ordering**
 
 Always create a base-only view first. Preserve the selected publication's bounded normalized findings in `SemgrepFindingView` whether the overlay is current or stale. A `done` publication applies scores only when:
 
 ```rust
-journal.is_closed(scan_id)? &&
+journal.is_closed(scan_id).unwrap_or(false) &&
 publication.run.source_sha256.as_deref() == Some(current_source_sha256.as_str()) &&
 publication.scores.len() == inventory.candidates.len() &&
 score_ids == candidate_ids &&
@@ -1607,7 +1653,11 @@ publication.scores.iter().all(|score| {
 })
 ```
 
-Do not write effective scores into candidates. Sort `SemgrepTargetView` using `f64::total_cmp` and the approved tie breakers.
+Do not write effective scores into candidates. A missing, interrupted, aborted,
+corrupt, or otherwise unverifiable journal maps to `IncompleteJournal` and a
+base-only view rather than making parent status or historical findings
+unreadable; sticky degradation still blocks starts. Sort `SemgrepTargetView`
+using `f64::total_cmp` and the approved tie breakers.
 
 - [ ] **Step 5: Route every ranking consumer through the overlay**
 
@@ -1632,7 +1682,12 @@ if let (Some(store), Some(semgrep)) = (&store, semgrep_coordinator.as_ref()) {
 }
 ```
 
-A sticky journal/recovery error makes new starts fail closed. Status remains readable. Recovery validates the staging directory as exactly `workspace_root()/semgrep/<uuid>` before deleting it.
+A sticky journal/recovery error makes new starts fail closed. Status and base-only historical results remain readable. Recovery validates the staging directory as exactly `workspace_root()/semgrep/<uuid>` before deleting it. Descriptor-proven absence of that exact UUID child is idempotent success; a missing/ambiguous managed root or replaced/symlinked ancestor is still an error. Cleanup syncs the modified Semgrep parent before journal close or abort.
+
+Recovery appends the terminal `recovered` abort only after the database repair
+and exact staging cleanup succeed. It never writes `ready_to_commit` for an
+operation that did not reach that state. If compensation, cleanup, or abort
+cannot be made durable, the journal stays interrupted for a later retry.
 
 - [ ] **Step 7: Run service tests**
 
@@ -1649,8 +1704,9 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/hf-service/src/semgrep.rs crates/hf-service/src/container.rs \
-  crates/hf-service/src/lib.rs crates/hf-service/src/agent.rs \
+git add crates/hf-service/src/semgrep.rs crates/hf-service/src/semgrep_recovery.rs \
+  crates/hf-service/src/container.rs crates/hf-service/src/lib.rs \
+  crates/hf-service/src/agent.rs \
   crates/hf-service/src/scheduler.rs crates/hf-service/src/workbench.rs
 git commit -m "feat: publish and consume current Semgrep overlays"
 ```
