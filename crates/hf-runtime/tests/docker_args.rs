@@ -177,6 +177,7 @@ fn build_exec_args_with_syzkaller_profile() {
         devices: vec!["/dev/kvm".to_owned()],
         workspace_read_only: true,
         max_file_size_bytes: None,
+        max_pids: None,
     };
     let args = hf_runtime::docker::build_exec_args_with(
         &cfg,
@@ -220,6 +221,29 @@ fn build_exec_args_with_syzkaller_profile() {
     );
     // Process limits remain part of the hardened profile.
     assert!(joined.contains("--pids-limit=512"), "{joined}");
+}
+
+#[test]
+fn specialized_profile_can_tighten_but_not_expand_pid_limit() {
+    use hf_core::runtime::SandboxOptions;
+
+    let cfg = RuntimeConfig {
+        max_pids: 512,
+        ..RuntimeConfig::default()
+    };
+    let opts = SandboxOptions {
+        max_pids: Some(128),
+        ..SandboxOptions::default()
+    };
+
+    let args = hf_runtime::docker::build_exec_args_with(
+        &cfg,
+        &ResourceLimits::default(),
+        &["true".to_owned()],
+        &opts,
+    );
+
+    assert!(args.contains(&"--pids-limit=128".to_owned()));
 }
 
 #[test]

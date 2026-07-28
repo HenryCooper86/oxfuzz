@@ -294,6 +294,7 @@ pub(crate) fn sandbox_options(
         },
         workspace_read_only: true,
         max_file_size_bytes: Some(stage.writable_budget_bytes),
+        max_pids: None,
     }
 }
 
