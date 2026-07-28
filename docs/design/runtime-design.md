@@ -118,6 +118,33 @@ duration before runtime staging. The runtime then enforces the resolved values;
 it never interprets an approval id itself. Cancellation and terminal outcomes
 use the same explicit completed/timed-out/cancelled semantics as fuzz engines.
 
+### 3.2 Semgrep Enrichment Profile
+
+Semgrep target enrichment runs only through a fixed wrapper bundled in the
+pinned sandbox image. The image pins Semgrep CE to `1.169.0` and
+`0xdea/semgrep-rules` to commit
+`4d66ecf30bfb1809a984085f2c86a8c3915bfc71`, restricted to `rules/c`. The
+wrapper invokes only those bundled, reviewed rules. It accepts no
+caller-provided arguments, environment, configuration, or rule paths. Network
+and Semgrep Registry access are disabled; access to registry rules is
+forbidden.
+
+The source snapshot is mounted read-only at its fixed container path. The only
+writable mount is an operation-owned output directory, and its JSON output is
+bounded. The pinned rules remain read-only in the image. There is no host
+fallback. The container drops every capability, sets `no-new-privileges`, and
+uses this fixed resource profile:
+
+- 2 CPUs;
+- 4 GiB memory;
+- 128 PIDs;
+- 600 seconds wall-clock time; and
+- 64 MiB `RLIMIT_FSIZE`.
+
+Timeout, cancellation, non-zero exit, missing or oversized output, and forced
+teardown are explicit non-success outcomes. `hf-service` validates the bounded
+output before any result is published.
+
 ## 4. Artifact Integrity
 
 The promoted harness source and binary identify the exact revision approved by

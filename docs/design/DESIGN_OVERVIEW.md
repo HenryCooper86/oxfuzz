@@ -27,6 +27,7 @@ all under human-in-the-loop supervision.
 | --- | --- | --- | --- |
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (reuse y-agent) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
+| Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |
 | Engine integration | hf-engine | `FuzzEngine`, `FuzzRunHandle` | engine-integration-design.md |
 | Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |

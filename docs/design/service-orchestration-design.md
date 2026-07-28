@@ -320,6 +320,62 @@ claim becomes verified only from service-owned sandbox evidence tied to the
 exact patch and reproducer digests. See
 `proof-carrying-campaign-intelligence.md` for the versioned contracts.
 
+### 4.7 Semgrep Target Enrichment
+
+Semgrep enrichment is an explicit, feature-gated service operation for a
+persisted C or C++ inventory. Normal discovery, agents, schedules, campaigns,
+and effective-ranking reads never start a scan. `hf-service` exposes
+asynchronous start, status, cancel, and result operations; start completes
+admission, inserts a durable running operation, registers cooperative
+cancellation, and returns the operation UUID without awaiting Semgrep. One
+project may have only one active Semgrep scan, and a second start fails busy.
+
+The service takes the shared workspace lease for the complete operation and
+creates a source snapshot from the canonical C/C++ discovery set. Every input
+must be a regular, non-symlink file below the canonical project root and remain
+stable while copied. The normalized relative path and source snapshot bounds
+are:
+
+- 25,000 files;
+- 2 MiB per file;
+- 512 MiB aggregate bytes; and
+- 4,096 bytes per normalized relative path.
+
+Exceeding a bound fails the whole operation; a partial project is never
+scanned. The snapshot is mounted read-only, and its deterministic SHA-256 is
+the enrichment revision.
+
+The durable publication sequence is:
+
+```text
+synced WAL open
+-> synced ready_to_commit
+-> one database publication transaction
+-> synced WAL close
+-> staged-artifact cleanup
+```
+
+The WAL open is durable before background work begins. After validation, the
+`ready_to_commit` record contains the provenance and output digest. The
+database transaction publishes every finding and target score together with
+the terminal `done` run. Only after a synced WAL close may the source snapshot
+and raw output be removed.
+
+If WAL close or cleanup fails after database publication, a compensation
+transaction deletes that scan's findings and scores and marks the run
+`failed`. Startup recovery performs the same fail-closed repair for interrupted
+non-terminal runs and unclosed `ready_to_commit` runs, then cleans only the
+validated operation-owned staging directory. Failed and explicitly cancelled
+runs publish no finding or score rows.
+
+Every ranking consumer asks `hf-service` for `SemgrepInventoryView`; clients do
+not join or rescore results. An overlay is current only when the eligible
+source digest matches its scan revision and every stored base score matches the
+current candidate base score. A mismatch makes it stale: the historical scan
+remains queryable, but effective ranking immediately uses base scores only.
+Repeated successful scans recompute from the current immutable base inventory
+and never compound prior boosts.
+
 ## 5. Sub-Agents
 
 `hf-agent` owns only the model reason/act loop and depends on an inward
