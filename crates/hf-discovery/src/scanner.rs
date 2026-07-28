@@ -124,6 +124,15 @@ pub fn discoverable_source_files(
     canonical_root: &Path,
     lang: TargetLanguage,
 ) -> Result<Vec<PathBuf>, ClassifiedError> {
+    let mut relative_paths = discoverable_source_files_in_walk_order(canonical_root, lang)?;
+    relative_paths.sort();
+    Ok(relative_paths)
+}
+
+fn discoverable_source_files_in_walk_order(
+    canonical_root: &Path,
+    lang: TargetLanguage,
+) -> Result<Vec<PathBuf>, ClassifiedError> {
     if !matches!(lang, TargetLanguage::C | TargetLanguage::Cpp) {
         return Err(ClassifiedError::Validation(format!(
             "Semgrep source discovery does not support {}",
@@ -216,7 +225,6 @@ pub fn discoverable_source_files(
         }
         relative_paths.push(relative.to_path_buf());
     }
-    relative_paths.sort();
     Ok(relative_paths)
 }
 
@@ -890,7 +898,7 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         std::collections::HashMap::new();
     let mut complexity_map: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
-    for relative in discoverable_source_files(root, lang)? {
+    for relative in discoverable_source_files_in_walk_order(root, lang)? {
         let path = root.join(relative);
         // Non-UTF-8 or unreadable sources are common in the wild (Latin-1
         // comments, permission gaps); skip the file rather than aborting the
@@ -1217,10 +1225,13 @@ fn compute_fit_score(
 #[cfg(test)]
 mod tests {
     use super::{
-        discoverable_source_files, extract_functions, extract_go_functions,
-        extract_python_functions,
+        deterministic_target_id, discoverable_source_files, extract_functions,
+        extract_go_functions, extract_python_functions,
     };
-    use hf_core::target::{InputSurface, TargetCandidate, TargetKind, TargetLanguage};
+    use hf_core::target::{
+        InputSurface, TargetCandidate, TargetInventory, TargetKind, TargetLanguage,
+    };
+    use ignore::WalkBuilder;
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -1332,6 +1343,90 @@ mod tests {
             ]
         );
         assert_eq!(second_identity, first_identity);
+    }
+
+    fn legacy_c_inventory_oracle(root: &Path) -> TargetInventory {
+        let mut parser = TsParser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .unwrap();
+        let mut candidates = Vec::new();
+        let mut calls = HashMap::new();
+        let mut complexity_map = HashMap::new();
+        let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
+        for entry in walker {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| TargetLanguage::C.extensions().contains(&extension))
+            {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let tree = parser.parse(&source, None).unwrap();
+            extract_functions(
+                &tree,
+                path,
+                &source,
+                TargetLanguage::C,
+                &mut candidates,
+                &mut calls,
+                &mut complexity_map,
+            );
+        }
+        crate::reachability::analyze(&mut candidates, &calls, &complexity_map);
+        let mut call_graph = HashMap::new();
+        for (caller, callees) in &calls {
+            let mut project: Vec<String> = callees
+                .iter()
+                .filter(|callee| *callee != caller && complexity_map.contains_key(*callee))
+                .cloned()
+                .collect();
+            project.sort();
+            project.dedup();
+            if !project.is_empty() {
+                call_graph.insert(caller.clone(), project);
+            }
+        }
+        for candidate in &mut candidates {
+            candidate.project_root = root.to_path_buf();
+            candidate.id = deterministic_target_id(candidate);
+        }
+        TargetInventory {
+            project_root: root.to_path_buf(),
+            candidates,
+            call_graph,
+        }
+    }
+
+    #[tokio::test]
+    async fn c_discovery_matches_the_complete_pre_refactor_oracle() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in (0..32).rev() {
+            std::fs::write(
+                dir.path().join(format!("{index:02}.c")),
+                format!("int parse_{index:02}(const char *s) {{ return s[0] + {index}; }}\n"),
+            )
+            .unwrap();
+        }
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let oracle = legacy_c_inventory_oracle(&canonical);
+        let actual = super::discover(&canonical, TargetLanguage::C)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(oracle).unwrap(),
+            "candidate fields, deterministic IDs, call graph, and legacy order changed"
+        );
     }
 
     #[test]
