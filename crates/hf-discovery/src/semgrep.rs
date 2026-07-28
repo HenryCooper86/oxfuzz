@@ -308,18 +308,18 @@ fn normalize_path(raw: &str) -> Result<PathBuf, SemgrepValidationError> {
     }
 
     let slash_normalized = raw.replace('\\', "/");
-    let has_windows_prefix = slash_normalized.as_bytes().get(1) == Some(&b':')
-        && slash_normalized
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic);
-    if slash_normalized.starts_with('/') || has_windows_prefix {
-        return Err(unsafe_path());
-    }
-
     let relative = slash_normalized
         .strip_prefix("./")
         .unwrap_or(&slash_normalized);
+    let has_windows_prefix = relative.as_bytes().get(1) == Some(&b':')
+        && relative
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic);
+    if relative.starts_with('/') || has_windows_prefix {
+        return Err(unsafe_path());
+    }
+
     if relative.is_empty()
         || relative
             .split('/')
@@ -653,6 +653,46 @@ mod tests {
                     "rejected raw paths must not be returned"
                 );
             }
+        }
+    }
+
+    // Production break caught: checking drive prefixes before stripping a result path's leading dot.
+    #[test]
+    fn parse_result_path_rejects_drive_prefix_after_leading_dot_separator() {
+        for path in ["./C:/work/source/file.c", ".\\C:\\work\\source\\file.c"] {
+            let bytes = one_result(
+                "rule.prefixed",
+                path,
+                1,
+                1,
+                1,
+                2,
+                "prefixed path",
+                "INFO",
+                path,
+            );
+            let error = parse_findings(&bytes, &manifest(&["C:/work/source/file.c"]))
+                .expect_err("result paths must reject a drive prefix after the leading dot");
+
+            assert!(matches!(error, SemgrepValidationError::UnsafeFinding(_)));
+        }
+    }
+
+    // Production break caught: checking drive prefixes before stripping a scanned path's leading dot.
+    #[test]
+    fn parse_scanned_path_rejects_drive_prefix_after_leading_dot_separator() {
+        for path in ["./C:/work/source/file.c", ".\\C:\\work\\source\\file.c"] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "version": "1.169.0",
+                "results": [],
+                "errors": [],
+                "paths": {"scanned": [path], "skipped": []}
+            }))
+            .expect("literal test document should serialize");
+            let error = parse_findings(&bytes, &manifest(&["C:/work/source/file.c"]))
+                .expect_err("scanned paths must reject a drive prefix after the leading dot");
+
+            assert!(matches!(error, SemgrepValidationError::UnsafeFinding(_)));
         }
     }
 
