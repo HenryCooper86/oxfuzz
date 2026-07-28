@@ -9,4 +9,4 @@ pub mod scanner;
 pub mod semgrep;
 
 pub use ranking::rank;
-pub use scanner::discover;
+pub use scanner::{discover, discoverable_source_files};
