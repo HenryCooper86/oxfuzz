@@ -758,11 +758,17 @@ COPY docker/sandbox/semgrep/scan.sh /usr/local/bin/oxfuzz-semgrep-scan
 RUN chmod 0755 /usr/local/bin/oxfuzz-semgrep-scan /opt/oxfuzz/semgrep-tree-digest.py \
     && test "$(semgrep --version)" = "${SEMGREP_VERSION}" \
     && test "$(python3 /opt/oxfuzz/semgrep-tree-digest.py /opt/oxfuzz/semgrep-rules/rules/c)" = \
-       "$(cat /opt/oxfuzz/semgrep-rules/RULES_SHA256)" \
-    && semgrep scan --validate --config /opt/oxfuzz/semgrep-rules/rules/c
+       "$(cat /opt/oxfuzz/semgrep-rules/RULES_SHA256)"
 ```
 
-Extend `scripts/build-sandbox.sh` to assert the version, tree digest, validation, and the exact `raptor-insecure-api-gets` fixture rule identifier inside a `docker run --network none --read-only` container with read-only source and writable output mounts.
+Semgrep CE `1.169.0`'s dedicated `scan --validate` path must not be used: it
+unconditionally fetches the registry-hosted `p/semgrep-rule-lints` pack.
+Extend `scripts/build-sandbox.sh` to assert the version and tree digest, then
+validate the complete bundled configuration by running the fixed wrapper
+inside a `docker run --network none --read-only` container with read-only
+source and writable output mounts. Successful loading/execution of all local
+rules plus the exact `raptor-insecure-api-gets` vulnerable/clean fixture
+assertion is the offline validation gate.
 
 - [ ] **Step 6: Build and run the container-only verification**
 
@@ -772,7 +778,10 @@ Run:
 ./scripts/build-sandbox.sh
 ```
 
-Expected: PASS; output confirms Semgrep `1.169.0`, exact tree digest, rule validation, networking disabled, and expected vulnerable/clean fixture identifiers. No host Semgrep command is run.
+Expected: PASS; output confirms Semgrep `1.169.0`, exact tree digest, complete
+local-configuration loading/execution, networking disabled, and expected
+vulnerable/clean fixture identifiers. No host Semgrep command or registry
+validation path is run.
 
 - [ ] **Step 7: Commit**
 
