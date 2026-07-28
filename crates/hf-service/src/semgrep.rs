@@ -1,7 +1,7 @@
 //! Service-owned Semgrep source snapshot support.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -117,16 +117,18 @@ fn stage_selected_paths_at_with_limits(
     managed_workspace: &Path,
     limits: SnapshotLimits,
 ) -> Result<SourceSnapshot, ClassifiedError> {
-    stage_selected_paths_at_with_hook(
+    stage_selected_paths_at_with_hooks(
         canonical_project,
         relative_paths,
         operation_id,
         managed_workspace,
         limits,
+        |_| {},
         || {},
     )
 }
 
+#[cfg(test)]
 fn stage_selected_paths_at_with_hook<F>(
     canonical_project: &Path,
     relative_paths: Vec<PathBuf>,
@@ -136,6 +138,61 @@ fn stage_selected_paths_at_with_hook<F>(
     after_read: F,
 ) -> Result<SourceSnapshot, ClassifiedError>
 where
+    F: FnOnce(),
+{
+    stage_selected_paths_at_with_hooks(
+        canonical_project,
+        relative_paths,
+        operation_id,
+        managed_workspace,
+        limits,
+        |_| {},
+        after_read,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageMutationPoint {
+    SemgrepRoot,
+    OperationRoot,
+    SourceRoot,
+    DestinationParent,
+}
+
+#[cfg(test)]
+fn stage_selected_paths_at_with_stage_hook<H>(
+    canonical_project: &Path,
+    relative_paths: Vec<PathBuf>,
+    operation_id: Uuid,
+    managed_workspace: &Path,
+    limits: SnapshotLimits,
+    stage_hook: H,
+) -> Result<SourceSnapshot, ClassifiedError>
+where
+    H: FnMut(StageMutationPoint),
+{
+    stage_selected_paths_at_with_hooks(
+        canonical_project,
+        relative_paths,
+        operation_id,
+        managed_workspace,
+        limits,
+        stage_hook,
+        || {},
+    )
+}
+
+fn stage_selected_paths_at_with_hooks<H, F>(
+    canonical_project: &Path,
+    relative_paths: Vec<PathBuf>,
+    operation_id: Uuid,
+    managed_workspace: &Path,
+    limits: SnapshotLimits,
+    mut stage_hook: H,
+    after_read: F,
+) -> Result<SourceSnapshot, ClassifiedError>
+where
+    H: FnMut(StageMutationPoint),
     F: FnOnce(),
 {
     validate_canonical_directory(canonical_project, "project root")?;
@@ -163,43 +220,96 @@ where
     }
 
     let workspace = validate_canonical_directory(managed_workspace, "managed workspace")?;
-    let semgrep_root = ensure_owned_directory(&workspace, Path::new("semgrep"))?;
+    let workspace_descriptor = open_directory_path_nofollow(&workspace, "managed workspace")?;
+    verify_directory_path_identity(&workspace, &workspace_descriptor, "managed workspace")?;
+    let semgrep_root = workspace.join("semgrep");
+    let semgrep_descriptor = open_or_create_directory_at(&workspace_descriptor, "semgrep", true)?;
+    stage_hook(StageMutationPoint::SemgrepRoot);
+    verify_directory_path_identity(&workspace, &workspace_descriptor, "managed workspace")?;
+    verify_directory_path_identity(&semgrep_root, &semgrep_descriptor, "Semgrep workspace")?;
     let operation_root = semgrep_root.join(operation_id.to_string());
-    create_owned_directory(&operation_root)?;
     let source_dir = operation_root.join("source");
     let output_dir = operation_root.join("output");
+    let operation_descriptor = create_new_directory_at(
+        &semgrep_descriptor,
+        operation_id.to_string().as_str(),
+        "Semgrep operation directory",
+    )?;
 
     let staged = (|| {
-        create_owned_directory(&source_dir)?;
-        create_owned_directory(&output_dir)?;
+        stage_hook(StageMutationPoint::OperationRoot);
+        verify_staging_directory_chain(
+            &workspace,
+            &workspace_descriptor,
+            &semgrep_root,
+            &semgrep_descriptor,
+            &operation_root,
+            &operation_descriptor,
+        )?;
+        let source_descriptor =
+            create_new_directory_at(&operation_descriptor, "source", "snapshot source directory")?;
+        stage_hook(StageMutationPoint::SourceRoot);
+        verify_staging_directory_chain(
+            &workspace,
+            &workspace_descriptor,
+            &semgrep_root,
+            &semgrep_descriptor,
+            &operation_root,
+            &operation_descriptor,
+        )?;
+        verify_directory_path_identity(&source_dir, &source_descriptor, "snapshot source")?;
+        let output_descriptor =
+            create_new_directory_at(&operation_descriptor, "output", "snapshot output directory")?;
+        verify_directory_path_identity(&output_dir, &output_descriptor, "snapshot output")?;
         let mut hasher = Sha256::new();
         let mut total_bytes = 0_u64;
         let mut after_read = Some(after_read);
         let mut manifest = BTreeSet::new();
 
         for (normalized_path, relative) in selected {
+            let remaining = limits
+                .max_total_bytes
+                .checked_sub(total_bytes)
+                .ok_or_else(|| snapshot_validation("snapshot aggregate byte count overflowed"))?;
+            let allowance = limits.max_file_bytes.min(remaining);
             let bytes = if let Some(hook) = after_read.take() {
-                read_stable_source(canonical_project, &relative, limits.max_file_bytes, hook)?
+                read_stable_source(canonical_project, &relative, allowance, hook)?
             } else {
-                read_stable_source(canonical_project, &relative, limits.max_file_bytes, || {})?
+                read_stable_source(canonical_project, &relative, allowance, || {})?
             };
             let file_bytes = u64::try_from(bytes.len())
                 .map_err(|_| snapshot_validation("snapshot file length cannot be represented"))?;
             total_bytes = total_bytes
                 .checked_add(file_bytes)
                 .ok_or_else(|| snapshot_validation("snapshot aggregate byte count overflowed"))?;
-            if total_bytes > limits.max_total_bytes {
-                return Err(snapshot_validation(format!(
-                    "snapshot aggregate bytes exceed {}",
-                    limits.max_total_bytes
-                )));
-            }
-            let destination = source_dir.join(&relative);
-            create_owned_parent_directories(&source_dir, &relative)?;
-            write_new_owned_file(&destination, &bytes)?;
+            let (parent_descriptor, parent_path, leaf) =
+                open_or_create_destination_parent(&source_descriptor, &source_dir, &relative)?;
+            stage_hook(StageMutationPoint::DestinationParent);
+            verify_staging_directory_chain(
+                &workspace,
+                &workspace_descriptor,
+                &semgrep_root,
+                &semgrep_descriptor,
+                &operation_root,
+                &operation_descriptor,
+            )?;
+            verify_directory_path_identity(&source_dir, &source_descriptor, "snapshot source")?;
+            verify_directory_path_identity(
+                &parent_path,
+                &parent_descriptor,
+                "snapshot destination parent",
+            )?;
+            write_new_owned_file_at(&parent_descriptor, &leaf, &bytes)?;
+            verify_directory_path_identity(
+                &parent_path,
+                &parent_descriptor,
+                "snapshot destination parent",
+            )?;
             hash_path_and_bytes(&mut hasher, &normalized_path, &bytes);
             manifest.insert(relative);
         }
+        verify_directory_path_identity(&source_dir, &source_descriptor, "snapshot source")?;
+        verify_directory_path_identity(&output_dir, &output_descriptor, "snapshot output")?;
 
         Ok(SourceSnapshot {
             operation_root: operation_root.clone(),
@@ -229,6 +339,18 @@ fn digest_live_sources_with_limits(
     language: TargetLanguage,
     limits: SnapshotLimits,
 ) -> Result<String, ClassifiedError> {
+    digest_live_sources_with_limits_and_read_hook(canonical_project, language, limits, |_| {})
+}
+
+fn digest_live_sources_with_limits_and_read_hook<H>(
+    canonical_project: &Path,
+    language: TargetLanguage,
+    limits: SnapshotLimits,
+    mut before_read: H,
+) -> Result<String, ClassifiedError>
+where
+    H: FnMut(&Path),
+{
     validate_canonical_directory(canonical_project, "project root")?;
     let relative_paths = hf_discovery::discoverable_source_files(canonical_project, language)?;
     if relative_paths.len() > limits.max_files {
@@ -248,18 +370,23 @@ fn digest_live_sources_with_limits(
                 limits.max_relative_path_bytes
             )));
         }
-        let bytes = read_stable_source(canonical_project, &relative, limits.max_file_bytes, || {})?;
+        let remaining = limits
+            .max_total_bytes
+            .checked_sub(total_bytes)
+            .ok_or_else(|| snapshot_validation("snapshot aggregate byte count overflowed"))?;
+        let allowance = limits.max_file_bytes.min(remaining);
+        let bytes = read_stable_source_with_hooks(
+            canonical_project,
+            &relative,
+            allowance,
+            || before_read(&relative),
+            || {},
+        )?;
         let file_bytes = u64::try_from(bytes.len())
             .map_err(|_| snapshot_validation("snapshot file length cannot be represented"))?;
         total_bytes = total_bytes
             .checked_add(file_bytes)
             .ok_or_else(|| snapshot_validation("snapshot aggregate byte count overflowed"))?;
-        if total_bytes > limits.max_total_bytes {
-            return Err(snapshot_validation(format!(
-                "snapshot aggregate bytes exceed {}",
-                limits.max_total_bytes
-            )));
-        }
         sources.push((relative, bytes));
     }
     digest_ordered_sources(sources)
@@ -337,130 +464,200 @@ fn validate_canonical_directory(path: &Path, label: &str) -> Result<PathBuf, Cla
     Ok(canonical)
 }
 
-fn ensure_owned_directory(root: &Path, relative: &Path) -> Result<PathBuf, ClassifiedError> {
-    let _ = normalized_relative_path_bytes(relative)?;
-    let directory = root.join(relative);
-    match std::fs::symlink_metadata(&directory) {
-        Ok(metadata) if metadata.file_type().is_dir() => {
-            let resolved = std::fs::canonicalize(&directory).map_err(|error| {
-                snapshot_validation(format!(
-                    "resolve snapshot directory {}: {error}",
-                    directory.display()
-                ))
-            })?;
-            if resolved != directory || !resolved.starts_with(root) {
-                return Err(snapshot_validation(
-                    "snapshot directory escaped its managed root",
-                ));
-            }
-        }
-        Ok(_) => {
-            return Err(snapshot_validation(format!(
-                "snapshot directory is not a regular directory: {}",
-                directory.display()
-            )));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            create_owned_directory(&directory)?;
-        }
-        Err(error) => {
-            return Err(snapshot_validation(format!(
-                "inspect snapshot directory {}: {error}",
-                directory.display()
-            )));
-        }
-    }
-    Ok(directory)
-}
-
-fn create_owned_directory(path: &Path) -> Result<(), ClassifiedError> {
-    std::fs::create_dir(path).map_err(|error| {
-        snapshot_validation(format!(
-            "create snapshot directory {}: {error}",
-            path.display()
-        ))
-    })?;
-    if let Err(error) = set_directory_permissions(path) {
-        return match std::fs::remove_dir(path) {
-            Ok(()) => Err(error),
-            Err(cleanup) => Err(append_error_context(
-                error,
-                &format!("remove incompletely created directory failed: {cleanup}"),
-            )),
-        };
-    }
-    Ok(())
-}
-
-fn create_owned_parent_directories(
-    source_root: &Path,
-    relative_file: &Path,
-) -> Result<(), ClassifiedError> {
-    let Some(parent) = relative_file.parent() else {
-        return Ok(());
-    };
-    let mut current = source_root.to_path_buf();
-    for component in parent.components() {
-        let Component::Normal(name) = component else {
-            return Err(snapshot_validation("snapshot relative path is unsafe"));
-        };
-        current.push(name);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(_) => {
-                return Err(snapshot_validation(format!(
-                    "snapshot destination parent is not a regular directory: {}",
-                    current.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                create_owned_directory(&current)?;
-            }
-            Err(error) => {
-                return Err(snapshot_validation(format!(
-                    "inspect snapshot destination parent {}: {error}",
-                    current.display()
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
-fn set_directory_permissions(path: &Path) -> Result<(), ClassifiedError> {
-    use std::os::unix::fs::PermissionsExt;
+fn open_directory_path_nofollow(path: &Path, label: &str) -> Result<File, ClassifiedError> {
+    use rustix::fs::{open, Mode, OFlags};
 
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
-        snapshot_validation(format!(
-            "restrict snapshot directory {}: {error}",
-            path.display()
-        ))
-    })
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let descriptor = open(path, flags, Mode::empty())
+        .map_err(|error| snapshot_validation(format!("open {label} without links: {error}")))?;
+    Ok(File::from(descriptor))
 }
 
 #[cfg(not(unix))]
-fn set_directory_permissions(_path: &Path) -> Result<(), ClassifiedError> {
+fn open_directory_path_nofollow(_path: &Path, _label: &str) -> Result<File, ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep staging requires descriptor-relative filesystem access".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+fn open_or_create_directory_at(
+    parent: &File,
+    name: &str,
+    allow_existing: bool,
+) -> Result<File, ClassifiedError> {
+    use rustix::fs::{mkdirat, openat, Mode, OFlags};
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    match openat(parent, name, flags, Mode::empty()) {
+        Ok(descriptor) if allow_existing => Ok(File::from(descriptor)),
+        Ok(_) => Err(snapshot_validation(
+            "snapshot directory already exists unexpectedly",
+        )),
+        Err(rustix::io::Errno::NOENT) => {
+            mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(|error| {
+                snapshot_validation(format!("create snapshot directory: {error}"))
+            })?;
+            let descriptor = openat(parent, name, flags, Mode::empty()).map_err(|error| {
+                snapshot_validation(format!("open created snapshot directory: {error}"))
+            })?;
+            Ok(File::from(descriptor))
+        }
+        Err(error) => Err(snapshot_validation(format!(
+            "open snapshot directory without links: {error}"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn open_or_create_directory_at(
+    _parent: &File,
+    _name: &str,
+    _allow_existing: bool,
+) -> Result<File, ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep staging requires descriptor-relative filesystem access".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+fn create_new_directory_at(
+    parent: &File,
+    name: &str,
+    label: &str,
+) -> Result<File, ClassifiedError> {
+    use rustix::fs::{mkdirat, openat, Mode, OFlags};
+
+    mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+        .map_err(|error| snapshot_validation(format!("create {label}: {error}")))?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let descriptor = openat(parent, name, flags, Mode::empty())
+        .map_err(|error| snapshot_validation(format!("open created {label}: {error}")))?;
+    Ok(File::from(descriptor))
+}
+
+#[cfg(not(unix))]
+fn create_new_directory_at(
+    _parent: &File,
+    _name: &str,
+    _label: &str,
+) -> Result<File, ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep staging requires descriptor-relative filesystem access".to_owned(),
+    ))
+}
+
+fn open_or_create_destination_parent(
+    source_descriptor: &File,
+    source_path: &Path,
+    relative_file: &Path,
+) -> Result<(File, PathBuf, std::ffi::OsString), ClassifiedError> {
+    let mut components: Vec<_> = relative_file
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name.to_os_string()),
+            _ => Err(snapshot_validation("snapshot relative path is unsafe")),
+        })
+        .collect::<Result<_, _>>()?;
+    let leaf = components
+        .pop()
+        .ok_or_else(|| snapshot_validation("snapshot relative path is empty"))?;
+    let mut current = source_descriptor.try_clone().map_err(|error| {
+        snapshot_validation(format!("retain snapshot source directory: {error}"))
+    })?;
+    let mut current_path = source_path.to_path_buf();
+    for component in components {
+        current = open_or_create_directory_at(
+            &current,
+            component
+                .to_str()
+                .ok_or_else(|| snapshot_validation("snapshot relative path is not UTF-8"))?,
+            true,
+        )?;
+        current_path.push(component);
+    }
+    Ok((current, current_path, leaf))
+}
+
+#[cfg(unix)]
+fn write_new_owned_file_at(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<(), ClassifiedError> {
+    use rustix::fs::{openat, Mode, OFlags};
+
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let descriptor = openat(parent, name, flags, Mode::RUSR | Mode::WUSR)
+        .map_err(|error| snapshot_validation(format!("create staged source: {error}")))?;
+    let mut file = File::from(descriptor);
+    if !file
+        .metadata()
+        .map_err(|error| snapshot_validation(format!("inspect staged source: {error}")))?
+        .file_type()
+        .is_file()
+    {
+        return Err(snapshot_validation("staged source is not a regular file"));
+    }
+    file.write_all(bytes)
+        .map_err(|error| snapshot_validation(format!("write staged source: {error}")))?;
+    file.sync_all()
+        .map_err(|error| snapshot_validation(format!("sync staged source: {error}")))
+}
+
+#[cfg(not(unix))]
+fn write_new_owned_file_at(
+    _parent: &File,
+    _name: &std::ffi::OsStr,
+    _bytes: &[u8],
+) -> Result<(), ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep staging requires descriptor-relative filesystem access".to_owned(),
+    ))
+}
+
+fn verify_staging_directory_chain(
+    workspace_path: &Path,
+    workspace: &File,
+    semgrep_path: &Path,
+    semgrep: &File,
+    operation_path: &Path,
+    operation: &File,
+) -> Result<(), ClassifiedError> {
+    verify_directory_path_identity(workspace_path, workspace, "managed workspace")?;
+    verify_directory_path_identity(semgrep_path, semgrep, "Semgrep workspace")?;
+    verify_directory_path_identity(operation_path, operation, "Semgrep operation")
+}
+
+#[cfg(unix)]
+fn verify_directory_path_identity(
+    path: &Path,
+    descriptor: &File,
+    label: &str,
+) -> Result<(), ClassifiedError> {
+    let path_metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| snapshot_validation(format!("inspect {label} path: {error}")))?;
+    let descriptor_metadata = descriptor
+        .metadata()
+        .map_err(|error| snapshot_validation(format!("inspect open {label}: {error}")))?;
+    if !same_directory_identity(&path_metadata, &descriptor_metadata) {
+        return Err(snapshot_validation(format!(
+            "{label} pathname changed during staging"
+        )));
+    }
     Ok(())
 }
 
-fn write_new_owned_file(path: &Path, bytes: &[u8]) -> Result<(), ClassifiedError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
-        snapshot_validation(format!("create staged source {}: {error}", path.display()))
-    })?;
-    file.write_all(bytes).map_err(|error| {
-        snapshot_validation(format!("write staged source {}: {error}", path.display()))
-    })?;
-    file.sync_all().map_err(|error| {
-        snapshot_validation(format!("sync staged source {}: {error}", path.display()))
-    })
+#[cfg(not(unix))]
+fn verify_directory_path_identity(
+    _path: &Path,
+    _descriptor: &File,
+    _label: &str,
+) -> Result<(), ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep staging requires filesystem identity checks".to_owned(),
+    ))
 }
 
 fn read_stable_source<F>(
@@ -471,6 +668,20 @@ fn read_stable_source<F>(
 ) -> Result<Vec<u8>, ClassifiedError>
 where
     F: FnOnce(),
+{
+    read_stable_source_with_hooks(canonical_project, relative, maximum, || {}, after_read)
+}
+
+fn read_stable_source_with_hooks<B, A>(
+    canonical_project: &Path,
+    relative: &Path,
+    maximum: u64,
+    before_allocate: B,
+    after_read: A,
+) -> Result<Vec<u8>, ClassifiedError>
+where
+    B: FnOnce(),
+    A: FnOnce(),
 {
     let _ = normalized_relative_path_bytes(relative)?;
     let mut file = open_source_beneath(canonical_project, relative)?;
@@ -485,11 +696,15 @@ where
             "snapshot source must be a regular file no larger than {maximum} bytes"
         )));
     }
+    before_allocate();
     let capacity = usize::try_from(before.len())
         .map_err(|_| snapshot_validation("snapshot source length cannot be allocated"))?;
+    let read_limit = maximum
+        .checked_add(1)
+        .ok_or_else(|| snapshot_validation("snapshot read bound overflowed"))?;
     let mut bytes = Vec::with_capacity(capacity);
     Read::by_ref(&mut file)
-        .take(maximum.saturating_add(1))
+        .take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(|error| {
             snapshot_validation(format!(
@@ -549,7 +764,7 @@ fn open_source_beneath(canonical_project: &Path, relative: &Path) -> Result<File
     let descriptor = openat(
         &directory,
         *leaf,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(|error| snapshot_validation(format!("open snapshot source: {error}")))?;
@@ -872,8 +1087,10 @@ mod snapshot_tests {
     use uuid::Uuid;
 
     use super::{
-        cleanup_operation_root_in, digest_live_sources_with_limits, digest_ordered_sources,
-        stage_selected_paths_at_with_limits, stage_source_snapshot_at_with_limits, SnapshotLimits,
+        cleanup_operation_root_in, digest_live_sources_with_limits,
+        digest_live_sources_with_limits_and_read_hook, digest_ordered_sources,
+        stage_selected_paths_at_with_limits, stage_selected_paths_at_with_stage_hook,
+        stage_source_snapshot_at_with_limits, SnapshotLimits, StageMutationPoint,
         COMMAND_SCHEMA_VERSION, RULES_COMMIT, SEMGREP_VERSION, SNAPSHOT_LIMITS,
     };
 
@@ -1244,6 +1461,172 @@ mod snapshot_tests {
             & 0o777;
         assert_eq!(mode, 0o600);
         cleanup_operation_root_in(&canonical_workspace, &snapshot.operation_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_rejects_swapped_owned_directory_paths_without_touching_external_trees() {
+        use std::os::unix::fs::symlink;
+
+        for point in [
+            StageMutationPoint::SemgrepRoot,
+            StageMutationPoint::OperationRoot,
+            StageMutationPoint::SourceRoot,
+            StageMutationPoint::DestinationParent,
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            write(project.path(), "nested/input.c", b"input");
+            let canonical = std::fs::canonicalize(project.path()).unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            write(outside.path(), "must-survive", b"external");
+            let operation_id = Uuid::new_v4();
+            let semgrep = canonical_workspace.join("semgrep");
+            let operation = semgrep.join(operation_id.to_string());
+            let source = operation.join("source");
+            let nested = source.join("nested");
+            let mut swapped = false;
+
+            let result = stage_selected_paths_at_with_stage_hook(
+                &canonical,
+                vec![PathBuf::from("nested/input.c")],
+                operation_id,
+                &canonical_workspace,
+                tiny_limits(),
+                |observed| {
+                    if observed != point || swapped {
+                        return;
+                    }
+                    swapped = true;
+                    let (target, held) = match point {
+                        StageMutationPoint::SemgrepRoot => {
+                            (semgrep.clone(), canonical_workspace.join("semgrep-held"))
+                        }
+                        StageMutationPoint::OperationRoot => (
+                            operation.clone(),
+                            semgrep.join(format!("{operation_id}-held")),
+                        ),
+                        StageMutationPoint::SourceRoot => {
+                            (source.clone(), operation.join("source-held"))
+                        }
+                        StageMutationPoint::DestinationParent => {
+                            (nested.clone(), source.join("nested-held"))
+                        }
+                    };
+                    std::fs::rename(&target, held).unwrap();
+                    symlink(outside.path(), target).unwrap();
+                },
+            );
+
+            assert!(swapped, "test did not reach {point:?}");
+            assert!(result.is_err(), "{point:?} swap must fail closed");
+            assert_eq!(
+                std::fs::read(outside.path().join("must-survive")).unwrap(),
+                b"external"
+            );
+            let external_entries = std::fs::read_dir(outside.path()).unwrap().count();
+            assert_eq!(
+                external_entries, 1,
+                "{point:?} staging wrote through a replacement pathname"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_limit_rejects_before_allocating_or_reading_the_next_file() {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "a.c", b"aaaa");
+        write(project.path(), "b.c", b"bbbb");
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        let mut read_paths = Vec::new();
+        let limits = SnapshotLimits {
+            max_total_bytes: 4,
+            ..tiny_limits()
+        };
+
+        let result = digest_live_sources_with_limits_and_read_hook(
+            &canonical,
+            TargetLanguage::C,
+            limits,
+            |path| read_paths.push(path.to_path_buf()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            read_paths,
+            vec![PathBuf::from("a.c")],
+            "the second file reached the allocation/read boundary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_without_a_writer_fails_promptly_and_cleans_the_operation() {
+        use std::time::{Duration, Instant};
+
+        let project = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(project.path().join("blocked.c"))
+            .status()
+            .unwrap()
+            .success());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
+        let operation_id = Uuid::new_v4();
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("semgrep::snapshot_tests::fifo_stage_child")
+            .env("OXFUZZ_FIFO_TEST_PROJECT", &canonical)
+            .env("OXFUZZ_FIFO_TEST_WORKSPACE", &canonical_workspace)
+            .env("OXFUZZ_FIFO_TEST_OPERATION", operation_id.to_string())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "opening a FIFO without O_NONBLOCK did not fail promptly"
+        );
+        assert!(
+            !canonical_workspace.join("semgrep").exists()
+                || std::fs::read_dir(canonical_workspace.join("semgrep"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "FIFO failure left an operation directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_stage_child() {
+        let Ok(project) = std::env::var("OXFUZZ_FIFO_TEST_PROJECT") else {
+            return;
+        };
+        let workspace = PathBuf::from(std::env::var("OXFUZZ_FIFO_TEST_WORKSPACE").unwrap());
+        let operation_id =
+            Uuid::parse_str(&std::env::var("OXFUZZ_FIFO_TEST_OPERATION").unwrap()).unwrap();
+        let result = stage_selected_paths_at_with_limits(
+            Path::new(&project),
+            vec![PathBuf::from("blocked.c")],
+            operation_id,
+            &workspace,
+            tiny_limits(),
+        );
+        assert!(result.is_err());
     }
 
     #[test]
