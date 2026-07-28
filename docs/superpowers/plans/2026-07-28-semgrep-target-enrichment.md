@@ -992,6 +992,7 @@ git commit -m "feat: persist atomic Semgrep enrichment overlays"
 ### Task 8: Add a Durable Per-Operation Semgrep Recovery Journal
 
 **Files:**
+- Modify: `crates/hf-service/Cargo.toml`
 - Modify: `crates/hf-service/src/lib.rs`
 - Create: `crates/hf-service/src/semgrep_recovery.rs`
 
@@ -1038,7 +1039,20 @@ impl SemgrepJournal {
 }
 ```
 
-- [ ] **Step 1: Write failing journal tests**
+- [ ] **Step 1: Establish the feature boundary and write failing journal tests**
+
+Declare the service feature before running the Task 8 tests:
+
+```toml
+[features]
+default = ["automotive-scapy", "proof-carrying", "semgrep-enrichment"]
+semgrep-enrichment = ["hf-discovery/semgrep-enrichment"]
+```
+
+Gate `pub mod semgrep_recovery;` with
+`#[cfg(feature = "semgrep-enrichment")]`. This moves the service feature wiring
+forward from Task 9 so the Task 8 test command is valid and the new recovery
+subsystem is feature-gated from its first commit.
 
 Test:
 
@@ -1105,7 +1119,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/hf-service/src/lib.rs crates/hf-service/src/semgrep_recovery.rs
+git add crates/hf-service/Cargo.toml crates/hf-service/src/lib.rs \
+  crates/hf-service/src/semgrep_recovery.rs
 git commit -m "feat: journal Semgrep enrichment publication"
 ```
 
@@ -1228,9 +1243,9 @@ fn hash_path_and_bytes(hasher: &mut Sha256, path: &[u8], bytes: &[u8]) {
 
 Create `source` and `output` with restrictive permissions. If any step fails, remove the validated operation directory and return the original error plus cleanup failure context when cleanup also fails.
 
-- [ ] **Step 5: Wire the service feature**
+- [ ] **Step 5: Verify and extend the service feature boundary**
 
-Use:
+Task 8 already declares:
 
 ```toml
 [features]
@@ -1238,7 +1253,8 @@ default = ["automotive-scapy", "proof-carrying", "semgrep-enrichment"]
 semgrep-enrichment = ["hf-discovery/semgrep-enrichment"]
 ```
 
-Gate `pub mod semgrep;` and all Semgrep re-exports with `#[cfg(feature = "semgrep-enrichment")]`.
+Keep that mapping unchanged. Gate `pub mod semgrep;` and all new Semgrep
+snapshot re-exports with `#[cfg(feature = "semgrep-enrichment")]`.
 
 - [ ] **Step 6: Run tests and feature-off check**
 
