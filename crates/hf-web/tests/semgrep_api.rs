@@ -83,52 +83,52 @@ impl RecordingSemgrepRuntime {
 }
 
 #[async_trait::async_trait]
-impl hf_core::runtime::RuntimeAdapter for RecordingSemgrepRuntime {
+impl hf_service::RuntimeAdapter for RecordingSemgrepRuntime {
     async fn run_command(
         &self,
         _cmd: &[String],
         cwd: &std::path::Path,
-        _limits: &hf_core::runtime::ResourceLimits,
-    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        _limits: &hf_service::ResourceLimits,
+    ) -> Result<hf_service::CommandResult, hf_service::ClassifiedError> {
         self.started.notify_one();
         self.release.notified().await;
         self.write_result(cwd)
             .await
-            .map_err(|error| hf_core::error::ClassifiedError::Sandbox(error.to_string()))?;
-        Ok(hf_core::runtime::CommandResult {
+            .map_err(|error| hf_service::ClassifiedError::Sandbox(error.to_string()))?;
+        Ok(hf_service::CommandResult {
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
             workspace: cwd.to_path_buf(),
-            termination: hf_core::runtime::CommandTermination::Completed,
+            termination: hf_service::CommandTermination::Completed,
         })
     }
 
     async fn resolve_image_reference(
         &self,
         _image: &str,
-    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
-    {
-        hf_test_utils::immutable_test_image().map(Some)
+    ) -> Result<Option<hf_service::ImmutableImageReference>, hf_service::ClassifiedError> {
+        hf_service::ImmutableImageReference::from_sha256_id(format!("sha256:{}", "a".repeat(64)))
+            .map(Some)
     }
 
     async fn write_file(
         &self,
         path: &std::path::Path,
         content: &str,
-    ) -> Result<(), hf_core::error::ClassifiedError> {
+    ) -> Result<(), hf_service::ClassifiedError> {
         tokio::fs::write(path, content)
             .await
-            .map_err(|error| hf_core::error::ClassifiedError::Sandbox(error.to_string()))
+            .map_err(|error| hf_service::ClassifiedError::Sandbox(error.to_string()))
     }
 
     async fn read_file(
         &self,
         path: &std::path::Path,
-    ) -> Result<String, hf_core::error::ClassifiedError> {
+    ) -> Result<String, hf_service::ClassifiedError> {
         tokio::fs::read_to_string(path)
             .await
-            .map_err(|error| hf_core::error::ClassifiedError::Sandbox(error.to_string()))
+            .map_err(|error| hf_service::ClassifiedError::Sandbox(error.to_string()))
     }
 }
 
