@@ -40,6 +40,10 @@ enum Commands {
         /// Enable LLM-assisted ranking (requires `HF_PROVIDER_API_KEY`).
         #[arg(long)]
         rank: bool,
+        /// Enrich persisted C/C++ targets with advisory Semgrep signals.
+        #[cfg(feature = "semgrep-enrichment")]
+        #[arg(long)]
+        semgrep: bool,
     },
     /// Generate a harness for a target.
     Harness {
@@ -876,7 +880,12 @@ async fn cmd_policy(op: PolicyOp) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Result<()> {
+async fn cmd_discover(
+    project: PathBuf,
+    lang: &str,
+    rank: bool,
+    #[cfg(feature = "semgrep-enrichment")] semgrep: bool,
+) -> anyhow::Result<()> {
     let lang = parse_lang(lang)?;
     let container = ServiceContainer::bootstrap().await;
     let mut inv = container.discover(&project, lang).await?;
@@ -889,8 +898,96 @@ async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Resul
             );
         }
     }
+    #[cfg(feature = "semgrep-enrichment")]
+    if semgrep {
+        if !matches!(lang, TargetLanguage::C | TargetLanguage::Cpp) {
+            anyhow::bail!("Semgrep enrichment supports only C and C++ target inventories");
+        }
+        let operation_id = container.start_semgrep_enrichment(project, lang).await?;
+        let result = wait_for_semgrep(&container, operation_id).await?;
+        eprintln!("Semgrep static-analysis signals");
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     println!("{}", serde_json::to_string_pretty(&inv)?);
     Ok(())
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+enum SemgrepPollAction {
+    Continue,
+    Complete(hf_service::SemgrepInventoryView),
+    Fail(String),
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+fn semgrep_state_name(state: hf_service::SemgrepOperationState) -> &'static str {
+    match state {
+        hf_service::SemgrepOperationState::Staging => "staging",
+        hf_service::SemgrepOperationState::Scanning => "scanning",
+        hf_service::SemgrepOperationState::Validating => "validating",
+        hf_service::SemgrepOperationState::Persisting => "persisting",
+        hf_service::SemgrepOperationState::Done => "done",
+        hf_service::SemgrepOperationState::Failed => "failed",
+        hf_service::SemgrepOperationState::Cancelled => "cancelled",
+    }
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+fn semgrep_poll_action(view: hf_service::SemgrepOperationView) -> SemgrepPollAction {
+    match view.state {
+        hf_service::SemgrepOperationState::Done => match view.result {
+            Some(result) => SemgrepPollAction::Complete(result),
+            None => SemgrepPollAction::Fail(
+                "Semgrep enrichment completed without an exact result".to_owned(),
+            ),
+        },
+        hf_service::SemgrepOperationState::Failed
+        | hf_service::SemgrepOperationState::Cancelled => {
+            SemgrepPollAction::Fail(view.failure_message.unwrap_or_else(|| {
+                format!("Semgrep enrichment {}", semgrep_state_name(view.state))
+            }))
+        }
+        _ => SemgrepPollAction::Continue,
+    }
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+async fn wait_for_semgrep(
+    container: &ServiceContainer,
+    operation_id: uuid::Uuid,
+) -> anyhow::Result<hf_service::SemgrepInventoryView> {
+    let mut previous_state = None;
+    let mut cancellation_requested = false;
+    loop {
+        let view = container
+            .semgrep_operation(operation_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Semgrep operation {operation_id} was not found"))?;
+        if previous_state != Some(view.state) {
+            eprintln!("Semgrep enrichment: {}", semgrep_state_name(view.state));
+            previous_state = Some(view.state);
+        }
+        match semgrep_poll_action(view) {
+            SemgrepPollAction::Continue => {}
+            SemgrepPollAction::Complete(result) => return Ok(result),
+            SemgrepPollAction::Fail(message) => anyhow::bail!("{message}"),
+        }
+
+        if cancellation_requested {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        } else {
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    eprintln!("Semgrep enrichment: cancellation requested");
+                    let _ = container.request_semgrep_cancel(operation_id).await?;
+                    cancellation_requested = true;
+                }
+            }
+        }
+    }
 }
 
 async fn cmd_harness(
@@ -1708,7 +1805,18 @@ async fn main() -> anyhow::Result<()> {
             project,
             lang,
             rank,
-        } => cmd_discover(project, &lang, rank).await?,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep,
+        } => {
+            cmd_discover(
+                project,
+                &lang,
+                rank,
+                #[cfg(feature = "semgrep-enrichment")]
+                semgrep,
+            )
+            .await?;
+        }
         Commands::Harness {
             project,
             target,
@@ -1895,9 +2003,33 @@ mod automotive_tests {
 
 #[cfg(test)]
 mod doctor_tests {
-    use super::{doctor_lines, parse_lang};
+    #[cfg(feature = "semgrep-enrichment")]
+    use clap::Parser as _;
     use hf_service::system::StatusFlag;
     use hf_service::SystemStatus;
+
+    use super::{doctor_lines, parse_lang};
+    #[cfg(feature = "semgrep-enrichment")]
+    use super::{Cli, Commands};
+
+    #[test]
+    #[cfg(feature = "semgrep-enrichment")]
+    fn cli_parses_semgrep_opt_in() {
+        let cli = Cli::try_parse_from([
+            "oxfuzz",
+            "discover",
+            "/tmp/project",
+            "--lang",
+            "c",
+            "--semgrep",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Discover { semgrep: true, .. }
+        ));
+    }
 
     #[test]
     fn doctor_output_distinguishes_required_and_optional_checks() {
@@ -2013,5 +2145,129 @@ mod policy_tests {
             panic!("expected policy decisions");
         };
         assert_eq!(limit, 5);
+    }
+}
+
+#[cfg(all(test, feature = "semgrep-enrichment"))]
+mod semgrep_cli_tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use hf_service::{
+        SemgrepInventoryView, SemgrepOperationState, SemgrepOperationView, SemgrepOverlayState,
+        TargetLanguage,
+    };
+    use uuid::Uuid;
+
+    use super::{semgrep_poll_action, semgrep_state_name, SemgrepPollAction};
+
+    fn operation(state: SemgrepOperationState) -> SemgrepOperationView {
+        SemgrepOperationView {
+            operation_id: Uuid::nil(),
+            project_root: "/tmp/project".to_owned(),
+            language: "c".to_owned(),
+            state,
+            active: true,
+            started_at: "2026-07-29T00:00:00Z".to_owned(),
+            ended_at: None,
+            failure_code: None,
+            failure_message: None,
+            result: None,
+        }
+    }
+
+    #[test]
+    fn semgrep_polling_uses_exact_results_and_fails_closed_at_terminals() {
+        for state in [
+            SemgrepOperationState::Staging,
+            SemgrepOperationState::Scanning,
+            SemgrepOperationState::Validating,
+            SemgrepOperationState::Persisting,
+        ] {
+            assert!(matches!(
+                semgrep_poll_action(operation(state)),
+                SemgrepPollAction::Continue
+            ));
+        }
+
+        let mut done = operation(SemgrepOperationState::Done);
+        done.result = Some(SemgrepInventoryView {
+            project_root: PathBuf::from("/tmp/project"),
+            language: TargetLanguage::C,
+            scan_id: Some(Uuid::nil()),
+            source_sha256: Some("1".repeat(64)),
+            overlay_state: SemgrepOverlayState::Current,
+            candidates: Vec::new(),
+            findings: Vec::new(),
+            call_graph: HashMap::new(),
+        });
+        let SemgrepPollAction::Complete(result) = semgrep_poll_action(done) else {
+            panic!("done operation must return its exact result");
+        };
+        assert_eq!(result.scan_id, Some(Uuid::nil()));
+
+        let missing = semgrep_poll_action(operation(SemgrepOperationState::Done));
+        let SemgrepPollAction::Fail(message) = missing else {
+            panic!("done operation without a result must fail closed");
+        };
+        assert!(message.contains("completed without an exact result"));
+
+        let mut failed = operation(SemgrepOperationState::Failed);
+        failed.failure_message = Some("bounded service failure".to_owned());
+        let SemgrepPollAction::Fail(message) = semgrep_poll_action(failed) else {
+            panic!("failed operation must return an error");
+        };
+        assert_eq!(message, "bounded service failure");
+
+        assert!(matches!(
+            semgrep_poll_action(operation(SemgrepOperationState::Cancelled)),
+            SemgrepPollAction::Fail(message) if message.contains("cancelled")
+        ));
+    }
+
+    #[test]
+    fn semgrep_state_labels_are_canonical_lowercase() {
+        assert_eq!(
+            semgrep_state_name(SemgrepOperationState::Staging),
+            "staging"
+        );
+        assert_eq!(
+            semgrep_state_name(SemgrepOperationState::Scanning),
+            "scanning"
+        );
+        assert_eq!(
+            semgrep_state_name(SemgrepOperationState::Validating),
+            "validating"
+        );
+        assert_eq!(
+            semgrep_state_name(SemgrepOperationState::Persisting),
+            "persisting"
+        );
+        assert_eq!(semgrep_state_name(SemgrepOperationState::Done), "done");
+        assert_eq!(semgrep_state_name(SemgrepOperationState::Failed), "failed");
+        assert_eq!(
+            semgrep_state_name(SemgrepOperationState::Cancelled),
+            "cancelled"
+        );
+    }
+}
+
+#[cfg(all(test, not(feature = "semgrep-enrichment")))]
+mod semgrep_absence_tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn cli_omits_semgrep_opt_in_without_the_feature() {
+        let parsed = Cli::try_parse_from([
+            "oxfuzz",
+            "discover",
+            "/tmp/project",
+            "--lang",
+            "c",
+            "--semgrep",
+        ]);
+        assert!(parsed.is_err());
     }
 }
