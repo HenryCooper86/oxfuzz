@@ -198,11 +198,15 @@ pub(crate) struct SemgrepCoordinator {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompletionPausePoint {
+    AfterOwnershipBeforeDurableWrite,
+    AfterStagingInsertBeforeBegin,
     AfterBegin,
     BeforeClaim,
     AfterClaim,
     AfterPublicationFailure,
     BeforeClose,
+    AfterCloseBeforeLeaseRelease,
+    AfterStatusParentLoad,
 }
 
 #[cfg(test)]
@@ -391,6 +395,14 @@ impl SemgrepCoordinator {
 
     fn is_active(&self, operation_id: Uuid) -> bool {
         self.active_token(operation_id).is_some()
+    }
+
+    #[cfg(test)]
+    fn active_operation_for_project(&self, project: &Path) -> Option<Uuid> {
+        self.active
+            .lock()
+            .ok()
+            .and_then(|active| active.get(project).map(|(operation_id, _)| *operation_id))
     }
 
     fn cancel(&self, operation_id: Uuid) -> Result<bool, ClassifiedError> {
@@ -669,8 +681,7 @@ impl crate::ServiceContainer {
     /// Admit and start one explicit Semgrep enrichment without awaiting it.
     ///
     /// # Errors
-    /// Returns a classified admission error before spawning work, or a durable
-    /// staging/journal error after reserving the operation.
+    /// Returns a classified admission or durable staging/journal error.
     pub async fn start_semgrep_enrichment(
         &self,
         project: PathBuf,
@@ -704,6 +715,35 @@ impl crate::ServiceContainer {
             .map_err(|_| semgrep_sandbox("sandbox_unavailable"))?
             .ok_or_else(|| semgrep_sandbox("sandbox_unavailable"))?;
 
+        let service = self.clone();
+        let image_reference = resolved_image.reference().to_owned();
+        let image_sha256 = resolved_image.sha256().to_owned();
+        let (admission_sender, admission_receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = service
+                .admit_semgrep_enrichment(
+                    store,
+                    canonical_project,
+                    language,
+                    image_reference,
+                    image_sha256,
+                )
+                .await;
+            let _ = admission_sender.send(outcome);
+        });
+        admission_receiver.await.map_err(|_| {
+            ClassifiedError::Internal("Semgrep admission task stopped unexpectedly".to_owned())
+        })?
+    }
+
+    async fn admit_semgrep_enrichment(
+        &self,
+        store: Arc<hf_storage::Store>,
+        canonical_project: PathBuf,
+        language: TargetLanguage,
+        image_reference: String,
+        image_sha256: String,
+    ) -> Result<Uuid, ClassifiedError> {
         let workspace_lease = self.acquire_workspace_operation().await?;
         let project_lease = acquire_semgrep_project_lease(&canonical_project)?;
         self.semgrep.ensure_recovery_healthy()?;
@@ -712,6 +752,15 @@ impl crate::ServiceContainer {
         let cancellation = CancellationToken::new();
         self.semgrep
             .reserve(&canonical_project, operation_id, cancellation.clone())?;
+        let active_guard = ActiveSemgrepGuard {
+            coordinator: Arc::clone(&self.semgrep),
+            project: canonical_project.clone(),
+            operation_id,
+        };
+        #[cfg(test)]
+        self.semgrep
+            .pause_completion(CompletionPausePoint::AfterOwnershipBeforeDurableWrite)
+            .await;
 
         let started_at = Utc::now();
         let run = SemgrepRunRecord {
@@ -720,7 +769,7 @@ impl crate::ServiceContainer {
             language: language.as_str().to_owned(),
             source_sha256: None,
             sandbox_image: SANDBOX_IMAGE.to_owned(),
-            sandbox_image_sha256: resolved_image.sha256().to_owned(),
+            sandbox_image_sha256: image_sha256.clone(),
             semgrep_version: SEMGREP_VERSION.to_owned(),
             rules_commit: RULES_COMMIT.to_owned(),
             rules_tree_sha256: rules_tree_sha256().to_owned(),
@@ -736,7 +785,6 @@ impl crate::ServiceContainer {
             failure_message: None,
         };
         if let Err(error) = insert_semgrep_run_with_retry(&store, &run).await {
-            self.semgrep.release(&canonical_project, operation_id);
             if error.to_string().contains("UNIQUE constraint failed") {
                 return Err(semgrep_validation("busy"));
             }
@@ -744,6 +792,10 @@ impl crate::ServiceContainer {
                 "Semgrep staging record could not be created".to_owned(),
             ));
         }
+        #[cfg(test)]
+        self.semgrep
+            .pause_completion(CompletionPausePoint::AfterStagingInsertBeforeBegin)
+            .await;
 
         if self
             .semgrep
@@ -761,7 +813,6 @@ impl crate::ServiceContainer {
                 None,
             )
             .await;
-            self.semgrep.release(&canonical_project, operation_id);
             return Err(ClassifiedError::Storage(
                 "Semgrep recovery journal could not begin".to_owned(),
             ));
@@ -776,11 +827,10 @@ impl crate::ServiceContainer {
             project_identity_sha256 = %project_digest,
             language = language_name,
             source_sha256 = tracing::field::Empty,
-            sandbox_image_sha256 = resolved_image.sha256(),
+            sandbox_image_sha256 = image_sha256,
             rules_tree_sha256 = rules_tree_sha256(),
             command_schema_version = COMMAND_SCHEMA_VERSION,
         );
-        let image_reference = resolved_image.reference().to_owned();
         let operation_span = span.clone();
         tokio::spawn(
             async move {
@@ -794,6 +844,7 @@ impl crate::ServiceContainer {
                         operation_span,
                         workspace_lease,
                         project_lease,
+                        active_guard,
                     )
                     .await;
             }
@@ -817,16 +868,31 @@ impl crate::ServiceContainer {
         let Some(run) = store.semgrep_run(operation_id).await? else {
             return Ok(None);
         };
-        let result = if run.status == SemgrepRunStatus::Done {
-            self.semgrep_result(operation_id).await?
+        #[cfg(test)]
+        self.semgrep
+            .pause_completion(CompletionPausePoint::AfterStatusParentLoad)
+            .await;
+        let mut state = operation_state(run.status);
+        let result = if run.status != SemgrepRunStatus::Done {
+            None
+        } else if !matches!(self.semgrep.journal.is_closed(operation_id), Ok(true)) {
+            state = SemgrepOperationState::Persisting;
+            None
+        } else if let Ok(result) = self.semgrep_result(operation_id).await {
+            result
         } else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                failure_code = "semgrep_result_unavailable",
+                "Semgrep result reconstruction was unavailable"
+            );
             None
         };
         Ok(Some(SemgrepOperationView {
             operation_id: run.id,
             project_root: run.project_root,
             language: run.language,
-            state: operation_state(run.status),
+            state,
             active: self.semgrep.is_active(operation_id),
             started_at: run.started_at.to_rfc3339(),
             ended_at: run.ended_at.map(|value| value.to_rfc3339()),
@@ -1083,14 +1149,11 @@ impl crate::ServiceContainer {
         operation_span: tracing::Span,
         workspace_lease: crate::container::WorkspaceOperationLease,
         project_lease: SemgrepProjectLease,
+        active_guard: ActiveSemgrepGuard,
     ) {
         let _workspace_lease = workspace_lease;
         let _project_lease = project_lease;
-        let _active = ActiveSemgrepGuard {
-            coordinator: Arc::clone(&self.semgrep),
-            project: canonical_project.clone(),
-            operation_id,
-        };
+        let _active = active_guard;
         let Some(store) = self.store().cloned() else {
             return;
         };
@@ -1550,7 +1613,14 @@ impl crate::ServiceContainer {
         self.semgrep
             .pause_completion(CompletionPausePoint::BeforeClose)
             .await;
-        if let Err(error) = self.semgrep.journal.close(operation_id) {
+        let close_result = self.semgrep.journal.close(operation_id);
+        #[cfg(test)]
+        if close_result.is_ok() {
+            self.semgrep
+                .pause_completion(CompletionPausePoint::AfterCloseBeforeLeaseRelease)
+                .await;
+        }
+        if let Err(error) = close_result {
             self.semgrep.mark_recovery_degraded(error);
         }
     }
@@ -4597,23 +4667,37 @@ mod process_lease_tests {
 
     #[derive(Clone, Copy)]
     enum ProcessPause {
+        AfterOwnershipBeforeDurableWrite,
         AfterBegin,
         BeforeClose,
+        AfterCloseBeforeLeaseRelease,
     }
 
     impl ProcessPause {
         fn as_env(self) -> &'static str {
             match self {
+                Self::AfterOwnershipBeforeDurableWrite => "after_ownership_before_durable_write",
                 Self::AfterBegin => "after_begin",
                 Self::BeforeClose => "before_close",
+                Self::AfterCloseBeforeLeaseRelease => "after_close_before_lease_release",
             }
         }
 
         fn completion_point(self) -> CompletionPausePoint {
             match self {
+                Self::AfterOwnershipBeforeDurableWrite => {
+                    CompletionPausePoint::AfterOwnershipBeforeDurableWrite
+                }
                 Self::AfterBegin => CompletionPausePoint::AfterBegin,
                 Self::BeforeClose => CompletionPausePoint::BeforeClose,
+                Self::AfterCloseBeforeLeaseRelease => {
+                    CompletionPausePoint::AfterCloseBeforeLeaseRelease
+                }
             }
+        }
+
+        fn admission_is_pending(self) -> bool {
+            matches!(self, Self::AfterOwnershipBeforeDurableWrite)
         }
     }
 
@@ -4778,11 +4862,20 @@ mod process_lease_tests {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let operation_id = loop {
             let mut line = String::new();
-            assert_ne!(
-                stdout.read_line(&mut line).unwrap(),
-                0,
-                "admitted child exited before signalling readiness"
-            );
+            if stdout.read_line(&mut line).unwrap() == 0 {
+                let mut stderr = String::new();
+                child
+                    .stderr
+                    .take()
+                    .unwrap()
+                    .read_to_string(&mut stderr)
+                    .unwrap();
+                let status = child.wait().unwrap();
+                panic!(
+                    "admitted child exited before signalling readiness: \
+                     status={status}; stderr={stderr}"
+                );
+            }
             if let Some(value) = line.trim().strip_prefix(READY_PREFIX) {
                 break Uuid::parse_str(value).unwrap();
             }
@@ -4858,10 +4951,56 @@ mod process_lease_tests {
                 assert_eq!(run.status, SemgrepRunStatus::Done);
                 assert!(!journal.is_closed(operation_id).unwrap());
             }
+            ProcessPause::AfterOwnershipBeforeDurableWrite
+            | ProcessPause::AfterCloseBeforeLeaseRelease => {
+                panic!("unsupported live-ownership pause")
+            }
         }
         assert_eq!(journal.interrupted().unwrap().len(), 1);
 
         release_and_wait(admitted);
+    }
+
+    async fn assert_project_ownership_boundary(pause: ProcessPause) {
+        let fixture = ProcessFixture::new();
+        let admitted = spawn_admitted_child(&fixture, pause);
+        let operation_id = admitted.operation_id;
+        let store = Store::connect(&fixture.db).await.unwrap();
+        let journal = crate::semgrep_recovery::SemgrepJournal::open(fixture.journal.clone());
+
+        match pause {
+            ProcessPause::AfterOwnershipBeforeDurableWrite => {
+                assert!(store.semgrep_run(operation_id).await.unwrap().is_none());
+                let run_count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM semgrep_enrichment_runs")
+                        .fetch_one(store.pool())
+                        .await
+                        .unwrap();
+                assert_eq!(run_count, 0);
+            }
+            ProcessPause::AfterCloseBeforeLeaseRelease => {
+                assert_eq!(
+                    store
+                        .semgrep_run(operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    SemgrepRunStatus::Done
+                );
+                assert!(journal.is_closed(operation_id).unwrap());
+            }
+            ProcessPause::AfterBegin | ProcessPause::BeforeClose => {
+                panic!("unsupported ownership-boundary pause")
+            }
+        }
+
+        let contender = child_output(&fixture, "same_project_start_child");
+        assert_child_success(&contender, "same-project admission");
+        release_and_wait(admitted);
+
+        let successor = child_output(&fixture, "same_project_start_succeeds_child");
+        assert_child_success(&successor, "same-project successor");
     }
 
     #[tokio::test]
@@ -4872,6 +5011,16 @@ mod process_lease_tests {
     #[tokio::test]
     async fn admitted_child_blocks_recovery_and_same_project_start_before_close() {
         assert_live_ownership(ProcessPause::BeforeClose).await;
+    }
+
+    #[tokio::test]
+    async fn admitted_child_blocks_same_project_start_before_durable_write() {
+        assert_project_ownership_boundary(ProcessPause::AfterOwnershipBeforeDurableWrite).await;
+    }
+
+    #[tokio::test]
+    async fn admitted_child_blocks_same_project_start_after_close_until_lease_release() {
+        assert_project_ownership_boundary(ProcessPause::AfterCloseBeforeLeaseRelease).await;
     }
 
     #[tokio::test]
@@ -4888,26 +5037,64 @@ mod process_lease_tests {
         let (service, store) = child_service().await;
         persist_child_inventory(&store, &project).await;
         let pause = match std::env::var(PAUSE_ENV).unwrap().as_str() {
+            "after_ownership_before_durable_write" => {
+                ProcessPause::AfterOwnershipBeforeDurableWrite
+            }
             "after_begin" => ProcessPause::AfterBegin,
             "before_close" => ProcessPause::BeforeClose,
+            "after_close_before_lease_release" => ProcessPause::AfterCloseBeforeLeaseRelease,
             other => panic!("unknown process pause {other}"),
         };
         let (reached, release) = service
             .semgrep
             .install_completion_pause(pause.completion_point());
-        let operation_id = service
-            .start_semgrep_enrichment(project, TargetLanguage::C)
+        let start_service = service.clone();
+        let start_project = project.clone();
+        let mut start = Some(tokio::spawn(async move {
+            start_service
+                .start_semgrep_enrichment(start_project, TargetLanguage::C)
+                .await
+        }));
+        if tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .is_err()
+        {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT id, status FROM semgrep_enrichment_runs ORDER BY started_at",
+            )
+            .fetch_all(store.pool())
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), reached.notified())
-            .await
-            .expect("admitted worker must reach the requested pause");
+            panic!(
+                "admitted worker must reach the requested pause: rows={rows:?}; \
+                 journal_error={:?}; recovery_health={:?}; interrupted={:?}",
+                service.semgrep.journal.durability_error(),
+                service.semgrep.ensure_recovery_healthy(),
+                service.semgrep.journal.interrupted()
+            );
+        }
+        let operation_id = if pause.admission_is_pending() {
+            service
+                .semgrep
+                .active_operation_for_project(&project)
+                .expect("owned admission must reserve the canonical project")
+        } else {
+            start
+                .take()
+                .unwrap()
+                .await
+                .unwrap()
+                .expect("admission must return an operation")
+        };
 
         println!("{READY_PREFIX}{operation_id}");
         std::io::stdout().flush().unwrap();
         let mut release_signal = [0_u8; 1];
         std::io::stdin().read_exact(&mut release_signal).unwrap();
         release.notify_one();
+        if let Some(start) = start {
+            assert_eq!(start.await.unwrap().unwrap(), operation_id);
+        }
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -4952,6 +5139,35 @@ mod process_lease_tests {
             .unwrap_err();
         assert!(error.to_string().contains("busy"), "{error}");
     }
+
+    #[tokio::test]
+    async fn same_project_start_succeeds_child() {
+        if std::env::var(CHILD_ENV).as_deref() != Ok("1") {
+            return;
+        }
+        let project = child_value(PROJECT_ENV);
+        let (service, store) = child_service().await;
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if store
+                    .semgrep_run(operation_id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|run| run.status == SemgrepRunStatus::Done)
+                    && service.semgrep.journal.is_closed(operation_id).unwrap()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor operation must finish and close");
+    }
 }
 
 #[cfg(test)]
@@ -4981,7 +5197,8 @@ mod lifecycle_tests {
     use uuid::Uuid;
 
     use super::{
-        CompletionPausePoint, SemgrepCancelOutcome, SemgrepOperationState, SemgrepOverlayState,
+        recover_semgrep_at_bootstrap, CompletionPausePoint, SemgrepCancelOutcome,
+        SemgrepCoordinator, SemgrepOperationState, SemgrepOverlayState,
     };
     use crate::semgrep_recovery::AppendFailurePoint;
     use crate::ServiceContainer;
@@ -5364,6 +5581,181 @@ mod lifecycle_tests {
         })
         .await
         .expect("Semgrep worker must release the coordinator");
+    }
+
+    #[tokio::test]
+    async fn persistent_coordinator_construction_does_not_touch_the_journal_filesystem() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let missing_journal = root.path().join("missing-journal");
+
+        let missing = SemgrepCoordinator::persistent(missing_journal.clone());
+        assert!(
+            !missing_journal.exists(),
+            "construction must not create the journal directory"
+        );
+        assert!(missing.journal.durability_error().is_none());
+
+        let corrupt_journal = root.path().join("corrupt-journal");
+        std::fs::create_dir(&corrupt_journal).unwrap();
+        let corrupt_id = Uuid::new_v4();
+        std::fs::write(
+            corrupt_journal.join(format!("{corrupt_id}.jsonl")),
+            b"{broken}\n",
+        )
+        .unwrap();
+        let corrupt = SemgrepCoordinator::persistent(corrupt_journal);
+        assert!(
+            corrupt.journal.durability_error().is_none(),
+            "construction must not replay operation journals"
+        );
+
+        let store = Store::connect(root.path().join("recovery.db"))
+            .await
+            .unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        assert!(
+            recover_semgrep_at_bootstrap(&store, &corrupt, &workspace)
+                .await
+                .is_err(),
+            "the first recovery replay must surface corruption"
+        );
+        assert!(corrupt.journal.durability_error().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_start_caller_does_not_orphan_durable_admission() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterStagingInsertBeforeBegin);
+
+        let caller_service = service.clone();
+        let caller_project = project.clone();
+        let caller = tokio::spawn(async move {
+            caller_service
+                .start_semgrep_enrichment(caller_project, TargetLanguage::C)
+                .await
+        });
+        wait_for_pause(&reached).await;
+        let operation_id = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM semgrep_enrichment_runs WHERE project_root = ?1",
+        )
+        .bind(project.to_string_lossy().as_ref())
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        release.notify_one();
+
+        let run = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let run = store.semgrep_run(operation_id).await.unwrap().unwrap();
+                let is_terminal = matches!(
+                    run.status,
+                    SemgrepRunStatus::Done | SemgrepRunStatus::Failed | SemgrepRunStatus::Cancelled
+                );
+                let is_durably_closed = run.status != SemgrepRunStatus::Done
+                    || service.semgrep.journal.is_closed(operation_id).unwrap();
+                if is_terminal && is_durably_closed {
+                    break run;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let run = match run {
+            Ok(run) => run,
+            Err(error) => {
+                let current = store.semgrep_run(operation_id).await.unwrap();
+                panic!(
+                    "owned admission must reach a terminal state after caller cancellation: \
+                     {error}; current={current:?}; active={}; journal_error={:?}; \
+                     recovery_health={:?}; interrupted={:?}",
+                    service.semgrep.is_active(operation_id),
+                    service.semgrep.journal.durability_error(),
+                    service.semgrep.ensure_recovery_healthy(),
+                    service.semgrep.journal.interrupted()
+                );
+            }
+        };
+        assert!(!service.semgrep.is_active(operation_id));
+        if run.status == SemgrepRunStatus::Done {
+            assert!(service.semgrep.journal.is_closed(operation_id).unwrap());
+        }
+        assert!(service.semgrep.journal.interrupted().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn operation_status_survives_concurrent_compensation() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (close_reached, close_release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::BeforeClose);
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&close_reached).await;
+        assert_eq!(
+            store
+                .semgrep_run(operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            SemgrepRunStatus::Done
+        );
+
+        let (status_reached, status_release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterStatusParentLoad);
+        let reader = {
+            let service = service.clone();
+            tokio::spawn(async move { service.semgrep_operation(operation_id).await })
+        };
+        wait_for_pause(&status_reached).await;
+        store
+            .compensate_semgrep_publication(
+                operation_id,
+                "recovered",
+                "Concurrent compensation fixture",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        status_release.notify_one();
+
+        let first = reader.await.unwrap().unwrap().unwrap();
+        assert_eq!(first.state, SemgrepOperationState::Persisting);
+        assert!(first.result.is_none());
+        status_release.notify_one();
+        let second = service
+            .semgrep_operation(operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.state, SemgrepOperationState::Failed);
+        assert!(second.result.is_none());
+
+        close_release.notify_one();
+        wait_for_worker_exit(&service).await;
     }
 
     #[tokio::test]

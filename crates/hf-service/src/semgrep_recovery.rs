@@ -112,7 +112,7 @@ type AppendRaceHook = Arc<dyn Fn(AppendRacePoint) + Send + Sync>;
 pub struct SemgrepJournal {
     persistent: bool,
     directory: Option<PathBuf>,
-    directory_handle: Option<Arc<File>>,
+    directory_handle: Mutex<Option<Arc<File>>>,
     shared_state: Arc<SharedJournalState>,
     memory_events: Mutex<BTreeMap<Uuid, Vec<SemgrepJournalEvent>>>,
     #[cfg(test)]
@@ -126,6 +126,12 @@ struct SharedJournalState {
     durability_error: Mutex<Option<String>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JournalDirectoryAccess {
+    Create,
+    Existing,
+}
+
 impl SemgrepJournal {
     /// Create a non-persistent journal with the same lifecycle validation.
     #[must_use]
@@ -133,7 +139,7 @@ impl SemgrepJournal {
         Self {
             persistent: false,
             directory: None,
-            directory_handle: None,
+            directory_handle: Mutex::new(None),
             shared_state: Arc::new(SharedJournalState {
                 operation_lock: Mutex::new(()),
                 durability_error: Mutex::new(None),
@@ -146,10 +152,10 @@ impl SemgrepJournal {
         }
     }
 
-    /// Open or securely create a persistent journal directory.
+    /// Retain a normalized persistent journal path without touching its filesystem.
     ///
-    /// Initialization failures are retained by [`Self::durability_error`];
-    /// subsequent operations fail closed.
+    /// Filesystem opening, creation, validation, and replay are deferred until
+    /// the first read, write, or recovery transaction.
     #[must_use]
     pub fn open(directory: PathBuf) -> Self {
         let normalized = normalize_directory_path(&directory);
@@ -158,45 +164,19 @@ impl SemgrepJournal {
             .cloned()
             .unwrap_or_else(|_| directory.clone());
         let shared_state = journal_state_for_directory(&lock_key);
-        let _guard = lock_recover(&shared_state.operation_lock);
-
-        let (normalized, handle, durability_error) = match normalized {
-            Ok(normalized) => match open_or_create_directory_nofollow(&normalized) {
-                Ok(handle) => {
-                    let handle = Arc::new(handle);
-                    let error = validate_all_journals(&handle).err().map(|error| {
-                        format!(
-                            "Semgrep journal replay in {} failed: {error}",
-                            normalized.display()
-                        )
-                    });
-                    (Some(normalized), Some(handle), error)
-                }
-                Err(error) => (
-                    Some(normalized.clone()),
-                    None,
-                    Some(format!(
-                        "Semgrep journal directory {} is not durable: {error}",
-                        normalized.display()
-                    )),
-                ),
-            },
-            Err(error) => (
-                Some(directory),
-                None,
-                Some(format!("Semgrep journal directory is unsafe: {error}")),
-            ),
+        let normalized = match normalized {
+            Ok(normalized) => Some(normalized),
+            Err(error) => {
+                let message = format!("Semgrep journal directory is unsafe: {error}");
+                let mut sticky = lock_recover(&shared_state.durability_error);
+                sticky.get_or_insert(message);
+                Some(directory)
+            }
         };
-
-        if let Some(error) = durability_error {
-            let mut sticky = lock_recover(&shared_state.durability_error);
-            sticky.get_or_insert(error);
-        }
-
         Self {
             persistent: true,
             directory: normalized,
-            directory_handle: handle,
+            directory_handle: Mutex::new(None),
             shared_state: Arc::clone(&shared_state),
             memory_events: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
@@ -232,7 +212,7 @@ impl SemgrepJournal {
             timestamp: Utc::now(),
         };
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated()?;
+        self.ensure_revalidated(JournalDirectoryAccess::Create)?;
         serialize_event(&event).map_err(|error| self.record_durability_failure(&error))?;
 
         if self.persistent {
@@ -302,7 +282,10 @@ impl SemgrepJournal {
     /// Return whether the operation has its own complete, valid lifecycle.
     pub fn is_closed(&self, operation_id: Uuid) -> Result<bool, ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated()?;
+        let directory = self.ensure_revalidated(JournalDirectoryAccess::Existing)?;
+        if self.persistent && directory.is_none() {
+            return Ok(false);
+        }
         let lifecycle = self.read_lifecycle(operation_id)?;
         Ok(matches!(lifecycle, Some(OperationLifecycle::Closed)))
     }
@@ -310,10 +293,12 @@ impl SemgrepJournal {
     /// Return all valid operations that began but did not durably close.
     pub fn interrupted(&self) -> Result<Vec<InterruptedSemgrepOperation>, ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated()?;
+        self.ensure_revalidated(JournalDirectoryAccess::Create)?;
         let lifecycles = if self.persistent {
-            let handle = self.directory_handle()?;
-            read_all_journals(handle).map_err(|error| self.record_durability_failure(&error))?
+            let handle = self
+                .directory_handle(JournalDirectoryAccess::Create)?
+                .ok_or_else(|| self.current_durability_error())?;
+            read_all_journals(&handle).map_err(|error| self.record_durability_failure(&error))?
         } else {
             lock_recover(&self.memory_events)
                 .iter()
@@ -358,19 +343,23 @@ impl SemgrepJournal {
         allowed: impl FnOnce(&OperationLifecycle) -> bool,
     ) -> Result<(), ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated()?;
+        self.ensure_revalidated(JournalDirectoryAccess::Create)?;
         serialize_event(&event).map_err(|error| self.record_durability_failure(&error))?;
 
         if self.persistent {
-            let handle = self.directory_handle()?;
-            let mut file = open_operation_file(handle, operation_id, OperationOpenMode::ReadAppend)
-                .map_err(|error| {
-                    if error.kind() == io::ErrorKind::NotFound {
-                        invalid_transition(operation_id, "operation was not opened")
-                    } else {
-                        self.record_durability_failure(&error)
-                    }
-                })?;
+            let handle = self
+                .directory_handle(JournalDirectoryAccess::Create)?
+                .ok_or_else(|| self.current_durability_error())?;
+            let mut file =
+                open_operation_file(&handle, operation_id, OperationOpenMode::ReadAppend).map_err(
+                    |error| {
+                        if error.kind() == io::ErrorKind::NotFound {
+                            invalid_transition(operation_id, "operation was not opened")
+                        } else {
+                            self.record_durability_failure(&error)
+                        }
+                    },
+                )?;
             let events = read_events_from_file(&mut file, operation_id)
                 .map_err(|error| self.record_durability_failure(&error))?;
             let state = replay_events(operation_id, &events)
@@ -381,7 +370,7 @@ impl SemgrepJournal {
                     "event is out of lifecycle order",
                 ));
             }
-            self.append_to_file(handle, &mut file, operation_id, &event)
+            self.append_to_file(&handle, &mut file, operation_id, &event)
         } else {
             let mut events = lock_recover(&self.memory_events);
             let Some(existing) = events.get_mut(&operation_id) else {
@@ -405,8 +394,10 @@ impl SemgrepJournal {
         operation_id: Uuid,
         event: &SemgrepJournalEvent,
     ) -> Result<(), ClassifiedError> {
-        let handle = self.directory_handle()?;
-        let mut file = open_operation_file(handle, operation_id, OperationOpenMode::Create)
+        let handle = self
+            .directory_handle(JournalDirectoryAccess::Create)?
+            .ok_or_else(|| self.current_durability_error())?;
+        let mut file = open_operation_file(&handle, operation_id, OperationOpenMode::Create)
             .map_err(|error| {
                 if error.kind() == io::ErrorKind::AlreadyExists {
                     invalid_transition(operation_id, "duplicate open")
@@ -414,7 +405,7 @@ impl SemgrepJournal {
                     self.record_durability_failure(&error)
                 }
             })?;
-        self.append_to_file(handle, &mut file, operation_id, event)
+        self.append_to_file(&handle, &mut file, operation_id, event)
     }
 
     fn append_to_file(
@@ -461,8 +452,10 @@ impl SemgrepJournal {
         operation_id: Uuid,
     ) -> Result<Option<OperationLifecycle>, ClassifiedError> {
         if self.persistent {
-            let handle = self.directory_handle()?;
-            let mut file = match open_operation_file(handle, operation_id, OperationOpenMode::Read)
+            let Some(handle) = self.directory_handle(JournalDirectoryAccess::Existing)? else {
+                return Ok(None);
+            };
+            let mut file = match open_operation_file(&handle, operation_id, OperationOpenMode::Read)
             {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -483,10 +476,44 @@ impl SemgrepJournal {
         }
     }
 
-    fn directory_handle(&self) -> Result<&File, ClassifiedError> {
-        self.directory_handle
+    fn directory_handle(
+        &self,
+        access: JournalDirectoryAccess,
+    ) -> Result<Option<Arc<File>>, ClassifiedError> {
+        self.ensure_healthy()?;
+        if !self.persistent {
+            return Ok(None);
+        }
+        let mut retained = lock_recover(&self.directory_handle);
+        if let Some(handle) = retained.as_ref() {
+            return Ok(Some(Arc::clone(handle)));
+        }
+        let directory = self
+            .directory
             .as_deref()
-            .ok_or_else(|| self.current_durability_error())
+            .ok_or_else(|| self.current_durability_error())?;
+        let resolved_directory = canonicalize_existing_ancestor(directory)
+            .map_err(|error| self.record_durability_failure(&error))?;
+        let opened = match access {
+            JournalDirectoryAccess::Create => {
+                open_or_create_directory_nofollow(&resolved_directory)
+            }
+            JournalDirectoryAccess::Existing => {
+                open_existing_directory_nofollow(&resolved_directory)
+            }
+        };
+        let handle = match opened {
+            Ok(handle) => Arc::new(handle),
+            Err(error)
+                if access == JournalDirectoryAccess::Existing
+                    && error.kind() == io::ErrorKind::NotFound =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(self.record_durability_failure(&error)),
+        };
+        *retained = Some(Arc::clone(&handle));
+        Ok(Some(handle))
     }
 
     fn ensure_healthy(&self) -> Result<(), ClassifiedError> {
@@ -497,14 +524,21 @@ impl SemgrepJournal {
         }
     }
 
-    fn ensure_revalidated(&self) -> Result<(), ClassifiedError> {
+    fn ensure_revalidated(
+        &self,
+        access: JournalDirectoryAccess,
+    ) -> Result<Option<Arc<File>>, ClassifiedError> {
         self.ensure_healthy()?;
         if self.persistent {
-            let handle = self.directory_handle()?;
-            validate_all_journals(handle)
+            let Some(handle) = self.directory_handle(access)? else {
+                return Ok(None);
+            };
+            validate_all_journals(&handle)
                 .map_err(|error| self.record_durability_failure(&error))?;
+            Ok(Some(handle))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     fn current_durability_error(&self) -> ClassifiedError {
@@ -964,7 +998,7 @@ fn normalize_directory_path(directory: &Path) -> io::Result<PathBuf> {
             }
         }
     }
-    canonicalize_existing_ancestor(&normalized)
+    Ok(normalized)
 }
 
 fn canonicalize_existing_ancestor(path: &Path) -> io::Result<PathBuf> {
@@ -1038,8 +1072,31 @@ fn open_or_create_directory_nofollow(directory: &Path) -> io::Result<File> {
     Ok(current)
 }
 
+#[cfg(unix)]
+fn open_existing_directory_nofollow(directory: &Path) -> io::Result<File> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut current = File::from(open(Path::new("/"), flags, Mode::empty())?);
+    for component in directory.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current = File::from(openat(&current, name, flags, Mode::empty())?);
+    }
+    Ok(current)
+}
+
 #[cfg(not(unix))]
 fn open_or_create_directory_nofollow(_directory: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Semgrep journals require descriptor-relative filesystem access",
+    ))
+}
+
+#[cfg(not(unix))]
+fn open_existing_directory_nofollow(_directory: &Path) -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "Semgrep journals require descriptor-relative filesystem access",
@@ -1362,6 +1419,11 @@ mod tests {
         .unwrap();
 
         let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        assert!(
+            journal.durability_error().is_none(),
+            "construction must defer replay"
+        );
+        assert!(journal.interrupted().is_err());
         let first = journal.durability_error().expect("corruption must surface");
         assert!(!first.is_empty());
         assert!(journal.interrupted().is_err());
@@ -1388,8 +1450,8 @@ mod tests {
         .unwrap();
 
         let reopened = SemgrepJournal::open(directory.path().to_path_buf());
-        assert!(reopened.durability_error().is_some());
         assert!(reopened.is_closed(closed_id).is_err());
+        assert!(reopened.durability_error().is_some());
     }
 
     #[test]
@@ -1452,7 +1514,6 @@ mod tests {
         .unwrap();
 
         let journal = SemgrepJournal::open(directory.path().to_path_buf());
-        assert!(journal.durability_error().is_some());
         assert!(journal
             .begin(
                 operation_id,
@@ -1460,6 +1521,7 @@ mod tests {
                 &operation_id.to_string()
             )
             .is_err());
+        assert!(journal.durability_error().is_some());
         assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
     }
 
@@ -1475,7 +1537,6 @@ mod tests {
         symlink(&actual, &link).unwrap();
 
         let journal = SemgrepJournal::open(link);
-        assert!(journal.durability_error().is_some());
         let operation_id = Uuid::new_v4();
         assert!(journal
             .begin(
@@ -1484,6 +1545,7 @@ mod tests {
                 &operation_id.to_string()
             )
             .is_err());
+        assert!(journal.durability_error().is_some());
         assert!(std::fs::read_dir(actual).unwrap().next().is_none());
     }
 
