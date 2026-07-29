@@ -174,6 +174,30 @@ async fn semgrep_routes_are_absent_without_the_feature() {
 }
 
 #[tokio::test]
+#[cfg(not(feature = "semgrep-enrichment"))]
+async fn semgrep_availability_is_false_without_the_feature() {
+    allow_open_dev_mode();
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .uri("/semgrep/available")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        false
+    );
+}
+
+#[tokio::test]
 async fn policy_decisions_returns_a_json_array() {
     allow_open_dev_mode();
     let app = hf_web::router::build();

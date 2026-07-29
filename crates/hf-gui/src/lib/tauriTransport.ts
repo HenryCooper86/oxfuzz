@@ -1,10 +1,15 @@
 // Tauri IPC transport implementation.
 
-import type { Transport, UnlistenFn } from "./transport";
+import type { InvokeOptions, Transport, UnlistenFn } from "./transport";
 
 export function createTauriTransport(): Transport {
   return {
-    async invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T> {
+    async invoke<T = unknown>(
+      command: string,
+      args?: Record<string, unknown>,
+      options?: InvokeOptions,
+    ): Promise<T> {
+      void options;
       const { invoke } = await import("@tauri-apps/api/core");
       return invoke<T>(command, args);
     },
