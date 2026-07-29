@@ -3953,7 +3953,10 @@ mod publication_tests {
 
         let run = store.semgrep_run(operation_id).await.unwrap().unwrap();
         assert_eq!(run.status, SemgrepRunStatus::Failed);
-        assert_eq!(run.failure_code.as_deref(), Some("recovered_missing_journal"));
+        assert_eq!(
+            run.failure_code.as_deref(),
+            Some("recovered_missing_journal")
+        );
         assert!(store
             .semgrep_publication(operation_id)
             .await
@@ -6322,12 +6325,7 @@ mod lifecycle_tests {
             SemgrepCancelOutcome::Accepted
         );
         release.notify_one();
-        wait_for_state(
-            &service,
-            operation_id,
-            SemgrepOperationState::Cancelled,
-        )
-        .await;
+        wait_for_state(&service, operation_id, SemgrepOperationState::Cancelled).await;
     }
 
     #[tokio::test]
@@ -6361,12 +6359,7 @@ mod lifecycle_tests {
             SemgrepCancelOutcome::Accepted
         );
         release.notify_one();
-        wait_for_state(
-            &service,
-            operation_id,
-            SemgrepOperationState::Cancelled,
-        )
-        .await;
+        wait_for_state(&service, operation_id, SemgrepOperationState::Cancelled).await;
     }
 
     #[tokio::test]
