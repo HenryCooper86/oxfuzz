@@ -158,7 +158,7 @@ pub struct SemgrepOperationView {
     pub language: String,
     /// Current lifecycle phase.
     pub state: SemgrepOperationState,
-    /// Whether cooperative cancellation is currently registered.
+    /// Whether the operation retains its process-local admission reservation.
     pub active: bool,
     /// RFC 3339 admission time.
     pub started_at: String,
@@ -186,13 +186,33 @@ pub enum SemgrepCancelOutcome {
 
 /// Shared process-local Semgrep admission and recovery state.
 pub(crate) struct SemgrepCoordinator {
-    active: Mutex<HashMap<PathBuf, (Uuid, CancellationToken)>>,
+    active: Mutex<HashMap<PathBuf, ActiveSemgrepOperation>>,
     journal: Arc<crate::semgrep_recovery::SemgrepJournal>,
     recovery_error: Mutex<Option<String>>,
     #[cfg(test)]
     completion_pause: Mutex<Option<CompletionPause>>,
     #[cfg(test)]
     cleanup_failure: Mutex<bool>,
+}
+
+enum ActiveSemgrepOperation {
+    Cancellable {
+        operation_id: Uuid,
+        cancellation: CancellationToken,
+    },
+    Finalizing {
+        operation_id: Uuid,
+    },
+}
+
+impl ActiveSemgrepOperation {
+    fn operation_id(&self) -> Uuid {
+        match self {
+            Self::Cancellable { operation_id, .. } | Self::Finalizing { operation_id } => {
+                *operation_id
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +224,7 @@ enum CompletionPausePoint {
     BeforeClaim,
     AfterClaim,
     AfterPublicationFailure,
+    AfterPublicationBeforeCleanup,
     BeforeClose,
     AfterCloseBeforeLeaseRelease,
     AfterStatusParentLoad,
@@ -254,7 +275,13 @@ impl SemgrepCoordinator {
         if active.contains_key(project) {
             return Err(semgrep_validation("busy"));
         }
-        active.insert(project.to_path_buf(), (operation_id, cancellation));
+        active.insert(
+            project.to_path_buf(),
+            ActiveSemgrepOperation::Cancellable {
+                operation_id,
+                cancellation,
+            },
+        );
         Ok(())
     }
 
@@ -378,45 +405,46 @@ impl SemgrepCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active
             .get(project)
-            .is_some_and(|(active_id, _)| *active_id == operation_id)
+            .is_some_and(|operation| operation.operation_id() == operation_id)
         {
             active.remove(project);
         }
     }
 
-    fn active_token(&self, operation_id: Uuid) -> Option<CancellationToken> {
-        self.active.lock().ok().and_then(|active| {
+    fn is_active(&self, operation_id: Uuid) -> bool {
+        self.active.lock().ok().is_some_and(|active| {
             active
                 .values()
-                .find(|(active_id, _)| *active_id == operation_id)
-                .map(|(_, token)| token.clone())
+                .any(|operation| operation.operation_id() == operation_id)
         })
-    }
-
-    fn is_active(&self, operation_id: Uuid) -> bool {
-        self.active_token(operation_id).is_some()
     }
 
     #[cfg(test)]
     fn active_operation_for_project(&self, project: &Path) -> Option<Uuid> {
-        self.active
-            .lock()
-            .ok()
-            .and_then(|active| active.get(project).map(|(operation_id, _)| *operation_id))
+        self.active.lock().ok().and_then(|active| {
+            active
+                .get(project)
+                .map(ActiveSemgrepOperation::operation_id)
+        })
     }
 
     fn cancel(&self, operation_id: Uuid) -> Result<bool, ClassifiedError> {
         let active = self.active.lock().map_err(|_| {
             ClassifiedError::Internal("Semgrep operation registry is unavailable".to_owned())
         })?;
-        let Some((_, token)) = active
+        let Some(operation) = active
             .values()
-            .find(|(active_id, _)| *active_id == operation_id)
+            .find(|operation| operation.operation_id() == operation_id)
         else {
             return Ok(false);
         };
-        token.cancel();
-        Ok(true)
+        match operation {
+            ActiveSemgrepOperation::Cancellable { cancellation, .. } => {
+                cancellation.cancel();
+                Ok(true)
+            }
+            ActiveSemgrepOperation::Finalizing { .. } => Ok(false),
+        }
     }
 
     fn claim_completion(&self, project: &Path, operation_id: Uuid) -> bool {
@@ -424,17 +452,21 @@ impl SemgrepCoordinator {
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cancelled = active
-            .get(project)
-            .filter(|(active_id, _)| *active_id == operation_id)
-            .is_some_and(|(_, token)| token.is_cancelled());
-        if active
-            .get(project)
-            .is_some_and(|(active_id, _)| *active_id == operation_id)
-        {
-            active.remove(project);
+        let Some(operation) = active.get_mut(project) else {
+            return false;
+        };
+        match operation {
+            ActiveSemgrepOperation::Cancellable {
+                operation_id: active_id,
+                cancellation,
+            } if *active_id == operation_id => {
+                let cancelled = cancellation.is_cancelled();
+                *operation = ActiveSemgrepOperation::Finalizing { operation_id };
+                cancelled
+            }
+            ActiveSemgrepOperation::Cancellable { .. }
+            | ActiveSemgrepOperation::Finalizing { .. } => false,
         }
-        cancelled
     }
 
     #[cfg(test)]
@@ -1580,6 +1612,10 @@ impl crate::ServiceContainer {
             .await;
             return;
         }
+        #[cfg(test)]
+        self.semgrep
+            .pause_completion(CompletionPausePoint::AfterPublicationBeforeCleanup)
+            .await;
         #[cfg(test)]
         let cleanup_result = if self.semgrep.take_test_cleanup_failure() {
             Err(snapshot_validation("injected Semgrep cleanup failure"))
@@ -5267,7 +5303,7 @@ mod lifecycle_tests {
     const IMAGE_ID: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn lifecycle_test_lock() -> &'static tokio::sync::Mutex<()> {
+    pub(super) fn lifecycle_test_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
@@ -5340,7 +5376,7 @@ mod lifecycle_tests {
     }
 
     #[derive(Clone, Copy)]
-    enum RuntimeBehavior {
+    pub(super) enum RuntimeBehavior {
         Block,
         Completed(i32),
         CompletedWithUnmatchedFinding,
@@ -5359,7 +5395,7 @@ mod lifecycle_tests {
         options: SandboxOptions,
     }
 
-    struct RecordingRuntime {
+    pub(super) struct RecordingRuntime {
         image: bool,
         behavior: RuntimeBehavior,
         calls: Mutex<Vec<RuntimeCall>>,
@@ -5369,7 +5405,7 @@ mod lifecycle_tests {
     }
 
     impl RecordingRuntime {
-        fn new(behavior: RuntimeBehavior) -> Self {
+        pub(super) fn new(behavior: RuntimeBehavior) -> Self {
             Self {
                 image: true,
                 behavior,
@@ -5548,7 +5584,7 @@ mod lifecycle_tests {
         }
     }
 
-    fn project_fixture(root: &Path, name: &str) -> PathBuf {
+    pub(super) fn project_fixture(root: &Path, name: &str) -> PathBuf {
         let project = root.join(name);
         std::fs::create_dir(&project).unwrap();
         std::fs::write(
@@ -5588,7 +5624,7 @@ mod lifecycle_tests {
         }
     }
 
-    async fn persistent_service(
+    pub(super) async fn persistent_service(
         root: &Path,
         runtime: Arc<RecordingRuntime>,
     ) -> (ServiceContainer, Arc<Store>) {
@@ -5603,7 +5639,7 @@ mod lifecycle_tests {
         )
     }
 
-    async fn save_inventory(store: &Store, project: &Path, complete_span: bool) {
+    pub(super) async fn save_inventory(store: &Store, project: &Path, complete_span: bool) {
         let inventory = if complete_span {
             let mut inventory = hf_discovery::discover(project, TargetLanguage::C)
                 .await
@@ -5619,7 +5655,11 @@ mod lifecycle_tests {
         store.save_inventory(&inventory, Utc::now()).await.unwrap();
     }
 
-    async fn wait_for_state(service: &ServiceContainer, id: Uuid, expected: SemgrepOperationState) {
+    pub(super) async fn wait_for_state(
+        service: &ServiceContainer,
+        id: Uuid,
+        expected: SemgrepOperationState,
+    ) {
         let waited = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let view = service
@@ -5641,7 +5681,7 @@ mod lifecycle_tests {
         );
     }
 
-    async fn wait_for_pause(reached: &Notify) {
+    pub(super) async fn wait_for_pause(reached: &Notify) {
         tokio::time::timeout(Duration::from_secs(5), reached.notified())
             .await
             .expect("worker must reach the completion pause");
@@ -6879,6 +6919,167 @@ mod lifecycle_tests {
         assert!(
             !runtime.calls().first().unwrap().cwd.exists(),
             "success must clean staging before the successful close"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_visibility_tests {
+    use std::sync::Arc;
+
+    use hf_core::target::TargetLanguage;
+    use hf_storage::SemgrepRunStatus;
+
+    use super::lifecycle_tests::{
+        lifecycle_test_lock, persistent_service, project_fixture, save_inventory, wait_for_pause,
+        wait_for_state, RecordingRuntime, RuntimeBehavior,
+    };
+    use super::{CompletionPausePoint, SemgrepCancelOutcome, SemgrepOperationState};
+
+    #[tokio::test]
+    async fn done_database_row_is_reported_persisting_until_close() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::BeforeClose);
+
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        assert_eq!(
+            store
+                .semgrep_run(operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            SemgrepRunStatus::Done
+        );
+        assert!(!service.semgrep.journal.is_closed(operation_id).unwrap());
+        assert_eq!(
+            service
+                .semgrep_operation(operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            SemgrepOperationState::Persisting
+        );
+
+        release.notify_one();
+        wait_for_state(&service, operation_id, SemgrepOperationState::Done).await;
+    }
+
+    #[tokio::test]
+    async fn same_project_start_is_busy_until_close() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::BeforeClose);
+
+        let operation_id = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        let error = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("busy"));
+
+        release.notify_one();
+        wait_for_state(&service, operation_id, SemgrepOperationState::Done).await;
+    }
+
+    #[tokio::test]
+    async fn finalizing_operation_is_inactive_for_cancel_but_active_for_status() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::BeforeClose);
+
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        let view = service
+            .semgrep_operation(operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.state, SemgrepOperationState::Persisting);
+        assert!(view.active);
+        assert_eq!(
+            service.request_semgrep_cancel(operation_id).await.unwrap(),
+            SemgrepCancelOutcome::Inactive
+        );
+
+        release.notify_one();
+        wait_for_state(&service, operation_id, SemgrepOperationState::Done).await;
+    }
+
+    #[tokio::test]
+    async fn externally_observed_done_never_regresses_to_failed() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Completed(0)));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterPublicationBeforeCleanup);
+
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        let before_cleanup = service
+            .semgrep_operation(operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before_cleanup.state, SemgrepOperationState::Persisting);
+        assert!(before_cleanup.active);
+        service.semgrep.install_test_cleanup_failure();
+        release.notify_one();
+        wait_for_state(&service, operation_id, SemgrepOperationState::Failed).await;
+        let after_cleanup = service
+            .semgrep_operation(operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            [before_cleanup.state, after_cleanup.state],
+            [
+                SemgrepOperationState::Persisting,
+                SemgrepOperationState::Failed
+            ]
         );
     }
 }
