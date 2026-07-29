@@ -333,7 +333,14 @@ Expose only:
 pub mod semgrep;
 ```
 
-Tests must cover valid Error/Warning/Info normalization; malformed JSON; missing `results`, `errors`, or `paths`; unknown severity; zero/reversed coordinates; absolute and `..` paths; paths absent from the manifest; non-empty `errors`; non-empty `paths.skipped`; rule/message byte limits; more than 50,000 findings; identical duplicates; and a forced fingerprint collision with different normalized content.
+Tests must cover valid Error/Warning/Info normalization; the real Semgrep
+`1.169.0` no-skip shape with omitted `paths.skipped`; malformed JSON; missing
+`results`, `errors`, `paths`, or `paths.scanned`; unknown severity;
+zero/reversed coordinates; absolute and `..` paths; paths absent from the
+manifest; non-empty `errors`; explicit non-empty `paths.skipped`;
+scanned-manifest mismatch; rule/message byte limits; more than 50,000
+findings; identical duplicates; and a forced fingerprint collision with
+different normalized content.
 
 The valid fixture shape is:
 
@@ -393,11 +400,23 @@ struct RawExtra { message: String, severity: String }
 #[derive(Deserialize)]
 struct RawPaths {
     scanned: Vec<String>,
+    #[serde(default)]
     skipped: Vec<serde_json::Value>,
 }
 ```
 
-Require `version == "1.169.0"`, empty errors/skips, safe normalized relative paths, positive ordered ranges, staged-manifest membership, exact equality between normalized `paths.scanned` and the staged manifest, and exact byte ceilings. Normalization accepts only an optional leading `./`, converts platform separators to `/`, and rejects absolute paths, prefixes, empty components, `.` elsewhere, and `..`; the fixed wrapper runs from `/work/source`, so no host or container-root prefix is accepted. Ignore unknown JSON fields for forward-compatible telemetry, but never persist them.
+Require `version == "1.169.0"`, empty errors/skips, safe normalized relative
+paths, positive ordered ranges, staged-manifest membership, exact equality
+between normalized `paths.scanned` and the staged manifest, and exact byte
+ceilings. Semgrep CE `1.169.0` may omit `paths.skipped` when no path was
+skipped, so only `RawPaths.skipped` receives `#[serde(default)]`; missing
+`paths` or `paths.scanned` still fails deserialization, and an explicitly
+non-empty skipped list remains incomplete analysis. Normalization accepts only
+an optional leading `./`, converts platform separators to `/`, and rejects
+absolute paths, prefixes, empty components, `.` elsewhere, and `..`; the fixed
+wrapper runs from `/work/source`, so no host or container-root prefix is
+accepted. Ignore unknown JSON fields for forward-compatible telemetry, but
+never persist them.
 
 Use one canonical length-prefix helper:
 
@@ -2683,7 +2702,11 @@ git commit -m "feat: render advisory Semgrep target enrichment"
 4. copy the committed vulnerable and clean C fixtures;
 5. run the image with `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, `--pids-limit 128`, `--memory 4096m`, `--cpus 2`, source read-only, output writable, and 64 MiB `fsize`;
 6. invoke `/usr/local/bin/oxfuzz-semgrep-scan`;
-7. use a bounded host-side JSON reader to assert empty `errors`/`paths.skipped`, exactly one `raptor-insecure-api-gets` finding in `vulnerable.c`, and no findings in `clean.c`;
+7. use a symlink-safe, regular-file-only, bounded host-side JSON reader to
+   assert empty `errors`, absent-or-empty `paths.skipped`, exact
+   `paths.scanned` equality with `{clean.c, vulnerable.c}`, exactly one
+   `raptor-insecure-api-gets` finding in `vulnerable.c`, and no result from any
+   rule in `clean.c`;
 8. assert Semgrep `1.169.0`, exact rules commit, and exact tree digest inside the same network-disabled image; and
 9. assert both `third_party/semgrep/LICENSE` and `third_party/semgrep-rules/LICENSE` are shipped in the release source; and
 10. remove only the temporary directory via its validated `mktemp -d` path.
