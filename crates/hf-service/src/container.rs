@@ -64,6 +64,11 @@ pub(crate) struct WorkspaceCleanupLease {
     _system_guard: File,
 }
 
+#[cfg(feature = "semgrep-enrichment")]
+pub(crate) struct SemgrepProjectLease {
+    _system_guard: File,
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct WorkspaceOwnershipManifest {
     application: String,
@@ -228,6 +233,46 @@ fn workspace_lock_error(error: TryLockError, cleanup: bool) -> ClassifiedError {
             ClassifiedError::Internal(format!("acquire workspace lease: {error}"))
         }
     }
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+pub(crate) fn acquire_semgrep_project_lease(
+    canonical_project: &Path,
+) -> Result<SemgrepProjectLease, ClassifiedError> {
+    use sha2::{Digest as _, Sha256};
+
+    let lock_dir = crate::init::user_app_dir().join("locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create Semgrep project lease directory {}: {error}",
+            lock_dir.display()
+        ))
+    })?;
+    let digest = Sha256::digest(canonical_project.as_os_str().as_encoded_bytes());
+    let lock_path = lock_dir.join(format!("semgrep-project-{digest:x}.lock"));
+    let system_guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "open Semgrep project lease {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+    system_guard.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => {
+            ClassifiedError::Validation("Semgrep enrichment: busy".to_owned())
+        }
+        TryLockError::Error(error) => {
+            ClassifiedError::Internal(format!("acquire Semgrep project lease: {error}"))
+        }
+    })?;
+    Ok(SemgrepProjectLease {
+        _system_guard: system_guard,
+    })
 }
 
 fn protected_workspace_paths() -> Vec<PathBuf> {
@@ -4907,6 +4952,8 @@ impl ServiceContainer {
     /// Returns `ClassifiedError` if the delete fails.
     pub async fn clear_knowledge(&self) -> Result<(), ClassifiedError> {
         if let Some(store) = &self.store {
+            let workspace = workspace_root();
+            let _workspace_cleanup = Self::try_acquire_workspace_cleanup(&workspace)?;
             store
                 .clear_knowledge()
                 .await
@@ -4933,6 +4980,8 @@ impl ServiceContainer {
         // or trailing-slash caller path can never wipe the disk while orphaning the
         // DB rows (e.g. `/tmp/p` vs the stored `/private/tmp/p` on macOS).
         let identity = project_lookup_identity(project);
+        #[cfg(feature = "semgrep-enrichment")]
+        let _semgrep_project = acquire_semgrep_project_lease(&identity)?;
         if let Some(store) = &self.store {
             let key = identity.to_string_lossy();
             store
