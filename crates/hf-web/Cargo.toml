@@ -7,9 +7,10 @@ description = "REST API + SSE streaming"
 
 # Automotive on by default; `--no-default-features` drops it (see hf-cli note).
 [features]
-default = ["automotive-scapy", "proof-carrying"]
+default = ["automotive-scapy", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 proof-carrying = ["hf-service/proof-carrying"]
+semgrep-enrichment = ["hf-service/semgrep-enrichment"]
 
 [dependencies]
 hf-service = { workspace = true }
@@ -31,6 +32,8 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 
 [dev-dependencies]
+hf-core = { workspace = true }
+hf-test-utils = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
