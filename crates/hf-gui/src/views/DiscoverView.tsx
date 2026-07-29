@@ -1,13 +1,49 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getTransport, pickFolder } from "../lib";
+import { waitForSemgrep } from "../lib/semgrep";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { useTarget } from "../providers/target";
-import type { TargetInventory, TargetCandidate } from "../types";
+import type {
+  SemgrepInventory,
+  SemgrepOperationState,
+  SemgrepOverlayState,
+  SemgrepTargetCandidate,
+  TargetCandidate,
+  TargetInventory,
+} from "../types";
 import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { useI18n } from "../i18nContext";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 import { shouldLoadCoverage } from "../lib/discoverCoverage";
+
+const ACTIVE_SEMGREP_STATES: ReadonlySet<SemgrepOperationState> = new Set([
+  "staging",
+  "scanning",
+  "validating",
+  "persisting",
+]);
+
+interface DiscoveryContext {
+  project: string;
+  lang: string;
+}
+
+function semgrepOverlayMessageKey(
+  overlayState: SemgrepOverlayState,
+): string | null {
+  switch (overlayState) {
+    case "stale_source":
+      return "discover.semgrepStaleSource";
+    case "stale_base":
+      return "discover.semgrepStaleBase";
+    case "incomplete_journal":
+      return "discover.semgrepIncompleteJournal";
+    case "none":
+    case "current":
+      return null;
+  }
+}
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { t } = useI18n();
@@ -21,11 +57,36 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
+  const [discoveryContext, setDiscoveryContext] =
+    useState<DiscoveryContext | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [semgrepInventory, setSemgrepInventory] =
+    useState<SemgrepInventory | null>(null);
+  const [semgrepState, setSemgrepState] =
+    useState<SemgrepOperationState | null>(null);
+  const [semgrepOperationId, setSemgrepOperationId] =
+    useState<string | null>(null);
+  const [semgrepLoading, setSemgrepLoading] = useState(false);
+  const [semgrepError, setSemgrepError] = useState<string | null>(null);
+  const semgrepAbortRef = useRef<AbortController | null>(null);
+  const semgrepOperationIdRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
 
-  async function browse() {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const operationId = semgrepOperationIdRef.current;
+      if (semgrepAbortRef.current && operationId) {
+        void getTransport().invoke("semgrep_cancel", { operationId });
+      }
+      semgrepAbortRef.current?.abort();
+    };
+  }, []);
+
+  const browse = useCallback(async () => {
     setScanning(true);
     try {
       const path = await pickFolder();
@@ -33,9 +94,9 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setScanning(false);
     }
-  }
+  }, []);
 
-  async function discover() {
+  const discover = useCallback(async () => {
     if (!project) return;
     setLoading(true);
     setError(null);
@@ -45,6 +106,12 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         lang,
       });
       setInventory(inv);
+      setDiscoveryContext({ project, lang });
+      setSemgrepInventory(null);
+      setSemgrepState(null);
+      setSemgrepOperationId(null);
+      semgrepOperationIdRef.current = null;
+      setSemgrepError(null);
       setActiveProject(project);
       markDone("discover");
     } catch (e) {
@@ -52,7 +119,96 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [lang, markDone, project, setActiveProject]);
+
+  const enrichWithSemgrep = useCallback(async () => {
+    if (
+      !inventory
+      || !discoveryContext
+      || discoveryContext.project !== project
+      || discoveryContext.lang !== lang
+      || (discoveryContext.lang !== "c" && discoveryContext.lang !== "cpp")
+    ) {
+      return;
+    }
+
+    setSemgrepLoading(true);
+    setSemgrepInventory(null);
+    setSemgrepState("staging");
+    setSemgrepOperationId(null);
+    semgrepOperationIdRef.current = null;
+    setSemgrepError(null);
+    const controller = new AbortController();
+    semgrepAbortRef.current = controller;
+    try {
+      const operationId = await getTransport().invoke<string>(
+        "semgrep_enrich",
+        {
+          project: discoveryContext.project,
+          lang: discoveryContext.lang,
+        },
+      );
+      if (!mountedRef.current) {
+        await getTransport().invoke("semgrep_cancel", { operationId });
+        return;
+      }
+      semgrepOperationIdRef.current = operationId;
+      setSemgrepOperationId(operationId);
+      const result = await waitForSemgrep(
+        operationId,
+        (state) => {
+          if (mountedRef.current) setSemgrepState(state);
+        },
+        controller.signal,
+      );
+      if (mountedRef.current) setSemgrepInventory(result);
+    } catch (cause) {
+      if (mountedRef.current && !controller.signal.aborted) {
+        setSemgrepError(String(cause));
+      }
+    } finally {
+      if (semgrepAbortRef.current === controller) {
+        semgrepAbortRef.current = null;
+      }
+      if (mountedRef.current) setSemgrepLoading(false);
+    }
+  }, [discoveryContext, inventory, lang, project]);
+
+  const stopSemgrep = useCallback(async () => {
+    const operationId = semgrepOperationId;
+    if (!operationId) return;
+    try {
+      await getTransport().invoke("semgrep_cancel", { operationId });
+      if (mountedRef.current) {
+        setSemgrepState("cancelled");
+        semgrepAbortRef.current?.abort();
+      }
+    } catch (cause) {
+      if (mountedRef.current) setSemgrepError(String(cause));
+    }
+  }, [semgrepOperationId]);
+
+  const baseCandidates = useMemo(
+    () =>
+      inventory
+        ? [...inventory.candidates].sort((a, b) => b.fit_score - a.fit_score)
+        : [],
+    [inventory],
+  );
+  const semgrepEligible =
+    inventory !== null
+    && discoveryContext !== null
+    && discoveryContext.project === project
+    && discoveryContext.lang === lang
+    && (discoveryContext.lang === "c" || discoveryContext.lang === "cpp");
+  const showSemgrepScores = semgrepInventory?.overlay_state === "current";
+  const staleMessageKey = semgrepInventory
+    ? semgrepOverlayMessageKey(semgrepInventory.overlay_state)
+    : null;
+  const semgrepActive =
+    semgrepLoading
+    && semgrepState !== null
+    && ACTIVE_SEMGREP_STATES.has(semgrepState);
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -72,12 +228,14 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             value={project}
             onChange={(e) => setLocalProject(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && discover()}
+            disabled={loading || semgrepLoading}
             className="flex-1"
           />
         )}
         <Select
           value={lang}
           onChange={(v) => setLang(v)}
+          disabled={loading || semgrepLoading}
           options={[
             { value: "c", label: "C" },
             { value: "cpp", label: "C++" },
@@ -91,6 +249,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
             size="sm"
             onClick={browse}
             loading={scanning}
+            disabled={loading || semgrepLoading}
             title={t("discover.browseFolder")}
             aria-label={t("discover.browseFolder")}
           >
@@ -100,7 +259,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         <Button
           variant="primary"
           onClick={discover}
-          disabled={loading || !project}
+          disabled={loading || semgrepLoading || !project}
           loading={loading}
         >
           {!loading && <Search size={14} />}
@@ -117,17 +276,90 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
+      {semgrepEligible && (
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={enrichWithSemgrep}
+            disabled={loading || semgrepLoading || !project}
+            loading={semgrepLoading}
+          >
+            {t("discover.semgrepEnrich")}
+          </Button>
+          {semgrepActive && semgrepOperationId && (
+            <Button
+              variant="outline"
+              onClick={stopSemgrep}
+              aria-label={t("discover.semgrepStop")}
+            >
+              {t("discover.semgrepStop")}
+            </Button>
+          )}
+          {semgrepState && (
+            <span
+              className="text-xs text-text-secondary"
+              role="status"
+              aria-live="polite"
+            >
+              {t(`discover.semgrepState.${semgrepState}`)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {semgrepError && (
+        <div
+          className="rounded-md text-xs px-3 py-2"
+          style={{ background: "var(--error-subtle)", color: "var(--error)" }}
+          role="alert"
+        >
+          {semgrepError}
+        </div>
+      )}
+
+      {semgrepInventory && (
+        <div
+          className="rounded-md text-xs px-3 py-2"
+          style={{
+            background: "var(--accent-subtle)",
+            color: "var(--text-secondary)",
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            {t("discover.semgrepSignals")}
+          </div>
+          {staleMessageKey && <div>{t(staleMessageKey)}</div>}
+        </div>
+      )}
+
       {inventory && (
         <div className="flex flex-col gap-2" style={{ animation: "slideInUp 0.2s ease" }}>
           <div className="text-xs text-text-secondary">
-            {t("discover.candidatesFound", { n: inventory.candidates.length })}
+            {t("discover.candidatesFound", {
+              n: semgrepInventory?.candidates.length ?? inventory.candidates.length,
+            })}
           </div>
           <div className="flex flex-col gap-1">
-            {[...inventory.candidates]
-              .sort((a, b) => b.fit_score - a.fit_score)
-              .map((c) => (
-                <CandidateCard key={c.id} candidate={c} callGraph={inventory.call_graph ?? {}} project={project} />
-              ))}
+            {semgrepInventory
+              ? semgrepInventory.candidates.map((candidate) => (
+                  <CandidateCard
+                    key={candidate.id}
+                    candidate={candidate}
+                    callGraph={semgrepInventory.call_graph}
+                    project={semgrepInventory.project_root}
+                    semgrepScores={
+                      showSemgrepScores ? candidate : undefined
+                    }
+                  />
+                ))
+              : baseCandidates.map((candidate) => (
+                  <CandidateCard
+                    key={candidate.id}
+                    candidate={candidate}
+                    callGraph={inventory.call_graph ?? {}}
+                    project={discoveryContext?.project ?? project}
+                  />
+                ))}
           </div>
         </div>
       )}
@@ -135,9 +367,20 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   );
 }
 
-function CandidateCard({ candidate: c, callGraph, project }: { candidate: TargetCandidate; callGraph: Record<string, string[]>; project: string }) {
+function CandidateCard({
+  candidate: c,
+  callGraph,
+  project,
+  semgrepScores,
+}: {
+  candidate: TargetCandidate;
+  callGraph: Record<string, string[]>;
+  project: string;
+  semgrepScores?: SemgrepTargetCandidate;
+}) {
   const { t } = useI18n();
-  const fitColor = c.fit_score > 0.8 ? "var(--accent)" : c.fit_score > 0.6 ? "var(--warning)" : "var(--text-muted)";
+  const displayedScore = semgrepScores?.effective_score ?? c.fit_score;
+  const fitColor = displayedScore > 0.8 ? "var(--accent)" : displayedScore > 0.6 ? "var(--warning)" : "var(--text-muted)";
   const reaches = c.reachable_functions?.length ?? 0;
   const hasTree = (callGraph[c.symbol]?.length ?? 0) > 0;
   const [treeOpen, setTreeOpen] = useState(false);
@@ -146,7 +389,7 @@ function CandidateCard({ candidate: c, callGraph, project }: { candidate: Target
   const [covered, setCovered] = useState<Set<string> | null>(null);
   const [covLoading, setCovLoading] = useState(false);
 
-  async function loadCoverage() {
+  const loadCoverage = useCallback(async () => {
     setCovLoading(true);
     try {
       const functions = await getTransport().invoke<string[]>("coverage_functions", {
@@ -159,15 +402,15 @@ function CandidateCard({ candidate: c, callGraph, project }: { candidate: Target
     } finally {
       setCovLoading(false);
     }
-  }
+  }, [c.symbol, project]);
 
-  function toggleTree() {
+  const toggleTree = useCallback(() => {
     const opening = !treeOpen;
     setTreeOpen(opening);
     if (shouldLoadCoverage(opening, covered, covLoading, project)) {
       void loadCoverage();
     }
-  }
+  }, [covLoading, covered, loadCoverage, project, treeOpen]);
 
   return (
     <div className="surface-card flex flex-col" style={{ padding: 0 }}>
@@ -209,9 +452,37 @@ function CandidateCard({ candidate: c, callGraph, project }: { candidate: Target
         )}
       </div>
       <div className="flex flex-col items-end gap-1 shrink-0">
-        <span className="text-sm font-mono" style={{ color: fitColor, fontWeight: 600 }}>
-          {c.fit_score.toFixed(3)}
-        </span>
+        {semgrepScores ? (
+          <>
+            <span className="text-xs font-mono text-text-secondary">
+              {t("discover.semgrepBase", {
+                score: semgrepScores.base_score.toFixed(3),
+              })}
+            </span>
+            <span className="text-xs font-mono text-text-secondary">
+              {t("discover.semgrepBoost", {
+                score: semgrepScores.semgrep_boost.toFixed(3),
+              })}
+            </span>
+            <span
+              className="text-sm font-mono"
+              style={{ color: fitColor, fontWeight: 600 }}
+            >
+              {t("discover.semgrepEffective", {
+                score: semgrepScores.effective_score.toFixed(3),
+              })}
+            </span>
+            <span className="text-xs text-text-muted">
+              {t("discover.semgrepMatchedRules", {
+                n: semgrepScores.semgrep_matched_rule_count,
+              })}
+            </span>
+          </>
+        ) : (
+          <span className="text-sm font-mono" style={{ color: fitColor, fontWeight: 600 }}>
+            {c.fit_score.toFixed(3)}
+          </span>
+        )}
         <span className="text-xs text-text-muted">{t("discover.complexity", { n: c.complexity })}</span>
         {reaches > 0 && (
           <span
