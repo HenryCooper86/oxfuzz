@@ -2815,3 +2815,49 @@ git add scripts/test-semgrep-sandbox.sh scripts/build-release.sh \
   docs/guides/GETTING_STARTED.md docs/guides/RELEASE_CHECKLIST.md README.md
 git commit -m "docs: add Semgrep enrichment release contract"
 ```
+
+---
+
+### Final Review: Reconcile pre-`Begin` rows and exclude knowledge deletion
+
+- [ ] **Step 1: Reproduce all missing-evidence windows**
+
+Add a focused recovery test that commits a `staging` parent and operation
+directory without journal `Begin`. Recovery must fail before implementation
+because journal-only enumeration leaves the parent active. Add lifecycle tests
+that pause an admitted worker after `Begin`; global `clear_knowledge` and
+canonical-alias `delete_project` must fail before implementation because they
+delete the active parent while its journal is open.
+
+- [ ] **Step 2: Add the active-parent storage query**
+
+Add
+`Store::active_semgrep_runs() -> Result<Vec<SemgrepRunRecord>, StorageError>`.
+Select the canonical parent projection for `staging`, `scanning`, `validating`,
+and `persisting`, ordered by `started_at, id`, and decode every row through the
+existing validated row mapper. Test exclusion of all terminal statuses.
+
+- [ ] **Step 3: Reconcile journal and database evidence**
+
+Under bootstrap's exclusive workspace lease, repair interrupted journals
+first. If an interrupted journal has no database parent, validate its UUID
+staging identity, clean the exact operation root, and append a recovered abort.
+Then query active parents. Exact-clean each remaining parent's UUID directory
+before atomically failing it with `recovered_missing_journal`; do not create a
+journal file or require the source project to exist. Re-run recovery to prove
+idempotence and verify no overlay child survives.
+
+- [ ] **Step 4: Exclude knowledge deletion**
+
+Make `clear_knowledge` acquire the nonblocking exclusive workspace cleanup
+lease before its database transaction. Keep `delete_project` in global lock
+order by acquiring the shared workspace lease and then the canonical project's
+Semgrep lease before deleting database rows or its workspace. Both explicit
+mutations report busy when they overlap a live scan.
+
+- [ ] **Step 5: Verify crash-window adjacency**
+
+Run the focused reconciliation and deletion regressions plus existing
+`Begin`, `ready_to_commit`, publication, cleanup, indeterminate `Close`, and
+cross-process lease-lifetime tests. Then run feature crate tests and the
+ordered workspace Rust quality gates.
