@@ -170,6 +170,26 @@ async fn exercise_semgrep_rest_contract() {
         security,
     );
 
+    let availability = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/semgrep/available")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(availability.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(availability.into_body(), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        true
+    );
+
     let response = app
         .clone()
         .oneshot(

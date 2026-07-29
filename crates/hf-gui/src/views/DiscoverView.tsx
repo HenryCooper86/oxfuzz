@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getTransport, pickFolder } from "../lib";
-import { waitForSemgrep } from "../lib/semgrep";
+import {
+  buildSemgrepPresentation,
+  canApplySemgrepResult,
+  canStartSemgrep,
+  hasOwnedSemgrepOperation,
+  semgrepCancelDecision,
+  semgrepStateAfterError,
+  waitForSemgrep,
+} from "../lib/semgrep";
 import { useProject } from "../providers/project";
 import { usePipeline } from "../providers/pipeline";
 import { useTarget } from "../providers/target";
 import type {
-  SemgrepInventory,
+  BoundSemgrepInventory,
+  SemgrepContext,
+} from "../lib/semgrep";
+import type {
+  SemgrepCancelOutcome,
   SemgrepOperationState,
-  SemgrepOverlayState,
   SemgrepTargetCandidate,
   TargetCandidate,
   TargetInventory,
@@ -16,34 +27,6 @@ import { Button, Input, Select, ViewHeader } from "../components/ui";
 import { useI18n } from "../i18nContext";
 import { Crosshair, Search, Loader2, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
 import { shouldLoadCoverage } from "../lib/discoverCoverage";
-
-const ACTIVE_SEMGREP_STATES: ReadonlySet<SemgrepOperationState> = new Set([
-  "staging",
-  "scanning",
-  "validating",
-  "persisting",
-]);
-
-interface DiscoveryContext {
-  project: string;
-  lang: string;
-}
-
-function semgrepOverlayMessageKey(
-  overlayState: SemgrepOverlayState,
-): string | null {
-  switch (overlayState) {
-    case "stale_source":
-      return "discover.semgrepStaleSource";
-    case "stale_base":
-      return "discover.semgrepStaleBase";
-    case "incomplete_journal":
-      return "discover.semgrepIncompleteJournal";
-    case "none":
-    case "current":
-      return null;
-  }
-}
 
 export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { t } = useI18n();
@@ -58,12 +41,13 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const project = embedded ? activeProject : localProject;
   const [inventory, setInventory] = useState<TargetInventory | null>(null);
   const [discoveryContext, setDiscoveryContext] =
-    useState<DiscoveryContext | null>(null);
+    useState<SemgrepContext | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [semgrepInventory, setSemgrepInventory] =
-    useState<SemgrepInventory | null>(null);
+    useState<BoundSemgrepInventory | null>(null);
+  const [semgrepAvailable, setSemgrepAvailable] = useState(false);
   const [semgrepState, setSemgrepState] =
     useState<SemgrepOperationState | null>(null);
   const [semgrepOperationId, setSemgrepOperationId] =
@@ -71,11 +55,27 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const [semgrepLoading, setSemgrepLoading] = useState(false);
   const [semgrepError, setSemgrepError] = useState<string | null>(null);
   const semgrepAbortRef = useRef<AbortController | null>(null);
+  const semgrepOwnershipRef = useRef<AbortController | null>(null);
   const semgrepOperationIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const currentSelectionRef = useRef<SemgrepContext>({ project, lang });
+  const discoveryContextRef = useRef<SemgrepContext | null>(discoveryContext);
+
+  useEffect(() => {
+    currentSelectionRef.current = { project, lang };
+    discoveryContextRef.current = discoveryContext;
+  }, [discoveryContext, lang, project]);
 
   useEffect(() => {
     mountedRef.current = true;
+    void getTransport()
+      .invoke<boolean>("semgrep_available")
+      .then((available) => {
+        if (mountedRef.current) setSemgrepAvailable(available);
+      })
+      .catch(() => {
+        if (mountedRef.current) setSemgrepAvailable(false);
+      });
     return () => {
       mountedRef.current = false;
       const operationId = semgrepOperationIdRef.current;
@@ -83,6 +83,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         void getTransport().invoke("semgrep_cancel", { operationId });
       }
       semgrepAbortRef.current?.abort();
+      semgrepOwnershipRef.current?.abort();
     };
   }, []);
 
@@ -122,15 +123,23 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   }, [lang, markDone, project, setActiveProject]);
 
   const enrichWithSemgrep = useCallback(async () => {
+    const operationOwned = hasOwnedSemgrepOperation(
+      semgrepOperationId,
+      semgrepState,
+    );
     if (
-      !inventory
+      !canStartSemgrep(
+        semgrepAvailable,
+        inventory !== null,
+        discoveryContext,
+        { project, lang },
+        operationOwned,
+      )
       || !discoveryContext
-      || discoveryContext.project !== project
-      || discoveryContext.lang !== lang
-      || (discoveryContext.lang !== "c" && discoveryContext.lang !== "cpp")
     ) {
       return;
     }
+    const operationContext = discoveryContext;
 
     setSemgrepLoading(true);
     setSemgrepInventory(null);
@@ -139,13 +148,15 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
     semgrepOperationIdRef.current = null;
     setSemgrepError(null);
     const controller = new AbortController();
+    const ownership = new AbortController();
     semgrepAbortRef.current = controller;
+    semgrepOwnershipRef.current = ownership;
     try {
       const operationId = await getTransport().invoke<string>(
         "semgrep_enrich",
         {
-          project: discoveryContext.project,
-          lang: discoveryContext.lang,
+          project: operationContext.project,
+          lang: operationContext.lang,
         },
       );
       if (!mountedRef.current) {
@@ -160,33 +171,77 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           if (mountedRef.current) setSemgrepState(state);
         },
         controller.signal,
+        {
+          ownershipSignal: ownership.signal,
+        },
       );
-      if (mountedRef.current) setSemgrepInventory(result);
+      if (
+        mountedRef.current
+        && canApplySemgrepResult(
+          operationContext,
+          discoveryContextRef.current,
+          currentSelectionRef.current,
+        )
+      ) {
+        setSemgrepInventory({ context: operationContext, inventory: result });
+      }
     } catch (cause) {
-      if (mountedRef.current && !controller.signal.aborted) {
+      const ownershipReleased =
+        cause instanceof DOMException
+        && cause.name === "SemgrepOwnershipReleased";
+      if (
+        mountedRef.current
+        && !controller.signal.aborted
+        && !ownershipReleased
+      ) {
         setSemgrepError(String(cause));
+        setSemgrepState((state) =>
+          semgrepStateAfterError(semgrepOperationIdRef.current, state),
+        );
       }
     } finally {
       if (semgrepAbortRef.current === controller) {
         semgrepAbortRef.current = null;
       }
+      if (semgrepOwnershipRef.current === ownership) {
+        semgrepOwnershipRef.current = null;
+      }
       if (mountedRef.current) setSemgrepLoading(false);
     }
-  }, [discoveryContext, inventory, lang, project]);
+  }, [
+    discoveryContext,
+    inventory,
+    lang,
+    project,
+    semgrepAvailable,
+    semgrepOperationId,
+    semgrepState,
+  ]);
 
   const stopSemgrep = useCallback(async () => {
     const operationId = semgrepOperationId;
     if (!operationId) return;
     try {
-      await getTransport().invoke("semgrep_cancel", { operationId });
-      if (mountedRef.current) {
-        setSemgrepState("cancelled");
-        semgrepAbortRef.current?.abort();
+      const outcome = await getTransport().invoke<SemgrepCancelOutcome>(
+        "semgrep_cancel",
+        { operationId },
+      );
+      if (!mountedRef.current) return;
+      const decision = semgrepCancelDecision(outcome);
+      if (decision.errorKey) setSemgrepError(t(decision.errorKey));
+      if (decision.releaseOwnership) {
+        semgrepOwnershipRef.current?.abort();
+        semgrepOperationIdRef.current = null;
+        setSemgrepOperationId(null);
+        setSemgrepState(null);
+        setSemgrepLoading(false);
       }
+      if (decision.nextState) setSemgrepState(decision.nextState);
+      if (decision.abortPolling) semgrepAbortRef.current?.abort();
     } catch (cause) {
       if (mountedRef.current) setSemgrepError(String(cause));
     }
-  }, [semgrepOperationId]);
+  }, [semgrepOperationId, t]);
 
   const baseCandidates = useMemo(
     () =>
@@ -195,20 +250,23 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         : [],
     [inventory],
   );
-  const semgrepEligible =
-    inventory !== null
-    && discoveryContext !== null
-    && discoveryContext.project === project
-    && discoveryContext.lang === lang
-    && (discoveryContext.lang === "c" || discoveryContext.lang === "cpp");
-  const showSemgrepScores = semgrepInventory?.overlay_state === "current";
-  const staleMessageKey = semgrepInventory
-    ? semgrepOverlayMessageKey(semgrepInventory.overlay_state)
-    : null;
-  const semgrepActive =
-    semgrepLoading
-    && semgrepState !== null
-    && ACTIVE_SEMGREP_STATES.has(semgrepState);
+  const semgrepOwned = hasOwnedSemgrepOperation(
+    semgrepOperationId,
+    semgrepState,
+  );
+  const semgrepEligible = canStartSemgrep(
+    semgrepAvailable,
+    inventory !== null,
+    discoveryContext,
+    { project, lang },
+    semgrepOwned,
+  );
+  const semgrepPresentation = buildSemgrepPresentation(
+    baseCandidates,
+    semgrepInventory,
+    discoveryContext,
+    { project, lang },
+  );
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
@@ -276,17 +334,19 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
-      {semgrepEligible && (
+      {(semgrepEligible || semgrepOwned) && (
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            onClick={enrichWithSemgrep}
-            disabled={loading || semgrepLoading || !project}
-            loading={semgrepLoading}
-          >
-            {t("discover.semgrepEnrich")}
-          </Button>
-          {semgrepActive && semgrepOperationId && (
+          {semgrepEligible && (
+            <Button
+              variant="outline"
+              onClick={enrichWithSemgrep}
+              disabled={loading || semgrepLoading || !project}
+              loading={semgrepLoading}
+            >
+              {t("discover.semgrepEnrich")}
+            </Button>
+          )}
+          {semgrepOwned && semgrepOperationId && (
             <Button
               variant="outline"
               onClick={stopSemgrep}
@@ -317,7 +377,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
-      {semgrepInventory && (
+      {semgrepPresentation.inventory && (
         <div
           className="rounded-md text-xs px-3 py-2"
           style={{
@@ -328,7 +388,9 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
           <div style={{ fontWeight: 600 }}>
             {t("discover.semgrepSignals")}
           </div>
-          {staleMessageKey && <div>{t(staleMessageKey)}</div>}
+          {semgrepPresentation.staleMessageKey && (
+            <div>{t(semgrepPresentation.staleMessageKey)}</div>
+          )}
         </div>
       )}
 
@@ -336,23 +398,27 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
         <div className="flex flex-col gap-2" style={{ animation: "slideInUp 0.2s ease" }}>
           <div className="text-xs text-text-secondary">
             {t("discover.candidatesFound", {
-              n: semgrepInventory?.candidates.length ?? inventory.candidates.length,
+              n: semgrepPresentation.candidates.length,
             })}
           </div>
           <div className="flex flex-col gap-1">
-            {semgrepInventory
-              ? semgrepInventory.candidates.map((candidate) => (
+            {semgrepPresentation.inventory
+              ? semgrepPresentation.candidates.map((candidate) => (
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}
-                    callGraph={semgrepInventory.call_graph}
-                    project={semgrepInventory.project_root}
+                    callGraph={semgrepPresentation.inventory?.call_graph ?? {}}
+                    project={
+                      semgrepPresentation.inventory?.project_root ?? project
+                    }
                     semgrepScores={
-                      showSemgrepScores ? candidate : undefined
+                      semgrepPresentation.showScores
+                        ? candidate as SemgrepTargetCandidate
+                        : undefined
                     }
                   />
                 ))
-              : baseCandidates.map((candidate) => (
+              : semgrepPresentation.candidates.map((candidate) => (
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}

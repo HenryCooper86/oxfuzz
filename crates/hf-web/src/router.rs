@@ -328,6 +328,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
     Router::new()
         .route("/health", get(health))
         .route("/discover", post(discover))
+        .route("/semgrep/available", get(semgrep_available))
         .route("/harness/draft", post(harness_draft))
         .route("/harness/compile", post(harness_compile))
         .route("/harness/smoke", post(harness_smoke))
@@ -602,6 +603,10 @@ async fn auth_audit(
 
 async fn health() -> StatusCode {
     StatusCode::OK
+}
+
+async fn semgrep_available() -> Json<bool> {
+    Json(cfg!(feature = "semgrep-enrichment"))
 }
 
 #[cfg(feature = "semgrep-enrichment")]
