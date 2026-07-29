@@ -950,7 +950,7 @@ impl crate::ServiceContainer {
             .parse::<TargetLanguage>()
             .map_err(|_| semgrep_validation("unsupported_language"))?;
         let project = PathBuf::from(&publication.run.project_root);
-        let mut inventory = load_persisted_inventory(store, &project, language).await?;
+        let mut inventory = load_current_inventory(store, &project, language, false).await?;
         let persisted_ids = inventory
             .candidates
             .iter()
@@ -1170,7 +1170,8 @@ impl crate::ServiceContainer {
             .await;
             return;
         }
-        let Ok(inventory) = load_persisted_inventory(&store, &canonical_project, language).await
+        let Ok(inventory) =
+            load_current_inventory(&store, &canonical_project, language, true).await
         else {
             self.finish_semgrep_failure(
                 &store,
@@ -1705,18 +1706,8 @@ async fn require_persisted_inventory(
     canonical_project: &Path,
     language: TargetLanguage,
 ) -> Result<(), ClassifiedError> {
-    let targets = store.list_all_targets().await?;
-    let candidates = targets
-        .iter()
-        .filter(|candidate| {
-            candidate.language == language
-                && canonical_stored_project(&candidate.project_root, canonical_project)
-        })
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Err(semgrep_validation("inventory_missing"));
-    }
-    if candidates.iter().any(|candidate| {
+    let inventory = load_current_inventory(store, canonical_project, language, true).await?;
+    if inventory.candidates.iter().any(|candidate| {
         candidate.location.end_line.is_none() || candidate.location.end_col.is_none()
     }) {
         return Err(semgrep_validation("inventory_span_incomplete"));
@@ -1724,10 +1715,11 @@ async fn require_persisted_inventory(
     Ok(())
 }
 
-async fn load_persisted_inventory(
+async fn load_current_inventory(
     store: &hf_storage::Store,
     canonical_project: &Path,
     language: TargetLanguage,
+    require_nonempty: bool,
 ) -> Result<TargetInventory, ClassifiedError> {
     let candidates = store
         .list_all_targets()
@@ -1738,7 +1730,7 @@ async fn load_persisted_inventory(
                 && canonical_stored_project(&candidate.project_root, canonical_project)
         })
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
+    if require_nonempty && candidates.is_empty() {
         return Err(semgrep_validation("inventory_missing"));
     }
     Ok(TargetInventory {
@@ -5282,6 +5274,7 @@ mod lifecycle_tests {
     enum RuntimeBehavior {
         Block,
         Completed(i32),
+        CompletedWithUnmatchedFinding,
         TimedOut,
         MissingOutput,
         OversizedOutput,
@@ -5361,6 +5354,28 @@ mod lifecycle_tests {
                     #[cfg(not(unix))]
                     std::fs::write(output, b"{}").unwrap();
                 }
+                RuntimeBehavior::CompletedWithUnmatchedFinding => std::fs::write(
+                    output,
+                    br#"{
+                        "version":"1.169.0",
+                        "results":[{
+                            "check_id":"cpp.lang.security.signal",
+                            "path":"parser.c",
+                            "start":{"line":1,"col":1},
+                            "end":{"line":1,"col":4},
+                            "extra":{"message":"matched advisory signal","severity":"WARNING"}
+                        },{
+                            "check_id":"cpp.lang.security.file-signal",
+                            "path":"parser.c",
+                            "start":{"line":2,"col":1},
+                            "end":{"line":2,"col":4},
+                            "extra":{"message":"unmatched advisory signal","severity":"INFO"}
+                        }],
+                        "errors":[],
+                        "paths":{"scanned":["parser.c"],"skipped":[]}
+                    }"#,
+                )
+                .unwrap(),
                 _ => std::fs::write(
                     output,
                     br#"{
@@ -6470,6 +6485,114 @@ mod lifecycle_tests {
         assert_f64_eq!(result.candidates[0].semgrep_boost, 0.05);
         assert_f64_eq!(result.candidates[0].effective_score, 0.88);
         assert_f64_eq!(result.candidates[0].candidate.fit_score, 0.83);
+    }
+
+    #[tokio::test]
+    async fn exact_result_with_deleted_inventory_is_findings_preserving_stale_base() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(
+            RuntimeBehavior::CompletedWithUnmatchedFinding,
+        ));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+
+        let id = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_state(&service, id, SemgrepOperationState::Done).await;
+        sqlx::query("DELETE FROM targets WHERE project_root = ?1")
+            .bind(project.to_string_lossy().as_ref())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let exact = service.semgrep_result(id).await.unwrap().unwrap();
+        assert_eq!(exact.overlay_state, SemgrepOverlayState::StaleBase);
+        assert!(exact.candidates.is_empty());
+        assert_eq!(exact.findings.len(), 2);
+        assert!(exact
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_some()));
+        assert!(exact
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+
+        let parent = service.semgrep_operation(id).await.unwrap().unwrap();
+        assert_eq!(parent.state, SemgrepOperationState::Done);
+    }
+
+    #[tokio::test]
+    async fn exact_result_with_reclassified_inventory_is_findings_preserving_stale_base() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(
+            RuntimeBehavior::CompletedWithUnmatchedFinding,
+        ));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+
+        let id = service
+            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_state(&service, id, SemgrepOperationState::Done).await;
+        let candidates = store
+            .list_targets(project.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        assert!(!candidates.is_empty());
+        for mut candidate in candidates {
+            candidate.language = TargetLanguage::Cpp;
+            store.upsert_target(&candidate, Utc::now()).await.unwrap();
+        }
+
+        let exact = service.semgrep_result(id).await.unwrap().unwrap();
+        assert_eq!(exact.overlay_state, SemgrepOverlayState::StaleBase);
+        assert!(exact.candidates.is_empty());
+        assert_eq!(exact.findings.len(), 2);
+        assert!(exact
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_some()));
+        assert!(exact
+            .findings
+            .iter()
+            .any(|finding| finding.matched_target_id.is_none()));
+
+        let parent = service.semgrep_operation(id).await.unwrap().unwrap();
+        assert_eq!(parent.state, SemgrepOperationState::Done);
+    }
+
+    #[tokio::test]
+    async fn operation_status_survives_result_reconstruction_failure() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(
+            RuntimeBehavior::CompletedWithUnmatchedFinding,
+        ));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+
+        let id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_state(&service, id, SemgrepOperationState::Done).await;
+        sqlx::query("ALTER TABLE targets RENAME TO targets_unavailable")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let parent = service.semgrep_operation(id).await.unwrap().unwrap();
+        assert_eq!(parent.state, SemgrepOperationState::Done);
+        assert!(parent.result.is_none());
     }
 
     #[tokio::test]
