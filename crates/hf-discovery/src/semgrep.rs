@@ -200,6 +200,7 @@ struct RawExtra {
 #[derive(Deserialize)]
 struct RawPaths {
     scanned: Vec<String>,
+    #[serde(default)]
     skipped: Vec<serde_json::Value>,
 }
 
@@ -1239,6 +1240,44 @@ mod tests {
         let bytes = br#"{"version":"1.169.0","results":[],"errors":[]}"#;
         let error =
             parse_findings(bytes, &BTreeSet::new()).expect_err("missing paths must be rejected");
+
+        assert!(matches!(error, SemgrepValidationError::Json(_)));
+    }
+
+    // Production break caught: requiring a field Semgrep 1.169.0 omits on no-skip success.
+    #[test]
+    fn parse_real_no_skip_shape_accepts_missing_skipped_field() {
+        let bytes = br#"{
+            "version":"1.169.0",
+            "results":[{
+                "check_id":"raptor-insecure-api-gets",
+                "path":"vulnerable.c",
+                "start":{"line":4,"col":12,"offset":62},
+                "end":{"line":4,"col":24,"offset":74},
+                "extra":{
+                    "message":"gets is unsafe",
+                    "severity":"ERROR",
+                    "metadata":{"category":"security"}
+                }
+            }],
+            "errors":[],
+            "paths":{"scanned":["vulnerable.c"]}
+        }"#;
+
+        let findings = parse_findings(bytes, &manifest(&["vulnerable.c"]))
+            .expect("Semgrep's omitted no-skip field must normalize to empty");
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "raptor-insecure-api-gets");
+        assert_eq!(findings[0].relative_path, PathBuf::from("vulnerable.c"));
+    }
+
+    // Production break caught: defaulting the required scanned-manifest evidence.
+    #[test]
+    fn parse_missing_scanned_paths_is_rejected() {
+        let bytes = br#"{"version":"1.169.0","results":[],"errors":[],"paths":{"skipped":[]}}"#;
+        let error = parse_findings(bytes, &BTreeSet::new())
+            .expect_err("missing scanned paths must be rejected");
 
         assert!(matches!(error, SemgrepValidationError::Json(_)));
     }
