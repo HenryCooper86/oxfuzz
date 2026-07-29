@@ -322,7 +322,10 @@ impl SemgrepCoordinator {
                 return Err(error);
             }
         }
-        for run in store.active_semgrep_runs().await? {
+        let active_runs = store.active_semgrep_runs().await.inspect_err(|error| {
+            self.mark_recovery_degraded(error);
+        })?;
+        for run in active_runs {
             if let Err(error) = self
                 .recover_active_without_journal(store, managed_workspace, run.id)
                 .await
@@ -4030,6 +4033,31 @@ mod publication_tests {
         assert!(!operation_root.exists());
         assert!(coordinator.journal.interrupted().unwrap().is_empty());
         assert!(!coordinator.journal.is_closed(operation_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn active_row_decode_failure_degrades_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(root.path()).unwrap();
+        let project = workspace.join("project");
+        let store = Store::connect(workspace.join("recovery.db")).await.unwrap();
+        let coordinator = super::SemgrepCoordinator::persistent(workspace.join("journal"));
+        let operation_id = Uuid::new_v4();
+        store
+            .insert_semgrep_run(&staging_run(operation_id, &project))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE semgrep_enrichment_runs SET sandbox_image = '' WHERE id = ?1")
+            .bind(operation_id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        assert!(coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .is_err());
+        assert!(coordinator.ensure_recovery_healthy().is_err());
     }
 
     #[tokio::test]
