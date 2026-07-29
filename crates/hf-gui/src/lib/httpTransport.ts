@@ -7,6 +7,7 @@ import type {
   RunStartResponse,
   RunStatusEvent,
   SemgrepStartResponse,
+  InvokeOptions,
   Transport,
   UnlistenFn,
 } from "./transport";
@@ -23,6 +24,7 @@ interface HttpTransportOptions {
 
 const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   discover: { method: "POST", path: "/discover" },
+  semgrep_available: { method: "GET", path: "/semgrep/available" },
   semgrep_enrich: { method: "POST", path: "/semgrep/enrich" },
   semgrep_status: { method: "GET", path: "/semgrep/enrich/{operation_id}" },
   semgrep_cancel: {
@@ -274,6 +276,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
   async function request<T>(
     endpoint: { method: string; path: string },
     args?: Record<string, unknown>,
+    options?: InvokeOptions,
   ): Promise<T> {
     const { url, body } = buildRequest(baseUrl, endpoint, args);
     const headers: Record<string, string> = {};
@@ -283,6 +286,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
       method: endpoint.method,
       headers,
       body: endpoint.method === "GET" ? undefined : JSON.stringify(body),
+      signal: options?.signal,
     });
     if (!response.ok) {
       throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);
@@ -403,11 +407,40 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
     return serviceSemgrepOperationId(start);
   }
 
+  async function cancelSemgrep(
+    args?: Record<string, unknown>,
+    options?: InvokeOptions,
+  ): Promise<"accepted" | "inactive" | "not_found"> {
+    const endpoint = COMMAND_MAP.semgrep_cancel;
+    const { url, body } = buildRequest(baseUrl, endpoint, args);
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const response = await fetch(url, {
+      method: endpoint.method,
+      headers,
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    });
+    if (response.status === 202) return "accepted";
+    if (response.status === 409) return "inactive";
+    if (response.status === 404) return "not_found";
+    throw new Error(`${endpoint.method} ${endpoint.path}: ${response.status}`);
+  }
+
   return {
-    async invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T> {
+    async invoke<T = unknown>(
+      command: string,
+      args?: Record<string, unknown>,
+      options?: InvokeOptions,
+    ): Promise<T> {
       if (command === "run_fuzzer") return runFuzzer(args) as Promise<T>;
       if (command === "cancel_run") return cancelActiveRun() as Promise<T>;
       if (command === "semgrep_enrich") return startSemgrep(args) as Promise<T>;
+      if (command === "semgrep_cancel") {
+        return cancelSemgrep(args, options) as Promise<T>;
+      }
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
@@ -441,7 +474,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
         : command === "campaign_advice"
           ? args?.request as Record<string, unknown> | undefined
           : args;
-      return request<T>(endpoint, requestArgs);
+      return request<T>(endpoint, requestArgs, options);
     },
     async listen<T = unknown>(event: string, callback: (event: { payload: T }) => void): Promise<UnlistenFn> {
       if (event === "run:progress" || event === "run:status") {
