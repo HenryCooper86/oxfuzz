@@ -2918,9 +2918,10 @@ fn cleanup_operation_root_in(
     managed_workspace: &Path,
     operation_root: &Path,
 ) -> Result<(), ClassifiedError> {
-    cleanup_operation_root_in_with_hook(managed_workspace, operation_root, || {})
+    cleanup_operation_root_in_with_hooks(managed_workspace, operation_root, || {}, || {}, || {})
 }
 
+#[cfg(test)]
 fn cleanup_operation_root_in_with_hook<F>(
     managed_workspace: &Path,
     operation_root: &Path,
@@ -2929,8 +2930,31 @@ fn cleanup_operation_root_in_with_hook<F>(
 where
     F: FnOnce(),
 {
-    let workspace = validate_canonical_directory(managed_workspace, "managed workspace")?;
-    let semgrep_root = workspace.join("semgrep");
+    cleanup_operation_root_in_with_hooks(
+        managed_workspace,
+        operation_root,
+        || {},
+        || {},
+        before_remove,
+    )
+}
+
+fn cleanup_operation_root_in_with_hooks<B, F, R>(
+    managed_workspace: &Path,
+    operation_root: &Path,
+    before_semgrep_open: B,
+    before_final_workspace_identity: F,
+    before_remove: R,
+) -> Result<(), ClassifiedError>
+where
+    B: FnOnce(),
+    F: FnOnce(),
+    R: FnOnce(),
+{
+    let workspace_path = validate_canonical_directory(managed_workspace, "managed workspace")?;
+    let workspace = open_directory_path_nofollow(&workspace_path, "canonical managed workspace")?;
+    verify_directory_path_identity(&workspace_path, &workspace, "managed workspace")?;
+    let semgrep_root = workspace_path.join("semgrep");
     let operation_name = operation_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -2943,101 +2967,71 @@ where
             "Semgrep cleanup target is not the exact owned operation directory",
         ));
     }
-    let semgrep_metadata = match std::fs::symlink_metadata(&semgrep_root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(snapshot_validation(format!(
-                "inspect Semgrep workspace {}: {error}",
-                semgrep_root.display()
-            )));
-        }
+    before_semgrep_open();
+    let Some(semgrep) = open_optional_directory_at(&workspace, "semgrep", "Semgrep workspace")?
+    else {
+        before_final_workspace_identity();
+        verify_directory_path_identity(&workspace_path, &workspace, "managed workspace")?;
+        return match open_optional_directory_at(&workspace, "semgrep", "Semgrep workspace")? {
+            None => Ok(()),
+            Some(_) => Err(snapshot_validation(
+                "Semgrep workspace appeared while proving its absence",
+            )),
+        };
     };
-    if !semgrep_metadata.file_type().is_dir() {
-        return Err(snapshot_validation(
-            "Semgrep workspace is not a regular directory",
-        ));
-    }
-    let resolved_semgrep = std::fs::canonicalize(&semgrep_root).map_err(|error| {
-        snapshot_validation(format!(
-            "resolve Semgrep workspace {}: {error}",
-            semgrep_root.display()
-        ))
-    })?;
-    if resolved_semgrep != semgrep_root {
-        return Err(snapshot_validation(
-            "Semgrep workspace has an ambiguous ancestor",
-        ));
-    }
-    let metadata = match std::fs::symlink_metadata(operation_root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return verify_absent_operation_path(&semgrep_root, &semgrep_metadata, operation_name);
-        }
-        Err(error) => {
-            return Err(snapshot_validation(format!(
-                "inspect Semgrep operation directory {}: {error}",
-                operation_root.display()
-            )));
-        }
+    verify_directory_path_identity(&workspace_path, &workspace, "managed workspace")?;
+    verify_directory_path_identity(&semgrep_root, &semgrep, "Semgrep workspace")?;
+
+    let Some(operation) =
+        open_optional_directory_at(&semgrep, operation_name, "Semgrep operation directory")?
+    else {
+        before_final_workspace_identity();
+        verify_directory_path_identity(&workspace_path, &workspace, "managed workspace")?;
+        verify_directory_path_identity(&semgrep_root, &semgrep, "Semgrep workspace")?;
+        return match open_optional_directory_at(
+            &semgrep,
+            operation_name,
+            "Semgrep operation directory",
+        )? {
+            None => Ok(()),
+            Some(_) => Err(snapshot_validation(
+                "Semgrep operation appeared while proving its absence",
+            )),
+        };
     };
-    if !metadata.file_type().is_dir() {
-        return Err(snapshot_validation(
-            "Semgrep cleanup target is not a regular directory",
-        ));
-    }
-    let resolved = std::fs::canonicalize(operation_root).map_err(|error| {
-        snapshot_validation(format!(
-            "resolve Semgrep operation directory {}: {error}",
-            operation_root.display()
-        ))
-    })?;
-    if resolved != expected || !resolved.starts_with(&semgrep_root) {
-        return Err(snapshot_validation(
-            "Semgrep cleanup target escaped its owned workspace",
-        ));
-    }
+    verify_directory_path_identity(operation_root, &operation, "Semgrep operation")?;
+
     before_remove();
-    remove_owned_operation_nofollow(&semgrep_root, operation_name, &semgrep_metadata, &metadata)
+    remove_owned_operation_nofollow(&semgrep, operation_name, &operation)?;
+    before_final_workspace_identity();
+    verify_directory_path_identity(&workspace_path, &workspace, "managed workspace")?;
+    verify_directory_path_identity(&semgrep_root, &semgrep, "Semgrep workspace")
 }
 
 #[cfg(unix)]
-fn verify_absent_operation_path(
-    semgrep_root: &Path,
-    expected_semgrep: &std::fs::Metadata,
-    operation_name: &str,
-) -> Result<(), ClassifiedError> {
-    use rustix::fs::{open, openat, Mode, OFlags};
+fn open_optional_directory_at(
+    parent: &File,
+    name: &str,
+    label: &str,
+) -> Result<Option<File>, ClassifiedError> {
+    use rustix::fs::{openat, Mode, OFlags};
 
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let semgrep = File::from(open(semgrep_root, flags, Mode::empty()).map_err(|error| {
-        snapshot_validation(format!("open Semgrep workspace without links: {error}"))
-    })?);
-    let open_semgrep = semgrep.metadata().map_err(|error| {
-        snapshot_validation(format!("reinspect open Semgrep workspace: {error}"))
-    })?;
-    if !same_directory_identity(expected_semgrep, &open_semgrep) {
-        return Err(snapshot_validation(
-            "Semgrep workspace changed while proving operation absence",
-        ));
-    }
-    match openat(&semgrep, operation_name, flags, Mode::empty()) {
-        Err(rustix::io::Errno::NOENT) => Ok(()),
-        Ok(_) => Err(snapshot_validation(
-            "Semgrep operation appeared while proving its absence",
-        )),
+    match openat(parent, name, flags, Mode::empty()) {
+        Ok(descriptor) => Ok(Some(File::from(descriptor))),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(error) => Err(snapshot_validation(format!(
-            "inspect Semgrep operation absence without links: {error}"
+            "open {label} without links: {error}"
         ))),
     }
 }
 
 #[cfg(not(unix))]
-fn verify_absent_operation_path(
-    _semgrep_root: &Path,
-    _expected_semgrep: &std::fs::Metadata,
-    _operation_name: &str,
-) -> Result<(), ClassifiedError> {
+fn open_optional_directory_at(
+    _parent: &File,
+    _name: &str,
+    _label: &str,
+) -> Result<Option<File>, ClassifiedError> {
     Err(ClassifiedError::Sandbox(
         "Semgrep cleanup requires descriptor-relative filesystem access".to_owned(),
     ))
@@ -3045,45 +3039,21 @@ fn verify_absent_operation_path(
 
 #[cfg(unix)]
 fn remove_owned_operation_nofollow(
-    semgrep_root: &Path,
+    semgrep: &File,
     operation_name: &str,
-    expected_semgrep: &std::fs::Metadata,
-    expected_operation: &std::fs::Metadata,
+    operation: &File,
 ) -> Result<(), ClassifiedError> {
-    use rustix::fs::{open, openat, unlinkat, AtFlags, Mode, OFlags};
+    use rustix::fs::{openat, unlinkat, AtFlags, Mode, OFlags};
 
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let semgrep = File::from(open(semgrep_root, flags, Mode::empty()).map_err(|error| {
-        snapshot_validation(format!("open Semgrep workspace without links: {error}"))
-    })?);
-    let open_semgrep = semgrep.metadata().map_err(|error| {
-        snapshot_validation(format!("reinspect open Semgrep workspace: {error}"))
-    })?;
-    if !same_directory_identity(expected_semgrep, &open_semgrep) {
-        return Err(snapshot_validation(
-            "Semgrep workspace changed before cleanup",
-        ));
-    }
-    let operation = File::from(
-        openat(&semgrep, operation_name, flags, Mode::empty()).map_err(|error| {
-            snapshot_validation(format!(
-                "open Semgrep operation directory without links: {error}"
-            ))
-        })?,
-    );
     let open_operation = operation.metadata().map_err(|error| {
         snapshot_validation(format!(
             "reinspect open Semgrep operation directory: {error}"
         ))
     })?;
-    if !same_directory_identity(expected_operation, &open_operation) {
-        return Err(snapshot_validation(
-            "Semgrep operation directory changed before cleanup",
-        ));
-    }
-    remove_open_directory_contents(&operation)?;
+    remove_open_directory_contents(operation)?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let current = File::from(
-        openat(&semgrep, operation_name, flags, Mode::empty()).map_err(|error| {
+        openat(semgrep, operation_name, flags, Mode::empty()).map_err(|error| {
             snapshot_validation(format!(
                 "reopen Semgrep operation directory before removal: {error}"
             ))
@@ -3099,7 +3069,7 @@ fn remove_owned_operation_nofollow(
             "Semgrep operation pathname changed during cleanup",
         ));
     }
-    unlinkat(&semgrep, operation_name, AtFlags::REMOVEDIR)
+    unlinkat(semgrep, operation_name, AtFlags::REMOVEDIR)
         .map_err(|error| {
             snapshot_validation(format!("remove owned Semgrep operation directory: {error}"))
         })
@@ -3108,6 +3078,17 @@ fn remove_owned_operation_nofollow(
                 snapshot_validation(format!("sync Semgrep workspace after cleanup: {error}"))
             })
         })
+}
+
+#[cfg(not(unix))]
+fn remove_owned_operation_nofollow(
+    _semgrep: &File,
+    _operation_name: &str,
+    _operation: &File,
+) -> Result<(), ClassifiedError> {
+    Err(ClassifiedError::Sandbox(
+        "Semgrep cleanup requires descriptor-relative filesystem access".to_owned(),
+    ))
 }
 
 #[cfg(unix)]
@@ -3165,18 +3146,6 @@ fn same_directory_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) 
         && right.file_type().is_dir()
         && left.dev() == right.dev()
         && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn remove_owned_operation_nofollow(
-    _semgrep_root: &Path,
-    _operation_name: &str,
-    _expected_semgrep: &std::fs::Metadata,
-    _expected_operation: &std::fs::Metadata,
-) -> Result<(), ClassifiedError> {
-    Err(ClassifiedError::Sandbox(
-        "Semgrep cleanup requires descriptor-relative filesystem access".to_owned(),
-    ))
 }
 
 fn snapshot_validation(message: impl Into<String>) -> ClassifiedError {
@@ -3974,6 +3943,7 @@ mod snapshot_tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
+    use hf_core::error::ClassifiedError;
     use hf_core::target::TargetLanguage;
     use uuid::Uuid;
 
@@ -4558,6 +4528,77 @@ mod snapshot_tests {
         cleanup_operation_root_in(&canonical_workspace, &operation).unwrap();
 
         std::fs::create_dir(canonical_workspace.join("semgrep")).unwrap();
+        cleanup_operation_root_in(&canonical_workspace, &operation).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_rejects_workspace_replacement_while_proving_semgrep_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical_workspace = std::fs::canonicalize(&workspace).unwrap();
+        let operation_id = Uuid::new_v4();
+        let operation = canonical_workspace
+            .join("semgrep")
+            .join(operation_id.to_string());
+        let held_workspace = root.path().join("workspace-held");
+
+        let result = super::cleanup_operation_root_in_with_hooks(
+            &canonical_workspace,
+            &operation,
+            || {
+                std::fs::rename(&canonical_workspace, &held_workspace).unwrap();
+                std::fs::create_dir_all(&operation).unwrap();
+                write(&operation, "must-survive", b"replacement");
+            },
+            || {},
+            || {},
+        );
+
+        assert!(matches!(result, Err(ClassifiedError::Validation(_))));
+        assert_eq!(
+            std::fs::read(operation.join("must-survive")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_rejects_semgrep_parent_recreation_while_proving_absence() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
+        let operation = canonical_workspace
+            .join("semgrep")
+            .join(Uuid::new_v4().to_string());
+
+        let result = super::cleanup_operation_root_in_with_hooks(
+            &canonical_workspace,
+            &operation,
+            || {},
+            || {
+                std::fs::create_dir_all(&operation).unwrap();
+                write(&operation, "must-survive", b"recreated");
+            },
+            || {},
+        );
+
+        assert!(matches!(result, Err(ClassifiedError::Validation(_))));
+        assert_eq!(
+            std::fs::read(operation.join("must-survive")).unwrap(),
+            b"recreated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_accepts_descriptor_proven_missing_semgrep_parent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
+        let operation = canonical_workspace
+            .join("semgrep")
+            .join(Uuid::new_v4().to_string());
+
         cleanup_operation_root_in(&canonical_workspace, &operation).unwrap();
     }
 
