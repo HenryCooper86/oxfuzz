@@ -59,7 +59,9 @@ pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
 pub use hf_core::provider::ProviderStatus;
-pub use hf_core::runtime::CommandTermination;
+pub use hf_core::runtime::{
+    CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
+};
 pub use hf_core::target::{TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, ProviderId, Role, SessionId};
 pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};
