@@ -129,7 +129,26 @@ struct SharedJournalState {
 
 struct PersistentJournalTransaction {
     directory: Arc<File>,
-    _lock_file: File,
+    lock_file: Option<File>,
+    directory_lock: Option<File>,
+}
+
+impl PersistentJournalTransaction {
+    fn verify_lock_identity(&self) -> io::Result<()> {
+        match self.lock_file.as_ref() {
+            Some(lock_file) => verify_transaction_lock_path_identity(&self.directory, lock_file),
+            None => Err(io::Error::other(
+                "Semgrep journal transaction lock was already released",
+            )),
+        }
+    }
+}
+
+impl Drop for PersistentJournalTransaction {
+    fn drop(&mut self) {
+        drop(self.lock_file.take());
+        drop(self.directory_lock.take());
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -223,7 +242,8 @@ impl SemgrepJournal {
 
         if self.persistent {
             let transaction = transaction.ok_or_else(|| self.current_durability_error())?;
-            self.create_operation_file(&transaction.directory, operation_id, &event)
+            self.create_operation_file(&transaction.directory, operation_id, &event)?;
+            self.finish_transaction(&transaction)
         } else {
             let mut events = lock_recover(&self.memory_events);
             if events.contains_key(&operation_id) {
@@ -299,6 +319,9 @@ impl SemgrepJournal {
                 .map(|transaction| transaction.directory.as_ref()),
             operation_id,
         )?;
+        if let Some(transaction) = transaction.as_ref() {
+            self.finish_transaction(transaction)?;
+        }
         Ok(matches!(lifecycle, Some(OperationLifecycle::Closed)))
     }
 
@@ -307,9 +330,15 @@ impl SemgrepJournal {
         let _guard = lock_recover(&self.shared_state.operation_lock);
         let transaction = self.begin_transaction(JournalDirectoryAccess::Create)?;
         let lifecycles = if self.persistent {
-            let transaction = transaction.ok_or_else(|| self.current_durability_error())?;
+            let transaction = transaction
+                .as_ref()
+                .ok_or_else(|| self.current_durability_error())?;
             read_all_journals(&transaction.directory)
-                .map_err(|error| self.record_durability_failure(&error))?
+                .map_err(|error| self.record_durability_failure(&error))
+                .and_then(|lifecycles| {
+                    self.finish_transaction(transaction)?;
+                    Ok(lifecycles)
+                })?
         } else {
             lock_recover(&self.memory_events)
                 .iter()
@@ -381,7 +410,8 @@ impl SemgrepJournal {
                     "event is out of lifecycle order",
                 ));
             }
-            self.append_to_file(&transaction.directory, &mut file, operation_id, &event)
+            self.append_to_file(&transaction.directory, &mut file, operation_id, &event)?;
+            self.finish_transaction(&transaction)
         } else {
             let mut events = lock_recover(&self.memory_events);
             let Some(existing) = events.get_mut(&operation_id) else {
@@ -543,17 +573,29 @@ impl SemgrepJournal {
             let Some(directory) = self.directory_handle(access)? else {
                 return Ok(None);
             };
+            let directory_lock = open_and_lock_journal_directory(&directory)
+                .map_err(|error| self.record_durability_failure(&error))?;
             let lock_file = open_and_lock_transaction_file(&directory)
                 .map_err(|error| self.record_durability_failure(&error))?;
             validate_all_journals(&directory)
                 .map_err(|error| self.record_durability_failure(&error))?;
             Ok(Some(PersistentJournalTransaction {
                 directory,
-                _lock_file: lock_file,
+                lock_file: Some(lock_file),
+                directory_lock: Some(directory_lock),
             }))
         } else {
             Ok(None)
         }
+    }
+
+    fn finish_transaction(
+        &self,
+        transaction: &PersistentJournalTransaction,
+    ) -> Result<(), ClassifiedError> {
+        transaction
+            .verify_lock_identity()
+            .map_err(|error| self.record_durability_failure(&error))
     }
 
     fn current_durability_error(&self) -> ClassifiedError {
@@ -948,6 +990,49 @@ fn operation_file_name(operation_id: Uuid) -> String {
 }
 
 #[cfg(unix)]
+fn open_and_lock_journal_directory(directory: &File) -> io::Result<File> {
+    use rustix::fs::{flock, openat, FlockOperation, Mode, OFlags};
+
+    let descriptor = openat(
+        directory,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let lock = File::from(descriptor);
+    verify_same_directory(directory, &lock)?;
+    flock(&lock, FlockOperation::LockExclusive)?;
+    verify_same_directory(directory, &lock)?;
+    Ok(lock)
+}
+
+#[cfg(unix)]
+fn verify_same_directory(expected: &File, actual: &File) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let expected = expected.metadata()?;
+    let actual = actual.metadata()?;
+    if !expected.is_dir()
+        || !actual.is_dir()
+        || expected.dev() != actual.dev()
+        || expected.ino() != actual.ino()
+    {
+        return Err(invalid_data(
+            "journal directory lock does not name the opened journal directory",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn open_and_lock_journal_directory(_directory: &File) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Semgrep journals require descriptor-relative directory locks",
+    ))
+}
+
+#[cfg(unix)]
 fn open_and_lock_transaction_file(directory: &File) -> io::Result<File> {
     use rustix::fs::{fchmod, flock, openat, FlockOperation, Mode, OFlags};
 
@@ -983,6 +1068,8 @@ fn open_and_lock_transaction_file(directory: &File) -> io::Result<File> {
         Err(error) => return Err(error.into()),
     };
     let file = File::from(descriptor);
+    #[cfg(test)]
+    pause_after_transaction_lock_creation(created);
     verify_transaction_lock_path_identity(directory, &file)?;
     flock(&file, FlockOperation::LockExclusive)?;
     verify_transaction_lock_path_identity(directory, &file)?;
@@ -992,6 +1079,20 @@ fn open_and_lock_transaction_file(directory: &File) -> io::Result<File> {
         directory.sync_all()?;
     }
     Ok(file)
+}
+
+#[cfg(all(test, unix))]
+fn pause_after_transaction_lock_creation(created: bool) {
+    if !created || std::env::var("HF_SEMGREP_JOURNAL_PAUSE_AFTER_LOCK_CREATE").as_deref() != Ok("1")
+    {
+        return;
+    }
+    println!("ready");
+    std::io::stdout().flush().expect("lock creator signal");
+    let mut release = [0_u8; 1];
+    std::io::stdin()
+        .read_exact(&mut release)
+        .expect("lock creator release");
 }
 
 #[cfg(not(unix))]
@@ -1010,10 +1111,14 @@ fn verify_transaction_lock_path_identity(directory: &File, file: &File) -> io::R
 
     let descriptor = file.metadata()?;
     let path = statat(directory, TRANSACTION_LOCK_FILE, AtFlags::SYMLINK_NOFOLLOW)?;
-    if !descriptor.file_type().is_file()
-        || FileType::from_raw_mode(path.st_mode) != FileType::RegularFile
+    let descriptor_is_linked_regular = descriptor.file_type().is_file() && descriptor.nlink() == 1;
+    let path_is_linked_regular =
+        FileType::from_raw_mode(path.st_mode) == FileType::RegularFile && path.st_nlink == 1;
+    if !descriptor_is_linked_regular
+        || !path_is_linked_regular
         || descriptor.dev() != path.st_dev as u64
         || descriptor.ino() != path.st_ino as u64
+        || descriptor.nlink() != u64::from(path.st_nlink)
     {
         return Err(invalid_data(
             "transaction lock pathname no longer names the opened regular file",
@@ -1287,7 +1392,7 @@ mod tests {
         directory: &Path,
         operation_id: Uuid,
     ) -> JournalChild {
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let child = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg(format!("semgrep_recovery::tests::{test_name}"))
             .arg("--nocapture")
@@ -1299,6 +1404,32 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        journal_child_from_spawned(child)
+    }
+
+    #[cfg(unix)]
+    fn spawn_restrictive_lock_creator(directory: &Path, operation_id: Uuid) -> JournalChild {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                "umask 777; exec \"$0\" --exact \
+                 semgrep_recovery::tests::journal_restrictive_create_child --nocapture",
+            )
+            .arg(std::env::current_exe().unwrap())
+            .env(PROCESS_CHILD_ENV, "create")
+            .env(PROCESS_DIRECTORY_ENV, directory)
+            .env(PROCESS_OPERATION_ENV, operation_id.to_string())
+            .env("HF_SEMGREP_JOURNAL_PAUSE_AFTER_LOCK_CREATE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        journal_child_from_spawned(child)
+    }
+
+    #[cfg(unix)]
+    fn journal_child_from_spawned(mut child: Child) -> JournalChild {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         loop {
             let mut signal = String::new();
@@ -1451,6 +1582,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn process_first_creators_converge_under_restrictive_umask() {
+        let directory = tempfile::tempdir().unwrap();
+        let operation_id = Uuid::new_v4();
+        let creator = spawn_restrictive_lock_creator(directory.path(), operation_id);
+        let mut contender = spawn_journal_child(
+            "journal_first_create_contender_child",
+            "create_contender",
+            directory.path(),
+            operation_id,
+        );
+        assert!(
+            wait_for_early_exit(&mut contender.child).is_none(),
+            "contender degraded instead of waiting for first-create convergence"
+        );
+
+        assert!(release_and_wait(creator).success());
+        assert!(wait_for_child(contender).success());
+        assert!(SemgrepJournal::open(directory.path().to_path_buf())
+            .interrupted()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_lock_replacement_cannot_bypass_active_transaction() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let operation_id = Uuid::new_v4();
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        begin(&journal, operation_id);
+        journal
+            .ready_to_commit(operation_id, &ready_record())
+            .unwrap();
+
+        let close_child = spawn_journal_child(
+            "journal_replaced_close_child",
+            "replaced_close",
+            directory.path(),
+            operation_id,
+        );
+        let lock_path = directory.path().join(".semgrep-journal.lock");
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::write(&lock_path, b"replacement").unwrap();
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut replay_child = spawn_journal_child(
+            "journal_replay_child",
+            "replay",
+            directory.path(),
+            operation_id,
+        );
+        assert!(
+            wait_for_early_exit(&mut replay_child.child).is_none(),
+            "replacement lock let replay bypass the active transaction"
+        );
+
+        assert!(release_and_wait(close_child).success());
+        assert!(wait_for_child(replay_child).success());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn journal_paused_close_child() {
         if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("close") {
             return;
@@ -1464,6 +1659,47 @@ mod tests {
             }
         });
         journal.close(operation_id).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_replaced_close_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("replaced_close") {
+            return;
+        }
+        let (journal, operation_id) = child_journal();
+        journal.install_test_race_hook(|point| {
+            if point == AppendRacePoint::BeforeIdentityCheck {
+                signal_child_ready();
+                let mut release = [0_u8; 1];
+                std::io::stdin().read_exact(&mut release).unwrap();
+            }
+        });
+        assert!(journal.close(operation_id).is_err());
+        assert!(journal.durability_error().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_restrictive_create_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("create") {
+            return;
+        }
+        let (journal, _) = child_journal();
+        assert!(journal.interrupted().unwrap().is_empty());
+        assert!(journal.durability_error().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_first_create_contender_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("create_contender") {
+            return;
+        }
+        let (journal, _) = child_journal();
+        signal_child_ready();
+        assert!(journal.interrupted().unwrap().is_empty());
+        assert!(journal.durability_error().is_none());
     }
 
     #[cfg(unix)]
@@ -1578,6 +1814,27 @@ mod tests {
         let journal = SemgrepJournal::open(directory.path().to_path_buf());
         assert!(journal.interrupted().is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_hard_link_is_rejected_before_metadata_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("owner-file");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::hard_link(&target, directory.path().join(".semgrep-journal.lock")).unwrap();
+        let before_mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        let result = journal.interrupted();
+
+        let after_mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(after_mode, before_mode);
+        assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
+        assert!(result.is_err());
     }
 
     #[test]
