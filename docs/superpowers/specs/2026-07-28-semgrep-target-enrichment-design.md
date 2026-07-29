@@ -316,6 +316,14 @@ durable. Admission rechecks recovery health after taking both leases and before
 its first durable write. Both leases are transferred into the background
 worker, rather than reacquired after spawning.
 
+After nondurable preflight, admission runs in an owned service task and returns
+its result through a one-shot response. Dropping the caller's start future
+cannot cancel the durable admission section between reservation, staging-row
+insert, journal `Begin`, and worker handoff. The owned task either returns an
+admission error with its reservation and leases released, or durably begins the
+journal and transfers the reservation and leases to the scan worker. It sends a
+successful operation UUID only after that handoff.
+
 The process-local operation registry distinguishes cancellable work from
 finalizing work. Completion claims atomically move the reservation into
 `finalizing`; cancellation is then inactive, but the reservation remains busy
@@ -338,10 +346,13 @@ Persistent journal replay and transitions use a securely descriptor-opened
 advisory lock file in the journal directory. The service takes its exclusive
 cross-process lock around each complete replay/validate/read/append
 transaction, including the first lifecycle replay. Journal construction opens
-and validates only the directory and lock descriptors; it does not enumerate
-or replay operation journals before bootstrap owns the workspace recovery
-lease. The fixed lock entry is not interpreted as an operation journal.
-Compliant processes use this order whenever multiple locks are needed:
+no filesystem object: it normalizes and retains the journal path only. The
+first create/open/validate/replay filesystem access occurs from an operation
+that already owns the shared workspace/project leases or from recovery after it
+owns the exclusive workspace lease. Result-only reads may open existing
+journal state but never create missing state. The fixed lock entry is not
+interpreted as an operation journal. Compliant processes use this order
+whenever multiple locks are needed:
 
 ```text
 workspace lease -> project lease -> journal lock -> database transaction
@@ -554,7 +565,15 @@ Implementation follows Red -> Green -> Refactor.
   `Begin` and before `Close`. At both points, prove bootstrap recovery defers,
   a second process cannot admit the same project, the database/journal/staging
   state remains untouched, and the admitted worker still owns both leases.
-  Also prove close/abort journal transitions serialize.
+  Add mutation-sensitive pauses immediately after both leases are acquired but
+  before the first durable write, and after `Close` but before lease release.
+  At the first pause a competing process must be busy even though no active
+  database row exists; at the second it must remain busy even though the
+  database row is `done` and the journal is closed. Also prove close/abort
+  journal transitions serialize.
+- Abort a caller while the owned admission task is paused between the staging
+  insert and journal `Begin`; prove the detached task completes journal/worker
+  handoff and leaves no orphaned reservation or staging row.
 - Prove source snapshot bounds and time-of-check/time-of-use detection.
 - Race workspace replacement and `semgrep`-parent recreation against cleanup;
   only descriptor-proven stable absence is successful.
@@ -563,6 +582,9 @@ Implementation follows Red -> Green -> Refactor.
 - Prove a source mutation before commit causes atomic failure.
 - Prove database `done` remains externally `persisting` until close, competing
   admission stays busy, and visible `done` never regresses to `failed`.
+- Deterministically compensate between the status API's parent-row read and
+  exact-result reconstruction; status must remain readable, return no
+  inconsistent result, and converge to `failed` on the next read.
 - Delete and reclassify every current same-language candidate and prove exact
   history remains readable as findings-preserving `StaleBase`.
 - Prove feature-disabled builds reject presentation entrypoints.

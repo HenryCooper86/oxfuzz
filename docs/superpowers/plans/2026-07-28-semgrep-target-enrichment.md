@@ -1854,6 +1854,106 @@ git add crates/hf-service/src/container.rs crates/hf-service/src/semgrep.rs
 git commit -m "fix: protect live Semgrep operations across processes"
 ```
 
+#### Task 11A Review Correction: Pull Forward Safety Prerequisites
+
+Independent review found that Task 11A cannot satisfy its recovery-ownership
+and stable-lifecycle gate while filesystem-lazy journal construction remains in
+Task 11B and close-gated resilient status remains in Tasks 11C/11E. These
+prerequisites move into the Task 11A fix loop. Task 11B still owns the advisory
+journal lock and process serialization; Task 11C still owns empty-inventory
+historical reconstruction; Task 11E still owns the finalizing registry.
+
+- [ ] **Review-fix Step 1: Add failing lazy-construction and cancellation tests**
+
+Add
+`persistent_coordinator_construction_does_not_touch_the_journal_filesystem`:
+construct a persistent coordinator for a missing journal path and assert the
+path remains absent. Create a corrupt existing operation journal, construct the
+coordinator, and assert construction itself records no replay error; the first
+recovery replay under the exclusive workspace lease must report the corruption.
+
+Add
+`cancelled_start_caller_does_not_orphan_durable_admission`. Install a test-only
+pause after the staging insert and before journal `Begin`, spawn
+`start_semgrep_enrichment`, wait for the pause, abort the caller task, release
+the owned admission task, and assert it either completes a closed successful
+operation or a fully terminalized failure. It must not leave a process-local
+reservation, an active staging row, or an unjournaled operation.
+
+- [ ] **Review-fix Step 2: Add mutation-sensitive lease-lifetime tests**
+
+Extend the real child-process harness with
+`AfterOwnershipBeforeDurableWrite` and `AfterCloseBeforeLeaseRelease` pauses.
+At the first pause, the shared database has no Semgrep run, yet a separate
+process's real same-project start must return `busy`; this fails if the project
+lease is acquired after the first durable write. At the second pause, the row
+is `Done` and `journal.is_closed(operation_id) == true`, yet a separate
+process's real same-project start must still return `busy`; this fails if the
+project lease drops before or during `Close`. Release the child and prove a new
+same-project start can then acquire ownership.
+
+- [ ] **Review-fix Step 3: Add a failing deterministic compensation-read test**
+
+Add `operation_status_survives_concurrent_compensation`. Pause
+`semgrep_operation` after it loads the `Done` parent but before exact-result
+reconstruction. Compensate the unclosed publication, release the read, and
+assert that the first status call returns a readable nonterminal view with
+`result: None`; the next call returns `Failed`. No inconsistent terminal-count
+error may escape.
+
+- [ ] **Review-fix Step 4: Verify RED**
+
+Run each new test with the repository-filtered form and `set -o pipefail`.
+Expected failures:
+
+- persistent construction creates/validates the journal path;
+- aborting the caller cancels admission after a durable staging write;
+- early/after-close contenders are admitted when the project lease lifetime is
+  moved late or shortened;
+- concurrent compensation escapes as inconsistent stored publication data.
+
+- [ ] **Review-fix Step 5: Make journal construction filesystem-lazy**
+
+`SemgrepJournal::open` normalizes and stores its path but performs no filesystem
+create/open/validation/replay. Write/recovery methods lazily open or create the
+directory only after their service caller owns the required workspace lease.
+Result-only `is_closed` may open an existing directory but treats a missing
+directory as not closed and never creates it. Preserve sticky durability errors
+after the first actual filesystem/replay failure. Task 11B will add the fixed
+descriptor-opened advisory lock around these lazy transactions.
+
+- [ ] **Review-fix Step 6: Make durable admission caller-cancellation safe**
+
+After authorization and immutable image resolution, spawn an owned service task
+that acquires workspace then project ownership and performs reservation,
+staging insert, synced journal `Begin`, and scan-worker handoff. Return the
+admission result through a one-shot channel. Dropping
+`start_semgrep_enrichment` detaches only the receiver; the owned task continues
+to a fully handed-off operation or a cleaned admission error. Move the active
+RAII guard into this owned path before the first await after reservation and
+transfer it to `run_semgrep_scan`.
+
+- [ ] **Review-fix Step 7: Pull forward close-gated resilient status**
+
+For a database `Done` row, `semgrep_operation` reports external `Done` only when
+`journal.is_closed(operation_id) == Ok(true)`; otherwise it reports
+`Persisting`. Exact-result reconstruction failure is logged with bounded
+structured metadata and yields `result: None` without hiding the parent
+lifecycle. This pulls forward only the parent-read resilience from Task 11C and
+the external close gate from Task 11E.
+
+- [ ] **Review-fix Step 8: Verify and commit the fix round**
+
+Run the new focused tests, `semgrep::process_lease_tests`,
+`semgrep::lifecycle_tests`, and the mandated Rust gates in repository order.
+Append RED/GREEN and gate evidence to the Task 11A report. Commit:
+
+```bash
+git add crates/hf-service/src/container.rs crates/hf-service/src/semgrep.rs \
+  crates/hf-service/src/semgrep_recovery.rs
+git commit -m "fix: complete Semgrep admission ownership"
+```
+
 ---
 
 ### Task 11B: Serialize Persistent Journal Transactions Across Processes
@@ -1914,10 +2014,10 @@ After taking `SharedJournalState::operation_lock`, take the advisory lock before
 initial replay and before each call path that performs
 replay/validate/read/append. Retain it until the complete transaction and
 directory sync finish. Release it before the process mutex. No journal method
-may acquire a workspace or project lease. Persistent construction opens and
-validates only the journal-directory and lock-file descriptors; it must not
-enumerate operation journals. Bootstrap's first lifecycle replay therefore
-occurs only inside the workspace recovery lease added by Task 11A.
+may acquire a workspace or project lease. Preserve Task 11A's filesystem-lazy
+construction: constructor calls must not touch the journal path. Bootstrap's
+first lifecycle replay therefore occurs only inside the workspace recovery
+lease added by Task 11A.
 
 - [ ] **Step 4: Run journal tests**
 
@@ -2016,8 +2116,8 @@ Use `require_nonempty: true` for admission and scan execution. Use
 `require_nonempty: false` for exact result reconstruction, then pass the empty
 inventory through the existing overlay validator so its candidate-ID/count
 mismatch produces `StaleBase` while retaining findings. In
-`semgrep_operation`, catch reconstruction errors, emit only bounded structured
-diagnostics, and return the parent with `result: None`.
+`semgrep_operation`, preserve Task 11A's bounded reconstruction-error handling
+and parent `result: None`.
 
 - [ ] **Step 4: Run effective-result tests**
 
@@ -2193,11 +2293,9 @@ matching `Cancellable` entry with `Finalizing`. `cancel` returns inactive for
 for both, and `ActiveSemgrepGuard::drop` remains the only successful-removal
 path.
 
-In `semgrep_operation`, map a database `Done` row to external `Done` only when
-`journal.is_closed(operation_id) == Ok(true)`. Otherwise report `Persisting`.
-Return its findings-preserving `IncompleteJournal` result when reconstruction
-succeeds and `None` when reconstruction itself fails. Keep failed/cancelled
-mapping unchanged.
+In `semgrep_operation`, preserve Task 11A's database-`Done` close gate and
+reconstruction-error handling. Add the finalizing-registry behavior required
+by this task and keep failed/cancelled mapping unchanged.
 
 - [ ] **Step 4: Run cancellation, publication, and terminal tests**
 
