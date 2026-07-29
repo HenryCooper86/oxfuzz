@@ -320,6 +320,190 @@ claim becomes verified only from service-owned sandbox evidence tied to the
 exact patch and reproducer digests. See
 `proof-carrying-campaign-intelligence.md` for the versioned contracts.
 
+### 4.7 Semgrep Target Enrichment
+
+Semgrep enrichment is an explicit, feature-gated service operation for a
+persisted C or C++ inventory. Normal discovery, agents, schedules, campaigns,
+and effective-ranking reads never start a scan. `hf-service` exposes
+asynchronous start, status, cancel, and result operations; start completes
+admission, inserts a durable running operation, registers cooperative
+cancellation, and returns the operation UUID without awaiting Semgrep. One
+project may have only one active Semgrep scan, and a second start fails busy.
+The `semgrep-enrichment` feature is enabled by default in normal product crates;
+`--no-default-features` excludes the integration and every Semgrep presentation
+entrypoint.
+
+The service takes the shared workspace lease before the first Semgrep database
+or journal write, transfers it into the background worker, and retains it
+through cleanup and journal close or abort. It also retains an exclusive
+digest-keyed cross-process project lease for that interval so the one-active
+project rule remains true while a published database row is `done` but not yet
+durably closed. Admission rechecks recovery health after taking both leases.
+Global knowledge deletion takes the exclusive workspace lease before deleting
+Semgrep rows. Project deletion takes the shared workspace lease and then the
+same canonical digest-keyed project lease as admission before deleting that
+project's database rows or workspace. A conflicting explicit deletion fails
+busy. These boundaries prevent deletion from removing an active parent while
+its journal remains open and preserve the global workspace-then-project lock
+order.
+After nondurable preflight, an owned service task performs lease acquisition,
+reservation, the staging-row insert, synced journal `Begin`, and worker
+handoff. The start API awaits a one-shot result, but dropping that caller does
+not cancel the owned durable-admission task. A successful UUID is sent only
+after the scan worker owns the reservation and both leases. The service then
+creates a source snapshot from the canonical C/C++ discovery set. Every input
+must be a regular, non-symlink file below the canonical project root and remain
+stable while copied. The normalized relative path and source snapshot bounds
+are:
+
+- 25,000 files;
+- 2 MiB per file;
+- 512 MiB aggregate bytes; and
+- 4,096 bytes per normalized relative path.
+
+Exceeding a bound fails the whole operation; a partial project is never
+scanned. The snapshot is mounted read-only, and its deterministic SHA-256 is
+the enrichment revision.
+
+After output validation and immediately before `ready_to_commit`, the service
+re-walks and re-hashes the current eligible source set under the same bounds.
+Any added, removed, changed, unstable, or newly ineligible source changes the
+revision and rejects the operation atomically before publication. No finding
+or score row is published for that scan.
+
+Semgrep CE `1.169.0` may omit `paths.skipped` when no target was skipped.
+`hf-discovery` normalizes only that omission to an empty collection. An
+explicit non-empty `paths.skipped`, a missing `paths` or `paths.scanned`, or a
+normalized `paths.scanned` set that differs from the staged snapshot manifest
+remains an atomic incomplete-analysis failure. This compatibility rule lives
+in the strict parser; the fixed in-image wrapper stays an `exec`-based
+no-argument boundary so PID 1 receives cancellation signals directly.
+
+The durable publication sequence is:
+
+```text
+synced WAL open
+-> synced ready_to_commit
+-> one database publication transaction
+-> staged-artifact cleanup
+-> synced WAL close
+```
+
+The WAL open is durable before background work begins. After validation, the
+`ready_to_commit` record contains the provenance and output digest. The
+database transaction publishes every finding and target score together with
+the terminal `done` run. The service then durably removes the source snapshot
+and raw output and only afterward appends the synced successful close. Keeping
+the journal in `ready_to_commit` through cleanup means a cleanup, close, or
+compensation failure remains recoverable and cannot expose a
+`done`-plus-closed overlay.
+
+The database `done` state is internal until the journal close is verifiable.
+The process-local reservation moves from cancellable to finalizing at the
+completion claim and remains busy until terminal journal persistence. During
+that interval, status reports `persisting`, cancellation reports inactive, and
+the project lease rejects competing starts from other processes. Only a
+successfully closed publication is externally `done`; an externally observed
+success cannot later regress because cleanup compensation ran.
+
+Every persistent journal replay or transition is serialized by an exclusive
+advisory lock on a fixed, securely descriptor-opened lock file in the journal
+directory. Initial replay and each replay/validate/read/append transaction hold
+the lock for the complete transaction. Journal construction is filesystem-lazy:
+it normalizes and retains the path without creating, opening, validating, or
+replaying journal state. The first write/replay access occurs only while the
+service owns its workspace lease. Result-only reads may open existing state but
+never create missing state. The fixed lock entry is excluded from
+operation-journal enumeration. The global lock order is workspace lease,
+project lease, journal lock, then database transaction. Result-only reads take
+only the journal lock and never acquire an earlier lease afterward.
+
+The successful close record is deliberately distinct from a terminal abort
+record. After a failed/cancelled database transition or a recovery
+compensation is durable, the service may append a synced abort from either the
+open or ready state. An abort contains only the terminal category, never
+invented ready-to-commit provenance, and never satisfies the successful-close
+gate used by result readers. If cleanup, compensation, or the abort append
+fails, the journal stays interrupted so recovery can retry and new starts fail
+closed.
+
+If cleanup fails after database publication, a compensation transaction
+deletes that scan's findings and scores and marks the run `failed`. A close
+append error is indeterminate because the record may already have been synced;
+the service marks recovery degraded, exposes only an `IncompleteJournal`
+base-only view, and does not compensate solely from that return value. On
+restart, a valid replayed close preserves the successful publication, while a
+replayed ready state triggers compensation. Startup recovery performs the same
+fail-closed repair for interrupted non-terminal runs, unclosed
+`ready_to_commit` runs, and already-failed or cancelled rows whose abort was
+interrupted, then cleans only the validated operation-owned staging directory
+before appending the terminal abort. Failed and explicitly cancelled runs
+publish no finding or score rows. If compensation or cleanup cannot be made
+durable, the journal remains unclosed so startup recovery can repair the run.
+
+Recovery also reconciles the two durable stores instead of assuming every
+active database parent has a journal. It first repairs every open or
+`ready_to_commit` journal. An interrupted journal whose database parent is
+absent is still authoritative for its operation UUID: recovery removes only
+that exact operation directory and appends a recovered abort. It then queries
+all remaining `staging`, `scanning`, `validating`, or `persisting` parents. Such
+a residual parent has no recoverable journal lifecycle, including the crash
+window after the staging-row commit and before journal `Begin`. Recovery
+removes the exact UUID operation directory first and only then atomically
+deletes any children and marks the parent `failed` with
+`recovered_missing_journal`. It does not fabricate `Begin` or `Abort`. The
+active parent remains the retry marker until cleanup and terminalization both
+succeed, so a second crash cannot strand artifacts without recovery evidence.
+This repair derives its cleanup target from the managed workspace and validated
+operation UUID; it does not require the source project to still exist.
+
+Startup recovery takes the exclusive workspace recovery lease before journal
+replay and retains it through database repair, cleanup, and terminal abort. If
+a live process holds a shared workspace lease, recovery is deferred without
+reading or mutating the journal and the new container rejects Semgrep starts.
+The corresponding live operation acquired its shared lease before its database
+insert and journal open, so bootstrap cannot misclassify a live pre-`Begin`
+database row as interrupted. The same exclusion covers the complete
+journal-to-database reconciliation pass.
+
+Recovery cleanup is idempotent. Descriptor-relative validation must prove
+either that the exact `workspace/semgrep/<operation-uuid>` directory was
+removed and its parent synced or that this exact UUID child is already absent
+beneath validated, non-symlink ancestors. An absent staging directory is
+expected after a crash between cleanup and close; ambiguous or replaced
+ancestors remain errors. An absent `semgrep` child beneath the validated
+managed workspace is also proven absence for an operation that failed before
+staging created that parent, but only through `openat` on a retained workspace
+descriptor followed by a pathname/descriptor identity post-check. A path-based
+`NotFound` is never sufficient evidence. Cleanup then repeats the
+descriptor-relative `semgrep` lookup and accepts absence only if the second
+lookup also returns `ENOENT`; a recreated parent or exact operation child is
+rejected. Recovery's exclusive workspace lease prevents compliant service
+operations from creating the parent during this proof. Live-operation cleanup
+uses a shared lease and therefore detects and fails safely if a different
+project creates the parent concurrently.
+
+Every ranking consumer asks `hf-service` for `SemgrepInventoryView`; clients do
+not join or rescore results. A result reader accepts an overlay only when the
+database row is terminal `done` and the corresponding recovery journal is
+successfully closed. A missing, interrupted, aborted, corrupt, or otherwise
+unverifiable journal maps to `IncompleteJournal`: status and historical
+findings remain readable, but ranking uses base scores only. New starts still
+fail closed on sticky journal or recovery degradation.
+
+After that publication gate, an overlay is current only when the eligible
+source digest matches its scan revision and every stored base score matches
+the current candidate base score. A mismatch makes it stale: the historical
+scan remains queryable, but effective ranking immediately uses base scores
+only. Repeated successful scans recompute from the current immutable base
+inventory and never compound prior boosts.
+
+Exact historical reconstruction permits an empty current same-language
+inventory and reports a findings-preserving `StaleBase` view. Admission still
+requires at least one persisted candidate. If reconstruction fails for another
+reason, the status endpoint still returns the parent operation and uses a null
+result rather than hiding the lifecycle row.
+
 ## 5. Sub-Agents
 
 `hf-agent` owns only the model reason/act loop and depends on an inward
@@ -366,6 +550,12 @@ silent fallback, while an omitted agent id intentionally selects the default.
   staging, builds, smoke, fuzz, corpus, crash, coverage, or evidence operations;
   independent containers share the root gate and an advisory-file regression
   proves the same exclusion primitive used by separate processes.
+- Semgrep recovery regression: a committed active parent without a journal is
+  cleaned and failed without a fabricated lifecycle, while an interrupted
+  journal without a database parent is cleaned and recovered-aborted.
+- Semgrep concurrency regression: global knowledge deletion holds the exclusive
+  workspace lease, and project deletion holds the canonical project lease, so
+  neither can remove a live Semgrep parent or its open journal.
 - Presentation regression: successful turns, rollback, and branching reload the
   canonical display transcript instead of slicing optimistic local messages.
 - Diagnostics regression: a current-session summary excludes persisted traces

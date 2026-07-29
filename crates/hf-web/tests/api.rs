@@ -5,11 +5,17 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 #[test]
-fn manifest_does_not_depend_on_domain_or_runtime_crates() {
+fn production_manifest_does_not_depend_on_domain_or_runtime_crates() {
     let manifest = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
     )
     .expect("read hf-web manifest");
+    let manifest = manifest
+        .parse::<toml::Value>()
+        .expect("parse hf-web manifest");
+    let dependencies = manifest["dependencies"]
+        .as_table()
+        .expect("hf-web production dependencies");
     let forbidden = [
         "hf-core",
         "hf-runtime",
@@ -21,12 +27,9 @@ fn manifest_does_not_depend_on_domain_or_runtime_crates() {
     ];
 
     for crate_name in forbidden {
-        let prefix = format!("{crate_name} =");
         assert!(
-            !manifest
-                .lines()
-                .any(|line| line.trim_start().starts_with(&prefix)),
-            "hf-web must go through hf-service, but depends directly on {crate_name}"
+            !dependencies.contains_key(crate_name),
+            "hf-web production code must go through hf-service, but depends directly on {crate_name}"
         );
     }
 }
@@ -136,6 +139,61 @@ async fn discover_returns_json() {
     assert!(
         !json["candidates"].as_array().unwrap().is_empty(),
         "fixture project should have candidates"
+    );
+}
+
+#[tokio::test]
+#[cfg(not(feature = "semgrep-enrichment"))]
+async fn semgrep_routes_are_absent_without_the_feature() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    for (method, uri) in [
+        ("POST", "/semgrep/enrich"),
+        (
+            "GET",
+            "/semgrep/enrich/00000000-0000-0000-0000-000000000001",
+        ),
+        (
+            "POST",
+            "/semgrep/enrich/00000000-0000-0000-0000-000000000001/cancel",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method(method)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+#[cfg(not(feature = "semgrep-enrichment"))]
+async fn semgrep_availability_is_false_without_the_feature() {
+    allow_open_dev_mode();
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .uri("/semgrep/available")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        false
     );
 }
 

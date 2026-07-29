@@ -51,7 +51,8 @@ sidecar tests/lint; and the release CLI artifact.
 
 ```bash
 ./scripts/build-sandbox.sh
-./scripts/build-release.sh
+./scripts/test-semgrep-sandbox.sh
+OXFUZZ_VERIFY_SEMGREP_SANDBOX=1 ./scripts/build-release.sh
 target/release/oxfuzz doctor
 target/release/oxfuzz doctor --json
 ```
@@ -61,6 +62,46 @@ versioned sandbox image, and bundled engine tools as ready. Host-installed
 fuzzing engines do not satisfy this gate. Optional integrations may be
 unavailable only when they are outside the release scope and the limitation is
 documented.
+
+The Semgrep release gate is container-only. It must use the already-built,
+versioned `OXFUZZ_SANDBOX_IMAGE` with networking disabled, the read-only
+committed source fixtures, the fixed `/usr/local/bin/oxfuzz-semgrep-scan`
+wrapper, and a bounded writable output. Retain evidence that the candidate
+contains:
+
+- Semgrep CE `1.169.0`, run as a separate LGPL-2.1 process, with
+  [upstream source](https://github.com/semgrep/semgrep/tree/v1.169.0) and the
+  shipped `third_party/semgrep/LICENSE`;
+- the MIT-licensed
+  [`0xdea/semgrep-rules` commit `4d66ecf30bfb1809a984085f2c86a8c3915bfc71`](https://github.com/0xdea/semgrep-rules/tree/4d66ecf30bfb1809a984085f2c86a8c3915bfc71),
+  tree digest
+  `b7b7a88a780c5f7cfe8ce7afc05af84165419e35aa0b1ef7fb553f58667fa613`,
+  and the shipped `third_party/semgrep-rules/LICENSE`; and
+- empty Semgrep `errors`, absent-or-empty `paths.skipped`, exact
+  `paths.scanned` fixture coverage, exactly one `raptor-insecure-api-gets`
+  result in `vulnerable.c`, and no result from any rule in `clean.c`.
+
+The ordinary source-only `./scripts/build-release.sh` neither downloads nor
+runs Semgrep. Its default feature set must expose `discover --semgrep`;
+`OXFUZZ_RELEASE_FEATURES` is an intentional exact feature-set override. CVE
+Binary Tool remains outside the release scope.
+
+For an intentional Semgrep or rules upgrade, update the reviewed pins and
+provenance together, then regenerate and inspect the vendored snapshot:
+
+```bash
+./scripts/update-semgrep-rules.sh
+git diff -- scripts/update-semgrep-rules.sh third_party/semgrep \
+  third_party/semgrep-rules docker/sandbox
+./scripts/build-sandbox.sh
+./scripts/test-semgrep-sandbox.sh
+```
+
+Review the upstream revision and licenses, every rule added/removed/changed,
+the deterministic tree digest, fixture findings, parser compatibility, score
+impact, and sandbox command/hardening before accepting an update. Runtime
+registry packs, user-supplied rules, tokens, extra flags, and autofix are not
+supported release shortcuts.
 
 For an automotive-enabled candidate, also run the separately distributed
 sidecar checks and confirm its pinned dependencies:

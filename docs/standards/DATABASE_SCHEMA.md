@@ -130,6 +130,126 @@ from `data_json` by migration 0019); the triple is the persistence identity of
 a target. Legacy rows whose file could not be backfilled keep `''` and remain
 valid.
 
+### Semgrep enrichment tables
+
+Migration `0022_semgrep_enrichment.sql` creates the durable Semgrep operation,
+finding, and target-score overlay records.
+
+#### `semgrep_enrichment_runs`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | service-owned operation UUID |
+| `project_root` | `TEXT NOT NULL` | canonical project root |
+| `language` | `TEXT NOT NULL CHECK (language IN ('c', 'cpp'))` | first-release language set |
+| `source_sha256` | `TEXT` | set when staging completes; required for `done` |
+| `sandbox_image` | `TEXT NOT NULL` | pinned image reference |
+| `sandbox_image_sha256` | `TEXT NOT NULL` | resolved image digest |
+| `semgrep_version` | `TEXT NOT NULL` | pinned Semgrep version |
+| `rules_commit` | `TEXT NOT NULL` | pinned rules revision |
+| `rules_tree_sha256` | `TEXT NOT NULL` | deterministic bundled-rules tree digest |
+| `command_schema_version` | `INTEGER NOT NULL CHECK (command_schema_version = 1)` | typed wrapper schema |
+| `status` | `TEXT NOT NULL CHECK (status IN ('staging','scanning','validating','persisting','done','failed','cancelled'))` | operation lifecycle |
+| `started_at` | `TEXT NOT NULL` | RFC 3339 |
+| `ended_at` | `TEXT` | terminal timestamp |
+| `output_sha256` | `TEXT` | normalized output digest |
+| `finding_count` | `INTEGER` | terminal finding count, at most 50,000 |
+| `matched_candidate_count` | `INTEGER` | terminal matched-candidate count |
+| `duration_ms` | `INTEGER` | terminal duration |
+| `failure_code` | `TEXT` | nullable bounded redacted code |
+| `failure_message` | `TEXT` | nullable bounded redacted message |
+
+The table check for a `done` row is:
+
+```sql
+CHECK (
+    status <> 'done' OR (
+        source_sha256 IS NOT NULL AND ended_at IS NOT NULL AND
+        output_sha256 IS NOT NULL AND finding_count IS NOT NULL AND
+        matched_candidate_count IS NOT NULL AND duration_ms IS NOT NULL
+    )
+)
+```
+
+Indexes:
+
+```sql
+CREATE UNIQUE INDEX idx_semgrep_one_active_project
+ON semgrep_enrichment_runs(project_root)
+WHERE status IN ('staging','scanning','validating','persisting');
+
+CREATE INDEX idx_semgrep_latest_project_language
+ON semgrep_enrichment_runs(project_root, language, ended_at DESC)
+WHERE status = 'done';
+```
+
+#### `semgrep_findings`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `scan_id` | `TEXT NOT NULL REFERENCES semgrep_enrichment_runs(id) ON DELETE CASCADE` | parent scan |
+| `fingerprint` | `TEXT NOT NULL` | service-owned deterministic fingerprint |
+| `rule_id` | `TEXT NOT NULL` | normalized rule id, at most 512 bytes |
+| `severity` | `TEXT NOT NULL CHECK (severity IN ('error','warning','info'))` | normalized severity |
+| `message` | `TEXT NOT NULL` | advisory message, at most 4,096 bytes |
+| `relative_file` | `TEXT NOT NULL` | normalized project-relative path |
+| `start_line` | `INTEGER NOT NULL CHECK (start_line > 0)` | one-based |
+| `start_col` | `INTEGER NOT NULL CHECK (start_col > 0)` | one-based |
+| `end_line` | `INTEGER NOT NULL CHECK (end_line > 0)` | one-based |
+| `end_col` | `INTEGER NOT NULL CHECK (end_col > 0)` | one-based |
+| `target_id` | `TEXT` | nullable logical target reference |
+| `nominal_weight` | `REAL NOT NULL CHECK (nominal_weight IN (0.10, 0.05, 0.01))` | severity weight |
+
+Primary key: `(scan_id, fingerprint)`. The `scan_id` foreign key cascades when
+the parent run is deleted. `target_id` is deliberately a nullable logical
+reference so unmatched findings remain visible. Upstream fingerprints, raw
+source snippets, metavariable captures, absolute host paths, credentials or
+login state, and arbitrary upstream Semgrep JSON are prohibited from durable
+records.
+
+#### `semgrep_target_scores`
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `scan_id` | `TEXT NOT NULL REFERENCES semgrep_enrichment_runs(id) ON DELETE CASCADE` | parent scan |
+| `target_id` | `TEXT NOT NULL` | logical target reference |
+| `base_score` | `REAL NOT NULL CHECK (base_score >= 0.0 AND base_score <= 1.0)` | immutable base observed at scan time |
+| `boost` | `REAL NOT NULL CHECK (boost >= 0.0 AND boost <= 0.20)` | capped overlay |
+| `effective_score` | `REAL NOT NULL CHECK (effective_score >= 0.0 AND effective_score <= 1.0)` | capped effective score |
+| `matched_rule_count` | `INTEGER NOT NULL CHECK (matched_rule_count >= 0)` | distinct matched rules |
+
+Primary key: `(scan_id, target_id)`. The `scan_id` foreign key cascades when the
+parent run is deleted. `target_id` remains a logical reference; overlay
+staleness is validated against the current target inventory by `hf-service`.
+
+Successful publication is one transaction: verify that the parent is
+`persisting`; insert every normalized finding; insert every candidate score;
+update exactly one parent to `done` with all terminal fields; then commit. Any
+insert or update failure rolls back the entire transaction. A separate
+compensation marks the run `failed` if publication cannot complete safely.
+Storage publication alone does not make an overlay visible: `hf-service`
+requires both the database row and its recovery journal to be terminal before
+returning it to a ranking consumer.
+
+Transitions to `failed` or `cancelled` delete finding and score children in the
+same transaction before updating the parent, so those terminal states prohibit
+child rows. Project deletion and `clear_knowledge` remove
+`semgrep_findings` and `semgrep_target_scores` first (directly or through the
+parent cascade), then `semgrep_enrichment_runs`, and only then `targets`. This
+order prevents stale logical target references during cleanup. Service-owned
+global deletion takes the exclusive workspace lease, while project deletion
+takes the shared workspace lease followed by the canonical project's Semgrep
+lease, so neither deletion can remove a parent from an active journal
+lifecycle.
+
+Startup recovery queries every parent whose status is `staging`, `scanning`,
+`validating`, or `persisting` after repairing interrupted journals. A remaining
+active parent has no recoverable journal lifecycle. Recovery first removes its
+exact operation-owned workspace directory, then uses the ordinary atomic
+failure transition to delete any children and set `failed` with
+`recovered_missing_journal`. The parent remains active until that sequence
+finishes and therefore serves as the durable retry marker.
+
 ### `harnesses`
 
 | column | SQLite declaration |
@@ -437,6 +557,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0019_targets_file_scoped_identity.sql` | adds and backfills `targets.file`; replaces the unique index with `UNIQUE(project_root, symbol, file)` |
 | `0020_harness_approvals.sql` | creates atomic, digest-bound human harness-promotion provenance |
 | `0021_run_provenance_components.sql` | adds independently verifiable source, corpus, and sandbox-reference digests to runs |
+| `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
 
 ## 7. Read failure contract
 

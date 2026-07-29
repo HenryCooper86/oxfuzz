@@ -233,6 +233,9 @@ pub struct SandboxOptions {
     /// Optional per-file write ceiling enforced by the container runtime.
     /// Service-level aggregate monitoring complements this limit.
     pub max_file_size_bytes: Option<u64>,
+    /// Optional process-count ceiling for a specialized profile. The runtime
+    /// accepts only values that tighten the configured sandbox limit.
+    pub max_pids: Option<u32>,
 }
 
 /// A sandboxed runtime for building harnesses and running fuzzers.

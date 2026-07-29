@@ -39,10 +39,13 @@ use commands::{
     run_coverage_series, run_fuzzer, run_harness_source, run_history, run_syzkaller, save_agent,
     save_report_draft, save_skill, schedule_concurrency_limits, schedule_concurrency_set,
     schedule_create, schedule_delete, schedule_history, schedule_history_clear, schedule_list,
-    schedule_set_enabled, schedule_targets, set_automotive_settings,
+    schedule_set_enabled, schedule_targets, semgrep_available, set_automotive_settings,
     set_project_auto_revert_override, set_providers, system_snapshot, system_status_cmd, triage,
     verify_crash, workbench_dashboard, write_config,
 };
+
+#[cfg(feature = "semgrep-enrichment")]
+use commands::{semgrep_cancel, semgrep_enrich, semgrep_status};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Run the Tauri GUI application.
@@ -63,6 +66,13 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             discover,
+            semgrep_available,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep_enrich,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep_status,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep_cancel,
             open_folder_dialog,
             open_file_dialog,
             harness_draft,
@@ -339,7 +349,15 @@ fn seed_user_provider_config(
 
 #[cfg(test)]
 mod tests {
-    use super::seed_user_provider_config;
+    use super::{commands, seed_user_provider_config};
+
+    #[test]
+    fn semgrep_availability_matches_the_compiled_feature() {
+        assert_eq!(
+            commands::semgrep_available(),
+            cfg!(feature = "semgrep-enrichment")
+        );
+    }
 
     #[test]
     fn first_run_provider_seed_is_private_and_never_clobbers() {

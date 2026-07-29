@@ -161,6 +161,27 @@ RUN clang --version \
     && cargo fuzz --version \
     && cargo +"${RUST_NIGHTLY}" --version
 
+# Semgrep CE and its reviewed C rules are pinned and verified at image build
+# time. Runtime scanning uses only the fixed wrapper and bundled rules below.
+ARG SEMGREP_VERSION=1.169.0
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    "semgrep==${SEMGREP_VERSION}"
+ENV SEMGREP_SETTINGS_FILE=/tmp/oxfuzz-semgrep-settings.yml \
+    SEMGREP_LOG_FILE=/tmp/oxfuzz-semgrep.log \
+    SEMGREP_SEND_METRICS=off
+
+COPY third_party/semgrep-rules /opt/oxfuzz/semgrep-rules
+COPY scripts/semgrep-tree-digest.py /opt/oxfuzz/semgrep-tree-digest.py
+COPY docker/sandbox/semgrep/scan.sh /usr/local/bin/oxfuzz-semgrep-scan
+# Do not add `semgrep scan --validate` here: Semgrep CE 1.169.0 fetches the
+# registry-hosted p/semgrep-rule-lints pack even for an entirely local config.
+# The network-disabled fixed-wrapper fixture scan is the authoritative gate.
+RUN chmod 0755 /usr/local/bin/oxfuzz-semgrep-scan /opt/oxfuzz/semgrep-tree-digest.py \
+    && test "$(semgrep --version --disable-version-check)" = "${SEMGREP_VERSION}" \
+    && test -z "$(find /opt/oxfuzz/semgrep-rules/rules/c -type l -print -quit)" \
+    && test "$(python3 /opt/oxfuzz/semgrep-tree-digest.py /opt/oxfuzz/semgrep-rules/rules/c)" = \
+       "$(cat /opt/oxfuzz/semgrep-rules/RULES_SHA256)"
+
 WORKDIR /work
 
 CMD ["true"]

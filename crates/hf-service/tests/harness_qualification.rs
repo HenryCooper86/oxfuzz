@@ -376,6 +376,8 @@ async fn corpus_records_keep_the_persisted_rust_target_identity() {
             file: project.path().join("src/lib.rs"),
             line: 1,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some("fn parse_rust(data: &[u8])".to_owned()),
         input_surface: InputSurface::Bytes,
