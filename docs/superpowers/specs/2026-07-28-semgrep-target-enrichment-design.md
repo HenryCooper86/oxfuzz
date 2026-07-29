@@ -305,8 +305,26 @@ The service retains a bounded, redacted failure code and message.
 
 One project may have only one active Semgrep enrichment. A second request fails
 busy. Workspace cleanup cannot overlap the operation because the service holds
-the shared workspace lease from staging through terminal persistence and
-cleanup.
+the shared workspace lease from before the database insert and journal open
+through terminal cleanup and journal close or abort. The admitted operation
+also owns an exclusive, digest-keyed cross-process project lease for that same
+interval. The workspace lease prevents startup recovery or whole-workspace
+cleanup from classifying a live operation as interrupted; the project lease
+preserves the one-active-operation rule after the database publication has
+temporarily moved the row to `done` but before cleanup and journal closure are
+durable. Admission rechecks recovery health after taking both leases and before
+its first durable write. Both leases are transferred into the background
+worker, rather than reacquired after spawning.
+
+The process-local operation registry distinguishes cancellable work from
+finalizing work. Completion claims atomically move the reservation into
+`finalizing`; cancellation is then inactive, but the reservation remains busy
+until cleanup and terminal journal persistence finish. A database `done` row
+whose successful journal close is not yet verifiable is exposed through the
+status API as `persisting`, with an `IncompleteJournal` base-only result when
+the historical result can be reconstructed. Only a closed `done` publication
+is externally terminal `done`. Therefore a terminal success observed by a
+client cannot later regress to `failed` because cleanup compensation ran.
 
 Before starting background work, the service appends a synced recovery-journal
 entry naming the operation and project. After validation, it syncs a
@@ -315,6 +333,24 @@ database publication transaction. After database publication, it durably
 removes the exact staged artifacts and syncs their parent, then appends the
 successful journal close. The journal remains `ready_to_commit` until cleanup
 succeeds.
+
+Persistent journal replay and transitions use a securely descriptor-opened
+advisory lock file in the journal directory. The service takes its exclusive
+cross-process lock around each complete replay/validate/read/append
+transaction, including the first lifecycle replay. Journal construction opens
+and validates only the directory and lock descriptors; it does not enumerate
+or replay operation journals before bootstrap owns the workspace recovery
+lease. The fixed lock entry is not interpreted as an operation journal.
+Compliant processes use this order whenever multiple locks are needed:
+
+```text
+workspace lease -> project lease -> journal lock -> database transaction
+```
+
+Result-only journal reads take only the journal lock and never acquire an
+earlier lock afterward. This serialization prevents competing processes from
+both validating `ready_to_commit` and appending incompatible `close` and
+`abort` records.
 
 The journal has two different terminal outcomes. `close` is accepted only
 after `ready_to_commit` and is the sole evidence of a successful publication.
@@ -338,13 +374,25 @@ operation-owned staging directory and appends the terminal abort.
 If compensation, cleanup, or abort cannot complete, the journal remains
 interrupted and new starts fail closed so recovery can retry.
 
+Startup recovery must first take the exclusive workspace recovery lease and
+retain it through journal replay, database repair, descriptor-relative cleanup,
+and terminal abort. If another process holds a shared operation lease, recovery
+does not inspect or mutate journals, is deferred, and that container rejects
+new Semgrep starts. Reads remain available. This is deliberately fail-closed:
+absence of an exclusive recovery lease is not evidence that an open journal
+belongs to a dead process.
+
 Recovery cleanup treats descriptor-proven absence of the exact UUID child as
 idempotent success, covering a crash after cleanup but before close or abort.
 It still rejects a missing or ambiguous managed root, symlinked or replaced
 ancestors, and every path that is not exactly
 `workspace/semgrep/<operation-uuid>`.
 An absent `semgrep` child beneath the validated managed workspace is also
-idempotent absence for a failure that occurred before staging created it.
+idempotent absence for a failure that occurred before staging created it, but
+only when `openat(workspace_fd, "semgrep", O_NOFOLLOW | O_DIRECTORY)` returns
+`ENOENT` and a post-check proves that the workspace pathname still names the
+opened workspace descriptor. All existing-parent and exact-operation checks
+remain descriptor-relative through removal and parent synchronization.
 
 After successful cleanup and close, only the digests and normalized durable
 records remain. Failed and cancelled
@@ -403,6 +451,14 @@ A missing, interrupted, aborted, corrupt, or otherwise unverifiable journal is
 reported as `IncompleteJournal` for reads. Historical findings and the parent
 operation remain readable, but the view uses base-only scores. Sticky journal
 or recovery degradation still blocks every new start.
+
+Historical reconstruction accepts an empty current same-language inventory.
+An empty candidate set is a valid base mismatch, so the exact result retains
+its normalized matched and unmatched findings, contains no current candidates,
+and reports `StaleBase`. Scan admission still requires a non-empty persisted
+inventory. If an unrelated reconstruction error prevents building the result,
+the status endpoint returns the parent operation with `result: null` instead of
+making its lifecycle unreadable.
 
 Repeated successful scans never compound: every score is recomputed from the
 current base inventory and the current scan's distinct rules.
@@ -488,10 +544,19 @@ Implementation follows Red -> Green -> Refactor.
   config path, and absence of caller-controlled flags.
 - Cover asynchronous lifecycle, busy rejection, cancellation, timeout, and
   workspace lease behavior.
+- Use real child processes to prove bootstrap defers recovery while a live
+  operation owns the workspace lease, same-project leases reject competing
+  processes, and close/abort journal transitions serialize.
 - Prove source snapshot bounds and time-of-check/time-of-use detection.
+- Race workspace replacement and `semgrep`-parent recreation against cleanup;
+  only descriptor-proven stable absence is successful.
 - Prove success publication is one transaction.
 - Inject each persistence failure and prove no partial overlay exists.
 - Prove a source mutation before commit causes atomic failure.
+- Prove database `done` remains externally `persisting` until close, competing
+  admission stays busy, and visible `done` never regresses to `failed`.
+- Delete and reclassify every current same-language candidate and prove exact
+  history remains readable as findings-preserving `StaleBase`.
 - Prove feature-disabled builds reject presentation entrypoints.
 
 ### Presentation tests
