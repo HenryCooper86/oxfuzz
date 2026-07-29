@@ -41,6 +41,8 @@ const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;
 const GUARDRAIL_DECISION_RETENTION: usize = 1000;
 const WORKSPACE_MANIFEST_FILE: &str = ".oxfuzz-workspace.json";
 const WORKSPACE_MANIFEST_VERSION: u32 = 1;
+pub(crate) const WORKSPACE_CLEANUP_BUSY_MESSAGE: &str =
+    "workspace cannot be cleared while another workspace operation is active";
 pub(crate) const EXACT_DOCKER_IMAGE_REV_PREFIX: &str = "docker-image-id-sha256:";
 
 type WorkspaceOperationGate = tokio::sync::RwLock<()>;
@@ -216,9 +218,9 @@ fn workspace_lock_file(root: &Path) -> Result<File, ClassifiedError> {
 
 fn workspace_lock_error(error: TryLockError, cleanup: bool) -> ClassifiedError {
     match error {
-        TryLockError::WouldBlock if cleanup => ClassifiedError::Validation(
-            "workspace cannot be cleared while another workspace operation is active".to_owned(),
-        ),
+        TryLockError::WouldBlock if cleanup => {
+            ClassifiedError::Validation(WORKSPACE_CLEANUP_BUSY_MESSAGE.to_owned())
+        }
         TryLockError::WouldBlock => ClassifiedError::Validation(
             "workspace operation cannot start while workspace cleanup is active".to_owned(),
         ),
@@ -4746,15 +4748,22 @@ impl ServiceContainer {
         if let Some(store) = &store {
             match initialize_workspace_root() {
                 Ok(workspace) => {
-                    if semgrep
-                        .recover_interrupted(store, &workspace)
+                    match crate::semgrep::recover_semgrep_at_bootstrap(store, &semgrep, &workspace)
                         .await
-                        .is_err()
                     {
-                        tracing::error!(
-                            failure_code = "semgrep_recovery_degraded",
-                            "Semgrep recovery is degraded"
-                        );
+                        Ok(crate::semgrep::StartupRecoveryOutcome::Recovered) => {}
+                        Ok(crate::semgrep::StartupRecoveryOutcome::Deferred) => {
+                            tracing::warn!(
+                                failure_code = "semgrep_recovery_deferred",
+                                "Semgrep recovery is deferred while another workspace operation is active"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                failure_code = "semgrep_recovery_degraded",
+                                "Semgrep recovery is degraded"
+                            );
+                        }
                     }
                 }
                 Err(error) => {
@@ -5033,16 +5042,13 @@ impl ServiceContainer {
     /// Take the whole-workspace cleanup lease without blocking a runtime thread.
     /// Cleanup is an explicit user action, so an overlapping operation is
     /// rejected and can be retried after that operation finishes.
-    fn try_acquire_workspace_cleanup(
+    pub(crate) fn try_acquire_workspace_cleanup(
         root: &Path,
     ) -> Result<WorkspaceCleanupLease, ClassifiedError> {
         let (root, gate) = workspace_operation_gate(root)?;
-        let process_guard = gate.try_write_owned().map_err(|_| {
-            ClassifiedError::Validation(
-                "workspace cannot be cleared while another workspace operation is active"
-                    .to_owned(),
-            )
-        })?;
+        let process_guard = gate
+            .try_write_owned()
+            .map_err(|_| ClassifiedError::Validation(WORKSPACE_CLEANUP_BUSY_MESSAGE.to_owned()))?;
         let system_guard = workspace_lock_file(&root)?;
         system_guard
             .try_lock()
