@@ -37,6 +37,16 @@ const MAX_SEMGREP_OUTPUT_BYTES: u64 = 67_108_864;
 const OUTPUT_TRUNCATION_MARKER: &str = "[output truncated]";
 const LINE_TRUNCATION_MARKER: &str = "[line truncated]";
 
+pub(crate) struct SemgrepProjectLease {
+    _system_guard: File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupRecoveryOutcome {
+    Recovered,
+    Deferred,
+}
+
 /// Current lifecycle phase of one explicit Semgrep enrichment operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -188,6 +198,7 @@ pub(crate) struct SemgrepCoordinator {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompletionPausePoint {
+    AfterBegin,
     BeforeClaim,
     AfterClaim,
     AfterPublicationFailure,
@@ -463,6 +474,65 @@ impl SemgrepCoordinator {
     }
 }
 
+fn acquire_semgrep_project_lease(
+    canonical_project: &Path,
+) -> Result<SemgrepProjectLease, ClassifiedError> {
+    let lock_dir = crate::init::user_app_dir().join("locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|error| {
+        ClassifiedError::Internal(format!(
+            "create Semgrep project lease directory {}: {error}",
+            lock_dir.display()
+        ))
+    })?;
+    let digest = Sha256::digest(canonical_project.as_os_str().as_encoded_bytes());
+    let lock_path = lock_dir.join(format!("semgrep-project-{digest:x}.lock"));
+    let system_guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            ClassifiedError::Internal(format!(
+                "open Semgrep project lease {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+    system_guard.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => semgrep_validation("busy"),
+        std::fs::TryLockError::Error(error) => {
+            ClassifiedError::Internal(format!("acquire Semgrep project lease: {error}"))
+        }
+    })?;
+    Ok(SemgrepProjectLease {
+        _system_guard: system_guard,
+    })
+}
+
+pub(crate) async fn recover_semgrep_at_bootstrap(
+    store: &hf_storage::Store,
+    semgrep: &SemgrepCoordinator,
+    workspace: &Path,
+) -> Result<StartupRecoveryOutcome, ClassifiedError> {
+    let _workspace_lease = match crate::ServiceContainer::try_acquire_workspace_cleanup(workspace) {
+        Ok(lease) => lease,
+        Err(ClassifiedError::Validation(message))
+            if message == crate::container::WORKSPACE_CLEANUP_BUSY_MESSAGE =>
+        {
+            semgrep.mark_recovery_degraded(
+                "Semgrep recovery was deferred while another workspace operation is active",
+            );
+            return Ok(StartupRecoveryOutcome::Deferred);
+        }
+        Err(error) => {
+            semgrep.mark_recovery_degraded(&error);
+            return Err(error);
+        }
+    };
+    semgrep.recover_interrupted(store, workspace).await?;
+    Ok(StartupRecoveryOutcome::Recovered)
+}
+
 struct ActiveSemgrepGuard {
     coordinator: Arc<SemgrepCoordinator>,
     project: PathBuf,
@@ -617,7 +687,6 @@ impl crate::ServiceContainer {
             )
         })?;
         require_persisted_inventory(&store, &canonical_project, language).await?;
-        self.semgrep.ensure_recovery_healthy()?;
 
         self.authorize_recorded(
             Action::AnalyzeSource {
@@ -634,6 +703,10 @@ impl crate::ServiceContainer {
             .await
             .map_err(|_| semgrep_sandbox("sandbox_unavailable"))?
             .ok_or_else(|| semgrep_sandbox("sandbox_unavailable"))?;
+
+        let workspace_lease = self.acquire_workspace_operation().await?;
+        let project_lease = acquire_semgrep_project_lease(&canonical_project)?;
+        self.semgrep.ensure_recovery_healthy()?;
 
         let operation_id = Uuid::new_v4();
         let cancellation = CancellationToken::new();
@@ -719,6 +792,8 @@ impl crate::ServiceContainer {
                         image_reference,
                         cancellation,
                         operation_span,
+                        workspace_lease,
+                        project_lease,
                     )
                     .await;
             }
@@ -1006,26 +1081,17 @@ impl crate::ServiceContainer {
         image_reference: String,
         cancellation: CancellationToken,
         operation_span: tracing::Span,
+        workspace_lease: crate::container::WorkspaceOperationLease,
+        project_lease: SemgrepProjectLease,
     ) {
+        let _workspace_lease = workspace_lease;
+        let _project_lease = project_lease;
         let _active = ActiveSemgrepGuard {
             coordinator: Arc::clone(&self.semgrep),
             project: canonical_project.clone(),
             operation_id,
         };
         let Some(store) = self.store().cloned() else {
-            return;
-        };
-        let Ok(_workspace_lease) = self.acquire_workspace_operation().await else {
-            self.finish_semgrep_failure(
-                &store,
-                &canonical_project,
-                operation_id,
-                SemgrepRunStatus::Failed,
-                "persistence_failed",
-                "Semgrep workspace lease could not be acquired",
-                None,
-            )
-            .await;
             return;
         };
         if cancellation.is_cancelled() {
@@ -1078,6 +1144,10 @@ impl crate::ServiceContainer {
             total_bytes = snapshot.total_bytes,
             "Semgrep stage complete"
         );
+        #[cfg(test)]
+        self.semgrep
+            .pause_completion(CompletionPausePoint::AfterBegin)
+            .await;
         if cancellation.is_cancelled() {
             self.finish_semgrep_failure(
                 &store,
@@ -4490,6 +4560,400 @@ mod snapshot_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod process_lease_tests {
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, ChildStdout, Command, Output, Stdio};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use hf_core::error::ClassifiedError;
+    use hf_core::runtime::{
+        CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
+        SandboxOptions,
+    };
+    use hf_core::target::TargetLanguage;
+    use hf_storage::{SemgrepRunStatus, Store};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use super::{
+        recover_semgrep_at_bootstrap, CompletionPausePoint, SemgrepCoordinator,
+        StartupRecoveryOutcome,
+    };
+    use crate::ServiceContainer;
+
+    const CHILD_ENV: &str = "OXFUZZ_SEMGREP_PROCESS_CHILD";
+    const DB_ENV: &str = "OXFUZZ_SEMGREP_PROCESS_DB";
+    const JOURNAL_ENV: &str = "OXFUZZ_SEMGREP_PROCESS_JOURNAL";
+    const PROJECT_ENV: &str = "OXFUZZ_SEMGREP_PROCESS_PROJECT";
+    const PAUSE_ENV: &str = "OXFUZZ_SEMGREP_PROCESS_PAUSE";
+    const READY_PREFIX: &str = "OXFUZZ_SEMGREP_READY:";
+    const IMAGE_ID: &str =
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    #[derive(Clone, Copy)]
+    enum ProcessPause {
+        AfterBegin,
+        BeforeClose,
+    }
+
+    impl ProcessPause {
+        fn as_env(self) -> &'static str {
+            match self {
+                Self::AfterBegin => "after_begin",
+                Self::BeforeClose => "before_close",
+            }
+        }
+
+        fn completion_point(self) -> CompletionPausePoint {
+            match self {
+                Self::AfterBegin => CompletionPausePoint::AfterBegin,
+                Self::BeforeClose => CompletionPausePoint::BeforeClose,
+            }
+        }
+    }
+
+    struct ProcessFixture {
+        _root: tempfile::TempDir,
+        db: PathBuf,
+        home: PathBuf,
+        journal: PathBuf,
+        project: PathBuf,
+        workspace: PathBuf,
+    }
+
+    impl ProcessFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let project = root.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            std::fs::write(
+                project.join("parser.c"),
+                b"int parse(const char *input) { return input[0]; }\n",
+            )
+            .unwrap();
+            Self {
+                db: root.path().join("shared.db"),
+                home: root.path().join("home"),
+                journal: root.path().join("semgrep-journal"),
+                project: std::fs::canonicalize(project).unwrap(),
+                workspace: root.path().join("workspace"),
+                _root: root,
+            }
+        }
+
+        fn child_command(&self, test_name: &str) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .arg("--exact")
+                .arg(test_name)
+                .arg("--nocapture")
+                .env(CHILD_ENV, "1")
+                .env(DB_ENV, &self.db)
+                .env(JOURNAL_ENV, &self.journal)
+                .env(PROJECT_ENV, &self.project)
+                .env("HF_DB_PATH", &self.db)
+                .env("HF_WORKSPACE_DIR", &self.workspace)
+                .env("HF_CONFIG_DIR", self.home.join("config"))
+                .env("HF_GUARDRAILS", "permissive")
+                .env("HOME", &self.home)
+                .env_remove("XDG_DATA_HOME");
+            command
+        }
+    }
+
+    struct AdmittedChild {
+        child: Child,
+        stdout: BufReader<ChildStdout>,
+        operation_id: Uuid,
+    }
+
+    struct RecordingRuntime;
+
+    #[async_trait]
+    impl RuntimeAdapter for RecordingRuntime {
+        async fn run_command(
+            &self,
+            _cmd: &[String],
+            _cwd: &Path,
+            _limits: &ResourceLimits,
+        ) -> Result<CommandResult, ClassifiedError> {
+            panic!("Semgrep must use the typed streaming sandbox profile")
+        }
+
+        async fn resolve_image_reference(
+            &self,
+            image: &str,
+        ) -> Result<Option<ImmutableImageReference>, ClassifiedError> {
+            assert_eq!(image, hf_runtime::SANDBOX_IMAGE);
+            ImmutableImageReference::from_sha256_id(IMAGE_ID).map(Some)
+        }
+
+        async fn run_command_streaming_opts(
+            &self,
+            _cmd: &[String],
+            cwd: &Path,
+            _limits: &ResourceLimits,
+            options: &SandboxOptions,
+            _cancel: &CancellationToken,
+            _on_line: &hf_core::runtime::LineSink<'_>,
+        ) -> Result<CommandResult, ClassifiedError> {
+            let output = options
+                .extra_mounts
+                .iter()
+                .find(|mount| mount.container_path == "/work/output")
+                .unwrap()
+                .host_path
+                .join("semgrep.json");
+            std::fs::write(
+                output,
+                br#"{
+                    "version":"1.169.0",
+                    "results":[{
+                        "check_id":"cpp.lang.security.signal",
+                        "path":"parser.c",
+                        "start":{"line":1,"col":1},
+                        "end":{"line":1,"col":4},
+                        "extra":{"message":"advisory signal","severity":"WARNING"}
+                    }],
+                    "errors":[],
+                    "paths":{"scanned":["parser.c"],"skipped":[]}
+                }"#,
+            )
+            .unwrap();
+            Ok(CommandResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                workspace: cwd.to_path_buf(),
+                termination: CommandTermination::Completed,
+            })
+        }
+
+        async fn write_file(&self, _path: &Path, _content: &str) -> Result<(), ClassifiedError> {
+            panic!("Semgrep staging is service-owned")
+        }
+
+        async fn read_file(&self, _path: &Path) -> Result<String, ClassifiedError> {
+            panic!("Semgrep output acquisition is service-owned")
+        }
+    }
+
+    fn child_path(name: &str) -> String {
+        format!("semgrep::process_lease_tests::{name}")
+    }
+
+    fn child_value(name: &str) -> PathBuf {
+        PathBuf::from(std::env::var(name).unwrap())
+    }
+
+    async fn child_service() -> (ServiceContainer, Arc<Store>) {
+        let store = Arc::new(Store::connect(child_value(DB_ENV)).await.unwrap());
+        let mut service =
+            ServiceContainer::new(Arc::new(RecordingRuntime), None).with_store(Arc::clone(&store));
+        service.semgrep = Arc::new(SemgrepCoordinator::persistent(child_value(JOURNAL_ENV)));
+        (service, store)
+    }
+
+    async fn persist_child_inventory(store: &Store, project: &Path) {
+        let inventory = hf_discovery::discover(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        store.save_inventory(&inventory, Utc::now()).await.unwrap();
+    }
+
+    fn spawn_admitted_child(fixture: &ProcessFixture, pause: ProcessPause) -> AdmittedChild {
+        let mut child = fixture
+            .child_command(&child_path("admitted_worker_child"))
+            .env(PAUSE_ENV, pause.as_env())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let operation_id = loop {
+            let mut line = String::new();
+            assert_ne!(
+                stdout.read_line(&mut line).unwrap(),
+                0,
+                "admitted child exited before signalling readiness"
+            );
+            if let Some(value) = line.trim().strip_prefix(READY_PREFIX) {
+                break Uuid::parse_str(value).unwrap();
+            }
+        };
+        AdmittedChild {
+            child,
+            stdout,
+            operation_id,
+        }
+    }
+
+    fn child_output(fixture: &ProcessFixture, name: &str) -> Output {
+        fixture
+            .child_command(&child_path(name))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    fn assert_child_success(output: &Output, role: &str) {
+        assert!(
+            output.status.success(),
+            "{role} child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn release_and_wait(mut admitted: AdmittedChild) {
+        admitted
+            .child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"release\n")
+            .unwrap();
+        let mut remaining_stdout = String::new();
+        admitted
+            .stdout
+            .read_to_string(&mut remaining_stdout)
+            .unwrap();
+        let output = admitted.child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "admitted child failed\nstdout:\n{remaining_stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    async fn assert_live_ownership(pause: ProcessPause) {
+        let fixture = ProcessFixture::new();
+        let admitted = spawn_admitted_child(&fixture, pause);
+        let operation_id = admitted.operation_id;
+        let store = Store::connect(&fixture.db).await.unwrap();
+        let journal = crate::semgrep_recovery::SemgrepJournal::open(fixture.journal.clone());
+        let operation_root = fixture
+            .workspace
+            .join("semgrep")
+            .join(operation_id.to_string());
+
+        let recovery = child_output(&fixture, "recovery_child");
+        assert_child_success(&recovery, "recovery");
+        let contender = child_output(&fixture, "same_project_start_child");
+        assert_child_success(&contender, "same-project admission");
+
+        let run = store.semgrep_run(operation_id).await.unwrap().unwrap();
+        match pause {
+            ProcessPause::AfterBegin => {
+                assert_eq!(run.status, SemgrepRunStatus::Staging);
+                assert!(operation_root.exists());
+            }
+            ProcessPause::BeforeClose => {
+                assert_eq!(run.status, SemgrepRunStatus::Done);
+                assert!(!journal.is_closed(operation_id).unwrap());
+            }
+        }
+        assert_eq!(journal.interrupted().unwrap().len(), 1);
+
+        release_and_wait(admitted);
+    }
+
+    #[tokio::test]
+    async fn admitted_child_blocks_recovery_and_same_project_start_after_begin() {
+        assert_live_ownership(ProcessPause::AfterBegin).await;
+    }
+
+    #[tokio::test]
+    async fn admitted_child_blocks_recovery_and_same_project_start_before_close() {
+        assert_live_ownership(ProcessPause::BeforeClose).await;
+    }
+
+    #[tokio::test]
+    async fn admitted_worker_child() {
+        if std::env::var(CHILD_ENV).as_deref() != Ok("1") {
+            return;
+        }
+        let workspace = crate::initialize_workspace_root().unwrap();
+        assert_eq!(
+            workspace,
+            std::fs::canonicalize(child_value("HF_WORKSPACE_DIR")).unwrap()
+        );
+        let project = child_value(PROJECT_ENV);
+        let (service, store) = child_service().await;
+        persist_child_inventory(&store, &project).await;
+        let pause = match std::env::var(PAUSE_ENV).unwrap().as_str() {
+            "after_begin" => ProcessPause::AfterBegin,
+            "before_close" => ProcessPause::BeforeClose,
+            other => panic!("unknown process pause {other}"),
+        };
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(pause.completion_point());
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .expect("admitted worker must reach the requested pause");
+
+        println!("{READY_PREFIX}{operation_id}");
+        std::io::stdout().flush().unwrap();
+        let mut release_signal = [0_u8; 1];
+        std::io::stdin().read_exact(&mut release_signal).unwrap();
+        release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let run = store.semgrep_run(operation_id).await.unwrap().unwrap();
+                if run.status == SemgrepRunStatus::Done
+                    && service.semgrep.journal.is_closed(operation_id).unwrap()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admitted worker must finish successfully after release");
+    }
+
+    #[tokio::test]
+    async fn recovery_child() {
+        if std::env::var(CHILD_ENV).as_deref() != Ok("1") {
+            return;
+        }
+        let store = Store::connect(child_value(DB_ENV)).await.unwrap();
+        let semgrep = SemgrepCoordinator::persistent(child_value(JOURNAL_ENV));
+        let workspace = std::fs::canonicalize(child_value("HF_WORKSPACE_DIR")).unwrap();
+        let outcome = recover_semgrep_at_bootstrap(&store, &semgrep, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(outcome, StartupRecoveryOutcome::Deferred);
+        assert!(semgrep.ensure_recovery_healthy().is_err());
+    }
+
+    #[tokio::test]
+    async fn same_project_start_child() {
+        if std::env::var(CHILD_ENV).as_deref() != Ok("1") {
+            return;
+        }
+        let project = child_value(PROJECT_ENV);
+        let (service, _) = child_service().await;
+        let error = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("busy"), "{error}");
+    }
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use std::path::{Path, PathBuf};
@@ -5042,7 +5506,7 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn admission_persists_staging_and_open_journal_before_background_work() {
+    async fn admission_waits_for_workspace_lease_before_durable_writes() {
         let _test_guard = lifecycle_test_lock().lock().await;
         let root = tempfile::tempdir().unwrap();
         let project = project_fixture(root.path(), "project");
@@ -5052,11 +5516,37 @@ mod lifecycle_tests {
         let workspace = crate::initialize_workspace_root().unwrap();
         let cleanup_lease =
             ServiceContainer::semgrep_test_workspace_cleanup_lease(&workspace).unwrap();
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterBegin);
 
-        let id = service
-            .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+        let pending_service = service.clone();
+        let pending_project = project.clone();
+        let start = tokio::spawn(async move {
+            pending_service
+                .start_semgrep_enrichment(pending_project, TargetLanguage::C)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!start.is_finished());
+        let run_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM semgrep_enrichment_runs WHERE project_root = ?1",
+        )
+        .bind(project.to_string_lossy().as_ref())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(run_count, 0);
+        assert!(service.semgrep.journal.interrupted().unwrap().is_empty());
+        assert!(runtime.calls().is_empty());
+
+        drop(cleanup_lease);
+        let id = tokio::time::timeout(Duration::from_secs(5), start)
             .await
+            .expect("admission must continue after workspace cleanup releases")
+            .unwrap()
             .unwrap();
+        wait_for_pause(&reached).await;
         let run = store.semgrep_run(id).await.unwrap().unwrap();
         assert_eq!(run.status, SemgrepRunStatus::Staging);
         assert_eq!(run.project_root, project.to_string_lossy());
@@ -5077,7 +5567,7 @@ mod lifecycle_tests {
             service.request_semgrep_cancel(id).await.unwrap(),
             SemgrepCancelOutcome::Accepted
         );
-        drop(cleanup_lease);
+        release.notify_one();
         wait_for_state(&service, id, SemgrepOperationState::Cancelled).await;
     }
 
