@@ -322,6 +322,15 @@ impl SemgrepCoordinator {
                 return Err(error);
             }
         }
+        for run in store.active_semgrep_runs().await? {
+            if let Err(error) = self
+                .recover_active_without_journal(store, managed_workspace, run.id)
+                .await
+            {
+                self.mark_recovery_degraded(&error);
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
@@ -331,17 +340,23 @@ impl SemgrepCoordinator {
         managed_workspace: &Path,
         operation: &crate::semgrep_recovery::InterruptedSemgrepOperation,
     ) -> Result<(), ClassifiedError> {
-        let run = store
-            .semgrep_run(operation.operation_id)
-            .await?
-            .ok_or_else(|| {
-                ClassifiedError::Storage(
-                    "Semgrep journal references a missing operation".to_owned(),
-                )
-            })?;
-        if !canonical_stored_project(Path::new(&run.project_root), &operation.project_root)
-            || operation.staging_dir_name != operation.operation_id.to_string()
-        {
+        if operation.staging_dir_name != operation.operation_id.to_string() {
+            return Err(ClassifiedError::Storage(
+                "Semgrep recovery identity does not match its operation".to_owned(),
+            ));
+        }
+        let Some(run) = store.semgrep_run(operation.operation_id).await? else {
+            let operation_root = managed_workspace
+                .join("semgrep")
+                .join(operation.operation_id.to_string());
+            cleanup_operation_root_in(managed_workspace, &operation_root)?;
+            self.journal.abort(
+                operation.operation_id,
+                crate::semgrep_recovery::SemgrepAbortKind::Recovered,
+            )?;
+            return Ok(());
+        };
+        if !canonical_stored_project(Path::new(&run.project_root), &operation.project_root) {
             return Err(ClassifiedError::Storage(
                 "Semgrep recovery identity does not match its operation".to_owned(),
             ));
@@ -395,6 +410,28 @@ impl SemgrepCoordinator {
             operation.operation_id,
             crate::semgrep_recovery::SemgrepAbortKind::Recovered,
         )?;
+        Ok(())
+    }
+
+    async fn recover_active_without_journal(
+        &self,
+        store: &hf_storage::Store,
+        managed_workspace: &Path,
+        operation_id: Uuid,
+    ) -> Result<(), ClassifiedError> {
+        let operation_root = managed_workspace
+            .join("semgrep")
+            .join(operation_id.to_string());
+        cleanup_operation_root_in(managed_workspace, &operation_root)?;
+        store
+            .fail_semgrep_run(
+                operation_id,
+                SemgrepRunStatus::Failed,
+                "recovered_missing_journal",
+                "Semgrep operation without recovery journal was repaired at startup",
+                Utc::now(),
+            )
+            .await?;
         Ok(())
     }
 
@@ -3919,6 +3956,80 @@ mod publication_tests {
             b"sibling",
             "recovery removed another operation UUID directory"
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_repairs_active_staging_row_without_journal_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(root.path()).unwrap();
+        let project = workspace.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let store = Store::connect(workspace.join("recovery.db")).await.unwrap();
+        let journal_dir = workspace.join("journal");
+        let coordinator = super::SemgrepCoordinator::persistent(journal_dir.clone());
+        let operation_id = Uuid::new_v4();
+        store
+            .insert_semgrep_run(&staging_run(operation_id, &project))
+            .await
+            .unwrap();
+        let operation_root = workspace.join("semgrep").join(operation_id.to_string());
+        std::fs::create_dir_all(&operation_root).unwrap();
+        std::fs::write(operation_root.join("owned"), b"partial snapshot").unwrap();
+
+        coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .unwrap();
+        coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .unwrap();
+
+        let run = store.semgrep_run(operation_id).await.unwrap().unwrap();
+        assert_eq!(run.status, SemgrepRunStatus::Failed);
+        assert_eq!(run.failure_code.as_deref(), Some("recovered_missing_journal"));
+        assert!(store
+            .semgrep_publication(operation_id)
+            .await
+            .unwrap()
+            .is_some_and(|publication| {
+                publication.findings.is_empty() && publication.scores.is_empty()
+            }));
+        assert!(!operation_root.exists());
+        assert!(
+            !journal_dir.join(format!("{operation_id}.jsonl")).exists(),
+            "recovery must not fabricate a journal lifecycle for an unbegun operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_aborts_interrupted_journal_without_database_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(root.path()).unwrap();
+        let project = workspace.join("deleted-project");
+        let store = Store::connect(workspace.join("recovery.db")).await.unwrap();
+        let coordinator = super::SemgrepCoordinator::persistent(workspace.join("journal"));
+        let operation_id = Uuid::new_v4();
+        coordinator
+            .journal
+            .begin(operation_id, &project, &operation_id.to_string())
+            .unwrap();
+        let operation_root = workspace.join("semgrep").join(operation_id.to_string());
+        std::fs::create_dir_all(&operation_root).unwrap();
+        std::fs::write(operation_root.join("owned"), b"partial snapshot").unwrap();
+
+        coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .unwrap();
+        coordinator
+            .recover_interrupted(&store, &workspace)
+            .await
+            .unwrap();
+
+        assert!(!operation_root.exists());
+        assert!(coordinator.journal.interrupted().unwrap().is_empty());
+        assert!(!coordinator.journal.is_closed(operation_id).unwrap());
     }
 
     #[tokio::test]
