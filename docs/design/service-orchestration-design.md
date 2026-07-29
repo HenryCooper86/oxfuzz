@@ -339,10 +339,15 @@ through cleanup and journal close or abort. It also retains an exclusive
 digest-keyed cross-process project lease for that interval so the one-active
 project rule remains true while a published database row is `done` but not yet
 durably closed. Admission rechecks recovery health after taking both leases.
-The service then creates a source snapshot from the canonical C/C++ discovery
-set. Every input must be a regular, non-symlink file below the canonical
-project root and remain stable while copied. The normalized relative path and
-source snapshot bounds are:
+After nondurable preflight, an owned service task performs lease acquisition,
+reservation, the staging-row insert, synced journal `Begin`, and worker
+handoff. The start API awaits a one-shot result, but dropping that caller does
+not cancel the owned durable-admission task. A successful UUID is sent only
+after the scan worker owns the reservation and both leases. The service then
+creates a source snapshot from the canonical C/C++ discovery set. Every input
+must be a regular, non-symlink file below the canonical project root and remain
+stable while copied. The normalized relative path and source snapshot bounds
+are:
 
 - 25,000 files;
 - 2 MiB per file;
@@ -389,13 +394,14 @@ success cannot later regress because cleanup compensation ran.
 Every persistent journal replay or transition is serialized by an exclusive
 advisory lock on a fixed, securely descriptor-opened lock file in the journal
 directory. Initial replay and each replay/validate/read/append transaction hold
-the lock for the complete transaction. Journal construction opens and validates
-only the directory and lock descriptors; operation enumeration is lazy, so
-bootstrap's first replay occurs after it owns the workspace recovery lease. The
-fixed lock entry is excluded from operation-journal enumeration. The global
-lock order is workspace lease, project lease, journal lock, then database
-transaction. Result-only reads take only the journal lock and never acquire an
-earlier lease afterward.
+the lock for the complete transaction. Journal construction is filesystem-lazy:
+it normalizes and retains the path without creating, opening, validating, or
+replaying journal state. The first write/replay access occurs only while the
+service owns its workspace lease. Result-only reads may open existing state but
+never create missing state. The fixed lock entry is excluded from
+operation-journal enumeration. The global lock order is workspace lease,
+project lease, journal lock, then database transaction. Result-only reads take
+only the journal lock and never acquire an earlier lease afterward.
 
 The successful close record is deliberately distinct from a terminal abort
 record. After a failed/cancelled database transition or a recovery
