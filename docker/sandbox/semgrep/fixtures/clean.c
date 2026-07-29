@@ -1,5 +1,3 @@
-#include <stdio.h>
-
-int parse_line(char *output) {
-    return fgets(output, 32, stdin) == NULL ? -1 : 0;
+int increment_bounded(unsigned int value) {
+    return value < 100 ? (int)(value + 1) : 0;
 }

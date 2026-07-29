@@ -59,6 +59,7 @@ of every term. The rest of this README is the technical reference.
 | --- | --- |
 | **Operational Dashboard** | Readiness, harness-review state, recent campaigns, crash handoff, and evidence counts in one operator-focused view. |
 | **Target Discovery** | Semantic + static-analysis scan of a project producing a ranked Target Inventory (fit score, input surface, complexity, call-graph reachability). |
+| **Optional Semgrep Enrichment** | Explicit C/C++-only enrichment adds capped, advisory static-analysis signals from a pinned offline rules snapshot without changing normal discovery. |
 | **Harness Generation** | LLM-authored, compile-validated, smoke-fuzzed harnesses per target. |
 | **Engine Integration** | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and Syzkaller behind one `EngineAdapter` trait. |
 | **Crash Triage** | Dedup by stack signature, CASR severity/exploitability, minimize, and LLM-drafted bug reports under human review. |
@@ -252,10 +253,17 @@ coverage, and release build scripts:
 ```bash
 ./scripts/tests/gates.sh
 ./scripts/build-sandbox.sh
+./scripts/test-semgrep-sandbox.sh
 ./scripts/build-release.sh
 target/release/oxfuzz doctor
 ./scripts/build-app.sh
 ```
+
+The Semgrep gate runs only the committed C fixtures through the fixed wrapper
+inside the already-built versioned sandbox. A source-only release build does
+not download or run Semgrep. Release candidates can require the sandbox gate
+from the CLI build with
+`OXFUZZ_VERIFY_SEMGREP_SANDBOX=1 ./scripts/build-release.sh`.
 
 On macOS, `build-app.sh` verifies the `.app` signature and the generated DMG.
 Its default ad-hoc signature is suitable for local QA, not public distribution;
@@ -312,6 +320,36 @@ oxfuzz run /path/to/project --target parse_value --engine afl++ --duration 60m
 oxfuzz triage /path/to/project --target parse_value
 ```
 
+### Optional Semgrep target enrichment
+
+After ordinary C or C++ discovery, you can explicitly enrich the ranking:
+
+```bash
+oxfuzz discover /path/to/c-project --lang c --semgrep
+```
+
+Without `--semgrep`, discovery is unchanged and Semgrep does not run. The
+enriched output is labelled **Semgrep static-analysis signals**. A signal is an
+advisory prioritization hint, not a confirmed vulnerability or a fuzzing crash.
+Each target retains its immutable base discovery score, shows the Semgrep
+boost separately, and reports the effective score used for ordering. Distinct
+matched rules contribute by severity, but the total boost is capped at `0.20`
+and the effective score cannot exceed `1.0`.
+
+The first release supports only C and C++, permits one active enrichment
+operation per canonical project, and lets Ctrl-C or the desktop **Stop** action
+cancel that exact operation. Source or base-score changes make a saved overlay
+stale; oxfuzz then uses base-only ranking and asks you to rediscover or rerun
+enrichment. Scan, validation, mapping, persistence, cancellation, or cleanup
+failure is atomic: partial findings and partial score changes are never
+published.
+
+The sandbox uses Semgrep CE `1.169.0` and the reviewed
+[`0xdea/semgrep-rules` commit `4d66ecf30bfb1809a984085f2c86a8c3915bfc71`](https://github.com/0xdea/semgrep-rules/tree/4d66ecf30bfb1809a984085f2c86a8c3915bfc71)
+offline. Runtime scans do not contact the Semgrep Registry and do not accept
+user-provided rules, configuration, flags, tokens, or autofix requests. CVE
+Binary Tool integration is outside this release's scope.
+
 ---
 
 ## Command Reference
@@ -320,7 +358,7 @@ oxfuzz triage /path/to/project --target parse_value
 | --- | --- |
 | `init` | Scaffold config from templates and create/migrate the database. |
 | `doctor [--json]` | Probe the mandatory Docker sandbox and its bundled engines; exit non-zero when fuzzing is not ready. |
-| `discover <project> --lang c [--rank]` | Scan a project and produce a ranked Target Inventory. |
+| `discover <project> --lang c [--rank] [--semgrep]` | Scan a project and produce a ranked Target Inventory; `--semgrep` explicitly adds advisory C/C++ enrichment. |
 | `harness <project> --target <sym> --engine <e> [--draft-only] [--repair N] [--refine] [--promote]` | Write, compile (optionally auto-repair or coverage-refine), and smoke-qualify a harness; `--promote` is the explicit approval step. |
 | `run <project> --target <sym> --engine <e> --duration 60m` | Run a sandboxed campaign with the active promoted harness (Ctrl-C cancels cooperatively). |
 | `campaign <project> --target <sym> --engine <e>` | Run and triage a bounded campaign using an already smoke-qualified, human-promoted harness. |
@@ -529,6 +567,14 @@ Core:                          hf-core            <- traits, types, contracts
 ## Acknowledgements
 
 oxfuzz is inspired by and based on **[y-agent](https://github.com/gorgiaxx/y-agent)** by [Gorgias (gorgiaxx)](https://github.com/gorgiaxx) -- a model-agnostic Rust agent framework that turns objectives into controlled, recoverable, and observable work. Its design (agent orchestration, skills, knowledge retrieval, recovery, and multi-surface CLI/TUI/REST/desktop presentation) shaped the foundations of this project. Please visit and use his awesome project.
+
+The optional enrichment sandbox runs
+[`Semgrep CE 1.169.0`](https://github.com/semgrep/semgrep/tree/v1.169.0) as a
+separate LGPL-2.1 process and bundles the MIT-licensed
+[`0xdea/semgrep-rules` C/C++ snapshot](https://github.com/0xdea/semgrep-rules/tree/4d66ecf30bfb1809a984085f2c86a8c3915bfc71).
+Distribution notices and exact provenance are retained in
+[`third_party/semgrep`](third_party/semgrep) and
+[`third_party/semgrep-rules`](third_party/semgrep-rules).
 
 ---
 

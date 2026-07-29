@@ -132,6 +132,34 @@ Click **Open project** and choose the folder of code you want to test. Then use
 the **Fuzzing Workflow** for a guided campaign, move through the four pipeline
 views directly, or ask the assistant for a recommendation in plain English.
 
+#### Optional: enrich a C/C++ target ranking
+
+Normal discovery does not run Semgrep. After a successful C or C++ discovery,
+the Discover screen offers **Enrich with Semgrep**. The equivalent explicit CLI
+command is:
+
+```bash
+oxfuzz discover /path/to/c-project --lang c --semgrep
+```
+
+The results are labelled **Semgrep static-analysis signals** because pattern
+matches are prioritization hints, not confirmed vulnerabilities or fuzzing
+crashes. The base score is the original discovery result. The Semgrep boost is
+the contribution from distinct matched rules, capped at `0.20`. The effective
+score is `base + boost`, capped at `1.0`, and is the score used to order the
+enriched inventory.
+
+Only C and C++ are supported, and only one enrichment can be active per
+project. **Stop** or Ctrl-C cancels that exact operation. If the source or base
+inventory changes, the overlay becomes stale and oxfuzz restores the base-only
+ranking until you rediscover or rerun enrichment. A failed or cancelled scan is
+atomic: it preserves the ordinary inventory and never publishes partial score
+changes.
+
+The fixed sandbox wrapper uses offline bundled rules. It does not fetch
+registry rules and does not accept user rules, extra flags, tokens, or autofix.
+CVE Binary Tool is not part of this integration.
+
 ### 2. The four-stage campaign (what Progress tracks)
 
 | Stage | Plain-language meaning |
