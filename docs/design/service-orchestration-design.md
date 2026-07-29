@@ -364,6 +364,14 @@ Any added, removed, changed, unstable, or newly ineligible source changes the
 revision and rejects the operation atomically before publication. No finding
 or score row is published for that scan.
 
+Semgrep CE `1.169.0` may omit `paths.skipped` when no target was skipped.
+`hf-discovery` normalizes only that omission to an empty collection. An
+explicit non-empty `paths.skipped`, a missing `paths` or `paths.scanned`, or a
+normalized `paths.scanned` set that differs from the staged snapshot manifest
+remains an atomic incomplete-analysis failure. This compatibility rule lives
+in the strict parser; the fixed in-image wrapper stays an `exec`-based
+no-argument boundary so PID 1 receives cancellation signals directly.
+
 The durable publication sequence is:
 
 ```text
