@@ -25,6 +25,16 @@
   confirmed journal, or cleanup failure is atomic and publishes no findings or
   score overlay. An indeterminate terminal journal append remains invisible
   until restart replay proves a successful close or triggers repair.
+- A live scan owns the shared workspace lease before its first database or
+  journal write and retains it through terminal journal persistence. Recovery
+  owns the matching exclusive lease and never inspects a journal when that
+  lease is unavailable.
+- One project owns an exclusive cross-process lease through cleanup and close.
+  A database `done` row is exposed as `persisting` until successful journal
+  closure is verifiable.
+- Persistent journal transactions use a securely descriptor-opened advisory
+  lock. The lock order is workspace lease -> project lease -> journal lock ->
+  database transaction.
 - No raw snippets, metavariables, upstream fingerprints, credentials, absolute host paths, or arbitrary Semgrep JSON are persisted or returned.
 - No generated harness or real fuzzer is run on the host. Normal tests use fake/recording runtimes; the real Semgrep smoke gate runs only inside Docker.
 - All Rust production changes follow Red -> Green -> Refactor and contain no inline lint suppression.
@@ -42,7 +52,7 @@
 | Runtime profile | `crates/hf-core/src/runtime.rs`, `crates/hf-runtime/src/docker.rs` | Per-operation PIDs tightening in the existing structured sandbox options. |
 | Bundled toolchain | `third_party/semgrep-rules/**`, `docker/sandbox/semgrep/scan.sh`, `scripts/update-semgrep-rules.sh`, `scripts/semgrep-tree-digest.py`, `docker/sandbox/Dockerfile`, `scripts/build-sandbox.sh` | Reviewed rule snapshot, license provenance, fixed command wrapper, image build verification, and container-only smoke gate. |
 | Storage | `crates/hf-storage/migrations/0022_semgrep_enrichment.sql`, `crates/hf-storage/src/store.rs`, `crates/hf-storage/src/lib.rs`, `crates/hf-storage/tests/store.rs` | Durable operation records, findings, scores, atomic publish/compensation, and latest-overlay reads. |
-| Recovery | `crates/hf-service/src/semgrep_recovery.rs` | Synced per-operation JSONL journal with open, ready-to-commit, successful-close, and terminal-abort records. |
+| Recovery | `crates/hf-service/src/semgrep_recovery.rs` | Cross-process-locked, synced per-operation JSONL journal with open, ready-to-commit, successful-close, and terminal-abort records. |
 | Service | `crates/hf-service/src/semgrep.rs`, `crates/hf-service/src/container.rs`, `crates/hf-service/src/lib.rs`, `crates/hf-service/src/agent.rs`, `crates/hf-service/src/scheduler.rs`, `crates/hf-service/src/workbench.rs` | Admission, staging, runtime invocation, cancellation, atomic completion, recovery, staleness, DTOs, and all effective-ranking consumers. |
 | Feature wiring | `crates/hf-discovery/Cargo.toml`, `crates/hf-service/Cargo.toml`, `crates/hf-cli/Cargo.toml`, `crates/hf-web/Cargo.toml`, `crates/hf-gui/src-tauri/Cargo.toml` | Compile-time inclusion in normal products and exclusion from no-default builds. |
 | Presentations | `crates/hf-cli/src/main.rs`, `crates/hf-web/src/router.rs`, `crates/hf-web/tests/api.rs`, `crates/hf-gui/src-tauri/src/commands.rs`, `crates/hf-gui/src-tauri/src/lib.rs`, `crates/hf-gui/src/lib/httpTransport.ts`, `crates/hf-gui/src/types/index.ts`, `crates/hf-gui/src/views/DiscoverView.tsx` | Explicit start/status/cancel/result transport and advisory rendering without scoring logic. |
@@ -1709,6 +1719,503 @@ git add crates/hf-service/src/semgrep.rs crates/hf-service/src/semgrep_recovery.
   crates/hf-service/src/agent.rs \
   crates/hf-service/src/scheduler.rs crates/hf-service/src/workbench.rs
 git commit -m "feat: publish and consume current Semgrep overlays"
+```
+
+---
+
+### Task 11A: Make Live-Operation Ownership Cross-Process Safe
+
+Tasks 11A-11E are the approved post-review correction to Tasks 10-11. Their
+lease timing, lazy replay, finalizing registry, and close-gated status rules
+supersede any earlier step that describes late workspace-lease acquisition,
+eager bootstrap replay, reservation removal at completion claim, or direct
+database-`done` status exposure.
+
+**Files:**
+- Modify: `crates/hf-service/src/container.rs`
+- Modify: `crates/hf-service/src/semgrep.rs`
+- Test: `crates/hf-service/src/semgrep.rs`
+
+**Interfaces:**
+- Consumes: `WorkspaceOperationLease`, `WorkspaceCleanupLease`, the canonical
+  project path, and the existing process-local Semgrep reservation.
+- Produces:
+
+```rust
+pub(crate) struct SemgrepProjectLease {
+    _system_guard: std::fs::File,
+}
+
+enum StartupRecoveryOutcome {
+    Recovered,
+    Deferred,
+}
+
+async fn recover_semgrep_at_bootstrap(
+    store: &hf_storage::Store,
+    semgrep: &SemgrepCoordinator,
+    workspace: &Path,
+) -> Result<StartupRecoveryOutcome, ClassifiedError>;
+```
+
+- [ ] **Step 1: Write failing real-process ownership tests**
+
+Add Unix tests named
+`bootstrap_recovery_defers_while_another_process_holds_a_live_workspace_lease`
+and `project_lease_rejects_the_same_project_across_processes`. Follow the
+existing `current_exe() --exact <child-test>` pattern. The first child acquires
+`acquire_workspace_operation_at(workspace)`, signals readiness through a pipe,
+and retains the lease. The parent creates a staging row, an open journal, and
+the exact operation directory, then invokes `recover_semgrep_at_bootstrap`.
+Assert:
+
+```rust
+assert_eq!(outcome, StartupRecoveryOutcome::Deferred);
+assert_eq!(
+    store.semgrep_run(operation_id).await.unwrap().unwrap().status,
+    SemgrepRunStatus::Staging
+);
+assert!(operation_root.exists());
+assert_eq!(journal.interrupted().unwrap().len(), 1);
+```
+
+The project-lease child retains the digest-keyed lock for one canonical
+project. The parent must receive the existing bounded `busy` validation error
+for that project and must acquire a lease for a different project.
+
+- [ ] **Step 2: Run the process tests and verify red**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  bootstrap_recovery_defers_while_another_process_holds_a_live_workspace_lease \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment \
+  project_lease_rejects_the_same_project_across_processes \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: FAIL because admission does not yet own either lease before its
+durable writes and bootstrap recovery does not take the exclusive lease.
+
+- [ ] **Step 3: Implement early workspace and project ownership**
+
+Create the project lock beside existing workspace lock files using a SHA-256 of
+the canonical project path, a fixed `semgrep-project-<digest>.lock` filename,
+`create(true)`, `truncate(false)`, and an exclusive nonblocking file lock. Map
+lock contention to `semgrep_validation("busy")`.
+
+In `start_semgrep_enrichment`, finish nondurable authorization and image
+resolution first. Then take the shared workspace lease and project lease,
+recheck `ensure_recovery_healthy`, reserve the process-local operation, and
+only then insert the row and append journal `Begin`. Move both lease guards
+into `run_semgrep_scan` and retain them until its active guard drops after
+cleanup and close or abort. Remove the worker's late workspace-lease
+acquisition.
+
+In bootstrap, call `recover_semgrep_at_bootstrap`. It must take the matching
+exclusive workspace lease before calling `recover_interrupted` and retain it
+through recovery. A contended lease returns `Deferred`, marks that container's
+Semgrep recovery state unavailable for new starts, and does not inspect the
+journal.
+
+- [ ] **Step 4: Run the ownership tests and service lifecycle tests**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::process_lease_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::lifecycle_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/hf-service/src/container.rs crates/hf-service/src/semgrep.rs
+git commit -m "fix: protect live Semgrep operations across processes"
+```
+
+---
+
+### Task 11B: Serialize Persistent Journal Transactions Across Processes
+
+**Files:**
+- Modify: `crates/hf-service/src/semgrep_recovery.rs`
+- Test: `crates/hf-service/src/semgrep_recovery.rs`
+
+**Interfaces:**
+- Consumes: the securely opened persistent journal-directory descriptor and
+  the existing process-local `SharedJournalState::operation_lock`.
+- Produces: a fixed `.semgrep-journal.lock` file, opened relative to the
+  journal-directory descriptor with no symlink following, whose exclusive
+  advisory lock covers one complete replay/validate/read/append transaction.
+
+- [ ] **Step 1: Write failing multi-process journal tests**
+
+Add Unix tests
+`process_close_and_abort_serialize_to_one_terminal_outcome` and
+`process_replay_waits_for_a_complete_append_transaction`. Use child tests
+started through `current_exe() --exact`. Pause a child close after lifecycle
+validation but before append while it owns the journal transaction lock. Start
+the competing abort in another process, release the child, and assert:
+
+```rust
+assert!(reopened.is_closed(operation_id).unwrap());
+assert!(reopened.interrupted().unwrap().is_empty());
+assert!(abort_status.success()); // child proves the transition was rejected, not appended
+```
+
+The replay test pauses one operation append at the same point and proves a
+second process cannot report directory corruption or observe the half-finished
+transaction.
+
+- [ ] **Step 2: Run the journal process tests and verify red**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep_recovery::tests::process_ \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: FAIL because `SharedJournalState::operation_lock` is process-local.
+
+- [ ] **Step 3: Add the descriptor-opened advisory lock**
+
+Open or create `.semgrep-journal.lock` with `openat` against the already
+validated journal directory, `NOFOLLOW`, owner read/write permissions, and no
+truncate. Verify that the opened entry is a regular file and that its pathname
+still names the opened inode. Exclude exactly this filename from
+`read_all_journals` and `validate_all_journals`; continue rejecting every other
+unexpected directory entry.
+
+After taking `SharedJournalState::operation_lock`, take the advisory lock before
+initial replay and before each call path that performs
+replay/validate/read/append. Retain it until the complete transaction and
+directory sync finish. Release it before the process mutex. No journal method
+may acquire a workspace or project lease. Persistent construction opens and
+validates only the journal-directory and lock-file descriptors; it must not
+enumerate operation journals. Bootstrap's first lifecycle replay therefore
+occurs only inside the workspace recovery lease added by Task 11A.
+
+- [ ] **Step 4: Run journal tests**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep_recovery::tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: PASS, including the existing thread races and new process races.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/hf-service/src/semgrep_recovery.rs
+git commit -m "fix: lock Semgrep journal transactions across processes"
+```
+
+---
+
+### Task 11C: Preserve Historical Results When the Live Inventory Is Empty
+
+**Files:**
+- Modify: `crates/hf-service/src/semgrep.rs`
+- Test: `crates/hf-service/src/semgrep.rs`
+
+**Interfaces:**
+- Consumes: persisted target rows and an exact completed Semgrep publication.
+- Produces:
+
+```rust
+async fn load_current_inventory(
+    store: &hf_storage::Store,
+    canonical_project: &Path,
+    language: TargetLanguage,
+    require_nonempty: bool,
+) -> Result<TargetInventory, ClassifiedError>;
+```
+
+- [ ] **Step 1: Write failing empty-inventory and readable-status tests**
+
+Add tests
+`exact_result_with_deleted_inventory_is_findings_preserving_stale_base`,
+`exact_result_with_reclassified_inventory_is_findings_preserving_stale_base`,
+and `operation_status_survives_result_reconstruction_failure`. Complete and
+close a publication with at least one matched and one unmatched finding, then
+delete or reclassify every same-language target. Assert:
+
+```rust
+let exact = service.semgrep_result(operation_id).await.unwrap().unwrap();
+assert_eq!(exact.overlay_state, SemgrepOverlayState::StaleBase);
+assert!(exact.candidates.is_empty());
+assert_eq!(exact.findings.len(), 2);
+
+let parent = service.semgrep_operation(operation_id).await.unwrap().unwrap();
+assert_eq!(parent.state, SemgrepOperationState::Done);
+```
+
+For the third test, rename the test database's `targets` table after publishing
+and closing the operation:
+
+```rust
+sqlx::query("ALTER TABLE targets RENAME TO targets_unavailable")
+    .execute(store.pool())
+    .await
+    .unwrap();
+```
+
+The parent `semgrep_enrichment_runs` row remains readable while
+`list_all_targets` fails. Assert the parent operation is returned with
+`result == None`.
+
+- [ ] **Step 2: Run the focused tests and verify red**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  findings_preserving_stale_base \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment \
+  operation_status_survives_result_reconstruction_failure \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: FAIL because the shared inventory loader rejects an empty set and
+status propagates exact-result reconstruction errors.
+
+- [ ] **Step 3: Split scan-time and result-time inventory requirements**
+
+Use `require_nonempty: true` for admission and scan execution. Use
+`require_nonempty: false` for exact result reconstruction, then pass the empty
+inventory through the existing overlay validator so its candidate-ID/count
+mismatch produces `StaleBase` while retaining findings. In
+`semgrep_operation`, catch reconstruction errors, emit only bounded structured
+diagnostics, and return the parent with `result: None`.
+
+- [ ] **Step 4: Run effective-result tests**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::effective_inventory_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/hf-service/src/semgrep.rs
+git commit -m "fix: retain Semgrep history for empty inventories"
+```
+
+---
+
+### Task 11D: Prove Cleanup Absence from the Workspace Descriptor
+
+**Files:**
+- Modify: `crates/hf-service/src/semgrep.rs`
+- Test: `crates/hf-service/src/semgrep.rs`
+
+**Interfaces:**
+- Consumes: the canonical managed workspace and exact
+  `workspace/semgrep/<operation-uuid>` path.
+- Produces: cleanup that opens the managed workspace with `O_NOFOLLOW`,
+  verifies pathname/descriptor identity, and uses `openat` for both the
+  `semgrep` parent and operation child.
+
+- [ ] **Step 1: Write failing replacement and recreation race tests**
+
+Add Unix tests
+`cleanup_rejects_workspace_replacement_while_proving_semgrep_absent`,
+`cleanup_rejects_semgrep_parent_recreation_while_proving_absence`, and
+`cleanup_accepts_descriptor_proven_missing_semgrep_parent`. Add test-only hooks
+immediately before the `semgrep`-parent open and before the final workspace
+identity check. Assert that both races return a sandbox-validation error and
+that the newly created operation directory remains untouched. The stable
+absence case returns `Ok(())`.
+
+- [ ] **Step 2: Run cleanup race tests and verify red**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  cleanup_rejects_ \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: FAIL because the missing-parent branch currently returns from
+path-based `symlink_metadata(...)=NotFound`.
+
+- [ ] **Step 3: Replace the path-based early return**
+
+Open the workspace descriptor first with
+`RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC`, verify it matches the canonical
+workspace pathname, and call
+`openat(workspace_fd, "semgrep", RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC)`.
+Treat `ENOENT` as success only after a second workspace pathname/descriptor
+identity check. If the parent opens, retain its descriptor and identity through
+the existing exact-child absence proof or removal and parent sync. Reject
+symlinks, non-directories, replaced ancestors, and a child that appears during
+the proof.
+
+- [ ] **Step 4: Run all snapshot and cleanup tests**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::snapshot_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/hf-service/src/semgrep.rs
+git commit -m "fix: prove Semgrep cleanup paths by descriptor"
+```
+
+---
+
+### Task 11E: Linearize Terminal Visibility and Finalizing Admission
+
+**Files:**
+- Modify: `crates/hf-service/src/semgrep.rs`
+- Test: `crates/hf-service/src/semgrep.rs`
+
+**Interfaces:**
+- Consumes: database run state, `SemgrepJournal::is_closed`, the process-local
+  reservation, and the cross-process project lease from Task 11A.
+- Produces:
+
+```rust
+enum ActiveSemgrepOperation {
+    Cancellable {
+        operation_id: Uuid,
+        cancellation: CancellationToken,
+    },
+    Finalizing {
+        operation_id: Uuid,
+    },
+}
+```
+
+- [ ] **Step 1: Write failing finalization-window tests**
+
+Add tests
+`done_database_row_is_reported_persisting_until_close`,
+`same_project_start_is_busy_until_close`,
+`finalizing_operation_is_inactive_for_cancel_but_active_for_status`, and
+`externally_observed_done_never_regresses_to_failed`. Pause the worker at
+`CompletionPausePoint::BeforeClose`, then assert:
+
+```rust
+let view = service.semgrep_operation(operation_id).await.unwrap().unwrap();
+assert_eq!(view.state, SemgrepOperationState::Persisting);
+assert!(view.active);
+assert_eq!(
+    service.cancel_semgrep_enrichment(operation_id).await.unwrap(),
+    SemgrepCancelOutcome::Inactive
+);
+assert!(service
+    .start_semgrep_enrichment(project.clone(), TargetLanguage::C)
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("busy"));
+```
+
+Release close and assert the next visible terminal state is `Done`. In the
+cleanup-failure case, assert polling sees `Persisting` followed by `Failed` and
+never `Done`.
+
+- [ ] **Step 2: Run finalization tests and verify red**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::terminal_visibility_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: FAIL because completion currently removes the reservation and status
+maps the database `done` state directly to external `Done`.
+
+- [ ] **Step 3: Preserve and expose finalization correctly**
+
+Change `claim_completion` to atomically read cancellation and replace the
+matching `Cancellable` entry with `Finalizing`. `cancel` returns inactive for
+`Finalizing`, `reserve` treats both variants as busy, `is_active` returns true
+for both, and `ActiveSemgrepGuard::drop` remains the only successful-removal
+path.
+
+In `semgrep_operation`, map a database `Done` row to external `Done` only when
+`journal.is_closed(operation_id) == Ok(true)`. Otherwise report `Persisting`.
+Return its findings-preserving `IncompleteJournal` result when reconstruction
+succeeds and `None` when reconstruction itself fails. Keep failed/cancelled
+mapping unchanged.
+
+- [ ] **Step 4: Run cancellation, publication, and terminal tests**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::lifecycle_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+cargo test -p hf-service --features semgrep-enrichment \
+  semgrep::publication_tests \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Run the complete Task 11 regression suite**
+
+Run:
+
+```bash
+set -o pipefail
+cargo test -p hf-service --features semgrep-enrichment \
+  2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/hf-service/src/semgrep.rs
+git commit -m "fix: linearize Semgrep terminal visibility"
 ```
 
 ---

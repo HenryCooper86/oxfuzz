@@ -333,11 +333,16 @@ The `semgrep-enrichment` feature is enabled by default in normal product crates;
 `--no-default-features` excludes the integration and every Semgrep presentation
 entrypoint.
 
-The service takes the shared workspace lease for the complete operation and
-creates a source snapshot from the canonical C/C++ discovery set. Every input
-must be a regular, non-symlink file below the canonical project root and remain
-stable while copied. The normalized relative path and source snapshot bounds
-are:
+The service takes the shared workspace lease before the first Semgrep database
+or journal write, transfers it into the background worker, and retains it
+through cleanup and journal close or abort. It also retains an exclusive
+digest-keyed cross-process project lease for that interval so the one-active
+project rule remains true while a published database row is `done` but not yet
+durably closed. Admission rechecks recovery health after taking both leases.
+The service then creates a source snapshot from the canonical C/C++ discovery
+set. Every input must be a regular, non-symlink file below the canonical
+project root and remain stable while copied. The normalized relative path and
+source snapshot bounds are:
 
 - 25,000 files;
 - 2 MiB per file;
@@ -373,6 +378,25 @@ the journal in `ready_to_commit` through cleanup means a cleanup, close, or
 compensation failure remains recoverable and cannot expose a
 `done`-plus-closed overlay.
 
+The database `done` state is internal until the journal close is verifiable.
+The process-local reservation moves from cancellable to finalizing at the
+completion claim and remains busy until terminal journal persistence. During
+that interval, status reports `persisting`, cancellation reports inactive, and
+the project lease rejects competing starts from other processes. Only a
+successfully closed publication is externally `done`; an externally observed
+success cannot later regress because cleanup compensation ran.
+
+Every persistent journal replay or transition is serialized by an exclusive
+advisory lock on a fixed, securely descriptor-opened lock file in the journal
+directory. Initial replay and each replay/validate/read/append transaction hold
+the lock for the complete transaction. Journal construction opens and validates
+only the directory and lock descriptors; operation enumeration is lazy, so
+bootstrap's first replay occurs after it owns the workspace recovery lease. The
+fixed lock entry is excluded from operation-journal enumeration. The global
+lock order is workspace lease, project lease, journal lock, then database
+transaction. Result-only reads take only the journal lock and never acquire an
+earlier lease afterward.
+
 The successful close record is deliberately distinct from a terminal abort
 record. After a failed/cancelled database transition or a recovery
 compensation is durable, the service may append a synced abort from either the
@@ -396,6 +420,13 @@ before appending the terminal abort. Failed and explicitly cancelled runs
 publish no finding or score rows. If compensation or cleanup cannot be made
 durable, the journal remains unclosed so startup recovery can repair the run.
 
+Startup recovery takes the exclusive workspace recovery lease before journal
+replay and retains it through database repair, cleanup, and terminal abort. If
+a live process holds a shared workspace lease, recovery is deferred without
+reading or mutating the journal and the new container rejects Semgrep starts.
+The corresponding live operation acquired its shared lease before its database
+insert and journal open, so bootstrap cannot misclassify it as interrupted.
+
 Recovery cleanup is idempotent. Descriptor-relative validation must prove
 either that the exact `workspace/semgrep/<operation-uuid>` directory was
 removed and its parent synced or that this exact UUID child is already absent
@@ -403,7 +434,9 @@ beneath validated, non-symlink ancestors. An absent staging directory is
 expected after a crash between cleanup and close; ambiguous or replaced
 ancestors remain errors. An absent `semgrep` child beneath the validated
 managed workspace is also proven absence for an operation that failed before
-staging created that parent.
+staging created that parent, but only through `openat` on a retained workspace
+descriptor followed by a pathname/descriptor identity post-check. A path-based
+`NotFound` is never sufficient evidence.
 
 Every ranking consumer asks `hf-service` for `SemgrepInventoryView`; clients do
 not join or rescore results. A result reader accepts an overlay only when the
@@ -419,6 +452,12 @@ the current candidate base score. A mismatch makes it stale: the historical
 scan remains queryable, but effective ranking immediately uses base scores
 only. Repeated successful scans recompute from the current immutable base
 inventory and never compound prior boosts.
+
+Exact historical reconstruction permits an empty current same-language
+inventory and reports a findings-preserving `StaleBase` view. Admission still
+requires at least one persisted candidate. If reconstruction fails for another
+reason, the status endpoint still returns the parent operation and uses a null
+result rather than hiding the lifecycle row.
 
 ## 5. Sub-Agents
 
