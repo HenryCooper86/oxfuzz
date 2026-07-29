@@ -5,11 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Tauri v2 desktop GUI for oxfuzz"
 
-# Automotive on by default; `--no-default-features` drops it (see hf-cli note).
+# Product capabilities are on by default; `--no-default-features` drops their
+# presentation entrypoints.
 [features]
-default = ["automotive-scapy", "proof-carrying"]
+default = ["automotive-scapy", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["hf-service/automotive-scapy"]
 proof-carrying = ["hf-service/proof-carrying"]
+semgrep-enrichment = ["hf-service/semgrep-enrichment"]
 
 [lib]
 name = "hf_gui_lib"

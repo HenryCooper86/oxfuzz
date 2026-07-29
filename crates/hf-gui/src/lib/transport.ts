@@ -19,6 +19,12 @@ export interface RunStartResponse {
   status: RunLifecycleStatus;
 }
 
+/** Accepted response from the asynchronous `POST /semgrep/enrich` contract. */
+export interface SemgrepStartResponse {
+  operation_id: string;
+  state: "staging";
+}
+
 /** Durable lifecycle snapshot returned by `GET /runs/{id}/status`. */
 export interface RunControlStatus {
   run_id: string;

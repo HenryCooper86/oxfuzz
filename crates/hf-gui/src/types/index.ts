@@ -72,6 +72,69 @@ export interface TargetInventory {
   call_graph?: Record<string, string[]>;
 }
 
+export type SemgrepOperationState =
+  | "staging"
+  | "scanning"
+  | "validating"
+  | "persisting"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export type SemgrepOverlayState =
+  | "none"
+  | "current"
+  | "stale_source"
+  | "stale_base"
+  | "incomplete_journal";
+
+export type SemgrepCancelOutcome = "accepted" | "inactive" | "not_found";
+
+export interface SemgrepOperationView {
+  operation_id: string;
+  project_root: string;
+  language: "c" | "cpp";
+  state: SemgrepOperationState;
+  active: boolean;
+  started_at: string;
+  ended_at: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  result: SemgrepInventory | null;
+}
+
+export interface SemgrepTargetCandidate extends TargetCandidate {
+  base_score: number;
+  semgrep_boost: number;
+  effective_score: number;
+  semgrep_matched_rule_count: number;
+}
+
+export interface SemgrepFinding {
+  fingerprint: string;
+  rule_id: string;
+  severity: "error" | "warning" | "info";
+  message: string;
+  relative_file: string;
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+  matched_target_id: string | null;
+  nominal_weight: number;
+}
+
+export interface SemgrepInventory {
+  project_root: string;
+  language: "c" | "cpp";
+  scan_id: string | null;
+  source_sha256: string | null;
+  overlay_state: SemgrepOverlayState;
+  candidates: SemgrepTargetCandidate[];
+  findings: SemgrepFinding[];
+  call_graph: Record<string, string[]>;
+}
+
 export interface CorpusEntry {
   path: string;
   sha256: string;

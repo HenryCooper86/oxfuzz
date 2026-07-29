@@ -44,6 +44,9 @@ use commands::{
     verify_crash, workbench_dashboard, write_config,
 };
 
+#[cfg(feature = "semgrep-enrichment")]
+use commands::{semgrep_cancel, semgrep_enrich, semgrep_status};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Run the Tauri GUI application.
 ///
@@ -63,6 +66,12 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             discover,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep_enrich,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep_status,
+            #[cfg(feature = "semgrep-enrichment")]
+            semgrep_cancel,
             open_folder_dialog,
             open_file_dialog,
             harness_draft,

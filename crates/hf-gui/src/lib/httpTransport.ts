@@ -6,6 +6,7 @@ import type {
   RunLifecycleStatus,
   RunStartResponse,
   RunStatusEvent,
+  SemgrepStartResponse,
   Transport,
   UnlistenFn,
 } from "./transport";
@@ -22,6 +23,12 @@ interface HttpTransportOptions {
 
 const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   discover: { method: "POST", path: "/discover" },
+  semgrep_enrich: { method: "POST", path: "/semgrep/enrich" },
+  semgrep_status: { method: "GET", path: "/semgrep/enrich/{operation_id}" },
+  semgrep_cancel: {
+    method: "POST",
+    path: "/semgrep/enrich/{operation_id}/cancel",
+  },
   harness_draft: { method: "POST", path: "/harness/draft" },
   harness_compile: { method: "POST", path: "/harness/compile" },
   harness_smoke: { method: "POST", path: "/harness/smoke" },
@@ -230,6 +237,18 @@ function serviceRunId(start: RunStartResponse): string {
   return start.run_id;
 }
 
+function serviceSemgrepOperationId(start: SemgrepStartResponse): string {
+  if (
+    typeof start.operation_id !== "string"
+    || start.operation_id.trim().length === 0
+  ) {
+    throw new Error(
+      "POST /semgrep/enrich did not return a service-owned operation id",
+    );
+  }
+  return start.operation_id;
+}
+
 function isTerminalStatus(status: RunLifecycleStatus): boolean {
   return status === "done" || status === "failed" || status === "cancelled";
 }
@@ -374,10 +393,21 @@ export function createHttpTransport(options: HttpTransportOptions = {}): Transpo
     return response.accepted ? 1 : 0;
   }
 
+  async function startSemgrep(
+    args?: Record<string, unknown>,
+  ): Promise<string> {
+    const start = await request<SemgrepStartResponse>(
+      COMMAND_MAP.semgrep_enrich,
+      args,
+    );
+    return serviceSemgrepOperationId(start);
+  }
+
   return {
     async invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T> {
       if (command === "run_fuzzer") return runFuzzer(args) as Promise<T>;
       if (command === "cancel_run") return cancelActiveRun() as Promise<T>;
+      if (command === "semgrep_enrich") return startSemgrep(args) as Promise<T>;
       const endpoint = COMMAND_MAP[command];
       if (!endpoint) {
         // Lifecycle/noop commands return undefined in web mode.
