@@ -6925,16 +6925,122 @@ mod lifecycle_tests {
 
 #[cfg(test)]
 mod terminal_visibility_tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use hf_core::target::TargetLanguage;
     use hf_storage::SemgrepRunStatus;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     use super::lifecycle_tests::{
         lifecycle_test_lock, persistent_service, project_fixture, save_inventory, wait_for_pause,
         wait_for_state, RecordingRuntime, RuntimeBehavior,
     };
-    use super::{CompletionPausePoint, SemgrepCancelOutcome, SemgrepOperationState};
+    use super::{
+        ActiveSemgrepGuard, ActiveSemgrepOperation, CompletionPausePoint, SemgrepCancelOutcome,
+        SemgrepCoordinator, SemgrepOperationState,
+    };
+
+    #[test]
+    fn finalizing_registry_claim_blocks_same_project_reservation() {
+        let coordinator = Arc::new(SemgrepCoordinator::in_memory());
+        let project = PathBuf::from("project");
+        let operation_id = Uuid::new_v4();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        coordinator
+            .reserve(&project, operation_id, cancellation)
+            .unwrap();
+        let guard = ActiveSemgrepGuard {
+            coordinator: Arc::clone(&coordinator),
+            project: project.clone(),
+            operation_id,
+        };
+
+        assert!(coordinator.claim_completion(&project, operation_id));
+        {
+            let active = coordinator.active.lock().unwrap();
+            assert!(matches!(
+                active.get(&project),
+                Some(ActiveSemgrepOperation::Finalizing {
+                    operation_id: active_id
+                }) if *active_id == operation_id
+            ));
+        }
+        let successor_id = Uuid::new_v4();
+        let error = coordinator
+            .reserve(&project, successor_id, CancellationToken::new())
+            .unwrap_err();
+        assert!(error.to_string().contains("busy"));
+        assert_eq!(
+            coordinator.active_operation_for_project(&project),
+            Some(operation_id)
+        );
+
+        drop(guard);
+        assert!(!coordinator.is_active(operation_id));
+        coordinator
+            .reserve(&project, successor_id, CancellationToken::new())
+            .unwrap();
+        assert_eq!(
+            coordinator.active_operation_for_project(&project),
+            Some(successor_id)
+        );
+        coordinator.release(&project, successor_id);
+    }
+
+    #[test]
+    fn finalizing_registry_ignores_mismatched_claims_and_releases() {
+        let coordinator = Arc::new(SemgrepCoordinator::in_memory());
+        let project = PathBuf::from("project");
+        let operation_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        coordinator
+            .reserve(&project, operation_id, CancellationToken::new())
+            .unwrap();
+        let matching_guard = ActiveSemgrepGuard {
+            coordinator: Arc::clone(&coordinator),
+            project: project.clone(),
+            operation_id,
+        };
+
+        assert!(!coordinator.claim_completion(&project, other_id));
+        {
+            let active = coordinator.active.lock().unwrap();
+            assert!(matches!(
+                active.get(&project),
+                Some(ActiveSemgrepOperation::Cancellable {
+                    operation_id: active_id,
+                    ..
+                }) if *active_id == operation_id
+            ));
+        }
+        assert!(!coordinator.claim_completion(&project, operation_id));
+        assert!(!coordinator.claim_completion(&project, operation_id));
+        assert!(!coordinator.claim_completion(&project, other_id));
+        coordinator.release(&project, other_id);
+        {
+            let mismatched_guard = ActiveSemgrepGuard {
+                coordinator: Arc::clone(&coordinator),
+                project: project.clone(),
+                operation_id: other_id,
+            };
+            drop(mismatched_guard);
+        }
+        {
+            let active = coordinator.active.lock().unwrap();
+            assert!(matches!(
+                active.get(&project),
+                Some(ActiveSemgrepOperation::Finalizing {
+                    operation_id: active_id
+                }) if *active_id == operation_id
+            ));
+        }
+
+        drop(matching_guard);
+        assert_eq!(coordinator.active_operation_for_project(&project), None);
+    }
 
     #[tokio::test]
     async fn done_database_row_is_reported_persisting_until_close() {
