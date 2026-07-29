@@ -39,6 +39,10 @@ pub mod report_store;
 pub mod repro;
 pub mod sarif;
 pub mod scheduler;
+#[cfg(feature = "semgrep-enrichment")]
+pub mod semgrep;
+#[cfg(feature = "semgrep-enrichment")]
+pub mod semgrep_recovery;
 pub mod system;
 mod syzkaller;
 pub mod verification;
@@ -55,7 +59,9 @@ pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
 pub use hf_core::provider::ProviderStatus;
-pub use hf_core::runtime::CommandTermination;
+pub use hf_core::runtime::{
+    CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
+};
 pub use hf_core::target::{TargetInventory, TargetLanguage};
 pub use hf_core::types::{Message, ProviderId, Role, SessionId};
 pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};
@@ -81,6 +87,11 @@ pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert
 pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
 pub use report_store::ReportDraft;
+#[cfg(feature = "semgrep-enrichment")]
+pub use semgrep::{
+    SemgrepCancelOutcome, SemgrepFindingView, SemgrepInventoryView, SemgrepOperationState,
+    SemgrepOperationView, SemgrepOverlayState, SemgrepTargetView,
+};
 pub use system::{system_status, SystemStatus};
 pub use workbench::{
     CrashReviewItem, HarnessReviewItem, IssueExport, WorkbenchDashboard, WorkbenchReadiness,

@@ -173,6 +173,7 @@ const en: Dict = {
   "composer.placeholder": "Type a message…",
   "composer.placeholderPlan": "Describe the goal — the agent will plan first…",
   "common.noProject": "No project",
+  "discover.semgrepSignals": "Semgrep static-analysis signals",
 };
 
 const zh: Dict = {
@@ -329,6 +330,7 @@ const zh: Dict = {
   "composer.placeholder": "输入消息…",
   "composer.placeholderPlan": "描述目标——助手会先制定计划…",
   "common.noProject": "未选择项目",
+  "discover.semgrepSignals": "Semgrep static-analysis signals",
 
   // Dashboard readiness -- localized from the backend's stable state/blocker/
   // action codes (see workbench.rs). English intentionally has no entries here:

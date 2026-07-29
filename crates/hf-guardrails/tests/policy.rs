@@ -11,6 +11,24 @@ fn run_fuzzer() -> Action {
     }
 }
 
+fn analyze_source() -> Action {
+    Action::AnalyzeSource {
+        analyzer: "semgrep".to_owned(),
+    }
+}
+
+#[test]
+fn analyze_source_has_stable_medium_risk_contract() {
+    let action = analyze_source();
+    assert_eq!(action.kind(), "analyze_source");
+    assert_eq!(action.label(), "analyze source with semgrep");
+    assert_eq!(action.risk(), RiskTier::Medium);
+    assert_eq!(
+        GuardrailPolicy::default().evaluate(&action),
+        Decision::Allow
+    );
+}
+
 #[test]
 fn risk_tiers_are_ordered() {
     assert!(RiskTier::Low < RiskTier::Medium);

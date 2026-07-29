@@ -24,6 +24,8 @@ fn sample_target() -> TargetCandidate {
             file: PathBuf::from("src/parse.c"),
             line: 42,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some("int parse_header(const uint8_t*, size_t)".to_owned()),
         input_surface: InputSurface::Bytes,

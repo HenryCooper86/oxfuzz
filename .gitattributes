@@ -1,0 +1,2 @@
+# Preserve the exact pinned upstream rules snapshot without classifying its whitespace as errors.
+third_party/semgrep-rules/rules/c/** -whitespace

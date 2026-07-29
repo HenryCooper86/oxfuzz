@@ -4,6 +4,10 @@ export interface UnlistenFn {
   (): void;
 }
 
+export interface InvokeOptions {
+  signal?: AbortSignal;
+}
+
 /** Lifecycle values emitted by the service-owned web run controller. */
 export type RunLifecycleStatus =
   | "pending"
@@ -17,6 +21,12 @@ export type RunLifecycleStatus =
 export interface RunStartResponse {
   run_id: string;
   status: RunLifecycleStatus;
+}
+
+/** Accepted response from the asynchronous `POST /semgrep/enrich` contract. */
+export interface SemgrepStartResponse {
+  operation_id: string;
+  state: "staging";
 }
 
 /** Durable lifecycle snapshot returned by `GET /runs/{id}/status`. */
@@ -54,7 +64,11 @@ export interface FuzzerRunResult {
 }
 
 export interface Transport {
-  invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
+  invoke<T = unknown>(
+    command: string,
+    args?: Record<string, unknown>,
+    options?: InvokeOptions,
+  ): Promise<T>;
   listen<T = unknown>(event: string, callback: (event: { payload: T }) => void): Promise<UnlistenFn>;
 }
 

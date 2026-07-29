@@ -76,6 +76,8 @@ fn cand(symbol: &str) -> TargetCandidate {
             file: PathBuf::from("src/json.c"),
             line: 1,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some(format!("int {symbol}(const char*, size_t);")),
         input_surface: InputSurface::Bytes,

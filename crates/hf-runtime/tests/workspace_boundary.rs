@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use hf_core::runtime::{RuntimeAdapter, SandboxMount, SandboxOptions};
+use hf_core::{
+    error::ClassifiedError,
+    runtime::{RuntimeAdapter, SandboxMount, SandboxOptions},
+};
 use hf_runtime::config::RuntimeConfig;
 use hf_runtime::docker::DockerRuntime;
 
@@ -155,4 +158,31 @@ fn sandbox_rejects_an_unsafe_image_override_before_launch() {
     };
 
     assert!(runtime.validate_sandbox_options(&options).is_err());
+}
+
+#[test]
+fn specialized_profile_rejects_pid_limit_outside_configured_ceiling() {
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let runtime = DockerRuntime::new(
+        RuntimeConfig {
+            max_pids: 512,
+            ..RuntimeConfig::default()
+        },
+        &workspace,
+    );
+
+    for max_pids in [0, 513] {
+        let options = SandboxOptions {
+            max_pids: Some(max_pids),
+            ..SandboxOptions::default()
+        };
+
+        assert!(matches!(
+            runtime.validate_sandbox_options(&options),
+            Err(ClassifiedError::Sandbox(message))
+                if message == "sandbox PID limit must be between 1 and 512"
+        ));
+    }
 }

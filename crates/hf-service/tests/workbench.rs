@@ -39,6 +39,8 @@ fn sample_target(project: &str) -> TargetCandidate {
             file: PathBuf::from("src/parser.c"),
             line: 42,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some("int parse_packet(const uint8_t*, size_t)".to_owned()),
         input_surface: InputSurface::Bytes,

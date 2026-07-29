@@ -1,0 +1,6 @@
+{
+  "version": "1.169.0",
+  "results": [],
+  "errors": [{"type": "Parse error", "path": "src/parser.c"}],
+  "paths": {"scanned": ["src/parser.c"], "skipped": []}
+}

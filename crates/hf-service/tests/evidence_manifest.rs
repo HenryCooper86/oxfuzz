@@ -173,6 +173,8 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
             file: directory.path().join("parser.c"),
             line: 1,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: None,
         input_surface: InputSurface::Bytes,

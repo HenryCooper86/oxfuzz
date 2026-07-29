@@ -150,10 +150,11 @@ pub struct IssueExport {
 }
 
 /// Build dashboard data from persisted store state.
-pub async fn dashboard(
+pub async fn dashboard<S: std::hash::BuildHasher>(
     store: Option<&Store>,
     active_project: Option<&Path>,
     active_target: Option<&str>,
+    effective_score_by_target: HashMap<Uuid, f64, S>,
 ) -> Result<WorkbenchDashboard, ClassifiedError> {
     let project_filter = active_project.map(path_key);
     let project_filter_ref = project_filter.as_deref();
@@ -208,7 +209,7 @@ pub async fn dashboard(
     let target_ids_for_project: HashSet<Uuid> =
         project_scoped_targets.iter().map(|t| t.id).collect();
 
-    let filtered_targets: Vec<TargetCandidate> = targets
+    let mut filtered_targets: Vec<TargetCandidate> = targets
         .iter()
         .filter(|t| {
             project_matches(t.project_root.as_path(), project_filter_ref)
@@ -216,6 +217,22 @@ pub async fn dashboard(
         })
         .cloned()
         .collect();
+    filtered_targets.sort_by(|left, right| {
+        let left_effective = effective_score_by_target
+            .get(&left.id)
+            .copied()
+            .unwrap_or(left.fit_score);
+        let right_effective = effective_score_by_target
+            .get(&right.id)
+            .copied()
+            .unwrap_or(right.fit_score);
+        right_effective
+            .total_cmp(&left_effective)
+            .then_with(|| right.fit_score.total_cmp(&left.fit_score))
+            .then_with(|| left.relative_file().cmp(&right.relative_file()))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+            .then_with(|| left.id.cmp(&right.id))
+    });
     let target_ids_for_active_target: HashSet<Uuid> =
         filtered_targets.iter().map(|t| t.id).collect();
 
@@ -328,9 +345,11 @@ pub async fn harness_review_queue(
     active_project: Option<&Path>,
     active_target: Option<&str>,
 ) -> Result<Vec<HarnessReviewItem>, ClassifiedError> {
-    Ok(dashboard(store, active_project, active_target)
-        .await?
-        .harness_reviews)
+    Ok(
+        dashboard(store, active_project, active_target, HashMap::new())
+            .await?
+            .harness_reviews,
+    )
 }
 
 /// Build an issue draft for a persisted crash, targeting the configured issue
@@ -975,6 +994,13 @@ fn format_ts(ts: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_core::target::{
+        InputSurface, SourceLocation, TargetInventory, TargetKind, TargetLanguage,
+    };
+
+    fn assert_f64_eq(left: f64, right: f64) {
+        assert_eq!(left.to_bits(), right.to_bits());
+    }
 
     #[test]
     fn parses_gitlab_ssh_remote() {
@@ -987,5 +1013,59 @@ mod tests {
     #[test]
     fn percent_encoding_handles_markdown() {
         assert_eq!(percent_encode("a b/#"), "a%20b%2F%23");
+    }
+
+    #[tokio::test]
+    async fn dashboard_orders_by_effective_score_but_keeps_base_score() {
+        let root = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let store = Store::connect(root.path().join("workbench.db"))
+            .await
+            .unwrap();
+        let make = |symbol: &str, fit_score: f64| TargetCandidate {
+            id: Uuid::new_v4(),
+            project_root: project.clone(),
+            language: TargetLanguage::C,
+            symbol: symbol.to_owned(),
+            kind: TargetKind::Parser,
+            location: SourceLocation {
+                file: project.join(format!("{symbol}.c")),
+                line: 1,
+                col: 1,
+                end_line: Some(1),
+                end_col: Some(10),
+            },
+            signature: None,
+            input_surface: InputSurface::Bytes,
+            complexity: 1,
+            fit_score,
+            sanitizers: Vec::new(),
+            rationale: symbol.to_owned(),
+            reachable_functions: Vec::new(),
+            accumulated_complexity: 1,
+        };
+        let high_base = make("high_base", 0.9);
+        let boosted = make("boosted", 0.4);
+        store
+            .save_inventory(
+                &TargetInventory {
+                    project_root: project.clone(),
+                    candidates: vec![high_base.clone(), boosted.clone()],
+                    call_graph: HashMap::new(),
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let scores = HashMap::from([(high_base.id, 0.9), (boosted.id, 1.0)]);
+
+        let view = dashboard(Some(&store), Some(&project), None, scores)
+            .await
+            .unwrap();
+
+        assert_eq!(view.top_targets[0].id, boosted.id.to_string());
+        assert_f64_eq(view.top_targets[0].fit_score, 0.4);
+        assert_eq!(view.top_targets[1].id, high_base.id.to_string());
+        assert_f64_eq(view.top_targets[1].fit_score, 0.9);
     }
 }
