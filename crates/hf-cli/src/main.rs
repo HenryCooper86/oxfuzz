@@ -899,18 +899,33 @@ async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Resul
 }
 
 #[cfg(feature = "semgrep-enrichment")]
+async fn bootstrap_discover_service<S, Bootstrap, BootstrapFuture>(
+    lang: &str,
+    bootstrap: Bootstrap,
+) -> anyhow::Result<(TargetLanguage, S)>
+where
+    Bootstrap: FnOnce() -> BootstrapFuture,
+    BootstrapFuture: std::future::Future<Output = S>,
+{
+    let language = parse_lang(lang)?;
+    let service = bootstrap().await;
+    Ok((language, service))
+}
+
+#[cfg(feature = "semgrep-enrichment")]
 async fn cmd_discover(
     project: PathBuf,
     lang: &str,
     rank: bool,
     semgrep: bool,
 ) -> anyhow::Result<()> {
-    let container = ServiceContainer::bootstrap().await;
+    let (language, container) =
+        bootstrap_discover_service(lang, ServiceContainer::bootstrap).await?;
     let mut output = ConsoleDiscoverOutput;
     run_discover_command(
         &container,
         project,
-        parse_lang(lang)?,
+        language,
         rank,
         semgrep,
         &mut output,
@@ -2330,6 +2345,7 @@ mod semgrep_cli_tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use hf_service::{
@@ -2339,8 +2355,8 @@ mod semgrep_cli_tests {
     use uuid::Uuid;
 
     use super::{
-        run_discover_command, semgrep_poll_action, semgrep_state_name, DiscoverCommandOutput,
-        DiscoverCommandService, SemgrepPollAction,
+        bootstrap_discover_service, run_discover_command, semgrep_poll_action, semgrep_state_name,
+        DiscoverCommandOutput, DiscoverCommandService, SemgrepPollAction,
     };
 
     enum StatusStep {
@@ -2504,6 +2520,24 @@ mod semgrep_cli_tests {
 
     fn immediate_delay() -> impl Future<Output = ()> {
         std::future::ready(())
+    }
+
+    #[tokio::test]
+    async fn invalid_discovery_language_rejects_before_bootstrap_side_effects() {
+        let bootstrap_called = Arc::new(AtomicBool::new(false));
+        let called_from_bootstrap = Arc::clone(&bootstrap_called);
+
+        let error = bootstrap_discover_service("invalid", move || {
+            called_from_bootstrap.store(true, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unknown target language 'invalid'"));
+        assert!(!bootstrap_called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
