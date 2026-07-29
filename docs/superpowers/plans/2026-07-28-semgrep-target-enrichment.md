@@ -774,7 +774,12 @@ int parse_line(char *output) {
 }
 ```
 
-The clean fixture uses bounded `fgets(output, 32, stdin)` instead. Build and release verification must assert exactly one `raptor-insecure-api-gets` finding in `vulnerable.c` and none in `clean.c`; it must not accept an arbitrary non-empty result set.
+The clean fixture is a call-free bounded arithmetic function. Do not use
+`fgets` or another library call: the bundled audit rules intentionally report
+interesting API calls even when their use is bounded. Build and release
+verification must assert exactly one `raptor-insecure-api-gets` finding in
+`vulnerable.c` and no result from any rule in `clean.c`; it must not accept an
+arbitrary non-empty result set.
 
 - [ ] **Step 5: Install and build-verify the pinned toolchain**
 
