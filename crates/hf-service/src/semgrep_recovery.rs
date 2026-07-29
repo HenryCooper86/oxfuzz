@@ -20,6 +20,7 @@ const JOURNAL_VERSION: u32 = 1;
 const MAX_JOURNAL_BYTES: usize = 64 * 1024;
 const MAX_LINE_BYTES: usize = 16 * 1024;
 const MAX_LIFECYCLE_RECORDS: usize = 3;
+const TRANSACTION_LOCK_FILE: &str = ".semgrep-journal.lock";
 
 /// Provenance made durable immediately before atomic database publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +127,11 @@ struct SharedJournalState {
     durability_error: Mutex<Option<String>>,
 }
 
+struct PersistentJournalTransaction {
+    directory: Arc<File>,
+    _lock_file: File,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum JournalDirectoryAccess {
     Create,
@@ -212,11 +218,12 @@ impl SemgrepJournal {
             timestamp: Utc::now(),
         };
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated(JournalDirectoryAccess::Create)?;
+        let transaction = self.begin_transaction(JournalDirectoryAccess::Create)?;
         serialize_event(&event).map_err(|error| self.record_durability_failure(&error))?;
 
         if self.persistent {
-            self.create_operation_file(operation_id, &event)
+            let transaction = transaction.ok_or_else(|| self.current_durability_error())?;
+            self.create_operation_file(&transaction.directory, operation_id, &event)
         } else {
             let mut events = lock_recover(&self.memory_events);
             if events.contains_key(&operation_id) {
@@ -282,23 +289,27 @@ impl SemgrepJournal {
     /// Return whether the operation has its own complete, valid lifecycle.
     pub fn is_closed(&self, operation_id: Uuid) -> Result<bool, ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        let directory = self.ensure_revalidated(JournalDirectoryAccess::Existing)?;
-        if self.persistent && directory.is_none() {
+        let transaction = self.begin_transaction(JournalDirectoryAccess::Existing)?;
+        if self.persistent && transaction.is_none() {
             return Ok(false);
         }
-        let lifecycle = self.read_lifecycle(operation_id)?;
+        let lifecycle = self.read_lifecycle(
+            transaction
+                .as_ref()
+                .map(|transaction| transaction.directory.as_ref()),
+            operation_id,
+        )?;
         Ok(matches!(lifecycle, Some(OperationLifecycle::Closed)))
     }
 
     /// Return all valid operations that began but did not durably close.
     pub fn interrupted(&self) -> Result<Vec<InterruptedSemgrepOperation>, ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated(JournalDirectoryAccess::Create)?;
+        let transaction = self.begin_transaction(JournalDirectoryAccess::Create)?;
         let lifecycles = if self.persistent {
-            let handle = self
-                .directory_handle(JournalDirectoryAccess::Create)?
-                .ok_or_else(|| self.current_durability_error())?;
-            read_all_journals(&handle).map_err(|error| self.record_durability_failure(&error))?
+            let transaction = transaction.ok_or_else(|| self.current_durability_error())?;
+            read_all_journals(&transaction.directory)
+                .map_err(|error| self.record_durability_failure(&error))?
         } else {
             lock_recover(&self.memory_events)
                 .iter()
@@ -343,23 +354,23 @@ impl SemgrepJournal {
         allowed: impl FnOnce(&OperationLifecycle) -> bool,
     ) -> Result<(), ClassifiedError> {
         let _guard = lock_recover(&self.shared_state.operation_lock);
-        self.ensure_revalidated(JournalDirectoryAccess::Create)?;
+        let transaction = self.begin_transaction(JournalDirectoryAccess::Create)?;
         serialize_event(&event).map_err(|error| self.record_durability_failure(&error))?;
 
         if self.persistent {
-            let handle = self
-                .directory_handle(JournalDirectoryAccess::Create)?
-                .ok_or_else(|| self.current_durability_error())?;
-            let mut file =
-                open_operation_file(&handle, operation_id, OperationOpenMode::ReadAppend).map_err(
-                    |error| {
-                        if error.kind() == io::ErrorKind::NotFound {
-                            invalid_transition(operation_id, "operation was not opened")
-                        } else {
-                            self.record_durability_failure(&error)
-                        }
-                    },
-                )?;
+            let transaction = transaction.ok_or_else(|| self.current_durability_error())?;
+            let mut file = open_operation_file(
+                &transaction.directory,
+                operation_id,
+                OperationOpenMode::ReadAppend,
+            )
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    invalid_transition(operation_id, "operation was not opened")
+                } else {
+                    self.record_durability_failure(&error)
+                }
+            })?;
             let events = read_events_from_file(&mut file, operation_id)
                 .map_err(|error| self.record_durability_failure(&error))?;
             let state = replay_events(operation_id, &events)
@@ -370,7 +381,7 @@ impl SemgrepJournal {
                     "event is out of lifecycle order",
                 ));
             }
-            self.append_to_file(&handle, &mut file, operation_id, &event)
+            self.append_to_file(&transaction.directory, &mut file, operation_id, &event)
         } else {
             let mut events = lock_recover(&self.memory_events);
             let Some(existing) = events.get_mut(&operation_id) else {
@@ -391,13 +402,11 @@ impl SemgrepJournal {
 
     fn create_operation_file(
         &self,
+        directory: &File,
         operation_id: Uuid,
         event: &SemgrepJournalEvent,
     ) -> Result<(), ClassifiedError> {
-        let handle = self
-            .directory_handle(JournalDirectoryAccess::Create)?
-            .ok_or_else(|| self.current_durability_error())?;
-        let mut file = open_operation_file(&handle, operation_id, OperationOpenMode::Create)
+        let mut file = open_operation_file(directory, operation_id, OperationOpenMode::Create)
             .map_err(|error| {
                 if error.kind() == io::ErrorKind::AlreadyExists {
                     invalid_transition(operation_id, "duplicate open")
@@ -405,7 +414,7 @@ impl SemgrepJournal {
                     self.record_durability_failure(&error)
                 }
             })?;
-        self.append_to_file(&handle, &mut file, operation_id, event)
+        self.append_to_file(directory, &mut file, operation_id, event)
     }
 
     fn append_to_file(
@@ -449,18 +458,19 @@ impl SemgrepJournal {
 
     fn read_lifecycle(
         &self,
+        directory: Option<&File>,
         operation_id: Uuid,
     ) -> Result<Option<OperationLifecycle>, ClassifiedError> {
         if self.persistent {
-            let Some(handle) = self.directory_handle(JournalDirectoryAccess::Existing)? else {
+            let Some(directory) = directory else {
                 return Ok(None);
             };
-            let mut file = match open_operation_file(&handle, operation_id, OperationOpenMode::Read)
-            {
-                Ok(file) => file,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(self.record_durability_failure(&error)),
-            };
+            let mut file =
+                match open_operation_file(directory, operation_id, OperationOpenMode::Read) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(self.record_durability_failure(&error)),
+                };
             let events = read_events_from_file(&mut file, operation_id)
                 .map_err(|error| self.record_durability_failure(&error))?;
             replay_events(operation_id, &events)
@@ -524,18 +534,23 @@ impl SemgrepJournal {
         }
     }
 
-    fn ensure_revalidated(
+    fn begin_transaction(
         &self,
         access: JournalDirectoryAccess,
-    ) -> Result<Option<Arc<File>>, ClassifiedError> {
+    ) -> Result<Option<PersistentJournalTransaction>, ClassifiedError> {
         self.ensure_healthy()?;
         if self.persistent {
-            let Some(handle) = self.directory_handle(access)? else {
+            let Some(directory) = self.directory_handle(access)? else {
                 return Ok(None);
             };
-            validate_all_journals(&handle)
+            let lock_file = open_and_lock_transaction_file(&directory)
                 .map_err(|error| self.record_durability_failure(&error))?;
-            Ok(Some(handle))
+            validate_all_journals(&directory)
+                .map_err(|error| self.record_durability_failure(&error))?;
+            Ok(Some(PersistentJournalTransaction {
+                directory,
+                _lock_file: lock_file,
+            }))
         } else {
             Ok(None)
         }
@@ -838,11 +853,16 @@ fn read_all_journals(directory: &File) -> io::Result<BTreeMap<Uuid, OperationLif
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_bytes();
-        if name == b"." || name == b".." || !name.ends_with(b".jsonl") {
+        if name == b"." || name == b".." || name == TRANSACTION_LOCK_FILE.as_bytes() {
             continue;
         }
         let name = std::str::from_utf8(name)
             .map_err(|_| invalid_data("journal filename is not valid UTF-8"))?;
+        if Path::new(name).extension() != Some(std::ffi::OsStr::new("jsonl")) {
+            return Err(invalid_data(format!(
+                "unexpected Semgrep journal directory entry {name}"
+            )));
+        }
         let id_text = name
             .strip_suffix(".jsonl")
             .ok_or_else(|| invalid_data("journal filename has an invalid suffix"))?;
@@ -925,6 +945,81 @@ fn open_operation_file(
 
 fn operation_file_name(operation_id: Uuid) -> String {
     format!("{operation_id}.jsonl")
+}
+
+#[cfg(unix)]
+fn open_and_lock_transaction_file(directory: &File) -> io::Result<File> {
+    use rustix::fs::{fchmod, flock, openat, FlockOperation, Mode, OFlags};
+
+    let existing_flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let (descriptor, created) = match openat(
+        directory,
+        TRANSACTION_LOCK_FILE,
+        existing_flags,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => (descriptor, false),
+        Err(rustix::io::Errno::NOENT) => {
+            let create_flags = existing_flags | OFlags::CREATE | OFlags::EXCL;
+            match openat(
+                directory,
+                TRANSACTION_LOCK_FILE,
+                create_flags,
+                Mode::RUSR | Mode::WUSR,
+            ) {
+                Ok(descriptor) => (descriptor, true),
+                Err(rustix::io::Errno::EXIST) => (
+                    openat(
+                        directory,
+                        TRANSACTION_LOCK_FILE,
+                        existing_flags,
+                        Mode::empty(),
+                    )?,
+                    false,
+                ),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let file = File::from(descriptor);
+    verify_transaction_lock_path_identity(directory, &file)?;
+    flock(&file, FlockOperation::LockExclusive)?;
+    verify_transaction_lock_path_identity(directory, &file)?;
+    fchmod(&file, Mode::RUSR | Mode::WUSR)?;
+    file.sync_all()?;
+    if created {
+        directory.sync_all()?;
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_and_lock_transaction_file(_directory: &File) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Semgrep journals require descriptor-relative advisory locks",
+    ))
+}
+
+#[cfg(unix)]
+fn verify_transaction_lock_path_identity(directory: &File, file: &File) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{statat, AtFlags, FileType};
+
+    let descriptor = file.metadata()?;
+    let path = statat(directory, TRANSACTION_LOCK_FILE, AtFlags::SYMLINK_NOFOLLOW)?;
+    if !descriptor.file_type().is_file()
+        || FileType::from_raw_mode(path.st_mode) != FileType::RegularFile
+        || descriptor.dev() != path.st_dev as u64
+        || descriptor.ino() != path.st_ino as u64
+    {
+        return Err(invalid_data(
+            "transaction lock pathname no longer names the opened regular file",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1136,8 +1231,21 @@ mod tests {
     };
     use hf_core::error::ClassifiedError;
     use std::io::{self, Write};
+    #[cfg(unix)]
+    use std::io::{BufRead, BufReader, Read};
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
     use uuid::Uuid;
+
+    #[cfg(unix)]
+    const PROCESS_CHILD_ENV: &str = "HF_SEMGREP_JOURNAL_CHILD";
+    #[cfg(unix)]
+    const PROCESS_DIRECTORY_ENV: &str = "HF_SEMGREP_JOURNAL_DIRECTORY";
+    #[cfg(unix)]
+    const PROCESS_OPERATION_ENV: &str = "HF_SEMGREP_JOURNAL_OPERATION";
 
     fn ready_record() -> SemgrepReadyRecord {
         SemgrepReadyRecord {
@@ -1166,6 +1274,226 @@ mod tests {
         journal.close(operation_id).unwrap();
     }
 
+    #[cfg(unix)]
+    struct JournalChild {
+        child: Child,
+        stdout: BufReader<ChildStdout>,
+    }
+
+    #[cfg(unix)]
+    fn spawn_journal_child(
+        test_name: &str,
+        role: &str,
+        directory: &Path,
+        operation_id: Uuid,
+    ) -> JournalChild {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("semgrep_recovery::tests::{test_name}"))
+            .arg("--nocapture")
+            .env(PROCESS_CHILD_ENV, role)
+            .env(PROCESS_DIRECTORY_ENV, directory)
+            .env(PROCESS_OPERATION_ENV, operation_id.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        loop {
+            let mut signal = String::new();
+            if stdout.read_line(&mut signal).unwrap() == 0 {
+                let mut stderr = String::new();
+                child
+                    .stderr
+                    .take()
+                    .unwrap()
+                    .read_to_string(&mut stderr)
+                    .unwrap();
+                let status = child.wait().unwrap();
+                panic!("journal child exited before signalling: status={status}; stderr={stderr}");
+            }
+            if signal.trim() == "ready" {
+                break;
+            }
+        }
+        JournalChild { child, stdout }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_early_exit(child: &mut Child) -> Option<ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn release_and_wait(mut child: JournalChild) -> ExitStatus {
+        child.child.stdin.take().unwrap().write_all(b"x").unwrap();
+        let mut remaining_stdout = String::new();
+        child.stdout.read_to_string(&mut remaining_stdout).unwrap();
+        let output = child.child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "paused journal child failed\nstdout:\n{remaining_stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.status
+    }
+
+    #[cfg(unix)]
+    fn wait_for_child(mut child: JournalChild) -> ExitStatus {
+        let mut remaining_stdout = String::new();
+        child.stdout.read_to_string(&mut remaining_stdout).unwrap();
+        let output = child.child.wait_with_output().unwrap();
+        if !output.status.success() {
+            eprintln!(
+                "journal child failed\nstdout:\n{remaining_stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        output.status
+    }
+
+    #[cfg(unix)]
+    fn child_journal() -> (SemgrepJournal, Uuid) {
+        let directory = PathBuf::from(std::env::var(PROCESS_DIRECTORY_ENV).unwrap());
+        let operation_id = Uuid::parse_str(&std::env::var(PROCESS_OPERATION_ENV).unwrap()).unwrap();
+        (SemgrepJournal::open(directory), operation_id)
+    }
+
+    #[cfg(unix)]
+    fn signal_child_ready() {
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_close_and_abort_serialize_to_one_terminal_outcome() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let actual_parent = root.path().join("actual");
+        let directory = actual_parent.join("journal");
+        std::fs::create_dir_all(&directory).unwrap();
+        let alias_parent = root.path().join("alias");
+        symlink(&actual_parent, &alias_parent).unwrap();
+        let alias = alias_parent.join("journal");
+        let operation_id = Uuid::new_v4();
+        let journal = SemgrepJournal::open(directory.clone());
+        begin(&journal, operation_id);
+        journal
+            .ready_to_commit(operation_id, &ready_record())
+            .unwrap();
+
+        let close_child = spawn_journal_child(
+            "journal_paused_close_child",
+            "close",
+            &directory,
+            operation_id,
+        );
+        let mut abort_child =
+            spawn_journal_child("journal_abort_child", "abort", &alias, operation_id);
+        assert!(
+            wait_for_early_exit(&mut abort_child.child).is_none(),
+            "abort completed while close owned the journal transaction"
+        );
+
+        let close_status = release_and_wait(close_child);
+        let abort_status = wait_for_child(abort_child);
+        assert!(close_status.success());
+
+        let reopened = SemgrepJournal::open(directory);
+        assert!(reopened.is_closed(operation_id).unwrap());
+        assert!(reopened.interrupted().unwrap().is_empty());
+        assert!(abort_status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_replay_waits_for_a_complete_append_transaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let operation_id = Uuid::new_v4();
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        begin(&journal, operation_id);
+        journal
+            .ready_to_commit(operation_id, &ready_record())
+            .unwrap();
+
+        let close_child = spawn_journal_child(
+            "journal_paused_close_child",
+            "close",
+            directory.path(),
+            operation_id,
+        );
+        let mut replay_child = spawn_journal_child(
+            "journal_replay_child",
+            "replay",
+            directory.path(),
+            operation_id,
+        );
+        assert!(
+            wait_for_early_exit(&mut replay_child.child).is_none(),
+            "replay completed while append owned the journal transaction"
+        );
+
+        assert!(release_and_wait(close_child).success());
+        assert!(wait_for_child(replay_child).success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_paused_close_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("close") {
+            return;
+        }
+        let (journal, operation_id) = child_journal();
+        journal.install_test_race_hook(|point| {
+            if point == AppendRacePoint::BeforeIdentityCheck {
+                signal_child_ready();
+                let mut release = [0_u8; 1];
+                std::io::stdin().read_exact(&mut release).unwrap();
+            }
+        });
+        journal.close(operation_id).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_abort_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("abort") {
+            return;
+        }
+        let (journal, operation_id) = child_journal();
+        signal_child_ready();
+        assert!(
+            journal
+                .abort(operation_id, SemgrepAbortKind::Failed)
+                .is_err(),
+            "abort must reject the lifecycle closed by the competing process"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_replay_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("replay") {
+            return;
+        }
+        let (journal, operation_id) = child_journal();
+        signal_child_ready();
+        assert!(journal.interrupted().unwrap().is_empty());
+        assert!(journal.is_closed(operation_id).unwrap());
+    }
+
     fn event_line(event: &str, version: u32, operation_id: Uuid) -> String {
         let mut value = serde_json::json!({
             "event": event,
@@ -1178,6 +1506,87 @@ mod tests {
             value["staging_dir_name"] = serde_json::json!(operation_id.to_string());
         }
         format!("{}\n", serde_json::to_string(&value).unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_is_a_fixed_owner_read_write_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+
+        assert!(journal.interrupted().unwrap().is_empty());
+
+        let metadata =
+            std::fs::symlink_metadata(directory.path().join(".semgrep-journal.lock")).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_permissions_ignore_restrictive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                "umask 777; exec \"$0\" --exact \
+                 semgrep_recovery::tests::journal_restrictive_umask_child --nocapture",
+            )
+            .arg(std::env::current_exe().unwrap())
+            .env(PROCESS_CHILD_ENV, "umask")
+            .env(PROCESS_DIRECTORY_ENV, directory.path())
+            .env(PROCESS_OPERATION_ENV, Uuid::new_v4().to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "restrictive-umask child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let metadata =
+            std::fs::symlink_metadata(directory.path().join(".semgrep-journal.lock")).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_restrictive_umask_child() {
+        if std::env::var(PROCESS_CHILD_ENV).as_deref() != Ok("umask") {
+            return;
+        }
+
+        let (journal, _) = child_journal();
+        assert!(journal.interrupted().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_symlink_is_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("lock-target");
+        std::fs::write(&target, b"unchanged").unwrap();
+        symlink(&target, directory.path().join(".semgrep-journal.lock")).unwrap();
+
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        assert!(journal.interrupted().is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn transaction_lock_is_the_only_non_journal_entry_allowed() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("unexpected"), b"data").unwrap();
+
+        let journal = SemgrepJournal::open(directory.path().to_path_buf());
+        assert!(journal.interrupted().is_err());
     }
 
     #[test]
@@ -1370,6 +1779,7 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         let mut expected = vec![
+            std::ffi::OsString::from(super::TRANSACTION_LOCK_FILE),
             std::ffi::OsString::from(format!("{first}.jsonl")),
             std::ffi::OsString::from(format!("{second}.jsonl")),
         ];
