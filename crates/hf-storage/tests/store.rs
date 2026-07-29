@@ -167,6 +167,88 @@ async fn semgrep_phase_compare_and_set_and_active_project_index_are_enforced() {
 }
 
 #[tokio::test]
+async fn active_semgrep_runs_returns_every_nonterminal_phase_in_start_order() {
+    let (store, _dir) = temp_store().await;
+    let started_at = Utc::now();
+    let mut active = Vec::new();
+    for (index, status) in [
+        SemgrepRunStatus::Staging,
+        SemgrepRunStatus::Scanning,
+        SemgrepRunStatus::Validating,
+        SemgrepRunStatus::Persisting,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut run = semgrep_staging_run(
+            &format!("/projects/active-{index}"),
+            started_at + Duration::seconds(i64::try_from(index).unwrap()),
+        );
+        store.insert_semgrep_run(&run).await.unwrap();
+        if status != SemgrepRunStatus::Staging {
+            store
+                .set_semgrep_phase(
+                    run.id,
+                    SemgrepRunStatus::Staging,
+                    SemgrepRunStatus::Scanning,
+                    Some(&"33".repeat(32)),
+                )
+                .await
+                .unwrap();
+            run.status = SemgrepRunStatus::Scanning;
+            run.source_sha256 = Some("33".repeat(32));
+        }
+        if matches!(
+            status,
+            SemgrepRunStatus::Validating | SemgrepRunStatus::Persisting
+        ) {
+            store
+                .set_semgrep_phase(
+                    run.id,
+                    SemgrepRunStatus::Scanning,
+                    SemgrepRunStatus::Validating,
+                    None,
+                )
+                .await
+                .unwrap();
+            run.status = SemgrepRunStatus::Validating;
+        }
+        if status == SemgrepRunStatus::Persisting {
+            store
+                .set_semgrep_phase(
+                    run.id,
+                    SemgrepRunStatus::Validating,
+                    SemgrepRunStatus::Persisting,
+                    None,
+                )
+                .await
+                .unwrap();
+            run.status = SemgrepRunStatus::Persisting;
+        }
+        active.push(run);
+    }
+
+    let failed = semgrep_staging_run("/projects/failed", started_at + Duration::seconds(5));
+    store.insert_semgrep_run(&failed).await.unwrap();
+    store
+        .fail_semgrep_run(
+            failed.id,
+            SemgrepRunStatus::Failed,
+            "fixture",
+            "fixture failure",
+            failed.started_at + Duration::milliseconds(1),
+        )
+        .await
+        .unwrap();
+    let mut done = semgrep_staging_run("/projects/done", started_at + Duration::seconds(6));
+    advance_semgrep_to_persisting(&store, &mut done).await;
+    let done_publication = semgrep_publication(done, 0, 0);
+    store.publish_semgrep_run(&done_publication).await.unwrap();
+
+    assert_eq!(store.active_semgrep_runs().await.unwrap(), active);
+}
+
+#[tokio::test]
 async fn semgrep_publication_persists_complete_overlay_and_latest_done_run() {
     let (store, _dir) = temp_store().await;
     let mut older = semgrep_staging_run("/projects/parser", Utc::now());

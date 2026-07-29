@@ -851,6 +851,19 @@ impl Store {
         row.as_ref().map(semgrep_run_from_row).transpose()
     }
 
+    /// Load every active Semgrep operation parent in deterministic start order.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or malformed persisted data.
+    pub async fn active_semgrep_runs(&self) -> Result<Vec<SemgrepRunRecord>, StorageError> {
+        sqlx::query(SEMGREP_ACTIVE_RUNS_SELECT)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(semgrep_run_from_row)
+            .collect()
+    }
+
     /// Load one Semgrep parent and its normalized children.
     ///
     /// # Errors
@@ -2662,6 +2675,14 @@ const SEMGREP_RUN_SELECT: &str = "SELECT id, project_root, language, source_sha2
     command_schema_version, status, started_at, ended_at, output_sha256, finding_count,
     matched_candidate_count, duration_ms, failure_code, failure_message
     FROM semgrep_enrichment_runs WHERE id = ?1";
+
+const SEMGREP_ACTIVE_RUNS_SELECT: &str = "SELECT id, project_root, language, source_sha256,
+    sandbox_image, sandbox_image_sha256, semgrep_version, rules_commit, rules_tree_sha256,
+    command_schema_version, status, started_at, ended_at, output_sha256, finding_count,
+    matched_candidate_count, duration_ms, failure_code, failure_message
+    FROM semgrep_enrichment_runs
+    WHERE status IN ('staging','scanning','validating','persisting')
+    ORDER BY started_at, id";
 
 /// Serialize an enum to its bare serde string name (no surrounding quotes).
 fn enum_str<T: Serialize>(v: &T) -> String {
