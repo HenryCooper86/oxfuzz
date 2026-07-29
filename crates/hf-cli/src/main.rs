@@ -880,12 +880,8 @@ async fn cmd_policy(op: PolicyOp) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_discover(
-    project: PathBuf,
-    lang: &str,
-    rank: bool,
-    #[cfg(feature = "semgrep-enrichment")] semgrep: bool,
-) -> anyhow::Result<()> {
+#[cfg(not(feature = "semgrep-enrichment"))]
+async fn cmd_discover(project: PathBuf, lang: &str, rank: bool) -> anyhow::Result<()> {
     let lang = parse_lang(lang)?;
     let container = ServiceContainer::bootstrap().await;
     let mut inv = container.discover(&project, lang).await?;
@@ -898,19 +894,128 @@ async fn cmd_discover(
             );
         }
     }
-    #[cfg(feature = "semgrep-enrichment")]
-    if semgrep {
-        if !matches!(lang, TargetLanguage::C | TargetLanguage::Cpp) {
-            anyhow::bail!("Semgrep enrichment supports only C and C++ target inventories");
-        }
-        let operation_id = container.start_semgrep_enrichment(project, lang).await?;
-        let result = wait_for_semgrep(&container, operation_id).await?;
-        eprintln!("Semgrep static-analysis signals");
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
-    }
     println!("{}", serde_json::to_string_pretty(&inv)?);
     Ok(())
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+async fn cmd_discover(
+    project: PathBuf,
+    lang: &str,
+    rank: bool,
+    semgrep: bool,
+) -> anyhow::Result<()> {
+    let container = ServiceContainer::bootstrap().await;
+    let mut output = ConsoleDiscoverOutput;
+    run_discover_command(
+        &container,
+        project,
+        parse_lang(lang)?,
+        rank,
+        semgrep,
+        &mut output,
+        tokio::signal::ctrl_c(),
+        || tokio::time::sleep(std::time::Duration::from_millis(250)),
+    )
+    .await
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+#[async_trait::async_trait]
+trait DiscoverCommandService {
+    async fn discover_targets(
+        &self,
+        project: &std::path::Path,
+        language: TargetLanguage,
+    ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError>;
+
+    async fn rank_targets(
+        &self,
+        inventory: hf_service::TargetInventory,
+    ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError>;
+
+    fn has_provider(&self) -> bool;
+
+    async fn start_semgrep(
+        &self,
+        project: PathBuf,
+        language: TargetLanguage,
+    ) -> Result<uuid::Uuid, hf_service::ClassifiedError>;
+
+    async fn semgrep_status(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<hf_service::SemgrepOperationView>, hf_service::ClassifiedError>;
+
+    async fn cancel_semgrep(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<hf_service::SemgrepCancelOutcome, hf_service::ClassifiedError>;
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+#[async_trait::async_trait]
+impl DiscoverCommandService for ServiceContainer {
+    async fn discover_targets(
+        &self,
+        project: &std::path::Path,
+        language: TargetLanguage,
+    ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError> {
+        self.discover(project, language).await
+    }
+
+    async fn rank_targets(
+        &self,
+        inventory: hf_service::TargetInventory,
+    ) -> Result<hf_service::TargetInventory, hf_service::ClassifiedError> {
+        self.rank(inventory).await
+    }
+
+    fn has_provider(&self) -> bool {
+        self.provider_pool().is_some()
+    }
+
+    async fn start_semgrep(
+        &self,
+        project: PathBuf,
+        language: TargetLanguage,
+    ) -> Result<uuid::Uuid, hf_service::ClassifiedError> {
+        self.start_semgrep_enrichment(project, language).await
+    }
+
+    async fn semgrep_status(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<Option<hf_service::SemgrepOperationView>, hf_service::ClassifiedError> {
+        self.semgrep_operation(operation_id).await
+    }
+
+    async fn cancel_semgrep(
+        &self,
+        operation_id: uuid::Uuid,
+    ) -> Result<hf_service::SemgrepCancelOutcome, hf_service::ClassifiedError> {
+        self.request_semgrep_cancel(operation_id).await
+    }
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+trait DiscoverCommandOutput {
+    fn stdout_line(&mut self, line: String);
+    fn stderr_line(&mut self, line: String);
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+struct ConsoleDiscoverOutput;
+
+#[cfg(feature = "semgrep-enrichment")]
+impl DiscoverCommandOutput for ConsoleDiscoverOutput {
+    fn stdout_line(&mut self, line: String) {
+        println!("{line}");
+    }
+
+    fn stderr_line(&mut self, line: String) {
+        eprintln!("{line}");
+    }
 }
 
 #[cfg(feature = "semgrep-enrichment")]
@@ -953,19 +1058,44 @@ fn semgrep_poll_action(view: hf_service::SemgrepOperationView) -> SemgrepPollAct
 }
 
 #[cfg(feature = "semgrep-enrichment")]
-async fn wait_for_semgrep(
-    container: &ServiceContainer,
+async fn wait_for_semgrep<S, O, Signal, Delay, DelayFuture>(
+    service: &S,
     operation_id: uuid::Uuid,
-) -> anyhow::Result<hf_service::SemgrepInventoryView> {
+    output: &mut O,
+    mut signal: std::pin::Pin<&mut Signal>,
+    delay: &mut Delay,
+) -> anyhow::Result<hf_service::SemgrepInventoryView>
+where
+    S: DiscoverCommandService,
+    O: DiscoverCommandOutput,
+    Signal: std::future::Future<Output = std::io::Result<()>>,
+    Delay: FnMut() -> DelayFuture,
+    DelayFuture: std::future::Future<Output = ()>,
+{
     let mut previous_state = None;
     let mut cancellation_requested = false;
     loop {
-        let view = container
-            .semgrep_operation(operation_id)
-            .await?
+        let status = if cancellation_requested {
+            service.semgrep_status(operation_id).await?
+        } else {
+            tokio::select! {
+                signal_result = signal.as_mut() => {
+                    signal_result?;
+                    output.stderr_line("Semgrep enrichment: cancellation requested".to_owned());
+                    let _ = service.cancel_semgrep(operation_id).await?;
+                    cancellation_requested = true;
+                    continue;
+                }
+                status = service.semgrep_status(operation_id) => status?,
+            }
+        };
+        let view = status
             .ok_or_else(|| anyhow::anyhow!("Semgrep operation {operation_id} was not found"))?;
         if previous_state != Some(view.state) {
-            eprintln!("Semgrep enrichment: {}", semgrep_state_name(view.state));
+            output.stderr_line(format!(
+                "Semgrep enrichment: {}",
+                semgrep_state_name(view.state)
+            ));
             previous_state = Some(view.state);
         }
         match semgrep_poll_action(view) {
@@ -975,19 +1105,66 @@ async fn wait_for_semgrep(
         }
 
         if cancellation_requested {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            delay().await;
         } else {
+            let delay_future = delay();
+            tokio::pin!(delay_future);
             tokio::select! {
-                () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
-                signal = tokio::signal::ctrl_c() => {
-                    signal?;
-                    eprintln!("Semgrep enrichment: cancellation requested");
-                    let _ = container.request_semgrep_cancel(operation_id).await?;
+                () = &mut delay_future => {}
+                signal_result = signal.as_mut() => {
+                    signal_result?;
+                    output.stderr_line("Semgrep enrichment: cancellation requested".to_owned());
+                    let _ = service.cancel_semgrep(operation_id).await?;
                     cancellation_requested = true;
                 }
             }
         }
     }
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+async fn run_discover_command<S, O, Signal, Delay, DelayFuture>(
+    service: &S,
+    project: PathBuf,
+    language: TargetLanguage,
+    rank: bool,
+    semgrep: bool,
+    output: &mut O,
+    signal: Signal,
+    mut delay: Delay,
+) -> anyhow::Result<()>
+where
+    S: DiscoverCommandService,
+    O: DiscoverCommandOutput,
+    Signal: std::future::Future<Output = std::io::Result<()>>,
+    Delay: FnMut() -> DelayFuture,
+    DelayFuture: std::future::Future<Output = ()>,
+{
+    let mut inventory = service.discover_targets(&project, language).await?;
+    if rank {
+        if service.has_provider() {
+            inventory = service.rank_targets(inventory).await?;
+        } else {
+            output.stderr_line(
+                "warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"
+                    .to_owned(),
+            );
+        }
+    }
+    if !semgrep {
+        output.stdout_line(serde_json::to_string_pretty(&inventory)?);
+        return Ok(());
+    }
+    if !matches!(language, TargetLanguage::C | TargetLanguage::Cpp) {
+        anyhow::bail!("Semgrep enrichment supports only C and C++ target inventories");
+    }
+    let operation_id = service.start_semgrep(project, language).await?;
+    tokio::pin!(signal);
+    let result =
+        wait_for_semgrep(service, operation_id, output, signal.as_mut(), &mut delay).await?;
+    output.stderr_line("Semgrep static-analysis signals".to_owned());
+    output.stdout_line(serde_json::to_string_pretty(&result)?);
+    Ok(())
 }
 
 async fn cmd_harness(
@@ -2150,20 +2327,165 @@ mod policy_tests {
 
 #[cfg(all(test, feature = "semgrep-enrichment"))]
 mod semgrep_cli_tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
+    use std::future::Future;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     use hf_service::{
-        SemgrepInventoryView, SemgrepOperationState, SemgrepOperationView, SemgrepOverlayState,
-        TargetLanguage,
+        ClassifiedError, SemgrepCancelOutcome, SemgrepInventoryView, SemgrepOperationState,
+        SemgrepOperationView, SemgrepOverlayState, TargetInventory, TargetLanguage,
     };
     use uuid::Uuid;
 
-    use super::{semgrep_poll_action, semgrep_state_name, SemgrepPollAction};
+    use super::{
+        run_discover_command, semgrep_poll_action, semgrep_state_name, DiscoverCommandOutput,
+        DiscoverCommandService, SemgrepPollAction,
+    };
+
+    enum StatusStep {
+        View(SemgrepOperationView),
+        Pending,
+    }
+
+    struct FakeDiscoverService {
+        events: Mutex<Vec<String>>,
+        provider_available: bool,
+        discovered: TargetInventory,
+        ranked: TargetInventory,
+        operation_id: Uuid,
+        statuses: Mutex<VecDeque<StatusStep>>,
+        cancelled: Mutex<Vec<Uuid>>,
+        pending_status_entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl FakeDiscoverService {
+        fn new(language: TargetLanguage, statuses: Vec<StatusStep>) -> Self {
+            let discovered = inventory(language, "/tmp/project");
+            let mut ranked = discovered.clone();
+            ranked.project_root = PathBuf::from("/tmp/project-ranked");
+            Self {
+                events: Mutex::new(Vec::new()),
+                provider_available: true,
+                discovered,
+                ranked,
+                operation_id: Uuid::from_u128(0x1234),
+                statuses: Mutex::new(statuses.into()),
+                cancelled: Mutex::new(Vec::new()),
+                pending_status_entered: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+
+        fn event_names(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+
+        fn cancelled_ids(&self) -> Vec<Uuid> {
+            self.cancelled.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DiscoverCommandService for FakeDiscoverService {
+        async fn discover_targets(
+            &self,
+            _project: &std::path::Path,
+            _language: TargetLanguage,
+        ) -> Result<TargetInventory, ClassifiedError> {
+            self.events.lock().unwrap().push("discover".to_owned());
+            Ok(self.discovered.clone())
+        }
+
+        async fn rank_targets(
+            &self,
+            _inventory: TargetInventory,
+        ) -> Result<TargetInventory, ClassifiedError> {
+            self.events.lock().unwrap().push("rank".to_owned());
+            Ok(self.ranked.clone())
+        }
+
+        fn has_provider(&self) -> bool {
+            self.provider_available
+        }
+
+        async fn start_semgrep(
+            &self,
+            _project: PathBuf,
+            language: TargetLanguage,
+        ) -> Result<Uuid, ClassifiedError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start:{}", language.as_str()));
+            Ok(self.operation_id)
+        }
+
+        async fn semgrep_status(
+            &self,
+            operation_id: Uuid,
+        ) -> Result<Option<SemgrepOperationView>, ClassifiedError> {
+            assert_eq!(operation_id, self.operation_id);
+            self.events.lock().unwrap().push("status".to_owned());
+            let step = self.statuses.lock().unwrap().pop_front().unwrap();
+            match step {
+                StatusStep::View(view) => Ok(Some(view)),
+                StatusStep::Pending => {
+                    self.pending_status_entered.notify_one();
+                    std::future::pending().await
+                }
+            }
+        }
+
+        async fn cancel_semgrep(
+            &self,
+            operation_id: Uuid,
+        ) -> Result<SemgrepCancelOutcome, ClassifiedError> {
+            self.events.lock().unwrap().push("cancel".to_owned());
+            self.cancelled.lock().unwrap().push(operation_id);
+            Ok(SemgrepCancelOutcome::Accepted)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingOutput {
+        stdout: Vec<String>,
+        stderr: Vec<String>,
+    }
+
+    impl DiscoverCommandOutput for RecordingOutput {
+        fn stdout_line(&mut self, line: String) {
+            self.stdout.push(line);
+        }
+
+        fn stderr_line(&mut self, line: String) {
+            self.stderr.push(line);
+        }
+    }
+
+    fn inventory(_language: TargetLanguage, project: &str) -> TargetInventory {
+        TargetInventory {
+            project_root: PathBuf::from(project),
+            candidates: Vec::new(),
+            call_graph: HashMap::new(),
+        }
+    }
+
+    fn result(operation_id: Uuid) -> SemgrepInventoryView {
+        SemgrepInventoryView {
+            project_root: PathBuf::from("/tmp/project"),
+            language: TargetLanguage::C,
+            scan_id: Some(operation_id),
+            source_sha256: Some("1".repeat(64)),
+            overlay_state: SemgrepOverlayState::Current,
+            candidates: Vec::new(),
+            findings: Vec::new(),
+            call_graph: HashMap::new(),
+        }
+    }
 
     fn operation(state: SemgrepOperationState) -> SemgrepOperationView {
         SemgrepOperationView {
-            operation_id: Uuid::nil(),
+            operation_id: Uuid::from_u128(0x1234),
             project_root: "/tmp/project".to_owned(),
             language: "c".to_owned(),
             state,
@@ -2174,6 +2496,241 @@ mod semgrep_cli_tests {
             failure_message: None,
             result: None,
         }
+    }
+
+    fn pending_signal() -> impl Future<Output = std::io::Result<()>> {
+        std::future::pending()
+    }
+
+    fn immediate_delay() -> impl Future<Output = ()> {
+        std::future::ready(())
+    }
+
+    #[tokio::test]
+    async fn discover_without_semgrep_preserves_the_existing_inventory_output() {
+        let service = FakeDiscoverService::new(TargetLanguage::C, Vec::new());
+        let expected = serde_json::to_string_pretty(&service.discovered).unwrap();
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::C,
+            false,
+            false,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(service.event_names(), ["discover"]);
+        assert_eq!(output.stdout, [expected]);
+        assert!(output.stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_without_a_provider_preserves_the_existing_rank_warning() {
+        let mut service = FakeDiscoverService::new(TargetLanguage::C, Vec::new());
+        service.provider_available = false;
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::C,
+            true,
+            false,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(service.event_names(), ["discover"]);
+        assert_eq!(
+            output.stderr,
+            ["warning: --rank requested but HF_PROVIDER_API_KEY not set; using heuristic scores only"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_ranks_before_semgrep_and_prints_the_exact_service_result() {
+        let operation_id = Uuid::from_u128(0x1234);
+        let exact_result = result(operation_id);
+        let mut done = operation(SemgrepOperationState::Done);
+        done.active = false;
+        done.result = Some(exact_result.clone());
+        let service = FakeDiscoverService::new(
+            TargetLanguage::C,
+            vec![
+                StatusStep::View(operation(SemgrepOperationState::Scanning)),
+                StatusStep::View(done),
+            ],
+        );
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::C,
+            true,
+            true,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            service.event_names(),
+            ["discover", "rank", "start:c", "status", "status"]
+        );
+        assert_eq!(
+            output.stdout,
+            [serde_json::to_string_pretty(&exact_result).unwrap()]
+        );
+        assert_eq!(
+            output.stderr.last().map(String::as_str),
+            Some("Semgrep static-analysis signals")
+        );
+    }
+
+    #[tokio::test]
+    async fn semgrep_language_validation_runs_after_discovery_and_optional_ranking() {
+        let service = FakeDiscoverService::new(TargetLanguage::Rust, Vec::new());
+        let mut output = RecordingOutput::default();
+
+        let error = run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::Rust,
+            true,
+            true,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("only C and C++"));
+        assert_eq!(service.event_names(), ["discover", "rank"]);
+        assert!(output.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn semgrep_language_validation_accepts_cpp_after_discovery() {
+        let mut done = operation(SemgrepOperationState::Done);
+        done.active = false;
+        done.result = Some(result(Uuid::from_u128(0x1234)));
+        let service = FakeDiscoverService::new(TargetLanguage::Cpp, vec![StatusStep::View(done)]);
+        let mut output = RecordingOutput::default();
+
+        run_discover_command(
+            &service,
+            PathBuf::from("/tmp/project"),
+            TargetLanguage::Cpp,
+            false,
+            true,
+            &mut output,
+            pending_signal(),
+            immediate_delay,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(service.event_names(), ["discover", "start:cpp", "status"]);
+    }
+
+    #[tokio::test]
+    async fn semgrep_signal_cancels_the_exact_uuid_while_status_is_pending() {
+        let mut cancelled = operation(SemgrepOperationState::Cancelled);
+        cancelled.active = false;
+        cancelled.failure_message = Some("cancelled by test".to_owned());
+        let service = FakeDiscoverService::new(
+            TargetLanguage::C,
+            vec![StatusStep::Pending, StatusStep::View(cancelled)],
+        );
+        let pending_status_entered = Arc::clone(&service.pending_status_entered);
+        let signal = async move {
+            pending_status_entered.notified().await;
+            Ok(())
+        };
+        let mut output = RecordingOutput::default();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_discover_command(
+                &service,
+                PathBuf::from("/tmp/project"),
+                TargetLanguage::C,
+                false,
+                true,
+                &mut output,
+                signal,
+                immediate_delay,
+            ),
+        )
+        .await
+        .expect("Ctrl-C must be observed while status retrieval is pending")
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "cancelled by test");
+        assert_eq!(service.cancelled_ids(), [service.operation_id]);
+        assert_eq!(
+            service.event_names(),
+            ["discover", "start:c", "status", "cancel", "status"]
+        );
+    }
+
+    #[tokio::test]
+    async fn semgrep_signal_cancels_the_exact_uuid_while_poll_delay_is_pending() {
+        let mut cancelled = operation(SemgrepOperationState::Cancelled);
+        cancelled.active = false;
+        cancelled.failure_message = Some("cancelled during delay".to_owned());
+        let service = FakeDiscoverService::new(
+            TargetLanguage::C,
+            vec![
+                StatusStep::View(operation(SemgrepOperationState::Scanning)),
+                StatusStep::View(cancelled),
+            ],
+        );
+        let delay_started = Arc::new(tokio::sync::Notify::new());
+        let signal_started = Arc::clone(&delay_started);
+        let delay_notifier = Arc::clone(&delay_started);
+        let signal = async move {
+            signal_started.notified().await;
+            Ok(())
+        };
+        let delay = move || {
+            delay_notifier.notify_one();
+            std::future::pending::<()>()
+        };
+        let mut output = RecordingOutput::default();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_discover_command(
+                &service,
+                PathBuf::from("/tmp/project"),
+                TargetLanguage::C,
+                false,
+                true,
+                &mut output,
+                signal,
+                delay,
+            ),
+        )
+        .await
+        .expect("Ctrl-C must be observed while the poll delay is pending")
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "cancelled during delay");
+        assert_eq!(service.cancelled_ids(), [service.operation_id]);
     }
 
     #[test]
