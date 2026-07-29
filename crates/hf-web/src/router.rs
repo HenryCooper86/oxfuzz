@@ -328,6 +328,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
     Router::new()
         .route("/health", get(health))
         .route("/discover", post(discover))
+        .route("/semgrep/available", get(semgrep_available))
         .route("/harness/draft", post(harness_draft))
         .route("/harness/compile", post(harness_compile))
         .route("/harness/smoke", post(harness_smoke))
@@ -353,6 +354,7 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/runs/{id}/status", get(run_status))
         .route("/runs/{id}/cancel", post(cancel_run_by_id))
         .merge(proof_carrying_routes())
+        .merge(semgrep_routes())
         .route(
             "/projects/auto-revert",
             post(project_auto_revert_override),
@@ -525,6 +527,19 @@ fn proof_carrying_routes() -> Router<AppState> {
     Router::new()
 }
 
+#[cfg(feature = "semgrep-enrichment")]
+fn semgrep_routes() -> Router<AppState> {
+    Router::new()
+        .route("/semgrep/enrich", post(semgrep_start))
+        .route("/semgrep/enrich/{id}", get(semgrep_status))
+        .route("/semgrep/enrich/{id}/cancel", post(semgrep_cancel))
+}
+
+#[cfg(not(feature = "semgrep-enrichment"))]
+fn semgrep_routes() -> Router<AppState> {
+    Router::new()
+}
+
 /// Bearer-token auth + request audit middleware.
 ///
 /// Enforces [`AuthPolicy`]: with a token configured, every request except
@@ -588,6 +603,110 @@ async fn auth_audit(
 
 async fn health() -> StatusCode {
     StatusCode::OK
+}
+
+async fn semgrep_available() -> Json<bool> {
+    Json(cfg!(feature = "semgrep-enrichment"))
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+#[derive(Debug, Deserialize)]
+struct SemgrepStartRequest {
+    project: PathBuf,
+    #[serde(alias = "language")]
+    lang: String,
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+#[derive(Debug, Serialize)]
+struct SemgrepStartResponse {
+    operation_id: uuid::Uuid,
+    state: hf_service::SemgrepOperationState,
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+async fn semgrep_start(
+    State(state): State<AppState>,
+    Json(request): Json<SemgrepStartRequest>,
+) -> Result<(StatusCode, Json<SemgrepStartResponse>), ApiError> {
+    let language = request
+        .lang
+        .parse::<TargetLanguage>()
+        .map_err(|error| classified_api_error(ClassifiedError::Validation(error)))?;
+    let project = approved_project(&state, &request.project)?;
+    let operation_id = state
+        .container
+        .start_semgrep_enrichment(project, language)
+        .await
+        .map_err(classified_api_error)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SemgrepStartResponse {
+            operation_id,
+            state: hf_service::SemgrepOperationState::Staging,
+        }),
+    ))
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+async fn semgrep_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<hf_service::SemgrepOperationView> {
+    let operation_id = uuid::Uuid::parse_str(&id).map_err(|error| {
+        classified_api_error(ClassifiedError::Validation(format!(
+            "invalid Semgrep operation id: {error}"
+        )))
+    })?;
+    let operation = state
+        .container
+        .semgrep_operation(operation_id)
+        .await
+        .map_err(classified_api_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Semgrep operation not found".to_owned(),
+                }),
+            )
+        })?;
+    Ok(Json(operation))
+}
+
+#[cfg(feature = "semgrep-enrichment")]
+async fn semgrep_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<hf_service::SemgrepCancelOutcome>), ApiError> {
+    let operation_id = uuid::Uuid::parse_str(&id).map_err(|error| {
+        classified_api_error(ClassifiedError::Validation(format!(
+            "invalid Semgrep operation id: {error}"
+        )))
+    })?;
+    match state
+        .container
+        .request_semgrep_cancel(operation_id)
+        .await
+        .map_err(classified_api_error)?
+    {
+        hf_service::SemgrepCancelOutcome::Accepted => Ok((
+            StatusCode::ACCEPTED,
+            Json(hf_service::SemgrepCancelOutcome::Accepted),
+        )),
+        hf_service::SemgrepCancelOutcome::Inactive => Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Semgrep operation is not active".to_owned(),
+            }),
+        )),
+        hf_service::SemgrepCancelOutcome::NotFound => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Semgrep operation not found".to_owned(),
+            }),
+        )),
+    }
 }
 
 fn approved_project(state: &AppState, requested: &std::path::Path) -> Result<PathBuf, ApiError> {

@@ -17,6 +17,8 @@ fn sample_candidate(symbol: &str, fit: f64) -> TargetCandidate {
             file: std::path::PathBuf::from("src/json.c"),
             line: 42,
             col: 1,
+            end_line: None,
+            end_col: None,
         },
         signature: Some(format!("int {symbol}(const char *buf, size_t len);")),
         input_surface: InputSurface::Bytes,

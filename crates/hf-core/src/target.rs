@@ -151,6 +151,10 @@ pub struct SourceLocation {
     pub file: PathBuf,
     pub line: u32,
     pub col: u32,
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    #[serde(default)]
+    pub end_col: Option<u32>,
 }
 
 /// A candidate fuzzing target produced by `hf-discovery`.
@@ -238,6 +242,8 @@ mod tests {
                 file: PathBuf::from(file),
                 line: 1,
                 col: 1,
+                end_line: None,
+                end_col: None,
             },
             signature: None,
             input_surface: InputSurface::Bytes,
@@ -248,6 +254,14 @@ mod tests {
             reachable_functions: Vec::new(),
             accumulated_complexity: 0,
         }
+    }
+
+    #[test]
+    fn source_location_reads_legacy_json_without_end_coordinates() {
+        let location: SourceLocation =
+            serde_json::from_str(r#"{"file":"src/parser.c","line":4,"col":1}"#).unwrap();
+        assert_eq!(location.end_line, None);
+        assert_eq!(location.end_col, None);
     }
 
     #[test]

@@ -179,6 +179,58 @@ pub async fn discover(
     serde_json::to_value(&inv).map_err(|e| e.to_string())
 }
 
+/// Report whether this application build includes Semgrep enrichment.
+#[tauri::command]
+#[must_use]
+pub const fn semgrep_available() -> bool {
+    cfg!(feature = "semgrep-enrichment")
+}
+
+/// Start explicit Semgrep enrichment for a persisted C or C++ inventory.
+#[cfg(feature = "semgrep-enrichment")]
+#[tauri::command]
+pub async fn semgrep_enrich(
+    state: tauri::State<'_, crate::state::AppState>,
+    project: PathBuf,
+    lang: String,
+) -> Result<uuid::Uuid, String> {
+    let language = parse_lang(&lang)?;
+    state
+        .container
+        .start_semgrep_enrichment(project, language)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Read one exact service-owned Semgrep operation.
+#[cfg(feature = "semgrep-enrichment")]
+#[tauri::command]
+pub async fn semgrep_status(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: uuid::Uuid,
+) -> Result<hf_service::SemgrepOperationView, String> {
+    state
+        .container
+        .semgrep_operation(operation_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Semgrep operation not found".to_owned())
+}
+
+/// Request cancellation of one exact service-owned Semgrep operation.
+#[cfg(feature = "semgrep-enrichment")]
+#[tauri::command]
+pub async fn semgrep_cancel(
+    state: tauri::State<'_, crate::state::AppState>,
+    operation_id: uuid::Uuid,
+) -> Result<hf_service::SemgrepCancelOutcome, String> {
+    state
+        .container
+        .request_semgrep_cancel(operation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn open_folder_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;

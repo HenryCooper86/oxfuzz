@@ -17,7 +17,9 @@ pub use session_store::SqliteSessionStore;
 pub use store::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind,
-    HarnessApprovalRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus, StorageError, Store,
+    HarnessApprovalRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus, SemgrepFindingRecord,
+    SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
+    SemgrepTargetScoreRecord, StorageError, Store,
 };
 pub use transcript::JsonlTranscriptStore;
 pub use transcript_display::JsonlDisplayTranscriptStore;

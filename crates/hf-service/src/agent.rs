@@ -236,6 +236,26 @@ impl ServiceContainer {
             "discover" => {
                 let language = parse_language(arg_str(args, "lang").unwrap_or("c"))?;
                 let inventory = self.discover(project, language).await?;
+                #[cfg(feature = "semgrep-enrichment")]
+                let effective = self.effective_inventory(inventory, language).await?;
+                #[cfg(feature = "semgrep-enrichment")]
+                let targets: Vec<Value> = effective
+                    .candidates
+                    .into_iter()
+                    .take(10)
+                    .map(|target| {
+                        serde_json::json!({
+                            "symbol": target.candidate.symbol,
+                            "base_score": target.base_score,
+                            "semgrep_boost": target.semgrep_boost,
+                            "effective_score": target.effective_score,
+                            "semgrep_matched_rule_count": target.semgrep_matched_rule_count,
+                            "kind": format!("{:?}", target.candidate.kind),
+                            "location": format!("{}:{}", target.candidate.location.file.display(), target.candidate.location.line),
+                        })
+                    })
+                    .collect();
+                #[cfg(not(feature = "semgrep-enrichment"))]
                 let targets: Vec<Value> = inventory
                     .ranked()
                     .into_iter()
@@ -581,4 +601,71 @@ fn validate_skill_definition(
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "semgrep-enrichment"))]
+mod semgrep_consumer_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use hf_core::target::TargetLanguage;
+    use hf_storage::Store;
+    use serde_json::json;
+
+    use super::ServiceContainer;
+
+    #[tokio::test]
+    async fn discover_tool_renders_service_scores_without_starting_semgrep() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("parser.c"),
+            b"int parse(const char *input) { return input[0]; }\n",
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(root.path()).unwrap();
+        let inventory = hf_discovery::discover(&project, TargetLanguage::C)
+            .await
+            .unwrap();
+        let target_id = inventory.candidates[0].id;
+        let base_score = inventory.candidates[0].fit_score;
+        let store = Arc::new(Store::connect(root.path().join("agent.db")).await.unwrap());
+        store
+            .save_inventory(&inventory, chrono::Utc::now())
+            .await
+            .unwrap();
+        let service = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store));
+        service
+            .semgrep_test_publish_inventory(&inventory, HashMap::from([(target_id, 0.05)]))
+            .await
+            .unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semgrep_enrichment_runs")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+
+        let response = service
+            .dispatch_agent_tool(&project, "discover", &json!({"lang": "c"}))
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let target = &response["targets"][0];
+        assert!(target.get("base_score").is_some());
+        assert!(target.get("semgrep_boost").is_some());
+        assert!(target.get("effective_score").is_some());
+        assert!(target.get("semgrep_matched_rule_count").is_some());
+        assert!(target.get("fit_score").is_none());
+        assert_eq!(target["base_score"].as_f64(), Some(base_score));
+        assert_eq!(target["semgrep_boost"].as_f64(), Some(0.05));
+        assert_eq!(
+            target["effective_score"].as_f64(),
+            Some((base_score + 0.05).min(1.0))
+        );
+        assert_eq!(target["semgrep_matched_rule_count"].as_u64(), Some(1));
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semgrep_enrichment_runs")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(after, before, "discover tool started a Semgrep operation");
+    }
 }
