@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
+use crate::container::{acquire_semgrep_project_lease, SemgrepProjectLease};
+
 /// Pinned Semgrep Community Edition version in the sandbox image.
 pub const SEMGREP_VERSION: &str = "1.169.0";
 /// Pinned `0xdea/semgrep-rules` revision bundled in the sandbox image.
@@ -36,10 +38,6 @@ const SEMGREP_OUTPUT_FILE: &str = "semgrep.json";
 const MAX_SEMGREP_OUTPUT_BYTES: u64 = 67_108_864;
 const OUTPUT_TRUNCATION_MARKER: &str = "[output truncated]";
 const LINE_TRUNCATION_MARKER: &str = "[line truncated]";
-
-pub(crate) struct SemgrepProjectLease {
-    _system_guard: File,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupRecoveryOutcome {
@@ -556,41 +554,6 @@ impl SemgrepCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::mem::take(&mut *failure)
     }
-}
-
-fn acquire_semgrep_project_lease(
-    canonical_project: &Path,
-) -> Result<SemgrepProjectLease, ClassifiedError> {
-    let lock_dir = crate::init::user_app_dir().join("locks");
-    std::fs::create_dir_all(&lock_dir).map_err(|error| {
-        ClassifiedError::Internal(format!(
-            "create Semgrep project lease directory {}: {error}",
-            lock_dir.display()
-        ))
-    })?;
-    let digest = Sha256::digest(canonical_project.as_os_str().as_encoded_bytes());
-    let lock_path = lock_dir.join(format!("semgrep-project-{digest:x}.lock"));
-    let system_guard = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| {
-            ClassifiedError::Internal(format!(
-                "open Semgrep project lease {}: {error}",
-                lock_path.display()
-            ))
-        })?;
-    system_guard.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => semgrep_validation("busy"),
-        std::fs::TryLockError::Error(error) => {
-            ClassifiedError::Internal(format!("acquire Semgrep project lease: {error}"))
-        }
-    })?;
-    Ok(SemgrepProjectLease {
-        _system_guard: system_guard,
-    })
 }
 
 pub(crate) async fn recover_semgrep_at_bootstrap(
@@ -6246,7 +6209,10 @@ mod lifecycle_tests {
             .start_semgrep_enrichment(alias, TargetLanguage::C)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("busy"));
+        assert!(matches!(
+            error,
+            ClassifiedError::Validation(message) if message == "Semgrep enrichment: busy"
+        ));
         let second_id = service
             .start_semgrep_enrichment(second, TargetLanguage::C)
             .await
@@ -6286,7 +6252,10 @@ mod lifecycle_tests {
             .start_semgrep_enrichment(project, TargetLanguage::C)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("busy"));
+        assert!(matches!(
+            error,
+            ClassifiedError::Validation(message) if message == "Semgrep enrichment: busy"
+        ));
         assert!(second_runtime.calls().is_empty());
 
         assert_eq!(
@@ -6320,6 +6289,84 @@ mod lifecycle_tests {
             SemgrepCancelOutcome::Accepted
         );
         wait_for_state(&service, id, SemgrepOperationState::Cancelled).await;
+    }
+
+    #[tokio::test]
+    async fn clear_knowledge_rejects_an_active_semgrep_operation() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Block));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterBegin);
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        let error = service.clear_knowledge().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassifiedError::Validation(message)
+                if message == crate::container::WORKSPACE_CLEANUP_BUSY_MESSAGE
+        ));
+        assert!(store.semgrep_run(operation_id).await.unwrap().is_some());
+        assert_eq!(service.semgrep.journal.interrupted().unwrap().len(), 1);
+        assert_eq!(
+            service.request_semgrep_cancel(operation_id).await.unwrap(),
+            SemgrepCancelOutcome::Accepted
+        );
+        release.notify_one();
+        wait_for_state(
+            &service,
+            operation_id,
+            SemgrepOperationState::Cancelled,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn delete_project_rejects_its_active_semgrep_operation() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let project_alias = project.join("..").join("project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::Block));
+        let (service, store) = persistent_service(root.path(), runtime).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterBegin);
+        let operation_id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        let error = service.delete_project(&project_alias).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassifiedError::Validation(message) if message == "Semgrep enrichment: busy"
+        ));
+        assert!(store.semgrep_run(operation_id).await.unwrap().is_some());
+        assert_eq!(service.semgrep.journal.interrupted().unwrap().len(), 1);
+        assert_eq!(
+            service.request_semgrep_cancel(operation_id).await.unwrap(),
+            SemgrepCancelOutcome::Accepted
+        );
+        release.notify_one();
+        wait_for_state(
+            &service,
+            operation_id,
+            SemgrepOperationState::Cancelled,
+        )
+        .await;
     }
 
     #[tokio::test]
