@@ -54,6 +54,12 @@ Instead, the network-disabled fixed-wrapper scan validates the bundled
 configuration by loading and executing every local rule against the fixed
 fixtures.
 
+Semgrep CE `1.169.0` omits `paths.skipped` from successful JSON when no path was
+skipped. The strict parser treats only that omission as an empty collection.
+An explicit non-empty skipped collection remains an incomplete-analysis
+failure, and the normalized `paths.scanned` collection must exactly equal the
+staged source manifest.
+
 The Semgrep Community Edition executable is a separate process licensed under
 LGPL-2.1. The `0xdea/semgrep-rules` content is MIT-licensed. Distribution
 artifacts retain both notices and upstream source/revision references.
@@ -190,9 +196,12 @@ The command schema is versioned independently from Semgrep. Schema version 1:
 - scans only the staged `/work/source` directory; and
 - accepts no caller-provided flags, environment, config, or rule paths.
 
-The service treats a non-empty Semgrep `errors` collection, parse failure,
-per-file timeout, or size-based skip as incomplete analysis and rejects the
-whole enrichment.
+The service requires `errors`, `paths`, and `paths.scanned`. It accepts
+`paths.skipped` when the field is absent or explicitly empty because Semgrep CE
+`1.169.0` omits the field on a no-skip success. A non-empty `errors` or
+`paths.skipped`, a `paths.scanned` set that does not exactly equal the staged
+manifest, parse failure, per-file timeout, or size-based skip is incomplete
+analysis and rejects the whole enrichment.
 
 The container has no network, drops every capability, sets
 `no-new-privileges`, and receives:
@@ -545,8 +554,11 @@ Implementation follows Red -> Green -> Refactor.
 ### Unit tests
 
 - Parse valid Error/Warning/Info fixtures.
-- Reject malformed JSON, unknown severities, missing fields, bad coordinates,
-  unsafe paths, conflicting duplicate fingerprints, and excessive findings.
+- Accept the real Semgrep `1.169.0` no-skip shape with omitted
+  `paths.skipped`; reject malformed JSON, unknown severities, missing
+  `paths`/`paths.scanned`, explicit non-empty skips, scanned-manifest mismatch,
+  bad coordinates, unsafe paths, conflicting duplicate fingerprints, and
+  excessive findings.
 - Map only an exact file plus unique containing function span.
 - Leave file-level and ambiguous findings unmatched.
 - Deduplicate repeated `(candidate_id, rule_id)` matches.
@@ -607,7 +619,9 @@ A real container-only test:
 3. validates the bundled rules by loading and executing the complete local
    configuration without the registry-dependent `scan --validate` path;
 4. scans a fixed vulnerable and clean C fixture with networking disabled; and
-5. asserts the expected normalized rule identifiers.
+5. accepts absent-or-empty `paths.skipped`, asserts that `paths.scanned` is
+   exactly the two-file fixture manifest, asserts one expected vulnerable
+   rule identifier, and rejects a finding from any rule in the clean fixture.
 
 Normal unit, integration, and workspace tests do not run Semgrep.
 
@@ -641,6 +655,12 @@ Normal unit, integration, and workspace tests do not run Semgrep.
   compounding.
 - **Keeping partial output after failure** -- creates rankings with incomplete
   and potentially misleading evidence.
+- **Postprocessing JSON in the scan wrapper** -- fabricating an empty
+  `paths.skipped` field would add parsing and rewrite behavior to the fixed
+  execution boundary, prevent the final Semgrep process from remaining the
+  wrapper's `exec` target, and complicate PID 1 signal and cancellation
+  semantics. The strict Rust parser owns the one documented compatibility
+  default instead.
 - **Fabricating `ready_to_commit` to close a failed operation** -- falsely
   claims validated publication provenance; a distinct terminal abort preserves
   recovery evidence without passing the successful-publication gate.
