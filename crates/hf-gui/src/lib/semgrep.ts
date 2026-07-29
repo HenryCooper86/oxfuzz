@@ -11,6 +11,7 @@ import type {
 
 const SEMGREP_POLL_MS = 500;
 const SEMGREP_STATUS_TIMEOUT_MS = 5_000;
+const SEMGREP_MAX_CONSECUTIVE_FAILURES = 3;
 const ACTIVE_SEMGREP_STATES: ReadonlySet<SemgrepOperationState> = new Set([
   "staging",
   "scanning",
@@ -55,6 +56,7 @@ interface WaitForSemgrepOptions {
   pollMs?: number;
   requestTimeoutMs?: number;
   ownershipSignal?: AbortSignal;
+  maxConsecutiveFailures?: number;
 }
 
 function sameContext(
@@ -200,6 +202,13 @@ function ownershipReleasedError(): DOMException {
   );
 }
 
+function statusUnavailableError(): DOMException {
+  return new DOMException(
+    "Semgrep status is unavailable after repeated attempts",
+    "SemgrepStatusUnavailable",
+  );
+}
+
 function waitForPoll(
   signal: AbortSignal,
   ownershipSignal: AbortSignal | undefined,
@@ -299,6 +308,9 @@ export async function waitForSemgrep(
   const requestTimeoutMs =
     options.requestTimeoutMs ?? SEMGREP_STATUS_TIMEOUT_MS;
   const ownershipSignal = options.ownershipSignal;
+  const maxConsecutiveFailures =
+    options.maxConsecutiveFailures ?? SEMGREP_MAX_CONSECUTIVE_FAILURES;
+  let consecutiveFailures = 0;
 
   while (!signal.aborted) {
     if (ownershipSignal?.aborted) throw ownershipReleasedError();
@@ -310,9 +322,14 @@ export async function waitForSemgrep(
       requestTimeoutMs,
     );
     if (view === null) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        throw statusUnavailableError();
+      }
       await waitForPoll(signal, ownershipSignal, pollMs);
       continue;
     }
+    consecutiveFailures = 0;
     onState(view.state);
     if (view.state === "done") {
       if (!view.result) {

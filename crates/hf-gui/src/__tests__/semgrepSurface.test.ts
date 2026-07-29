@@ -297,6 +297,78 @@ describe("Semgrep advisory discovery behavior", () => {
     expect(result.scan_id).toBe("scan-1");
   });
 
+  it("bounds permanent status failures without releasing operation ownership", async () => {
+    vi.useFakeTimers();
+    const ownership = new AbortController();
+    let attempt = 0;
+    const waiting = waitForSemgrep(
+      "operation-id",
+      () => undefined,
+      new AbortController().signal,
+      {
+        transport: {
+          invoke: async () => {
+            attempt += 1;
+            if (attempt > 3) ownership.abort();
+            throw new Error("raw upstream body must not escape");
+          },
+        },
+        ownershipSignal: ownership.signal,
+        maxConsecutiveFailures: 3,
+        pollMs: 0,
+        requestTimeoutMs: 100,
+      },
+    );
+
+    await expect(waiting).rejects.toMatchObject({
+      name: "SemgrepStatusUnavailable",
+      message: "Semgrep status is unavailable after repeated attempts",
+    });
+    expect(attempt).toBe(3);
+    expect(hasOwnedSemgrepOperation("operation-id", "scanning")).toBe(true);
+    expect(semgrepStateAfterError("operation-id", "scanning")).toBe(
+      "scanning",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resets the consecutive failure budget after a successful status view", async () => {
+    const states: string[] = [];
+    let attempt = 0;
+    const result = await waitForSemgrep(
+      "operation-id",
+      (state) => states.push(state),
+      new AbortController().signal,
+      {
+        transport: {
+          invoke: async () => {
+            attempt += 1;
+            if (attempt === 1 || attempt === 3 || attempt === 4) {
+              throw new Error("temporary transport failure");
+            }
+            if (attempt === 2) {
+              return {
+                ...doneView(),
+                state: "scanning",
+                active: true,
+                ended_at: null,
+                result: null,
+              };
+            }
+            return doneView();
+          },
+        },
+        maxConsecutiveFailures: 3,
+        pollMs: 0,
+        requestTimeoutMs: 100,
+      },
+    );
+
+    expect(attempt).toBe(5);
+    expect(states).toEqual(["scanning", "done"]);
+    expect(result.scan_id).toBe("scan-1");
+  });
+
   it("releases a missing operation and its pending status resources immediately", async () => {
     vi.useFakeTimers();
     const ownership = new AbortController();
