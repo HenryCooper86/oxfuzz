@@ -339,6 +339,13 @@ through cleanup and journal close or abort. It also retains an exclusive
 digest-keyed cross-process project lease for that interval so the one-active
 project rule remains true while a published database row is `done` but not yet
 durably closed. Admission rechecks recovery health after taking both leases.
+Global knowledge deletion takes the exclusive workspace lease before deleting
+Semgrep rows. Project deletion takes the shared workspace lease and then the
+same canonical digest-keyed project lease as admission before deleting that
+project's database rows or workspace. A conflicting explicit deletion fails
+busy. These boundaries prevent deletion from removing an active parent while
+its journal remains open and preserve the global workspace-then-project lock
+order.
 After nondurable preflight, an owned service task performs lease acquisition,
 reservation, the staging-row insert, synced journal `Begin`, and worker
 handoff. The start API awaits a one-shot result, but dropping that caller does
@@ -434,12 +441,30 @@ before appending the terminal abort. Failed and explicitly cancelled runs
 publish no finding or score rows. If compensation or cleanup cannot be made
 durable, the journal remains unclosed so startup recovery can repair the run.
 
+Recovery also reconciles the two durable stores instead of assuming every
+active database parent has a journal. It first repairs every open or
+`ready_to_commit` journal. An interrupted journal whose database parent is
+absent is still authoritative for its operation UUID: recovery removes only
+that exact operation directory and appends a recovered abort. It then queries
+all remaining `staging`, `scanning`, `validating`, or `persisting` parents. Such
+a residual parent has no recoverable journal lifecycle, including the crash
+window after the staging-row commit and before journal `Begin`. Recovery
+removes the exact UUID operation directory first and only then atomically
+deletes any children and marks the parent `failed` with
+`recovered_missing_journal`. It does not fabricate `Begin` or `Abort`. The
+active parent remains the retry marker until cleanup and terminalization both
+succeed, so a second crash cannot strand artifacts without recovery evidence.
+This repair derives its cleanup target from the managed workspace and validated
+operation UUID; it does not require the source project to still exist.
+
 Startup recovery takes the exclusive workspace recovery lease before journal
 replay and retains it through database repair, cleanup, and terminal abort. If
 a live process holds a shared workspace lease, recovery is deferred without
 reading or mutating the journal and the new container rejects Semgrep starts.
 The corresponding live operation acquired its shared lease before its database
-insert and journal open, so bootstrap cannot misclassify it as interrupted.
+insert and journal open, so bootstrap cannot misclassify a live pre-`Begin`
+database row as interrupted. The same exclusion covers the complete
+journal-to-database reconciliation pass.
 
 Recovery cleanup is idempotent. Descriptor-relative validation must prove
 either that the exact `workspace/semgrep/<operation-uuid>` directory was
@@ -525,6 +550,12 @@ silent fallback, while an omitted agent id intentionally selects the default.
   staging, builds, smoke, fuzz, corpus, crash, coverage, or evidence operations;
   independent containers share the root gate and an advisory-file regression
   proves the same exclusion primitive used by separate processes.
+- Semgrep recovery regression: a committed active parent without a journal is
+  cleaned and failed without a fabricated lifecycle, while an interrupted
+  journal without a database parent is cleaned and recovered-aborted.
+- Semgrep concurrency regression: global knowledge deletion holds the exclusive
+  workspace lease, and project deletion holds the canonical project lease, so
+  neither can remove a live Semgrep parent or its open journal.
 - Presentation regression: successful turns, rollback, and branching reload the
   canonical display transcript instead of slicing optimistic local messages.
 - Diagnostics regression: a current-session summary excludes persisted traces

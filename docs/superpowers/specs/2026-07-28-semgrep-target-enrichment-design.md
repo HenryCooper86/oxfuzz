@@ -325,6 +325,14 @@ durable. Admission rechecks recovery health after taking both leases and before
 its first durable write. Both leases are transferred into the background
 worker, rather than reacquired after spawning.
 
+Knowledge deletion uses those same exclusion boundaries. Global
+`clear_knowledge` takes the exclusive workspace lease before deleting any
+Semgrep parent. `delete_project` takes the shared workspace lease followed by
+the canonical project's digest-keyed Semgrep lease and retains both through
+the database and workspace deletion. An overlapping explicit deletion fails
+busy, so it cannot remove an active database parent while the worker's journal
+remains open.
+
 After nondurable preflight, admission runs in an owned service task and returns
 its result through a one-shot response. Dropping the caller's start future
 cannot cancel the durable admission section between reservation, staging-row
@@ -393,6 +401,21 @@ operation whose abort was interrupted, then cleans only its validated
 operation-owned staging directory and appends the terminal abort.
 If compensation, cleanup, or abort cannot complete, the journal remains
 interrupted and new starts fail closed so recovery can retry.
+
+Recovery reconciles both durable stores under the exclusive workspace lease.
+It first repairs every interrupted journal. If an interrupted journal's
+database parent is absent, its validated UUID still identifies the exact
+operation directory; recovery cleans that directory and appends a recovered
+abort. Recovery then queries all active Semgrep parents. Any active parent
+remaining after interrupted-journal repair has no recoverable open or
+ready-to-commit lifecycle, including a crash after the staging-row commit and
+before journal `Begin`. Recovery cleans its exact UUID directory first and then
+atomically removes any children and marks it `failed` with
+`recovered_missing_journal`. No journal lifecycle is fabricated. Until that
+sequence completes, the active parent remains a retry marker; cleanup is
+idempotent if recovery crashes before the terminal database transaction. The
+source project need not still exist because the cleanup identity is the
+validated operation UUID beneath the managed workspace.
 
 Startup recovery must first take the exclusive workspace recovery lease and
 retain it through journal replay, database repair, descriptor-relative cleanup,
@@ -541,8 +564,13 @@ The following are terminal atomic failures:
 - unsafe or inconsistent finding content;
 - finding-count or field-size limit breach;
 - source revision change before commit;
-- storage transaction failure; and
-- workspace cleanup or forced-teardown failure that prevents safe completion.
+- storage transaction failure;
+- workspace cleanup or forced-teardown failure that prevents safe completion;
+- committed active database parent without a recoverable journal lifecycle;
+- interrupted journal whose database parent was removed by an earlier
+  knowledge-deletion race; and
+- global or same-project knowledge deletion attempted while a Semgrep
+  operation owns the corresponding lease.
 
 No failure path changes candidate scores. The last valid matching overlay, if
 one exists, remains historical but is not replaced by partial new state.

@@ -236,7 +236,19 @@ same transaction before updating the parent, so those terminal states prohibit
 child rows. Project deletion and `clear_knowledge` remove
 `semgrep_findings` and `semgrep_target_scores` first (directly or through the
 parent cascade), then `semgrep_enrichment_runs`, and only then `targets`. This
-order prevents stale logical target references during cleanup.
+order prevents stale logical target references during cleanup. Service-owned
+global deletion takes the exclusive workspace lease, while project deletion
+takes the shared workspace lease followed by the canonical project's Semgrep
+lease, so neither deletion can remove a parent from an active journal
+lifecycle.
+
+Startup recovery queries every parent whose status is `staging`, `scanning`,
+`validating`, or `persisting` after repairing interrupted journals. A remaining
+active parent has no recoverable journal lifecycle. Recovery first removes its
+exact operation-owned workspace directory, then uses the ordinary atomic
+failure transition to delete any children and set `failed` with
+`recovered_missing_journal`. The parent remains active until that sequence
+finishes and therefore serves as the durable retry marker.
 
 ### `harnesses`
 
