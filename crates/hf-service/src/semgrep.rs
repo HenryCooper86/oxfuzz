@@ -4592,6 +4592,34 @@ mod snapshot_tests {
 
     #[cfg(unix)]
     #[test]
+    fn cleanup_rejects_exact_child_recreation_while_proving_absence() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
+        std::fs::create_dir(canonical_workspace.join("semgrep")).unwrap();
+        let operation = canonical_workspace
+            .join("semgrep")
+            .join(Uuid::new_v4().to_string());
+
+        let result = super::cleanup_operation_root_in_with_hooks(
+            &canonical_workspace,
+            &operation,
+            || {},
+            || {
+                std::fs::create_dir(&operation).unwrap();
+                write(&operation, "must-survive", b"recreated-child");
+            },
+            || {},
+        );
+
+        assert!(matches!(result, Err(ClassifiedError::Validation(_))));
+        assert_eq!(
+            std::fs::read(operation.join("must-survive")).unwrap(),
+            b"recreated-child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn cleanup_accepts_descriptor_proven_missing_semgrep_parent() {
         let workspace = tempfile::tempdir().unwrap();
         let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
