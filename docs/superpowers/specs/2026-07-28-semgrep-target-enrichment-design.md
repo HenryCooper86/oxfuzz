@@ -391,8 +391,14 @@ An absent `semgrep` child beneath the validated managed workspace is also
 idempotent absence for a failure that occurred before staging created it, but
 only when `openat(workspace_fd, "semgrep", O_NOFOLLOW | O_DIRECTORY)` returns
 `ENOENT` and a post-check proves that the workspace pathname still names the
-opened workspace descriptor. All existing-parent and exact-operation checks
-remain descriptor-relative through removal and parent synchronization.
+opened workspace descriptor. After that post-check, cleanup performs a second
+descriptor-relative `semgrep` lookup and succeeds only if it still returns
+`ENOENT`; appearance of the parent or exact UUID child is an error. Recovery's
+exclusive workspace lease excludes compliant creators. Live-operation cleanup
+holds a shared lease so another project's operation may create the parent; the
+second lookup detects that race and fails safely. All existing-parent and
+exact-operation checks remain descriptor-relative through removal and parent
+synchronization.
 
 After successful cleanup and close, only the digests and normalized durable
 records remain. Failed and cancelled
@@ -544,9 +550,11 @@ Implementation follows Red -> Green -> Refactor.
   config path, and absence of caller-controlled flags.
 - Cover asynchronous lifecycle, busy rejection, cancellation, timeout, and
   workspace lease behavior.
-- Use real child processes to prove bootstrap defers recovery while a live
-  operation owns the workspace lease, same-project leases reject competing
-  processes, and close/abort journal transitions serialize.
+- Use real child processes and actual service admission to pause after journal
+  `Begin` and before `Close`. At both points, prove bootstrap recovery defers,
+  a second process cannot admit the same project, the database/journal/staging
+  state remains untouched, and the admitted worker still owns both leases.
+  Also prove close/abort journal transitions serialize.
 - Prove source snapshot bounds and time-of-check/time-of-use detection.
 - Race workspace replacement and `semgrep`-parent recreation against cleanup;
   only descriptor-proven stable absence is successful.

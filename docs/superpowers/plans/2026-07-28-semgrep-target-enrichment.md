@@ -1761,13 +1761,21 @@ async fn recover_semgrep_at_bootstrap(
 - [ ] **Step 1: Write failing real-process ownership tests**
 
 Add Unix tests named
-`bootstrap_recovery_defers_while_another_process_holds_a_live_workspace_lease`
-and `project_lease_rejects_the_same_project_across_processes`. Follow the
-existing `current_exe() --exact <child-test>` pattern. The first child acquires
-`acquire_workspace_operation_at(workspace)`, signals readiness through a pipe,
-and retains the lease. The parent creates a staging row, an open journal, and
-the exact operation directory, then invokes `recover_semgrep_at_bootstrap`.
-Assert:
+`admitted_child_blocks_recovery_and_same_project_start_after_begin` and
+`admitted_child_blocks_recovery_and_same_project_start_before_close`. Follow
+the existing `current_exe() --exact <child-test>` pattern. The first child
+constructs the real `ServiceContainer` with the shared test database,
+persistent journal, explicit workspace, persisted C inventory, and
+`RecordingRuntime`, then calls `start_semgrep_enrichment`. Add test-only pause
+points after the synced journal `Begin` and immediately before `Close`. At each
+pause, the admitted child signals readiness through a pipe while the real
+background worker retains both lease guards.
+
+A second child invokes the exact `recover_semgrep_at_bootstrap` helper used by
+`ServiceContainer::bootstrap`; it must report `Deferred`. A third child
+constructs the same real service and calls `start_semgrep_enrichment` for the
+same canonical project; it must receive `busy`. At the post-`Begin` pause,
+assert:
 
 ```rust
 assert_eq!(outcome, StartupRecoveryOutcome::Deferred);
@@ -1779,9 +1787,11 @@ assert!(operation_root.exists());
 assert_eq!(journal.interrupted().unwrap().len(), 1);
 ```
 
-The project-lease child retains the digest-keyed lock for one canonical
-project. The parent must receive the existing bounded `busy` validation error
-for that project and must acquire a lease for a different project.
+At the pre-`Close` pause, assert the database row is internally `Done`, the
+journal remains unclosed, recovery still defers, and cross-process admission
+still returns `busy`. Release each pause and require the admitted child to
+finish successfully. These tests must use actual admission and worker guard
+transfer; manually acquiring the lease primitives is insufficient.
 
 - [ ] **Step 2: Run the process tests and verify red**
 
@@ -1790,10 +1800,10 @@ Run:
 ```bash
 set -o pipefail
 cargo test -p hf-service --features semgrep-enrichment \
-  bootstrap_recovery_defers_while_another_process_holds_a_live_workspace_lease \
+  admitted_child_blocks_recovery_and_same_project_start_after_begin \
   2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 cargo test -p hf-service --features semgrep-enrichment \
-  project_lease_rejects_the_same_project_across_processes \
+  admitted_child_blocks_recovery_and_same_project_start_before_close \
   2>&1 | { grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$' || true; } | head -200
 ```
 
@@ -2076,10 +2086,16 @@ Open the workspace descriptor first with
 workspace pathname, and call
 `openat(workspace_fd, "semgrep", RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC)`.
 Treat `ENOENT` as success only after a second workspace pathname/descriptor
-identity check. If the parent opens, retain its descriptor and identity through
-the existing exact-child absence proof or removal and parent sync. Reject
-symlinks, non-directories, replaced ancestors, and a child that appears during
-the proof.
+identity check and a second
+`openat(workspace_fd, "semgrep", RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC)`.
+The second lookup must also return `ENOENT`; reject if the parent or exact UUID
+child appeared after the first lookup. If the first parent lookup opens, retain
+its descriptor and identity through the existing exact-child absence proof or
+removal and parent sync. Reject symlinks, non-directories, replaced ancestors,
+and a child that appears during the proof. Recovery's exclusive workspace
+lease excludes compliant creators. Live-operation cleanup retains only its
+shared lease, so the second lookup must also detect another project's
+concurrent parent creation and fail safely.
 
 - [ ] **Step 4: Run all snapshot and cleanup tests**
 
