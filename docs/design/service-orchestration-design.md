@@ -436,7 +436,13 @@ ancestors remain errors. An absent `semgrep` child beneath the validated
 managed workspace is also proven absence for an operation that failed before
 staging created that parent, but only through `openat` on a retained workspace
 descriptor followed by a pathname/descriptor identity post-check. A path-based
-`NotFound` is never sufficient evidence.
+`NotFound` is never sufficient evidence. Cleanup then repeats the
+descriptor-relative `semgrep` lookup and accepts absence only if the second
+lookup also returns `ENOENT`; a recreated parent or exact operation child is
+rejected. Recovery's exclusive workspace lease prevents compliant service
+operations from creating the parent during this proof. Live-operation cleanup
+uses a shared lease and therefore detects and fails safely if a different
+project creates the parent concurrently.
 
 Every ranking consumer asks `hf-service` for `SemgrepInventoryView`; clients do
 not join or rescore results. A result reader accepts an overlay only when the
