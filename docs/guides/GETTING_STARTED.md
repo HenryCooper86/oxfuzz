@@ -217,10 +217,10 @@ oxfuzz schedule recovery acknowledge <occurrence-id>
 
 Acknowledgement records an expired, non-terminal occurrence with an unknown
 prior outcome as cancelled and permanently consumes that one-time schedule. It
-does not prove or force the termination of an orphaned sandbox process. To
-retry, create a new one-time schedule so it receives a new schedule identifier
-and a new durable receipt. Recurring schedules remain available when the
-one-time journal is blocked.
+does not stop, resume, or adopt an orphaned sandbox process, and does not prove
+its termination. To retry, create a new one-time schedule so it receives a new
+schedule identifier and a new durable receipt. Recurring schedules remain
+available when the one-time journal is blocked.
 
 The equivalent REST operations are:
 
