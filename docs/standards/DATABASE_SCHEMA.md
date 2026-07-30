@@ -524,7 +524,12 @@ CHECK (
 Index: `idx_schedule_occurrences_state(state, lease_expires_at, updated_at)`.
 Receipt and execution state transitions are paired atomic transactions.
 Retention and explicit history clearing protect every execution referenced by a
-non-terminal receipt; receipts are retained permanently.
+non-terminal receipt; receipts are retained permanently. When terminal history
+still exists, an idempotent transition replay must match both the receipt and
+serialized execution. After that history is explicitly cleared, replay is
+idempotent only from an exact match of the permanent occurrence, schedule,
+execution, owner, destination-state, lease, and recovery-detail fields. Such a
+receipt-only replay never recreates the cleared execution row.
 
 ### `project_settings`
 

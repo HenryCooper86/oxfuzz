@@ -2573,6 +2573,117 @@ async fn exact_terminal_repeat_is_idempotent_but_different_terminal_is_a_conflic
 }
 
 #[tokio::test]
+async fn exact_terminal_repeat_is_receipt_idempotent_after_history_clear() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-cleared", "schedule-cleared", "exec-cleared");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    let completed = transition(&new, "running", "completed", "completed");
+    store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    assert_eq!(store.clear_schedule_executions().await.unwrap(), 1);
+
+    let replay = store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    let ScheduleOccurrenceTransitionResult::Idempotent(receipt) = replay else {
+        panic!("exact terminal receipt replay must remain idempotent");
+    };
+    assert_eq!(receipt.execution_status, None);
+    assert_eq!(receipt.execution_data_json, None);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-cleared'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0,
+        "receipt-only replay must not recreate cleared execution history"
+    );
+}
+
+#[tokio::test]
+async fn terminal_receipt_replay_after_history_clear_rejects_every_metadata_mismatch() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-cleared", "schedule-cleared", "exec-cleared");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    let completed = transition(&new, "running", "completed", "completed");
+    store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    store.clear_schedule_executions().await.unwrap();
+
+    let mut schedule_mismatch = completed.clone();
+    schedule_mismatch.schedule_id = "other-schedule".to_owned();
+    let mut execution_mismatch = completed.clone();
+    execution_mismatch.execution_id = "other-execution".to_owned();
+    let mut owner_mismatch = completed.clone();
+    owner_mismatch.owner_id = "other-owner".to_owned();
+    let mut detail_mismatch = completed.clone();
+    detail_mismatch.recovery_detail = Some("different detail".to_owned());
+    let mut destination_mismatch = completed.clone();
+    destination_mismatch.to_state = "failed".to_owned();
+    destination_mismatch.execution_status = "failed".to_owned();
+
+    for (field, mismatch) in [
+        ("schedule", schedule_mismatch),
+        ("execution", execution_mismatch),
+        ("owner", owner_mismatch),
+        ("detail", detail_mismatch),
+        ("destination", destination_mismatch),
+    ] {
+        assert!(
+            matches!(
+                store
+                    .transition_schedule_occurrence(&mismatch)
+                    .await
+                    .unwrap(),
+                ScheduleOccurrenceTransitionResult::Conflict(_)
+            ),
+            "{field} mismatch must not be receipt-idempotent"
+        );
+    }
+
+    let mut occurrence_mismatch = completed.clone();
+    occurrence_mismatch.occurrence_id = "other-occurrence".to_owned();
+    assert!(matches!(
+        store
+            .transition_schedule_occurrence(&occurrence_mismatch)
+            .await
+            .unwrap(),
+        ScheduleOccurrenceTransitionResult::Missing
+    ));
+
+    let mut lease_mismatch = completed;
+    lease_mismatch.lease_expires_at = Some((Utc::now() + Duration::seconds(60)).to_rfc3339());
+    assert!(matches!(
+        store.transition_schedule_occurrence(&lease_mismatch).await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-cleared'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn acknowledgement_cannot_overtake_an_unexpired_lease() {
     let (store, _dir) = temp_store().await;
     let new = new_occurrence("occ-1", "schedule-1", "exec-1");
