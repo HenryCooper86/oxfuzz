@@ -95,9 +95,11 @@ receipts before planning, then reconciles a stale JSON cursor from the durable
 receipt timestamp; terminal execution history may have been cleared.
 
 Only one-time triggers use permanent SQLite occurrence receipts. Their admission
-order is receipt+pending transaction -> JSON `last_fire` -> tracked task ->
-running transaction -> dispatcher -> terminal transaction. A 60-second owner
-lease renews every 15 seconds. Expired non-terminal receipts require
+first checks global and schedule-specific journal health before any hourly or
+other preflight that can mutate the cursor or execution history. Its durable
+admission order is receipt+pending transaction -> JSON `last_fire` -> tracked
+task -> running transaction -> dispatcher -> terminal transaction. A 60-second
+owner lease renews every 15 seconds. Expired non-terminal receipts require
 acknowledgement as cancelled and never retry automatically. Recurring schedules
 do not use occurrence APIs. SQLite unique constraints, not process-local
 scheduler locks or the JSON write mutex, are the cross-process admission
