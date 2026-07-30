@@ -1816,12 +1816,8 @@ impl SchedulerManager {
             crate::store::TriggerConfig::OneTime { .. }
         );
         if one_time
-            && Self::one_time_trigger_blocked(
-                &schedule.id,
-                one_time_status,
-                one_time_global_block,
-            )
-            .await
+            && Self::one_time_trigger_blocked(&schedule.id, one_time_status, one_time_global_block)
+                .await
         {
             return;
         }
@@ -1847,9 +1843,8 @@ impl SchedulerManager {
                             "Cannot verify hourly schedule limit; skipping trigger"
                         );
                         if one_time {
-                            *one_time_global_block.lock().await = Some(
-                                "one-time hourly execution history is unavailable".to_owned(),
-                            );
+                            *one_time_global_block.lock().await =
+                                Some("one-time hourly execution history is unavailable".to_owned());
                             return;
                         }
                         Self::record_policy_skip(
@@ -3560,7 +3555,11 @@ mod tests {
         assert_eq!(dispatcher.calls_for("blocked-once").await, 0);
         assert_eq!(dispatcher.calls_for("wf").await, 1);
         assert_eq!(
-            manager.get_schedule("blocked-once").await.unwrap().last_fire,
+            manager
+                .get_schedule("blocked-once")
+                .await
+                .unwrap()
+                .last_fire,
             None
         );
         assert!(manager.execution_history("blocked-once").await.is_empty());
