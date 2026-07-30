@@ -8,11 +8,17 @@
 mod store;
 
 pub mod checkpoint_store;
+mod schedule_occurrence_store;
 pub mod session_store;
 pub mod transcript;
 pub mod transcript_display;
 
 pub use checkpoint_store::SqliteChatCheckpointStore;
+pub use schedule_occurrence_store::{
+    NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceRecord,
+    ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
+    ScheduleOccurrenceTransitionResult,
+};
 pub use session_store::SqliteSessionStore;
 pub use store::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
