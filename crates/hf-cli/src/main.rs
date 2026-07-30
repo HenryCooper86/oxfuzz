@@ -436,6 +436,11 @@ enum KnowledgeOp {
 enum ScheduleOp {
     /// List scheduled campaigns.
     List,
+    /// Inspect or acknowledge ambiguous one-time occurrences.
+    Recovery {
+        #[command(subcommand)]
+        op: ScheduleRecoveryOp,
+    },
     /// Show recent campaign execution history.
     History {
         #[arg(long, default_value = "20")]
@@ -479,6 +484,14 @@ enum ScheduleOp {
     Enable { id: String },
     /// Disable a scheduled campaign by id.
     Disable { id: String },
+}
+
+#[derive(Subcommand)]
+enum ScheduleRecoveryOp {
+    /// List one-time occurrences requiring operator acknowledgement.
+    List,
+    /// Record an unknown prior outcome as cancelled. This does not terminate a process.
+    Acknowledge { occurrence_id: String },
 }
 
 #[derive(Subcommand)]
@@ -734,6 +747,37 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
                     v.last_fire.unwrap_or_else(|| "never".to_owned()),
                 );
             }
+        }
+        ScheduleOp::Recovery {
+            op: ScheduleRecoveryOp::List,
+        } => {
+            for recovery in scheduler.list_one_time_recoveries().await? {
+                println!(
+                    "{}  {}  {}  {}  {}",
+                    recovery.occurrence_id,
+                    recovery
+                        .schedule_name
+                        .as_deref()
+                        .unwrap_or("<deleted schedule>"),
+                    recovery.triggered_at,
+                    recovery.state,
+                    recovery
+                        .recovery_detail
+                        .as_deref()
+                        .unwrap_or("unknown outcome"),
+                );
+            }
+        }
+        ScheduleOp::Recovery {
+            op: ScheduleRecoveryOp::Acknowledge { occurrence_id },
+        } => {
+            let recovery = scheduler
+                .acknowledge_one_time_recovery(&occurrence_id)
+                .await?;
+            println!(
+                "{} recorded as {}. This did not terminate or adopt an orphaned sandbox process.",
+                recovery.occurrence_id, recovery.state,
+            );
         }
         ScheduleOp::History { limit } => {
             for e in scheduler.recent_executions(limit).await? {
@@ -2860,5 +2904,39 @@ mod semgrep_absence_tests {
             "--semgrep",
         ]);
         assert!(parsed.is_err());
+    }
+}
+
+#[cfg(test)]
+mod schedule_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands, ScheduleOp, ScheduleRecoveryOp};
+
+    #[test]
+    fn schedule_recovery_commands_parse() {
+        let list = Cli::try_parse_from(["oxfuzz", "schedule", "recovery", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Commands::Schedule {
+                op: ScheduleOp::Recovery {
+                    op: ScheduleRecoveryOp::List
+                }
+            }
+        ));
+
+        let acknowledge =
+            Cli::try_parse_from(["oxfuzz", "schedule", "recovery", "acknowledge", "occ-123"])
+                .unwrap();
+        let Commands::Schedule {
+            op:
+                ScheduleOp::Recovery {
+                    op: ScheduleRecoveryOp::Acknowledge { occurrence_id },
+                },
+        } = acknowledge.command
+        else {
+            panic!("expected recovery acknowledgement");
+        };
+        assert_eq!(occurrence_id, "occ-123");
     }
 }

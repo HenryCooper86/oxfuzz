@@ -2,6 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 #[test]
@@ -45,6 +46,222 @@ fn allow_open_dev_mode() {
     unsafe {
         std::env::set_var("HF_WEB_TOKEN_OPTIONAL", "1");
     }
+}
+
+struct WebRecoveryFixture {
+    _directory: tempfile::TempDir,
+    scheduler: Arc<hf_service::scheduler::CampaignScheduler>,
+    app: axum::Router,
+}
+
+impl WebRecoveryFixture {
+    fn app(&self) -> axum::Router {
+        self.app.clone()
+    }
+}
+
+async fn web_scheduler_with_occurrence(expired: bool) -> WebRecoveryFixture {
+    use hf_scheduler::{ExecutionStatus, Schedule, ScheduleExecution, TriggerConfig};
+    use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition, Store};
+
+    let directory = tempfile::tempdir().unwrap();
+    let schedules_path = directory.path().join("schedules.json");
+    let database_path = directory.path().join("scheduler.db");
+    let store = Arc::new(Store::connect(&database_path).await.unwrap());
+    let triggered_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let params = hf_service::scheduler::CampaignParams {
+        project: directory.path().display().to_string(),
+        target: Some("parser".to_owned()),
+        engine: "libfuzzer".to_owned(),
+        lang: "c".to_owned(),
+        duration_secs: 1,
+        max_runs: Some(1),
+        max_total_secs: None,
+        schedule_id: "schedule-web".to_owned(),
+    };
+    let schedule = Schedule::new(
+        "schedule-web",
+        "web recovery",
+        TriggerConfig::OneTime { at: triggered_at },
+        "fuzz-campaign",
+    )
+    .with_params(serde_json::to_value(params).unwrap());
+    std::fs::write(
+        &schedules_path,
+        serde_json::to_vec_pretty(&vec![schedule]).unwrap(),
+    )
+    .unwrap();
+
+    let pending = ScheduleExecution {
+        execution_id: "exec-web".to_owned(),
+        schedule_id: "schedule-web".to_owned(),
+        triggered_at,
+        started_at: None,
+        completed_at: None,
+        status: ExecutionStatus::Pending,
+        workflow_execution_id: None,
+        request_summary: serde_json::json!({}),
+        response_summary: serde_json::json!({}),
+        error_message: None,
+    };
+    store
+        .reserve_schedule_occurrence(&NewScheduleOccurrence {
+            id: "occ-web".to_owned(),
+            schedule_id: "schedule-web".to_owned(),
+            execution_id: "exec-web".to_owned(),
+            triggered_at: triggered_at.to_rfc3339(),
+            owner_id: "web-fixture".to_owned(),
+            lease_expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+            execution_status: "pending".to_owned(),
+            execution_data_json: serde_json::to_string(&pending).unwrap(),
+        })
+        .await
+        .unwrap();
+    let mut running = pending.clone();
+    running.status = ExecutionStatus::Running;
+    running.started_at = Some(triggered_at);
+    store
+        .transition_schedule_occurrence(&ScheduleOccurrenceTransition {
+            occurrence_id: "occ-web".to_owned(),
+            schedule_id: "schedule-web".to_owned(),
+            execution_id: "exec-web".to_owned(),
+            owner_id: "web-fixture".to_owned(),
+            from_state: "reserved".to_owned(),
+            to_state: "running".to_owned(),
+            lease_expires_at: Some(
+                (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+            ),
+            recovery_detail: None,
+            execution_status: "running".to_owned(),
+            execution_data_json: serde_json::to_string(&running).unwrap(),
+        })
+        .await
+        .unwrap();
+    if expired {
+        store
+            .release_schedule_occurrence_lease(
+                "occ-web",
+                "web-fixture",
+                &chrono::Utc::now().to_rfc3339(),
+                "terminal outcome is unknown",
+            )
+            .await
+            .unwrap();
+    }
+
+    let container = hf_service::ServiceContainer::stubbed().with_store(Arc::clone(&store));
+    let scheduler = Arc::new(
+        hf_service::scheduler::CampaignScheduler::try_start(
+            container.clone(),
+            schedules_path,
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    let app = hf_web::router::build_with_state(
+        hf_web::router::AppState::new(container).with_scheduler(Arc::clone(&scheduler)),
+    );
+    WebRecoveryFixture {
+        _directory: directory,
+        scheduler,
+        app,
+    }
+}
+
+#[tokio::test]
+async fn schedule_recovery_list_and_acknowledge_preserve_service_dto() {
+    allow_open_dev_mode();
+    let fixture = web_scheduler_with_occurrence(true).await;
+    let app = fixture.app();
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/schedule/recovery")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(listed.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body[0]["occurrence_id"], "occ-web");
+    assert_eq!(body[0]["state"], "running");
+
+    let acknowledged = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(acknowledged.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(acknowledged.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["state"], "cancelled");
+    fixture.scheduler.stop().await;
+}
+
+#[tokio::test]
+async fn recovery_mutation_without_scheduler_is_unavailable() {
+    allow_open_dev_mode();
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-1/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn schedule_recovery_acknowledge_maps_missing_and_live_conflicts() {
+    allow_open_dev_mode();
+    let fixture = web_scheduler_with_occurrence(false).await;
+    let app = fixture.app();
+    let live = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::CONFLICT);
+
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/missing/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    fixture.scheduler.stop().await;
 }
 
 #[tokio::test]
