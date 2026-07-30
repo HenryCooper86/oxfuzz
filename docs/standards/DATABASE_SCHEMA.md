@@ -481,6 +481,35 @@ is still inside the rolling one-hour admission window. Hourly counts likewise
 read the serialized `started_at`; trigger time is not a substitute for a real
 execution start.
 
+### `schedule_occurrences`
+
+Migration `0023_schedule_occurrences.sql` creates permanent
+`schedule_occurrences` receipts. Each receipt is unique per `schedule_id` and
+`execution_id`; the execution reference is intentionally soft so terminal
+history can be cleared while durable occurrence evidence remains.
+
+Migration 0023 creates permanent schedule_occurrences receipts, one receipt per
+schedule_id and execution_id, non-terminal lease requirements, terminal lease
+clearing, a 4,096-byte recovery_detail check, soft execution references, atomic
+paired transitions, and retention protection.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | occurrence identifier |
+| `schedule_id` | `TEXT NOT NULL UNIQUE` | one receipt per one-time schedule |
+| `execution_id` | `TEXT NOT NULL UNIQUE` | soft reference to `schedule_executions` |
+| `triggered_at` | `TEXT NOT NULL` | durable trigger timestamp |
+| `state` | `TEXT NOT NULL` | `reserved`, `running`, `completed`, `failed`, or `cancelled` |
+| `owner_id` | `TEXT NOT NULL` | scheduler-instance owner |
+| `lease_expires_at` | `TEXT` | required for non-terminal states and cleared for terminal states |
+| `recovery_detail` | `TEXT` | limited to 4,096 bytes |
+
+The schema requires a non-null lease for `reserved` and `running`, and a null
+lease for `completed`, `failed`, and `cancelled`. Receipt and execution state
+transitions are paired atomic transactions. Retention and explicit history
+clearing protect every execution referenced by a non-terminal receipt; receipts
+are retained permanently.
+
 ### `project_settings`
 
 | column | SQLite declaration |
@@ -558,6 +587,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0020_harness_approvals.sql` | creates atomic, digest-bound human harness-promotion provenance |
 | `0021_run_provenance_components.sql` | adds independently verifiable source, corpus, and sandbox-reference digests to runs |
 | `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
+| `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
 
 ## 7. Read failure contract
 
