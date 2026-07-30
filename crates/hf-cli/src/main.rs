@@ -7,6 +7,7 @@
 mod tui;
 
 use clap::{Parser, Subcommand};
+use hf_service::scheduler::{CampaignScheduler, CampaignSchedulerError};
 use hf_service::{
     EngineKind, FuzzProgress, ServiceContainer, SessionId, TargetLanguage, VerdictLevel,
 };
@@ -436,6 +437,11 @@ enum KnowledgeOp {
 enum ScheduleOp {
     /// List scheduled campaigns.
     List,
+    /// Inspect or acknowledge ambiguous one-time occurrences.
+    Recovery {
+        #[command(subcommand)]
+        op: ScheduleRecoveryOp,
+    },
     /// Show recent campaign execution history.
     History {
         #[arg(long, default_value = "20")]
@@ -479,6 +485,14 @@ enum ScheduleOp {
     Enable { id: String },
     /// Disable a scheduled campaign by id.
     Disable { id: String },
+}
+
+#[derive(Subcommand)]
+enum ScheduleRecoveryOp {
+    /// List one-time occurrences requiring operator acknowledgement.
+    List,
+    /// Record an unknown prior outcome as cancelled. This does not terminate a process.
+    Acknowledge { occurrence_id: String },
 }
 
 #[derive(Subcommand)]
@@ -699,14 +713,23 @@ fn cmd_knowledge(op: KnowledgeOp) -> anyhow::Result<()> {
 /// Start a campaign scheduler for a one-shot CLI operation. Background ticking
 /// stops when the process exits; persisted schedules live under the user data
 /// dir (shared with the GUI and web server).
-async fn start_scheduler() -> anyhow::Result<hf_service::scheduler::CampaignScheduler> {
+async fn start_scheduler() -> Result<CampaignScheduler, CampaignSchedulerError> {
     let container = ServiceContainer::bootstrap().await;
     let store_path = hf_service::init::user_app_dir().join("schedules.json");
-    Ok(hf_service::scheduler::CampaignScheduler::try_start(container, store_path, None).await?)
+    CampaignScheduler::try_start(container, store_path, None).await
+}
+
+fn recovery_cli_error(error: CampaignSchedulerError) -> anyhow::Error {
+    anyhow::Error::new(error.into_public_recovery_error())
 }
 
 async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
-    let scheduler = start_scheduler().await?;
+    let recovery_command = matches!(&op, ScheduleOp::Recovery { .. });
+    let scheduler = match start_scheduler().await {
+        Ok(scheduler) => scheduler,
+        Err(error) if recovery_command => return Err(recovery_cli_error(error)),
+        Err(error) => return Err(error.into()),
+    };
     match op {
         ScheduleOp::List => {
             let views = scheduler.list_views().await?;
@@ -734,6 +757,42 @@ async fn cmd_schedule(op: ScheduleOp) -> anyhow::Result<()> {
                     v.last_fire.unwrap_or_else(|| "never".to_owned()),
                 );
             }
+        }
+        ScheduleOp::Recovery {
+            op: ScheduleRecoveryOp::List,
+        } => {
+            for recovery in scheduler
+                .list_one_time_recoveries()
+                .await
+                .map_err(recovery_cli_error)?
+            {
+                println!(
+                    "{}  {}  {}  {}  {}",
+                    recovery.occurrence_id,
+                    recovery
+                        .schedule_name
+                        .as_deref()
+                        .unwrap_or("<deleted schedule>"),
+                    recovery.triggered_at,
+                    recovery.state,
+                    recovery
+                        .recovery_detail
+                        .as_deref()
+                        .unwrap_or("unknown outcome"),
+                );
+            }
+        }
+        ScheduleOp::Recovery {
+            op: ScheduleRecoveryOp::Acknowledge { occurrence_id },
+        } => {
+            let recovery = scheduler
+                .acknowledge_one_time_recovery(&occurrence_id)
+                .await
+                .map_err(recovery_cli_error)?;
+            println!(
+                "{} recorded as {}. This did not terminate or adopt an orphaned sandbox process.",
+                recovery.occurrence_id, recovery.state,
+            );
         }
         ScheduleOp::History { limit } => {
             for e in scheduler.recent_executions(limit).await? {
@@ -2860,5 +2919,52 @@ mod semgrep_absence_tests {
             "--semgrep",
         ]);
         assert!(parsed.is_err());
+    }
+}
+
+#[cfg(test)]
+mod schedule_cli_tests {
+    use clap::Parser as _;
+    use hf_service::scheduler::CampaignSchedulerError;
+
+    use super::{recovery_cli_error, Cli, Commands, ScheduleOp, ScheduleRecoveryOp};
+
+    #[test]
+    fn schedule_recovery_commands_parse() {
+        let list = Cli::try_parse_from(["oxfuzz", "schedule", "recovery", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Commands::Schedule {
+                op: ScheduleOp::Recovery {
+                    op: ScheduleRecoveryOp::List
+                }
+            }
+        ));
+
+        let acknowledge =
+            Cli::try_parse_from(["oxfuzz", "schedule", "recovery", "acknowledge", "occ-123"])
+                .unwrap();
+        let Commands::Schedule {
+            op:
+                ScheduleOp::Recovery {
+                    op: ScheduleRecoveryOp::Acknowledge { occurrence_id },
+                },
+        } = acknowledge.command
+        else {
+            panic!("expected recovery acknowledgement");
+        };
+        assert_eq!(occurrence_id, "occ-123");
+    }
+
+    #[test]
+    fn cli_recovery_error_excludes_stored_json_diagnostics() {
+        let public = recovery_cli_error(CampaignSchedulerError::History(
+            r#"STORED_JSON_PRIVATE_MARKER: {"project":"/private/source"}"#.to_owned(),
+        ))
+        .to_string();
+
+        assert_eq!(public, "one-time recovery is temporarily unavailable");
+        assert!(!public.contains("STORED_JSON_PRIVATE_MARKER"));
+        assert!(!public.contains("/private/source"));
     }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
@@ -13,6 +13,16 @@ import {
   parseCampaignConcurrencyLimits,
   type CampaignConcurrencyLimits,
 } from "../lib/schedulerLimits";
+import {
+  ScheduleRecoveryPanel,
+  type OneTimeRecoveryView,
+} from "../components/ScheduleRecoveryPanel";
+import {
+  acknowledgeRecoveryWithRefresh,
+  createLatestRefresh,
+  initialRecoveryLoadState,
+  recoveryLoadReducer,
+} from "../lib/scheduleRecovery";
 
 // ---------------------------------------------------------------------------
 // Agents
@@ -1197,6 +1207,7 @@ interface CampaignView {
   runs_done: number;
   secs_done: number;
   last_fire: string | null;
+  durability_status: "ready" | "consumed" | "recovery_required";
 }
 
 interface ExecutionView {
@@ -1237,6 +1248,11 @@ export function AutomationView() {
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
   const [history, setHistory] = useState<ExecutionView[]>([]);
+  const [recoveries, setRecoveries] = useState<OneTimeRecoveryView[]>([]);
+  const [recoveryLoad, dispatchRecoveryLoad] = useReducer(
+    recoveryLoadReducer,
+    initialRecoveryLoadState,
+  );
   const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
   const [triggerValue, setTriggerValue] = useState("3600");
   const [durationOverride, setDurationOverride] = useState<number | null>(null);
@@ -1267,40 +1283,67 @@ export function AutomationView() {
     return [...new Set(all)];
   }, [project, activeProject, recentProjects]);
 
-  // Load + light poll so progress, last-run times, and history update as
-  // campaigns fire.
+  const automationRefresh = useMemo(
+    () => createLatestRefresh({
+      onStart: () => dispatchRecoveryLoad("start"),
+      load: () => Promise.allSettled([
+        getTransport().invoke<CampaignView[]>("schedule_list"),
+        getTransport().invoke<ExecutionView[]>("schedule_history", { limit: 20 }),
+        getTransport().invoke<OneTimeRecoveryView[]>("schedule_recovery_list"),
+      ] as const),
+      commit: ([nextCampaigns, nextHistory, nextRecoveries]) => {
+        if (nextCampaigns.status === "fulfilled") {
+          setCampaigns(nextCampaigns.value);
+        } else {
+          setError(String(nextCampaigns.reason));
+        }
+        if (nextHistory.status === "fulfilled") {
+          setHistory(nextHistory.value);
+        } else {
+          setError(String(nextHistory.reason));
+        }
+        if (nextRecoveries.status === "fulfilled") {
+          setRecoveries(nextRecoveries.value);
+          dispatchRecoveryLoad("success");
+        } else {
+          setRecoveries([]);
+          dispatchRecoveryLoad("error");
+        }
+      },
+    }),
+    [],
+  );
+  const refreshAutomation = useCallback(
+    () => automationRefresh.refresh(),
+    [automationRefresh],
+  );
+
+  // Load + light poll so campaign state, recoveries, and history stay aligned.
   useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      const T = getTransport();
-      T.invoke<CampaignView[]>("schedule_list")
-        .then((c) => !cancelled && setCampaigns(c))
-        .catch(() => !cancelled && setCampaigns([]));
-      T.invoke<ExecutionView[]>("schedule_history", { limit: 20 })
-        .then((h) => !cancelled && setHistory(h))
-        .catch(() => !cancelled && setHistory([]));
-    };
-    tick();
+    automationRefresh.activate();
+    void Promise.resolve()
+      .then(refreshAutomation)
+      .catch((cause: unknown) => setError(String(cause)));
     getTransport()
       .invoke<unknown>("schedule_concurrency_limits")
       .then((value) => {
-        if (cancelled) return;
         const limits = parseCampaignConcurrencyLimits(value);
         setConcurrencyLimits(limits);
         if (limits) setConcurrency(limits.active_fuzz_campaign_limit);
         setConcurrencyLimitsLoaded(true);
       })
       .catch(() => {
-        if (cancelled) return;
         setConcurrencyLimits(null);
         setConcurrencyLimitsLoaded(true);
       });
-    const id = setInterval(tick, 10000);
+    const intervalId = window.setInterval(() => {
+      void refreshAutomation().catch((cause: unknown) => setError(String(cause)));
+    }, 10_000);
     return () => {
-      cancelled = true;
-      clearInterval(id);
+      window.clearInterval(intervalId);
+      automationRefresh.deactivate();
     };
-  }, []);
+  }, [automationRefresh, refreshAutomation]);
 
   // Only promoted harnesses can be scheduled; ask the backend which those are.
   // The answer is stored with the project it belongs to, so a slow reply for a
@@ -1440,6 +1483,31 @@ export function AutomationView() {
       setError(String(e));
     }
   }
+
+  async function acknowledgeRecovery(occurrenceId: string) {
+    setError(null);
+    try {
+      await acknowledgeRecoveryWithRefresh({
+        occurrenceId,
+        confirm: () =>
+          confirm({
+            title: t("automation.recoveryAcknowledgeTitle"),
+            message: t("automation.recoveryAcknowledgeMessage"),
+            danger: true,
+            confirmLabel: t("automation.recoveryAcknowledgeAction"),
+          }),
+        acknowledge: (id) =>
+          getTransport().invoke<OneTimeRecoveryView>(
+            "schedule_recovery_acknowledge",
+            { occurrenceId: id },
+          ),
+        refresh: refreshAutomation,
+      });
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }
+
   async function remove(id: string) {
     if (!(await confirm({ title: t("automation.deleteCampaignTitle"), message: t("automation.deleteCampaignMessage"), danger: true, confirmLabel: t("common.delete") }))) return;
     setError(null);
@@ -1534,6 +1602,18 @@ export function AutomationView() {
           error={fuzzingPolicyError}
         />
       )}
+
+      <ScheduleRecoveryPanel
+        recoveries={recoveries}
+        title={t("automation.recoveryTitle")}
+        actionLabel={t("automation.recoveryAcknowledgeAction")}
+        unknownScheduleLabel={t("automation.recoveryUnknownSchedule")}
+        loading={recoveryLoad.loading}
+        error={recoveryLoad.error}
+        loadingLabel={t("automation.recoveryLoading")}
+        errorLabel={t("automation.recoveryUnavailable")}
+        onAcknowledge={(occurrenceId) => void acknowledgeRecovery(occurrenceId)}
+      />
 
       {/* New campaign form */}
       <div className="surface-card flex flex-col gap-3" style={{ padding: "var(--space-md)" }}>

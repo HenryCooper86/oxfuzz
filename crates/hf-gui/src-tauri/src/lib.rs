@@ -39,9 +39,9 @@ use commands::{
     run_coverage_series, run_fuzzer, run_harness_source, run_history, run_syzkaller, save_agent,
     save_report_draft, save_skill, schedule_concurrency_limits, schedule_concurrency_set,
     schedule_create, schedule_delete, schedule_history, schedule_history_clear, schedule_list,
-    schedule_set_enabled, schedule_targets, semgrep_available, set_automotive_settings,
-    set_project_auto_revert_override, set_providers, system_snapshot, system_status_cmd, triage,
-    verify_crash, workbench_dashboard, write_config,
+    schedule_recovery_acknowledge, schedule_recovery_list, schedule_set_enabled, schedule_targets,
+    semgrep_available, set_automotive_settings, set_project_auto_revert_override, set_providers,
+    system_snapshot, system_status_cmd, triage, verify_crash, workbench_dashboard, write_config,
 };
 
 #[cfg(feature = "semgrep-enrichment")]
@@ -189,6 +189,8 @@ pub fn run() {
             interrupted_runs,
             dismiss_interrupted_run,
             schedule_list,
+            schedule_recovery_list,
+            schedule_recovery_acknowledge,
             schedule_history,
             schedule_history_clear,
             schedule_targets,

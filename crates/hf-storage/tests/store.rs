@@ -12,10 +12,12 @@ use hf_core::target::{
 };
 use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
-    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind, ProjectAutoRevert,
-    RunKind, RunRecord, RunStatus, SemgrepFindingRecord, SemgrepFindingSeverity,
-    SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError,
-    Store,
+    AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind,
+    NewScheduleOccurrence, ProjectAutoRevert, RunKind, RunRecord, RunStatus,
+    ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection, ScheduleOccurrenceReservation,
+    ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, SemgrepFindingRecord,
+    SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
+    SemgrepTargetScoreRecord, StorageError, Store,
 };
 use uuid::Uuid;
 
@@ -24,6 +26,71 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     let path = dir.path().join("test.db");
     let store = Store::connect(&path).await.expect("connect");
     (store, dir)
+}
+
+fn execution_json(
+    execution_id: &str,
+    schedule_id: &str,
+    triggered_at: &str,
+    status: &str,
+) -> String {
+    serde_json::json!({
+        "execution_id": execution_id,
+        "schedule_id": schedule_id,
+        "triggered_at": triggered_at,
+        "started_at": if status == "running" {
+            Some(triggered_at)
+        } else {
+            None::<&str>
+        },
+        "completed_at": None::<&str>,
+        "status": status,
+        "workflow_execution_id": null,
+        "request_summary": {},
+        "response_summary": {},
+        "error_message": null,
+    })
+    .to_string()
+}
+
+fn new_occurrence(id: &str, schedule_id: &str, execution_id: &str) -> NewScheduleOccurrence {
+    let triggered_at = Utc::now().to_rfc3339();
+    NewScheduleOccurrence {
+        id: id.to_owned(),
+        schedule_id: schedule_id.to_owned(),
+        execution_id: execution_id.to_owned(),
+        triggered_at: triggered_at.clone(),
+        owner_id: "owner-1".to_owned(),
+        lease_expires_at: (Utc::now() + Duration::seconds(60)).to_rfc3339(),
+        execution_status: "pending".to_owned(),
+        execution_data_json: execution_json(execution_id, schedule_id, &triggered_at, "pending"),
+    }
+}
+
+fn transition(
+    new: &NewScheduleOccurrence,
+    from_state: &str,
+    to_state: &str,
+    execution_status: &str,
+) -> ScheduleOccurrenceTransition {
+    ScheduleOccurrenceTransition {
+        occurrence_id: new.id.clone(),
+        schedule_id: new.schedule_id.clone(),
+        execution_id: new.execution_id.clone(),
+        owner_id: new.owner_id.clone(),
+        from_state: from_state.to_owned(),
+        to_state: to_state.to_owned(),
+        lease_expires_at: (to_state == "running")
+            .then(|| (Utc::now() + Duration::seconds(60)).to_rfc3339()),
+        recovery_detail: None,
+        execution_status: execution_status.to_owned(),
+        execution_data_json: execution_json(
+            &new.execution_id,
+            &new.schedule_id,
+            &new.triggered_at,
+            execution_status,
+        ),
+    }
 }
 
 fn semgrep_staging_run(project_root: &str, started_at: chrono::DateTime<Utc>) -> SemgrepRunRecord {
@@ -2289,6 +2356,732 @@ async fn schedule_executions_round_trip_and_latest_fire() {
         .await
         .unwrap();
     assert_eq!(store.list_schedule_executions(10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn occurrence_reservation_commits_receipt_and_pending_execution_together() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    let result = store.reserve_schedule_occurrence(&new).await.unwrap();
+    assert!(matches!(result, ScheduleOccurrenceReservation::Reserved(_)));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = 'schedule-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-1' AND status = 'pending'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn duplicate_schedule_reservation_returns_existing_without_second_execution() {
+    let (store, _dir) = temp_store().await;
+    store
+        .reserve_schedule_occurrence(&new_occurrence("occ-1", "schedule-1", "exec-1"))
+        .await
+        .unwrap();
+    let duplicate = store
+        .reserve_schedule_occurrence(&new_occurrence("occ-2", "schedule-1", "exec-2"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        duplicate,
+        ScheduleOccurrenceReservation::Existing(_)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'schedule-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn occurrence_constraints_reject_unknown_state_and_oversized_detail() {
+    let (store, _dir) = temp_store().await;
+    let unknown = sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+         VALUES ('bad-state', 'schedule-a', 'exec-a', ?1, 'invented', 'owner', ?2)",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind((Utc::now() + Duration::seconds(60)).to_rfc3339())
+    .execute(store.pool())
+    .await;
+    assert!(unknown.is_err());
+
+    let oversized = sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id,
+             lease_expires_at, recovery_detail)
+         VALUES ('bad-detail', 'schedule-b', 'exec-b', ?1, 'reserved',
+                 'owner', ?2, ?3)",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind((Utc::now() + Duration::seconds(60)).to_rfc3339())
+    .bind("x".repeat(4_097))
+    .execute(store.pool())
+    .await;
+    assert!(oversized.is_err());
+}
+
+#[tokio::test]
+async fn occurrence_constraints_reject_invalid_lease_shape() {
+    let (store, _dir) = temp_store().await;
+    let reserved_without_lease = sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+         VALUES ('missing-lease', 'schedule-a', 'exec-a', ?1, 'reserved', 'owner', NULL)",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .execute(store.pool())
+    .await;
+    assert!(reserved_without_lease.is_err());
+
+    let terminal_with_lease = sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+         VALUES ('terminal-lease', 'schedule-b', 'exec-b', ?1, 'completed', 'owner', ?2)",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind((Utc::now() + Duration::seconds(60)).to_rfc3339())
+    .execute(store.pool())
+    .await;
+    assert!(terminal_with_lease.is_err());
+}
+
+#[tokio::test]
+async fn occurrence_inspection_preserves_safe_identity_for_malformed_rows() {
+    let (store, _dir) = temp_store().await;
+    sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+         VALUES
+            ('occ-identifiable', 'schedule-identifiable', x'ff',
+             '2026-07-30T00:00:00Z', 'completed', 'owner', NULL),
+            ('occ-undecodable', x'ff', 'exec-undecodable',
+             '2026-07-30T00:00:01Z', 'completed', 'owner', NULL)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let inspected = store.inspect_schedule_occurrences().await.unwrap();
+    assert_eq!(
+        inspected,
+        [
+            ScheduleOccurrenceInspection::Malformed {
+                schedule_id: Some("schedule-identifiable".to_owned()),
+            },
+            ScheduleOccurrenceInspection::Malformed { schedule_id: None },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn transition_updates_receipt_and_execution_in_one_transaction() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    let result = store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        ScheduleOccurrenceTransitionResult::Applied(_)
+    ));
+    let states: (String, String) = sqlx::query_as(
+        "SELECT o.state, e.status
+         FROM schedule_occurrences o
+         JOIN schedule_executions e ON e.id = o.execution_id
+         WHERE o.id = 'occ-1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(states, ("running".to_owned(), "running".to_owned()));
+}
+
+#[tokio::test]
+async fn invalid_transition_changes_neither_row() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    let result = store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "completed", "completed"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        ScheduleOccurrenceTransitionResult::Conflict(_)
+    ));
+    let states: (String, String) = sqlx::query_as(
+        "SELECT o.state, e.status
+         FROM schedule_occurrences o
+         JOIN schedule_executions e ON e.id = o.execution_id
+         WHERE o.id = 'occ-1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(states, ("reserved".to_owned(), "pending".to_owned()));
+}
+
+#[tokio::test]
+async fn exact_terminal_repeat_is_idempotent_but_different_terminal_is_a_conflict() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    let completed = transition(&new, "running", "completed", "completed");
+    store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .transition_schedule_occurrence(&completed)
+            .await
+            .unwrap(),
+        ScheduleOccurrenceTransitionResult::Idempotent(_)
+    ));
+    assert!(matches!(
+        store
+            .transition_schedule_occurrence(&transition(&new, "running", "failed", "failed"))
+            .await
+            .unwrap(),
+        ScheduleOccurrenceTransitionResult::Conflict(_)
+    ));
+}
+
+#[tokio::test]
+async fn exact_terminal_repeat_is_receipt_idempotent_after_history_clear() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-cleared", "schedule-cleared", "exec-cleared");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    let completed = transition(&new, "running", "completed", "completed");
+    store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    assert_eq!(store.clear_schedule_executions().await.unwrap(), 1);
+
+    let replay = store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    let ScheduleOccurrenceTransitionResult::Idempotent(receipt) = replay else {
+        panic!("exact terminal receipt replay must remain idempotent");
+    };
+    assert_eq!(receipt.execution_status, None);
+    assert_eq!(receipt.execution_data_json, None);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-cleared'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0,
+        "receipt-only replay must not recreate cleared execution history"
+    );
+}
+
+#[tokio::test]
+async fn terminal_receipt_replay_after_history_clear_rejects_every_metadata_mismatch() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-cleared", "schedule-cleared", "exec-cleared");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    let completed = transition(&new, "running", "completed", "completed");
+    store
+        .transition_schedule_occurrence(&completed)
+        .await
+        .unwrap();
+    store.clear_schedule_executions().await.unwrap();
+
+    let mut schedule_mismatch = completed.clone();
+    schedule_mismatch.schedule_id = "other-schedule".to_owned();
+    let mut execution_mismatch = completed.clone();
+    execution_mismatch.execution_id = "other-execution".to_owned();
+    let mut owner_mismatch = completed.clone();
+    owner_mismatch.owner_id = "other-owner".to_owned();
+    let mut detail_mismatch = completed.clone();
+    detail_mismatch.recovery_detail = Some("different detail".to_owned());
+    let mut destination_mismatch = completed.clone();
+    destination_mismatch.to_state = "failed".to_owned();
+    destination_mismatch.execution_status = "failed".to_owned();
+
+    for (field, mismatch) in [
+        ("schedule", schedule_mismatch),
+        ("execution", execution_mismatch),
+        ("owner", owner_mismatch),
+        ("detail", detail_mismatch),
+        ("destination", destination_mismatch),
+    ] {
+        assert!(
+            matches!(
+                store
+                    .transition_schedule_occurrence(&mismatch)
+                    .await
+                    .unwrap(),
+                ScheduleOccurrenceTransitionResult::Conflict(_)
+            ),
+            "{field} mismatch must not be receipt-idempotent"
+        );
+    }
+
+    let mut occurrence_mismatch = completed.clone();
+    occurrence_mismatch.occurrence_id = "other-occurrence".to_owned();
+    assert!(matches!(
+        store
+            .transition_schedule_occurrence(&occurrence_mismatch)
+            .await
+            .unwrap(),
+        ScheduleOccurrenceTransitionResult::Missing
+    ));
+
+    let mut lease_mismatch = completed;
+    lease_mismatch.lease_expires_at = Some((Utc::now() + Duration::seconds(60)).to_rfc3339());
+    assert!(matches!(
+        store.transition_schedule_occurrence(&lease_mismatch).await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-cleared'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn acknowledgement_cannot_overtake_an_unexpired_lease() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    let result = store
+        .acknowledge_schedule_occurrence(
+            &new.id,
+            &Utc::now().to_rfc3339(),
+            "operator acknowledgement",
+            "cancelled",
+            &execution_json(
+                &new.execution_id,
+                &new.schedule_id,
+                &new.triggered_at,
+                "cancelled",
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        ScheduleOccurrenceAcknowledgement::Conflict(_)
+    ));
+}
+
+#[tokio::test]
+async fn lease_renewal_requires_the_current_owner() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    let original = store
+        .schedule_occurrence(&new.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .lease_expires_at;
+    assert!(!store
+        .renew_schedule_occurrence_lease(
+            &new.id,
+            "different-owner",
+            &(Utc::now() + Duration::seconds(120)).to_rfc3339(),
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .schedule_occurrence(&new.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .lease_expires_at,
+        original
+    );
+}
+
+#[tokio::test]
+async fn acknowledgement_is_idempotent_after_expiry() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence("occ-1", "schedule-1", "exec-1");
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    let now = Utc::now().to_rfc3339();
+    assert!(store
+        .release_schedule_occurrence_lease(&new.id, &new.owner_id, &now, "released for recovery",)
+        .await
+        .unwrap());
+    let cancelled = execution_json(
+        &new.execution_id,
+        &new.schedule_id,
+        &new.triggered_at,
+        "cancelled",
+    );
+    let first = store
+        .acknowledge_schedule_occurrence(
+            &new.id,
+            &now,
+            "operator acknowledgement",
+            "cancelled",
+            &cancelled,
+        )
+        .await
+        .unwrap();
+    let second = store
+        .acknowledge_schedule_occurrence(
+            &new.id,
+            &now,
+            "operator acknowledgement",
+            "cancelled",
+            &cancelled,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        first,
+        ScheduleOccurrenceAcknowledgement::Acknowledged(_)
+    ));
+    assert!(matches!(
+        second,
+        ScheduleOccurrenceAcknowledgement::AlreadyCancelled(_)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_reservations_have_one_winner() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("race.db");
+    let first = Store::connect(&path).await.unwrap();
+    let second = Store::connect(&path).await.unwrap();
+    let candidate_a = new_occurrence("occ-a", "schedule-1", "exec-a");
+    let candidate_b = new_occurrence("occ-b", "schedule-1", "exec-b");
+    let (a, b) = tokio::join!(
+        first.reserve_schedule_occurrence(&candidate_a),
+        second.reserve_schedule_occurrence(&candidate_b),
+    );
+    let results = [a.unwrap(), b.unwrap()];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, ScheduleOccurrenceReservation::Reserved(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, ScheduleOccurrenceReservation::Existing(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = 'schedule-1'",
+        )
+        .fetch_one(first.pool())
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'schedule-1'",
+        )
+        .fetch_one(first.pool())
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn execution_insert_failure_rolls_back_receipt() {
+    let (store, _dir) = temp_store().await;
+    store
+        .upsert_schedule_execution(
+            "exec-conflict",
+            "other-schedule",
+            &Utc::now().to_rfc3339(),
+            "completed",
+            "{}",
+        )
+        .await
+        .unwrap();
+    let new = new_occurrence("occ-rollback", "schedule-1", "exec-conflict");
+    assert!(store.reserve_schedule_occurrence(&new).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_occurrences WHERE id = 'occ-rollback'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn receipt_insert_failure_never_creates_an_execution() {
+    let (store, _dir) = temp_store().await;
+    store
+        .reserve_schedule_occurrence(&new_occurrence("occ-conflict", "schedule-a", "exec-a"))
+        .await
+        .unwrap();
+    let conflicting = new_occurrence("occ-conflict", "schedule-b", "exec-b");
+    assert!(store
+        .reserve_schedule_occurrence(&conflicting)
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-b'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn transition_execution_update_failure_rolls_back_receipt() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence(
+        "occ-transition-rollback",
+        "schedule-rollback",
+        "exec-rollback",
+    );
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    sqlx::query("DELETE FROM schedule_executions WHERE id = ?1")
+        .bind(&new.execution_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let result = store
+        .transition_schedule_occurrence(&transition(&new, "reserved", "running", "running"))
+        .await;
+    assert!(matches!(result, Err(StorageError::InvalidData(_))));
+    let receipt = store.schedule_occurrence(&new.id).await.unwrap().unwrap();
+    assert_eq!(receipt.state, "reserved");
+    assert_eq!(receipt.lease_expires_at, Some(new.lease_expires_at));
+}
+
+#[tokio::test]
+async fn acknowledgement_execution_update_failure_rolls_back_receipt() {
+    let (store, _dir) = temp_store().await;
+    let new = new_occurrence(
+        "occ-ack-rollback",
+        "schedule-ack-rollback",
+        "exec-ack-rollback",
+    );
+    store.reserve_schedule_occurrence(&new).await.unwrap();
+    let acknowledged_at = Utc::now().to_rfc3339();
+    store
+        .release_schedule_occurrence_lease(&new.id, &new.owner_id, &acknowledged_at, "released")
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM schedule_executions WHERE id = ?1")
+        .bind(&new.execution_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let result = store
+        .acknowledge_schedule_occurrence(
+            &new.id,
+            &acknowledged_at,
+            "acknowledged",
+            "cancelled",
+            "{}",
+        )
+        .await;
+    assert!(matches!(result, Err(StorageError::InvalidData(_))));
+    let receipt = store.schedule_occurrence(&new.id).await.unwrap().unwrap();
+    assert_eq!(receipt.state, "reserved");
+    assert_eq!(receipt.lease_expires_at, Some(acknowledged_at));
+}
+
+#[tokio::test]
+async fn occurrence_mutations_enforce_utf8_recovery_detail_byte_limit() {
+    let (store, _dir) = temp_store().await;
+    let boundary = "é".repeat(2_048);
+    let oversized = "é".repeat(2_049);
+    let releasable = new_occurrence(
+        "occ-release-bound",
+        "schedule-release-bound",
+        "exec-release",
+    );
+    store
+        .reserve_schedule_occurrence(&releasable)
+        .await
+        .unwrap();
+    let released_at = Utc::now().to_rfc3339();
+    assert!(store
+        .release_schedule_occurrence_lease(
+            &releasable.id,
+            &releasable.owner_id,
+            &released_at,
+            &boundary,
+        )
+        .await
+        .unwrap());
+    assert!(matches!(
+        store
+            .release_schedule_occurrence_lease(
+                &releasable.id,
+                &releasable.owner_id,
+                &released_at,
+                &oversized,
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert!(matches!(
+        store
+            .acknowledge_schedule_occurrence(
+                &releasable.id,
+                &released_at,
+                &oversized,
+                "cancelled",
+                "{}",
+            )
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+
+    let running = new_occurrence(
+        "occ-transition-bound",
+        "schedule-transition-bound",
+        "exec-transition",
+    );
+    store.reserve_schedule_occurrence(&running).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&running, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    let mut oversized_transition = transition(&running, "running", "failed", "failed");
+    oversized_transition.recovery_detail = Some(oversized);
+    assert!(matches!(
+        store
+            .transition_schedule_occurrence(&oversized_transition)
+            .await,
+        Err(StorageError::InvalidData(_))
+    ));
+}
+
+#[tokio::test]
+async fn history_deletion_preserves_non_terminal_receipt_executions_and_all_receipts() {
+    let (store, _dir) = temp_store().await;
+    let protected = new_occurrence("occ-live", "schedule-live", "exec-live");
+    store.reserve_schedule_occurrence(&protected).await.unwrap();
+    sqlx::query(
+        "UPDATE schedule_executions
+         SET status = 'completed', triggered_at = '2020-01-01T00:00:00Z'
+         WHERE id = 'exec-live'",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store
+        .upsert_schedule_execution(
+            "old-history",
+            "schedule-live",
+            "2020-01-01T00:00:00Z",
+            "completed",
+            "{}",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .prune_schedule_executions("schedule-live", 0)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'exec-live'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        1
+    );
+
+    let terminal = new_occurrence("occ-done", "schedule-done", "exec-done");
+    store.reserve_schedule_occurrence(&terminal).await.unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&terminal, "reserved", "running", "running"))
+        .await
+        .unwrap();
+    store
+        .transition_schedule_occurrence(&transition(&terminal, "running", "completed", "completed"))
+        .await
+        .unwrap();
+
+    assert_eq!(store.clear_schedule_executions().await.unwrap(), 1);
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM schedule_executions ORDER BY id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(remaining, ["exec-live"]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schedule_occurrences")
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        2
+    );
+    let receipts = store.list_schedule_occurrences().await.unwrap();
+    assert_eq!(receipts.len(), 2);
+    let terminal_receipt = receipts
+        .iter()
+        .find(|receipt| receipt.id == "occ-done")
+        .unwrap();
+    assert_eq!(terminal_receipt.state, "completed");
+    assert_eq!(terminal_receipt.execution_status, None);
+    assert_eq!(terminal_receipt.execution_data_json, None);
 }
 
 #[tokio::test]

@@ -47,6 +47,195 @@ fn allow_open_dev_mode() {
     }
 }
 
+struct WebRecoveryFixture {
+    recovery: hf_service::test_support::OneTimeRecoveryTestFixture,
+    app: axum::Router,
+}
+
+impl WebRecoveryFixture {
+    fn app(&self) -> axum::Router {
+        self.app.clone()
+    }
+
+    async fn stop(&self) {
+        self.recovery.scheduler().stop().await;
+    }
+}
+
+async fn web_scheduler_with_occurrence(expired: bool) -> WebRecoveryFixture {
+    let recovery = hf_service::test_support::one_time_recovery_fixture(expired)
+        .await
+        .unwrap();
+    let app = hf_web::router::build_with_state(
+        hf_web::router::AppState::new(recovery.container()).with_scheduler(recovery.scheduler()),
+    );
+    WebRecoveryFixture { recovery, app }
+}
+
+#[tokio::test]
+async fn schedule_recovery_list_and_acknowledge_preserve_service_dto() {
+    allow_open_dev_mode();
+    let fixture = web_scheduler_with_occurrence(true).await;
+    let app = fixture.app();
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/schedule/recovery")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(listed.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body[0]["occurrence_id"], "occ-web");
+    assert_eq!(body[0]["state"], "running");
+
+    let acknowledged = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(acknowledged.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(acknowledged.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["state"], "cancelled");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn recovery_mutation_without_scheduler_is_unavailable() {
+    allow_open_dev_mode();
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-1/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(
+        body["error"],
+        "one-time recovery is temporarily unavailable"
+    );
+}
+
+#[tokio::test]
+async fn schedule_recovery_acknowledge_maps_missing_and_live_conflicts() {
+    allow_open_dev_mode();
+    let fixture = web_scheduler_with_occurrence(false).await;
+    let app = fixture.app();
+    let live = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::CONFLICT);
+    let live_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(live.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(live_body["code"], "conflict");
+    assert_eq!(
+        live_body["error"],
+        "one-time recovery occurrence cannot be acknowledged"
+    );
+
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/missing/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(missing.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(missing_body["code"], "not_found");
+    assert_eq!(
+        missing_body["error"],
+        "one-time recovery occurrence was not found"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn schedule_recovery_persistence_failure_redacts_the_host_path() {
+    allow_open_dev_mode();
+    let fixture = web_scheduler_with_occurrence(true).await;
+    std::fs::remove_file(fixture.recovery.schedules_path()).unwrap();
+    std::fs::create_dir(fixture.recovery.schedules_path()).unwrap();
+
+    let response = fixture
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(
+        body["error"],
+        "one-time recovery is temporarily unavailable"
+    );
+    let public_body = body.to_string();
+    assert!(!public_body.contains("PRIVATE_PATH_MARKER"));
+    assert!(!public_body.contains(fixture.recovery.directory_path().to_string_lossy().as_ref()));
+    fixture.stop().await;
+}
+
 #[tokio::test]
 async fn health_returns_ok() {
     allow_open_dev_mode();
