@@ -580,7 +580,7 @@ fn is_exact_terminal_repeat(
     record: &ScheduleOccurrenceRecord,
     transition: &ScheduleOccurrenceTransition,
 ) -> bool {
-    matches!(
+    let receipt_matches = matches!(
         transition.to_state.as_str(),
         "completed" | "failed" | "cancelled"
     ) && record.id == transition.occurrence_id
@@ -589,9 +589,21 @@ fn is_exact_terminal_repeat(
         && record.owner_id == transition.owner_id
         && record.state == transition.to_state
         && record.lease_expires_at == transition.lease_expires_at
-        && record.recovery_detail == transition.recovery_detail
-        && record.execution_status.as_deref() == Some(transition.execution_status.as_str())
-        && record.execution_data_json.as_deref() == Some(transition.execution_data_json.as_str())
+        && record.recovery_detail == transition.recovery_detail;
+    if !receipt_matches {
+        return false;
+    }
+
+    match (
+        record.execution_status.as_deref(),
+        record.execution_data_json.as_deref(),
+    ) {
+        (Some(status), Some(data)) => {
+            status == transition.execution_status && data == transition.execution_data_json
+        }
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn require_occurrence_execution(rows_affected: u64) -> Result<(), StorageError> {
