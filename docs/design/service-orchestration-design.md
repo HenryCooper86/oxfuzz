@@ -161,7 +161,10 @@ cannot overwrite unknown damaged evidence; recurring schedules still execute
 from their in-memory definitions. Recovery acknowledgement serializes cursor
 reconciliation with direct remove and enable/disable, then re-reads and updates
 only the current definition; it never recreates a removed schedule or restores
-a stale enabled value.
+a stale enabled value. The service maps recovery failures to stable public
+`not_found`, `conflict`, `unavailable`, or `internal` codes and bounded messages.
+REST, Tauri, and CLI never format the underlying path-, SQL-, OS-, or
+stored-JSON-bearing error directly.
 
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist

@@ -517,6 +517,16 @@ HTTP and Tauri transports preserve the same service DTOs. Missing schedulers
 return the existing explicit unavailable behavior for recovery mutation; they
 do not return a fabricated empty success.
 
+`hf-service` also owns the presentation-safe recovery error contract. Its stable
+codes are `not_found`, `conflict`, `unavailable`, and `internal`. Recovery
+presentations use only the corresponding bounded public message; absolute host
+paths, SQL diagnostics, OS details, and stored JSON remain in internal error
+values and diagnostics. REST maps these codes to `404`, `409`, `503`, and `500`
+respectively and includes the code in its error body. Tauri and CLI render the
+same safe message. State-file, history, occurrence-journal, and durability
+failures are `unavailable`; acknowledgement persistence failure therefore
+cannot expose its path even when the receipt transaction already committed.
+
 ## 13. History Retention
 
 Schedule-scoped retention continues to protect `pending` and `running`
