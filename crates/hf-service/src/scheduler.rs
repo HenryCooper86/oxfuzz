@@ -6,7 +6,7 @@
 //! headlessly through the [`ServiceContainer`] when a schedule fires, ticks in
 //! the background, and persists schedules to JSON so they survive restarts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -62,6 +62,7 @@ pub struct CampaignNotice {
 struct ScheduleFileStore {
     path: PathBuf,
     write_lock: AsyncMutex<()>,
+    quarantined_schedules: AsyncMutex<HashMap<String, Option<Schedule>>>,
 }
 
 impl ScheduleFileStore {
@@ -69,6 +70,7 @@ impl ScheduleFileStore {
         Self {
             path,
             write_lock: AsyncMutex::new(()),
+            quarantined_schedules: AsyncMutex::new(HashMap::new()),
         }
     }
 
@@ -78,21 +80,71 @@ impl ScheduleFileStore {
 
     async fn replace(&self, schedules: &[Schedule]) -> Result<(), StateFileError> {
         let _guard = self.write_lock.lock().await;
-        atomic_write_schedules(&self.path, schedules)
+        let mut schedules = schedules.to_vec();
+        self.restore_quarantined_schedules(&mut schedules).await;
+        atomic_write_schedules(&self.path, &schedules)
     }
 
     async fn replace_from_manager(&self, manager: &SchedulerManager) -> Result<(), StateFileError> {
         let _guard = self.write_lock.lock().await;
-        let schedules = manager.list_schedules().await;
+        let mut schedules = manager.list_schedules().await;
+        self.restore_quarantined_schedules(&mut schedules).await;
         atomic_write_schedules(&self.path, &schedules)
     }
 
     async fn upsert(&self, schedule: &Schedule) -> Result<(), StateFileError> {
         let _guard = self.write_lock.lock().await;
+        if self
+            .quarantined_schedules
+            .lock()
+            .await
+            .contains_key(&schedule.id)
+        {
+            return Ok(());
+        }
         let mut schedules = load_schedules(&self.path)?;
         schedules.retain(|existing| existing.id != schedule.id);
         schedules.push(schedule.clone());
         atomic_write_schedules(&self.path, &schedules)
+    }
+
+    async fn quarantine(&self, schedule_id: &str) -> Result<(), StateFileError> {
+        let _guard = self.write_lock.lock().await;
+        let mut quarantined = self.quarantined_schedules.lock().await;
+        if quarantined.contains_key(schedule_id) {
+            return Ok(());
+        }
+        let original = load_schedules(&self.path)?
+            .into_iter()
+            .find(|schedule| schedule.id == schedule_id);
+        quarantined.insert(schedule_id.to_owned(), original);
+        Ok(())
+    }
+
+    async fn is_quarantined(&self, schedule_id: &str) -> bool {
+        self.quarantined_schedules
+            .lock()
+            .await
+            .contains_key(schedule_id)
+    }
+
+    async fn restore_quarantined_schedules(&self, schedules: &mut Vec<Schedule>) {
+        let quarantined = self.quarantined_schedules.lock().await;
+        for (schedule_id, original) in quarantined.iter() {
+            match original {
+                Some(original) => {
+                    if let Some(schedule) = schedules
+                        .iter_mut()
+                        .find(|schedule| schedule.id == *schedule_id)
+                    {
+                        *schedule = original.clone();
+                    } else {
+                        schedules.push(original.clone());
+                    }
+                }
+                None => schedules.retain(|schedule| schedule.id != *schedule_id),
+            }
+        }
     }
 }
 
@@ -102,7 +154,6 @@ struct CampaignSchedulerPersistence {
     store: Option<Arc<Store>>,
     schedules: Arc<ScheduleFileStore>,
     history_retention_limit: usize,
-    quarantined_schedules: Arc<AsyncMutex<HashSet<String>>>,
     manager: Weak<SchedulerManager>,
 }
 
@@ -123,7 +174,6 @@ impl CampaignSchedulerPersistence {
             store,
             schedules,
             history_retention_limit,
-            quarantined_schedules: Arc::new(AsyncMutex::new(HashSet::new())),
             manager,
         }
     }
@@ -158,18 +208,12 @@ impl CampaignSchedulerPersistence {
         })
     }
 
-    async fn quarantine_schedule(&self, schedule_id: &str) {
-        self.quarantined_schedules
-            .lock()
-            .await
-            .insert(schedule_id.to_owned());
+    async fn quarantine_schedule(&self, schedule_id: &str) -> Result<(), StateFileError> {
+        self.schedules.quarantine(schedule_id).await
     }
 
     async fn schedule_is_quarantined(&self, schedule_id: &str) -> bool {
-        self.quarantined_schedules
-            .lock()
-            .await
-            .contains(schedule_id)
+        self.schedules.is_quarantined(schedule_id).await
     }
 
     async fn map_storage_result<T>(
@@ -1395,10 +1439,7 @@ impl CampaignScheduler {
                                     .iter()
                                     .find(|schedule| schedule.id == receipt.schedule_id)
                                     .filter(|schedule| {
-                                        !matches!(
-                                            schedule.trigger,
-                                            TriggerConfig::OneTime { .. }
-                                        )
+                                        !matches!(schedule.trigger, TriggerConfig::OneTime { .. })
                                     })
                                     .map(|schedule| schedule.id.clone())
                             })
@@ -1429,10 +1470,7 @@ impl CampaignScheduler {
                                             .mark_one_time_recovery_required(
                                                 &schedule.id,
                                                 receipt.recovery_detail.clone().unwrap_or_else(
-                                                    || {
-                                                        "expired non-terminal occurrence"
-                                                            .to_owned()
-                                                    },
+                                                    || "expired non-terminal occurrence".to_owned(),
                                                 ),
                                             )
                                             .await;
@@ -1459,7 +1497,7 @@ impl CampaignScheduler {
                             true
                         } else {
                             for schedule_id in &mismatched_schedule_ids {
-                                occurrences.quarantine_schedule(schedule_id).await;
+                                occurrences.quarantine_schedule(schedule_id).await?;
                             }
                             manager.record_corrupt_one_time_journal();
                             manager.block_one_time(JOURNAL_CORRUPT_REASON).await;
@@ -1829,7 +1867,7 @@ impl CampaignScheduler {
         }
 
         for schedule_id in mismatched_schedule_ids {
-            self.occurrences.quarantine_schedule(&schedule_id).await;
+            self.occurrences.quarantine_schedule(&schedule_id).await?;
         }
         if self.manager.one_time_block_reason().await.as_deref() != Some(JOURNAL_CORRUPT_REASON) {
             self.manager.record_corrupt_one_time_journal();
@@ -2450,18 +2488,21 @@ mod tests {
     }
 
     async fn wait_for_execution(scheduler: &CampaignScheduler, schedule_id: &str) {
+        wait_for_execution_count(scheduler, schedule_id, 1).await;
+    }
+
+    async fn wait_for_execution_count(
+        scheduler: &CampaignScheduler,
+        schedule_id: &str,
+        expected: usize,
+    ) {
         for _ in 0..100 {
-            if !scheduler
-                .manager
-                .execution_history(schedule_id)
-                .await
-                .is_empty()
-            {
+            if scheduler.manager.execution_history(schedule_id).await.len() >= expected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("schedule {schedule_id} did not dispatch");
+        panic!("schedule {schedule_id} did not dispatch {expected} time(s)");
     }
 
     async fn wait_for_one_time_block(scheduler: &CampaignScheduler) -> String {
@@ -2784,6 +2825,121 @@ mod tests {
         assert_eq!(receipt.state, "reserved");
         assert_eq!(receipt.execution_status.as_deref(), Some("pending"));
         assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn full_snapshot_preserves_quarantined_schedule_during_unrelated_mutations() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_event("recurring");
+        fixture
+            .reserve_expired_receipt(
+                "recurring",
+                "occ-mismatch",
+                "exec-mismatch",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
+        let original = load_schedules(&fixture.schedules_path).unwrap().remove(0);
+
+        let scheduler = fixture.start().await.unwrap();
+        assert_eq!(
+            scheduler
+                .manager
+                .emit_event(IncomingEvent {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    payload: None,
+                    timestamp: Utc::now(),
+                })
+                .await,
+            vec!["recurring"]
+        );
+        wait_for_execution_count(&scheduler, "recurring", 1).await;
+        assert!(scheduler
+            .manager
+            .get_schedule("recurring")
+            .await
+            .unwrap()
+            .last_fire
+            .is_some());
+
+        let created = scheduler
+            .try_create(
+                "unrelated",
+                &fixture.params(),
+                TriggerConfig::Interval { interval_secs: 60 },
+            )
+            .await
+            .unwrap();
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                durable
+                    .iter()
+                    .find(|schedule| schedule.id == "recurring")
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert!(durable.iter().any(|schedule| schedule.id == created.id));
+
+        assert!(scheduler.try_set_enabled(&created.id, false).await.unwrap());
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                durable
+                    .iter()
+                    .find(|schedule| schedule.id == "recurring")
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert!(
+            !durable
+                .iter()
+                .find(|schedule| schedule.id == created.id)
+                .unwrap()
+                .enabled
+        );
+
+        assert!(scheduler.try_remove(&created.id).await.unwrap());
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                durable
+                    .iter()
+                    .find(|schedule| schedule.id == "recurring")
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert!(!durable.iter().any(|schedule| schedule.id == created.id));
+
+        assert_eq!(
+            scheduler
+                .manager
+                .emit_event(IncomingEvent {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    payload: None,
+                    timestamp: Utc::now(),
+                })
+                .await,
+            vec!["recurring"]
+        );
+        wait_for_execution_count(&scheduler, "recurring", 2).await;
+        let receipt = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.state, "reserved");
+        assert_eq!(receipt.execution_status.as_deref(), Some("pending"));
         scheduler.stop().await;
     }
 
