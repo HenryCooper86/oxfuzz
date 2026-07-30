@@ -1,10 +1,11 @@
 //! `SchedulerManager`: top-level entry point that owns the async trigger loop.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -13,6 +14,10 @@ use crate::config::{ConcurrencyPolicy, MissedPolicy, SchedulerConfig};
 use crate::dispatcher::WorkflowDispatcher;
 use crate::event_bridge::{EventBridge, IncomingEvent};
 use crate::executor::{ExecutionStatus, ExecutionStore, ScheduleExecution, ScheduleExecutor};
+use crate::occurrence::{
+    OneTimeAcknowledgement, OneTimeOccurrence, OneTimeOccurrenceTransition, OneTimeReservation,
+    OneTimeRuntimeStatus, OneTimeTransitionResult,
+};
 use crate::queue::{trigger_queue, TriggerReceiver, TriggerSender};
 use crate::recovery;
 use crate::store::{Schedule, ScheduleStore};
@@ -60,16 +65,187 @@ pub trait SchedulerPersistence: Send + Sync {
     ) -> Result<u64, PersistenceError> {
         Ok(0)
     }
+
+    /// Atomically reserve a one-time occurrence and its pending execution.
+    async fn reserve_one_time_occurrence(
+        &self,
+        occurrence: &OneTimeOccurrence,
+        execution: &ScheduleExecution,
+    ) -> Result<OneTimeReservation, PersistenceError> {
+        let _ = (occurrence, execution);
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Atomically transition a one-time occurrence and its execution.
+    async fn transition_one_time_occurrence(
+        &self,
+        transition: &OneTimeOccurrenceTransition,
+        execution: &ScheduleExecution,
+    ) -> Result<OneTimeTransitionResult, PersistenceError> {
+        let _ = (transition, execution);
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Renew a non-terminal one-time occurrence lease owned by this manager.
+    async fn renew_one_time_lease(
+        &self,
+        occurrence_id: &str,
+        owner_id: &str,
+        lease_expires_at: DateTime<Utc>,
+    ) -> Result<bool, PersistenceError> {
+        let _ = (occurrence_id, owner_id, lease_expires_at);
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Release a one-time occurrence lease for acknowledgement recovery.
+    async fn release_one_time_lease(
+        &self,
+        occurrence_id: &str,
+        owner_id: &str,
+        released_at: DateTime<Utc>,
+        recovery_detail: &str,
+    ) -> Result<bool, PersistenceError> {
+        let _ = (occurrence_id, owner_id, released_at, recovery_detail);
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Load durable one-time occurrence receipts for startup reconciliation.
+    async fn load_one_time_occurrences(&self) -> Result<Vec<OneTimeOccurrence>, PersistenceError> {
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Load a one-time occurrence receipt by identifier.
+    async fn get_one_time_occurrence(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<OneTimeOccurrence>, PersistenceError> {
+        let _ = occurrence_id;
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Load the execution associated with a one-time occurrence receipt.
+    async fn get_one_time_execution(
+        &self,
+        occurrence_id: &str,
+    ) -> Result<Option<ScheduleExecution>, PersistenceError> {
+        let _ = occurrence_id;
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
+
+    /// Acknowledge a recovery-eligible occurrence as cancelled.
+    async fn acknowledge_one_time_occurrence(
+        &self,
+        occurrence_id: &str,
+        acknowledged_at: DateTime<Utc>,
+        recovery_detail: &str,
+        execution: &ScheduleExecution,
+    ) -> Result<OneTimeAcknowledgement, PersistenceError> {
+        let _ = (occurrence_id, acknowledged_at, recovery_detail, execution);
+        Err(PersistenceError::new(
+            "durable one-time occurrence persistence is unavailable",
+        ))
+    }
 }
 
 struct TrackedDispatch {
     execution_id: String,
     schedule_id: String,
+    occurrence_id: Option<String>,
+    owner_id: Option<String>,
     handle: JoinHandle<()>,
 }
 
 type SerialLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 type DispatchTasks = Arc<StdMutex<Vec<TrackedDispatch>>>;
+
+/// Snapshot of scheduler-owned one-time occurrence counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OccurrenceMetricsSnapshot {
+    pub reservation_wins: u64,
+    pub duplicate_suppressions: u64,
+    pub transition_failures: u64,
+    pub lease_renewal_failures: u64,
+    pub expired_non_terminal: u64,
+    pub acknowledgements: u64,
+    pub corrupt_journal_blocks: u64,
+}
+
+/// Lightweight counters for durable one-time occurrence outcomes.
+#[derive(Debug, Default)]
+pub struct OccurrenceMetrics {
+    reservation_wins: AtomicU64,
+    duplicate_suppressions: AtomicU64,
+    transition_failures: AtomicU64,
+    lease_renewal_failures: AtomicU64,
+    expired_non_terminal: AtomicU64,
+    acknowledgements: AtomicU64,
+    corrupt_journal_blocks: AtomicU64,
+}
+
+impl OccurrenceMetrics {
+    /// Record a successful durable reservation.
+    pub fn record_reservation_win(&self) {
+        self.reservation_wins.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record suppression caused by an existing durable occurrence.
+    pub fn record_duplicate_suppression(&self) {
+        self.duplicate_suppressions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a durable occurrence transition failure.
+    pub fn record_transition_failure(&self) {
+        self.transition_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a durable occurrence lease renewal failure.
+    pub fn record_lease_renewal_failure(&self) {
+        self.lease_renewal_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record an expired non-terminal durable occurrence.
+    pub fn record_expired_non_terminal(&self) {
+        self.expired_non_terminal.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a recovery acknowledgement.
+    pub fn record_acknowledgement(&self) {
+        self.acknowledgements.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a global block caused by a corrupt durable journal.
+    pub fn record_corrupt_journal_block(&self) {
+        self.corrupt_journal_blocks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Return a coherent point-in-time view of all counters.
+    #[must_use]
+    pub fn snapshot(&self) -> OccurrenceMetricsSnapshot {
+        OccurrenceMetricsSnapshot {
+            reservation_wins: self.reservation_wins.load(Ordering::Relaxed),
+            duplicate_suppressions: self.duplicate_suppressions.load(Ordering::Relaxed),
+            transition_failures: self.transition_failures.load(Ordering::Relaxed),
+            lease_renewal_failures: self.lease_renewal_failures.load(Ordering::Relaxed),
+            expired_non_terminal: self.expired_non_terminal.load(Ordering::Relaxed),
+            acknowledgements: self.acknowledgements.load(Ordering::Relaxed),
+            corrupt_journal_blocks: self.corrupt_journal_blocks.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Runtime-owned scheduler state that changes when the trigger loop starts/stops.
 struct RuntimeState {
@@ -124,6 +300,14 @@ pub struct SchedulerManager {
     serial_locks: SerialLocks,
     /// Every dispatched workflow task is retained until reaped or stopped.
     dispatch_tasks: DispatchTasks,
+    /// Stable identifier for this scheduler process instance.
+    owner_id: String,
+    /// Process-local per-schedule one-time runtime status.
+    one_time_status: Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+    /// Process-local safety block for every one-time schedule.
+    one_time_global_block: Arc<Mutex<Option<String>>>,
+    /// Lightweight durable occurrence outcome counters.
+    occurrence_metrics: Arc<OccurrenceMetrics>,
 }
 
 impl SchedulerManager {
@@ -144,12 +328,110 @@ impl SchedulerManager {
             event_bridge: Mutex::new(EventBridge::new()),
             serial_locks: Arc::new(Mutex::new(HashMap::new())),
             dispatch_tasks: Arc::new(StdMutex::new(Vec::new())),
+            owner_id: uuid::Uuid::new_v4().to_string(),
+            one_time_status: Arc::new(Mutex::new(HashMap::new())),
+            one_time_global_block: Arc::new(Mutex::new(None)),
+            occurrence_metrics: Arc::new(OccurrenceMetrics::default()),
         }
     }
 
     /// Create a scheduler manager with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(SchedulerConfig::default())
+    }
+
+    /// Return the random identifier associated with this scheduler instance.
+    #[must_use]
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    /// Fail closed by blocking all one-time schedules for a journal condition.
+    pub async fn block_one_time(&self, detail: impl Into<String>) {
+        *self.one_time_global_block.lock().await = Some(detail.into());
+    }
+
+    /// Mark one one-time schedule as permanently consumed.
+    pub async fn mark_one_time_consumed(&self, schedule_id: &str) {
+        self.one_time_status
+            .lock()
+            .await
+            .insert(schedule_id.to_owned(), OneTimeRuntimeStatus::Consumed);
+    }
+
+    /// Mark one one-time schedule as requiring operator recovery.
+    pub async fn mark_one_time_recovery_required(
+        &self,
+        schedule_id: &str,
+        detail: impl Into<String>,
+    ) {
+        self.one_time_status.lock().await.insert(
+            schedule_id.to_owned(),
+            OneTimeRuntimeStatus::RecoveryRequired {
+                detail: detail.into(),
+            },
+        );
+    }
+
+    /// Clear a schedule-local one-time status without weakening a global block.
+    pub async fn clear_one_time_status(&self, schedule_id: &str) {
+        self.one_time_status.lock().await.remove(schedule_id);
+    }
+
+    /// Return the global one-time journal block reason, if present.
+    pub async fn one_time_block_reason(&self) -> Option<String> {
+        self.one_time_global_block.lock().await.clone()
+    }
+
+    /// Return one-time readiness, with a global journal block taking precedence.
+    pub async fn one_time_runtime_status(&self, schedule_id: &str) -> OneTimeRuntimeStatus {
+        if let Some(detail) = self.one_time_global_block.lock().await.clone() {
+            return OneTimeRuntimeStatus::RecoveryRequired { detail };
+        }
+        self.one_time_status
+            .lock()
+            .await
+            .get(schedule_id)
+            .cloned()
+            .unwrap_or(OneTimeRuntimeStatus::Ready)
+    }
+
+    /// Return whether a tracked task is still active for an occurrence.
+    #[must_use]
+    pub fn has_active_occurrence(&self, occurrence_id: &str) -> bool {
+        let mut tasks = self
+            .dispatch_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tasks.retain(|task| !task.handle.is_finished());
+        tasks.iter().any(|task| {
+            debug_assert!(task
+                .owner_id
+                .as_deref()
+                .is_none_or(|owner_id| !owner_id.is_empty()));
+            task.occurrence_id.as_deref() == Some(occurrence_id)
+        })
+    }
+
+    /// Record an expired non-terminal one-time occurrence.
+    pub fn record_expired_one_time_occurrence(&self) {
+        self.occurrence_metrics.record_expired_non_terminal();
+    }
+
+    /// Record a one-time recovery acknowledgement.
+    pub fn record_one_time_acknowledgement(&self) {
+        self.occurrence_metrics.record_acknowledgement();
+    }
+
+    /// Record a global block caused by corrupt one-time journal data.
+    pub fn record_corrupt_one_time_journal(&self) {
+        self.occurrence_metrics.record_corrupt_journal_block();
+    }
+
+    /// Return current one-time occurrence metrics.
+    #[must_use]
+    pub fn occurrence_metrics(&self) -> OccurrenceMetricsSnapshot {
+        self.occurrence_metrics.snapshot()
     }
 
     /// Register a schedule.
@@ -953,6 +1235,8 @@ impl SchedulerManager {
             tasks.push(TrackedDispatch {
                 execution_id,
                 schedule_id: schedule.id,
+                occurrence_id: None,
+                owner_id: None,
                 handle,
             });
         } else {
@@ -1145,10 +1429,42 @@ mod tests {
     use super::*;
     use crate::config::{ConcurrencyPolicy, MissedPolicy};
     use crate::dispatcher::{DispatchError, DispatchResult};
+    use crate::occurrence::OneTimeRuntimeStatus;
     use crate::store::{SchedulePolicies, TriggerConfig};
     use chrono::{DateTime, TimeDelta, Utc};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::{Mutex as AsyncMutex, Notify};
+
+    #[tokio::test]
+    async fn global_one_time_block_overrides_schedule_status() {
+        let manager = SchedulerManager::with_defaults();
+        manager.mark_one_time_consumed("once").await;
+        manager.block_one_time("journal is corrupt").await;
+        assert_eq!(
+            manager.one_time_block_reason().await.as_deref(),
+            Some("journal is corrupt")
+        );
+        assert!(matches!(
+            manager.one_time_runtime_status("once").await,
+            OneTimeRuntimeStatus::RecoveryRequired { .. }
+        ));
+        assert!(matches!(
+            manager.one_time_runtime_status("another").await,
+            OneTimeRuntimeStatus::RecoveryRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn occurrence_metrics_snapshot_reports_each_counter() {
+        let manager = SchedulerManager::with_defaults();
+        manager.record_expired_one_time_occurrence();
+        manager.record_one_time_acknowledgement();
+        manager.record_corrupt_one_time_journal();
+        let snapshot = manager.occurrence_metrics();
+        assert_eq!(snapshot.expired_non_terminal, 1);
+        assert_eq!(snapshot.acknowledgements, 1);
+        assert_eq!(snapshot.corrupt_journal_blocks, 1);
+    }
 
     #[tokio::test]
     async fn test_manager_register_and_get() {

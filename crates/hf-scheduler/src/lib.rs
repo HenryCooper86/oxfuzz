@@ -22,6 +22,7 @@ pub mod event_bridge;
 pub mod executor;
 pub mod interval;
 pub mod manager;
+pub mod occurrence;
 pub mod onetime;
 pub mod params;
 pub mod queue;
@@ -39,7 +40,16 @@ pub use executor::{
     ExecutionStatus, ExecutionStore, ScheduleContext, ScheduleExecution, ScheduleExecutor,
 };
 pub use interval::IntervalSchedule;
-pub use manager::{PersistenceError, SchedulerManager, SchedulerPersistence};
+pub use manager::{
+    OccurrenceMetrics, OccurrenceMetricsSnapshot, PersistenceError, SchedulerManager,
+    SchedulerPersistence,
+};
+pub use occurrence::{
+    bounded_recovery_detail, transition_allowed, OccurrenceValidationError, OneTimeAcknowledgement,
+    OneTimeOccurrence, OneTimeOccurrenceState, OneTimeOccurrenceTransition, OneTimeReservation,
+    OneTimeRuntimeStatus, OneTimeTransitionResult, MAX_RECOVERY_DETAIL_BYTES, ONE_TIME_HEARTBEAT,
+    ONE_TIME_LEASE,
+};
 pub use onetime::OneTimeSchedule;
 pub use params::{resolve_parameters, ResolutionContext, ResolveError};
 pub use store::{Schedule, SchedulePolicies, ScheduleStore, TriggerConfig};
