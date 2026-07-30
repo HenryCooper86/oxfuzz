@@ -2064,14 +2064,7 @@ impl CampaignScheduler {
         trigger: TriggerConfig,
     ) -> Result<Schedule, CampaignSchedulerError> {
         if matches!(&trigger, TriggerConfig::OneTime { .. }) {
-            if self.store.is_none() {
-                return Err(CampaignSchedulerError::DurabilityUnavailable(
-                    "SQLite storage is not configured".to_owned(),
-                ));
-            }
-            if let Some(reason) = self.manager.one_time_block_reason().await {
-                return Err(CampaignSchedulerError::DurabilityUnavailable(reason));
-            }
+            self.probe_one_time_journal_for_creation().await?;
         }
         validate_campaign_fuzzing_policy(params)?;
         let id = uuid::Uuid::new_v4().to_string();
@@ -2087,6 +2080,30 @@ impl CampaignScheduler {
             return Err(error.into());
         }
         Ok(schedule)
+    }
+
+    async fn probe_one_time_journal_for_creation(&self) -> Result<(), CampaignSchedulerError> {
+        if self.store.is_none() {
+            return Err(CampaignSchedulerError::DurabilityUnavailable(
+                "SQLite storage is not configured".to_owned(),
+            ));
+        }
+        if let Some(reason) = self.manager.one_time_block_reason().await {
+            return Err(CampaignSchedulerError::DurabilityUnavailable(reason));
+        }
+        if let Err(error) = self.occurrences.load_one_time_occurrences().await {
+            tracing::warn!(
+                %error,
+                "One-time schedule creation journal probe failed"
+            );
+            let reason = self
+                .manager
+                .one_time_block_reason()
+                .await
+                .unwrap_or_else(|| JOURNAL_UNAVAILABLE_REASON.to_owned());
+            return Err(CampaignSchedulerError::DurabilityUnavailable(reason));
+        }
+        Ok(())
     }
 
     /// Clear the persisted execution history, returning how many rows went.
@@ -3475,6 +3492,56 @@ mod tests {
         );
         wait_for_execution(&scheduler, "recurring").await;
         assert!(scheduler.manager.is_running());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn one_time_creation_first_probes_a_post_start_journal_outage() {
+        let fixture = scheduler_fixture_with_store().await;
+        let scheduler = fixture.start().await.unwrap();
+        let file_before = std::fs::read(&fixture.schedules_path).ok();
+        let schedule_ids_before: Vec<_> = scheduler
+            .list()
+            .await
+            .into_iter()
+            .map(|schedule| schedule.id)
+            .collect();
+        fixture.store.as_ref().unwrap().pool().close().await;
+
+        assert!(matches!(
+            scheduler
+                .try_create("new once", &fixture.params(), due_trigger())
+                .await,
+            Err(CampaignSchedulerError::DurabilityUnavailable(_))
+        ));
+        assert_eq!(
+            scheduler.manager.one_time_block_reason().await.as_deref(),
+            Some(JOURNAL_UNAVAILABLE_REASON)
+        );
+        assert_eq!(
+            scheduler
+                .list()
+                .await
+                .into_iter()
+                .map(|schedule| schedule.id)
+                .collect::<Vec<_>>(),
+            schedule_ids_before
+        );
+        assert_eq!(std::fs::read(&fixture.schedules_path).ok(), file_before);
+
+        let recurring = scheduler
+            .try_create(
+                "recurring remains live",
+                &fixture.params(),
+                TriggerConfig::Event {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    debounce_secs: 0,
+                    filter: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(scheduler.manager.get_schedule(&recurring.id).await.is_some());
         scheduler.stop().await;
     }
 
