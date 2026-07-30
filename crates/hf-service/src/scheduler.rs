@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use hf_core::engine::EngineKind;
 use hf_core::error::ClassifiedError;
@@ -63,6 +66,7 @@ pub struct CampaignNotice {
 struct ScheduleRaceHook {
     paused: tokio::sync::Barrier,
     resumed: tokio::sync::Barrier,
+    reached: AtomicBool,
 }
 
 #[cfg(test)]
@@ -71,10 +75,12 @@ impl ScheduleRaceHook {
         Self {
             paused: tokio::sync::Barrier::new(2),
             resumed: tokio::sync::Barrier::new(2),
+            reached: AtomicBool::new(false),
         }
     }
 
     async fn pause(&self) {
+        self.reached.store(true, Ordering::SeqCst);
         self.paused.wait().await;
         self.resumed.wait().await;
     }
@@ -86,11 +92,16 @@ impl ScheduleRaceHook {
     async fn resume(&self) {
         self.resumed.wait().await;
     }
+
+    fn reached(&self) -> bool {
+        self.reached.load(Ordering::SeqCst)
+    }
 }
 
 struct ScheduleFileStore {
     path: PathBuf,
-    // Outermost lock for direct ID mutation and quarantine establishment.
+    // Outermost lock for acknowledgement reconciliation, direct ID mutation,
+    // and quarantine establishment.
     // Nested repository locks always follow write_lock -> quarantined_schedules.
     mutation_admission: AsyncMutex<()>,
     write_lock: AsyncMutex<()>,
@@ -98,7 +109,13 @@ struct ScheduleFileStore {
     #[cfg(test)]
     direct_mutation_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
     #[cfg(test)]
+    direct_mutation_admitted_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
+    #[cfg(test)]
+    acknowledgement_cursor_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
+    #[cfg(test)]
     quarantine_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
+    #[cfg(test)]
+    mutation_admission_waiters: AtomicUsize,
 }
 
 impl ScheduleFileStore {
@@ -111,7 +128,13 @@ impl ScheduleFileStore {
             #[cfg(test)]
             direct_mutation_hook: Mutex::new(None),
             #[cfg(test)]
+            direct_mutation_admitted_hook: Mutex::new(None),
+            #[cfg(test)]
+            acknowledgement_cursor_hook: Mutex::new(None),
+            #[cfg(test)]
             quarantine_hook: Mutex::new(None),
+            #[cfg(test)]
+            mutation_admission_waiters: AtomicUsize::new(0),
         }
     }
 
@@ -181,6 +204,22 @@ impl ScheduleFileStore {
     }
 
     #[cfg(test)]
+    fn set_direct_mutation_admitted_hook(&self, hook: Option<Arc<ScheduleRaceHook>>) {
+        *self
+            .direct_mutation_admitted_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn set_acknowledgement_cursor_hook(&self, hook: Option<Arc<ScheduleRaceHook>>) {
+        *self
+            .acknowledgement_cursor_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
     fn set_quarantine_hook(&self, hook: Option<Arc<ScheduleRaceHook>>) {
         *self
             .quarantine_hook
@@ -201,6 +240,30 @@ impl ScheduleFileStore {
     }
 
     #[cfg(test)]
+    async fn pause_direct_mutation_admitted_for_test(&self) {
+        let hook = self
+            .direct_mutation_admitted_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_acknowledgement_cursor_for_test(&self) {
+        let hook = self
+            .acknowledgement_cursor_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
+    }
+
+    #[cfg(test)]
     async fn pause_quarantine_for_test(&self) {
         let hook = self
             .quarantine_hook
@@ -210,6 +273,11 @@ impl ScheduleFileStore {
         if let Some(hook) = hook {
             hook.pause().await;
         }
+    }
+
+    #[cfg(test)]
+    fn mutation_admission_waiters(&self) -> usize {
+        self.mutation_admission_waiters.load(Ordering::SeqCst)
     }
 
     async fn restore_quarantined_schedules(&self, schedules: &mut Vec<Schedule>) {
@@ -1977,16 +2045,21 @@ impl CampaignScheduler {
         &self,
         occurrence: &OneTimeOccurrence,
     ) -> Result<OneTimeRecoveryView, CampaignSchedulerError> {
+        let admission_guard = self.lock_schedule_mutation_admission().await;
         self.manager
             .mark_one_time_consumed(&occurrence.schedule_id)
             .await;
-        if let Some(mut schedule) = self.manager.get_schedule(&occurrence.schedule_id).await {
+        let current_schedule = self.manager.get_schedule(&occurrence.schedule_id).await;
+        #[cfg(test)]
+        self.schedules.pause_acknowledgement_cursor_for_test().await;
+        if let Some(mut schedule) = current_schedule {
             schedule.last_fire = Some(schedule.last_fire.map_or(occurrence.triggered_at, |last| {
                 last.max(occurrence.triggered_at)
             }));
             self.manager.register(schedule).await;
             self.persist().await?;
         }
+        drop(admission_guard);
         Ok(self.recovery_view(occurrence).await)
     }
 
@@ -2157,6 +2230,10 @@ impl CampaignScheduler {
         #[cfg(test)]
         self.schedules.pause_direct_mutation_for_test().await;
         let _admission_guard = self.admit_schedule_mutation(id).await?;
+        #[cfg(test)]
+        self.schedules
+            .pause_direct_mutation_admitted_for_test()
+            .await;
         let previous = self.manager.get_schedule(id).await;
         let removed = self.manager.remove(id).await;
         if removed {
@@ -2196,6 +2273,10 @@ impl CampaignScheduler {
         #[cfg(test)]
         self.schedules.pause_direct_mutation_for_test().await;
         let _admission_guard = self.admit_schedule_mutation(id).await?;
+        #[cfg(test)]
+        self.schedules
+            .pause_direct_mutation_admitted_for_test()
+            .await;
         let previous = self.manager.get_schedule(id).await;
         let ok = if enabled {
             self.manager.resume(id).await
@@ -2221,13 +2302,26 @@ impl CampaignScheduler {
         &self,
         schedule_id: &str,
     ) -> Result<tokio::sync::MutexGuard<'_, ()>, CampaignSchedulerError> {
-        let admission_guard = self.schedules.mutation_admission.lock().await;
+        let admission_guard = self.lock_schedule_mutation_admission().await;
         if self.schedules.is_quarantined(schedule_id).await {
             return Err(CampaignSchedulerError::OccurrenceJournal(
                 "schedule mutation is blocked by corrupt one-time occurrence evidence".to_owned(),
             ));
         }
         Ok(admission_guard)
+    }
+
+    async fn lock_schedule_mutation_admission(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        self.schedules
+            .mutation_admission_waiters
+            .fetch_add(1, Ordering::SeqCst);
+        let admission_guard = self.schedules.mutation_admission.lock().await;
+        #[cfg(test)]
+        self.schedules
+            .mutation_admission_waiters
+            .fetch_sub(1, Ordering::SeqCst);
+        admission_guard
     }
 
     async fn persist(&self) -> Result<(), StateFileError> {
@@ -2371,17 +2465,21 @@ mod tests {
         }
 
         fn write_due_one_time(&self, id: &str) {
-            self.push_schedule(
-                Schedule::new(
-                    id,
-                    id,
-                    TriggerConfig::OneTime {
-                        at: Utc::now() - chrono::Duration::seconds(1),
-                    },
-                    CAMPAIGN_KIND,
-                )
-                .with_params(serde_json::to_value(self.params()).unwrap()),
-            );
+            self.write_due_one_time_with_enabled(id, true);
+        }
+
+        fn write_due_one_time_with_enabled(&self, id: &str, enabled: bool) {
+            let mut schedule = Schedule::new(
+                id,
+                id,
+                TriggerConfig::OneTime {
+                    at: Utc::now() - chrono::Duration::seconds(1),
+                },
+                CAMPAIGN_KIND,
+            )
+            .with_params(serde_json::to_value(self.params()).unwrap());
+            schedule.enabled = enabled;
+            self.push_schedule(schedule);
         }
 
         fn write_future_one_time(&self, id: &str) {
@@ -2906,6 +3004,210 @@ mod tests {
                 );
             }
         }
+        scheduler.stop().await;
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RaceContenderPosition {
+        HookReached,
+        WaitingForAdmission,
+    }
+
+    async fn wait_for_hook_or_admission_waiter(
+        scheduler: &CampaignScheduler,
+        hook: &ScheduleRaceHook,
+    ) -> RaceContenderPosition {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if hook.reached() {
+                    return RaceContenderPosition::HookReached;
+                }
+                if scheduler.schedules.mutation_admission_waiters() > 0 {
+                    return RaceContenderPosition::WaitingForAdmission;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("race contender did not reach its synchronization point")
+    }
+
+    async fn apply_raced_one_time_mutation(
+        scheduler: Arc<CampaignScheduler>,
+        mutation: RacedScheduleMutation,
+    ) -> Result<bool, CampaignSchedulerError> {
+        match mutation {
+            RacedScheduleMutation::Remove => scheduler.try_remove("once").await,
+            RacedScheduleMutation::SetEnabled(enabled) => {
+                scheduler.try_set_enabled("once", enabled).await
+            }
+        }
+    }
+
+    async fn start_acknowledgement_mutation_race(
+        mutation: RacedScheduleMutation,
+    ) -> (SchedulerFixture, Arc<CampaignScheduler>) {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_due_one_time_with_enabled("once", mutation.initial_enabled());
+        fixture
+            .reserve_expired_receipt(
+                "once",
+                "occ-race",
+                "exec-race",
+                OneTimeOccurrenceState::Running,
+            )
+            .await;
+        let scheduler = Arc::new(fixture.start().await.unwrap());
+        (fixture, scheduler)
+    }
+
+    async fn assert_acknowledgement_mutation_race_result(
+        fixture: &SchedulerFixture,
+        scheduler: &CampaignScheduler,
+        mutation: RacedScheduleMutation,
+        mutation_won: bool,
+        mutation_result: Result<bool, CampaignSchedulerError>,
+        acknowledged: OneTimeRecoveryView,
+    ) {
+        assert!(mutation_result.unwrap());
+        assert_eq!(acknowledged.state, "cancelled");
+        if mutation_won && matches!(mutation, RacedScheduleMutation::Remove) {
+            assert!(!acknowledged.schedule_exists);
+        }
+
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        match mutation {
+            RacedScheduleMutation::Remove => {
+                assert!(scheduler.manager.get_schedule("once").await.is_none());
+                assert!(!durable.iter().any(|schedule| schedule.id == "once"));
+            }
+            RacedScheduleMutation::SetEnabled(enabled) => {
+                let current = scheduler.manager.get_schedule("once").await.unwrap();
+                let persisted = durable
+                    .iter()
+                    .find(|schedule| schedule.id == "once")
+                    .unwrap();
+                assert_eq!(current.enabled, enabled);
+                assert_eq!(persisted.enabled, enabled);
+                assert_eq!(
+                    serde_json::to_value(persisted).unwrap(),
+                    serde_json::to_value(current).unwrap()
+                );
+            }
+        }
+        assert_eq!(
+            fixture
+                .store
+                .as_ref()
+                .unwrap()
+                .schedule_occurrence("occ-race")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "cancelled"
+        );
+    }
+
+    async fn assert_acknowledgement_wins_mutation_race(mutation: RacedScheduleMutation) {
+        let (fixture, scheduler) = start_acknowledgement_mutation_race(mutation).await;
+        let acknowledgement_hook = Arc::new(ScheduleRaceHook::new());
+        let mutation_hook = Arc::new(ScheduleRaceHook::new());
+        scheduler
+            .schedules
+            .set_acknowledgement_cursor_hook(Some(Arc::clone(&acknowledgement_hook)));
+        scheduler
+            .schedules
+            .set_direct_mutation_admitted_hook(Some(Arc::clone(&mutation_hook)));
+
+        let acknowledgement_scheduler = Arc::clone(&scheduler);
+        let acknowledgement_task = tokio::spawn(async move {
+            acknowledgement_scheduler
+                .acknowledge_one_time_recovery("occ-race")
+                .await
+        });
+        acknowledgement_hook.wait_until_paused().await;
+
+        let mutation_task = tokio::spawn(apply_raced_one_time_mutation(
+            Arc::clone(&scheduler),
+            mutation,
+        ));
+        let contender_position =
+            wait_for_hook_or_admission_waiter(&scheduler, &mutation_hook).await;
+        if contender_position == RaceContenderPosition::HookReached {
+            mutation_hook.wait_until_paused().await;
+        }
+
+        acknowledgement_hook.resume().await;
+        let acknowledged = acknowledgement_task.await.unwrap().unwrap();
+        if contender_position == RaceContenderPosition::WaitingForAdmission {
+            mutation_hook.wait_until_paused().await;
+        }
+        mutation_hook.resume().await;
+        let mutation_result = mutation_task.await.unwrap();
+        scheduler.schedules.set_acknowledgement_cursor_hook(None);
+        scheduler.schedules.set_direct_mutation_admitted_hook(None);
+
+        assert_acknowledgement_mutation_race_result(
+            &fixture,
+            &scheduler,
+            mutation,
+            false,
+            mutation_result,
+            acknowledged,
+        )
+        .await;
+        scheduler.stop().await;
+    }
+
+    async fn assert_mutation_wins_acknowledgement_race(mutation: RacedScheduleMutation) {
+        let (fixture, scheduler) = start_acknowledgement_mutation_race(mutation).await;
+        let acknowledgement_hook = Arc::new(ScheduleRaceHook::new());
+        let mutation_hook = Arc::new(ScheduleRaceHook::new());
+        scheduler
+            .schedules
+            .set_acknowledgement_cursor_hook(Some(Arc::clone(&acknowledgement_hook)));
+        scheduler
+            .schedules
+            .set_direct_mutation_admitted_hook(Some(Arc::clone(&mutation_hook)));
+
+        let mutation_task = tokio::spawn(apply_raced_one_time_mutation(
+            Arc::clone(&scheduler),
+            mutation,
+        ));
+        mutation_hook.wait_until_paused().await;
+
+        let acknowledgement_scheduler = Arc::clone(&scheduler);
+        let acknowledgement_task = tokio::spawn(async move {
+            acknowledgement_scheduler
+                .acknowledge_one_time_recovery("occ-race")
+                .await
+        });
+        let contender_position =
+            wait_for_hook_or_admission_waiter(&scheduler, &acknowledgement_hook).await;
+        if contender_position == RaceContenderPosition::HookReached {
+            acknowledgement_hook.wait_until_paused().await;
+        }
+
+        mutation_hook.resume().await;
+        let mutation_result = mutation_task.await.unwrap();
+        if contender_position == RaceContenderPosition::WaitingForAdmission {
+            acknowledgement_hook.wait_until_paused().await;
+        }
+        acknowledgement_hook.resume().await;
+        let acknowledged = acknowledgement_task.await.unwrap().unwrap();
+        scheduler.schedules.set_acknowledgement_cursor_hook(None);
+        scheduler.schedules.set_direct_mutation_admitted_hook(None);
+
+        assert_acknowledgement_mutation_race_result(
+            &fixture,
+            &scheduler,
+            mutation,
+            true,
+            mutation_result,
+            acknowledged,
+        )
+        .await;
         scheduler.stop().await;
     }
 
@@ -3577,6 +3879,36 @@ mod tests {
     async fn schedule_mutation_quarantine_race_enable_completes_before_capture() {
         assert_mutation_wins_schedule_quarantine_race(RacedScheduleMutation::SetEnabled(true))
             .await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_remove_race_acknowledgement_wins() {
+        assert_acknowledgement_wins_mutation_race(RacedScheduleMutation::Remove).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_remove_race_mutation_wins() {
+        assert_mutation_wins_acknowledgement_race(RacedScheduleMutation::Remove).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_disable_race_acknowledgement_wins() {
+        assert_acknowledgement_wins_mutation_race(RacedScheduleMutation::SetEnabled(false)).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_disable_race_mutation_wins() {
+        assert_mutation_wins_acknowledgement_race(RacedScheduleMutation::SetEnabled(false)).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_enable_race_acknowledgement_wins() {
+        assert_acknowledgement_wins_mutation_race(RacedScheduleMutation::SetEnabled(true)).await;
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_enable_race_mutation_wins() {
+        assert_mutation_wins_acknowledgement_race(RacedScheduleMutation::SetEnabled(true)).await;
     }
 
     #[tokio::test]
