@@ -1779,6 +1779,33 @@ impl SchedulerManager {
         }
     }
 
+    async fn load_unblocked_schedule(
+        fired: &FiredTrigger,
+        store: &Arc<Mutex<ScheduleStore>>,
+        one_time_status: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+        one_time_global_block: &Arc<Mutex<Option<String>>>,
+    ) -> Option<(Schedule, bool)> {
+        let schedule = {
+            let store_guard = store.lock().await;
+            let Some(schedule) = store_guard.get(&fired.schedule_id).cloned() else {
+                warn!(schedule_id = %fired.schedule_id, "Schedule not found, skipping");
+                return None;
+            };
+            schedule
+        };
+        let one_time = matches!(
+            schedule.trigger,
+            crate::store::TriggerConfig::OneTime { .. }
+        );
+        if one_time
+            && Self::one_time_trigger_blocked(&schedule.id, one_time_status, one_time_global_block)
+                .await
+        {
+            return None;
+        }
+        Some((schedule, one_time))
+    }
+
     /// Handle a single fired trigger.
     ///
     /// When a `WorkflowDispatcher` is available, creates a `Running` execution
@@ -1803,24 +1830,12 @@ impl SchedulerManager {
         occurrence_metrics: &Arc<OccurrenceMetrics>,
         owner_id: &str,
     ) {
-        let schedule = {
-            let store_guard = store.lock().await;
-            let Some(schedule) = store_guard.get(&fired.schedule_id).cloned() else {
-                warn!(schedule_id = %fired.schedule_id, "Schedule not found, skipping");
-                return;
-            };
-            schedule
-        };
-        let one_time = matches!(
-            schedule.trigger,
-            crate::store::TriggerConfig::OneTime { .. }
-        );
-        if one_time
-            && Self::one_time_trigger_blocked(&schedule.id, one_time_status, one_time_global_block)
+        let Some((schedule, one_time)) =
+            Self::load_unblocked_schedule(&fired, store, one_time_status, one_time_global_block)
                 .await
-        {
+        else {
             return;
-        }
+        };
 
         let now = chrono::Utc::now();
         let max_per_hour = schedule.policies.max_executions_per_hour;

@@ -48,7 +48,7 @@ pub struct ScheduleOccurrenceRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduleOccurrenceInspection {
     /// Every storage column decoded and passed structural validation.
-    Valid(ScheduleOccurrenceRecord),
+    Valid(Box<ScheduleOccurrenceRecord>),
     /// The row is malformed; `schedule_id` is retained only when it is
     /// non-empty UTF-8 text.
     Malformed {
@@ -390,7 +390,7 @@ impl Store {
             .await?
             .into_iter()
             .map(|inspection| match inspection {
-                ScheduleOccurrenceInspection::Valid(record) => Ok(record),
+                ScheduleOccurrenceInspection::Valid(record) => Ok(*record),
                 ScheduleOccurrenceInspection::Malformed { .. } => Err(StorageError::InvalidData(
                     "invalid stored one-time occurrence".to_owned(),
                 )),
@@ -402,7 +402,7 @@ impl Store {
     /// schedule identity of an individually malformed row.
     ///
     /// # Errors
-    /// Returns an error only when SQLite cannot fetch the row set. Column
+    /// Returns an error only when `SQLite` cannot fetch the row set. Column
     /// decoding and structural failures are returned as per-row malformed
     /// inspections.
     pub async fn inspect_schedule_occurrences(
@@ -413,7 +413,7 @@ impl Store {
         Ok(rows
             .iter()
             .map(|row| match record_from_row(row) {
-                Ok(record) => ScheduleOccurrenceInspection::Valid(record),
+                Ok(record) => ScheduleOccurrenceInspection::Valid(Box::new(record)),
                 Err(_) => ScheduleOccurrenceInspection::Malformed {
                     schedule_id: row
                         .try_get::<String, _>("schedule_id")
