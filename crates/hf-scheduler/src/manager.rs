@@ -896,12 +896,11 @@ impl SchedulerManager {
         statuses: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
         global_block: &Arc<Mutex<Option<String>>>,
     ) -> bool {
-        if let Some(detail) = global_block.lock().await.clone() {
+        if global_block.lock().await.is_some() {
             warn!(
                 occurrence_id = ONE_TIME_ID_NOT_RESERVED,
                 schedule_id,
                 execution_id = ONE_TIME_ID_NOT_RESERVED,
-                reason = %detail,
                 recovery_reason = "journal_health",
                 "One-time schedule blocked by journal health"
             );
@@ -912,12 +911,11 @@ impl SchedulerManager {
                 debug!(schedule_id, "Consumed one-time schedule suppressed");
                 true
             }
-            Some(OneTimeRuntimeStatus::RecoveryRequired { detail }) => {
+            Some(OneTimeRuntimeStatus::RecoveryRequired { .. }) => {
                 warn!(
                     occurrence_id = ONE_TIME_ID_NOT_RESERVED,
                     schedule_id,
                     execution_id = ONE_TIME_ID_NOT_RESERVED,
-                    reason = %detail,
                     recovery_reason = "runtime_status",
                     "One-time schedule requires recovery"
                 );
@@ -1301,7 +1299,7 @@ impl SchedulerManager {
                 Self::clear_one_time_admission(one_time_admissions, &admission_id);
                 return;
             }
-            Err(error) => {
+            Err(_) => {
                 let recovered = persistence
                     .get_one_time_occurrence(&occurrence.id)
                     .await
@@ -1350,7 +1348,6 @@ impl SchedulerManager {
                     occurrence_id = %occurrence.id,
                     schedule_id = %schedule.id,
                     execution_id = %occurrence.execution_id,
-                    error = %error,
                     reservation_outcome = "unavailable",
                     duration_ms = reservation_duration_ms,
                     recovery_reason = "reservation_unavailable",
@@ -2472,6 +2469,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::{Mutex as AsyncMutex, Notify};
 
+    const SENSITIVE_JOURNAL_DETAIL: &str =
+        "/private/targets/customer-a/journal.sqlite credential=journal-secret";
+    const SENSITIVE_RUNTIME_DETAIL: &str = "OPENAI_API_KEY=sk-runtime-secret";
+    const SENSITIVE_PERSISTENCE_ERROR: &str =
+        "DATABASE_URL=postgres://admin:secret@internal/oxfuzz";
+
     #[derive(Clone, Default)]
     struct EventCapture {
         events: Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>,
@@ -2562,7 +2565,7 @@ mod tests {
         success_manager.stop().await;
 
         let statuses = Arc::new(Mutex::new(HashMap::new()));
-        let journal_block = Arc::new(Mutex::new(Some("journal unavailable".to_owned())));
+        let journal_block = Arc::new(Mutex::new(Some(SENSITIVE_JOURNAL_DETAIL.to_owned())));
         assert!(
             SchedulerManager::one_time_trigger_blocked(
                 "journal-blocked",
@@ -2574,7 +2577,7 @@ mod tests {
         statuses.lock().await.insert(
             "runtime-blocked".to_owned(),
             OneTimeRuntimeStatus::RecoveryRequired {
-                detail: "operator recovery required".to_owned(),
+                detail: SENSITIVE_RUNTIME_DETAIL.to_owned(),
             },
         );
         assert!(
@@ -2602,6 +2605,15 @@ mod tests {
         persistence_missing.start(Duration::from_millis(10)).await;
         wait_for_one_time_recovery(&persistence_missing, "persistence-missing").await;
         persistence_missing.stop().await;
+
+        let (reservation_failure, _) = manager_and_persistence(OccurrenceFailure::Reserve).await;
+        attached_counting_dispatcher(&reservation_failure).await;
+        reservation_failure
+            .register(due_one_time("reservation-failure"))
+            .await;
+        reservation_failure.start(Duration::from_millis(10)).await;
+        wait_for_one_time_recovery(&reservation_failure, "reservation-failure").await;
+        reservation_failure.stop().await;
 
         let (shutdown_manager, shutdown_persistence) =
             manager_and_persistence(OccurrenceFailure::PauseCursor).await;
@@ -2657,6 +2669,27 @@ mod tests {
             for fields in matching {
                 assert_event_identity_fields(fields);
             }
+        }
+
+        let recovery_events: Vec<_> = events
+            .iter()
+            .filter(|fields| fields.contains_key("recovery_reason"))
+            .collect();
+        for marker in [
+            "/private/targets/customer-a",
+            "credential=journal-secret",
+            "OPENAI_API_KEY",
+            "sk-runtime-secret",
+            "DATABASE_URL",
+            "postgres://admin:secret@internal",
+        ] {
+            assert!(
+                recovery_events
+                    .iter()
+                    .flat_map(|fields| fields.values())
+                    .all(|value| !value.contains(marker)),
+                "recovery event exposed sensitive marker {marker}: {recovery_events:?}"
+            );
         }
     }
 
@@ -3065,7 +3098,7 @@ mod tests {
         ) -> Result<OneTimeReservation, PersistenceError> {
             self.occurrence_calls.fetch_add(1, Ordering::SeqCst);
             if self.failure == OccurrenceFailure::Reserve {
-                return Err(PersistenceError::new("injected reserve failure"));
+                return Err(PersistenceError::new(SENSITIVE_PERSISTENCE_ERROR));
             }
             let mut stored = self.occurrence.lock().await;
             if let Some(existing) = stored.as_ref() {
