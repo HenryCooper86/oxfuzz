@@ -1811,6 +1811,20 @@ impl SchedulerManager {
             };
             schedule
         };
+        let one_time = matches!(
+            schedule.trigger,
+            crate::store::TriggerConfig::OneTime { .. }
+        );
+        if one_time
+            && Self::one_time_trigger_blocked(
+                &schedule.id,
+                one_time_status,
+                one_time_global_block,
+            )
+            .await
+        {
+            return;
+        }
 
         let now = chrono::Utc::now();
         let max_per_hour = schedule.policies.max_executions_per_hour;
@@ -1832,6 +1846,12 @@ impl SchedulerManager {
                             %error,
                             "Cannot verify hourly schedule limit; skipping trigger"
                         );
+                        if one_time {
+                            *one_time_global_block.lock().await = Some(
+                                "one-time hourly execution history is unavailable".to_owned(),
+                            );
+                            return;
+                        }
                         Self::record_policy_skip(
                             &fired,
                             &schedule,
@@ -1862,10 +1882,7 @@ impl SchedulerManager {
             }
         }
 
-        if matches!(
-            schedule.trigger,
-            crate::store::TriggerConfig::OneTime { .. }
-        ) {
+        if one_time {
             Self::handle_one_time_trigger(
                 fired,
                 schedule,
@@ -2951,6 +2968,22 @@ mod tests {
         )
     }
 
+    fn future_one_time_with_hourly_limit(id: &str, max_per_hour: u32) -> Schedule {
+        Schedule::new(
+            id,
+            id,
+            TriggerConfig::OneTime {
+                at: Utc::now() + chrono::Duration::hours(1),
+            },
+            id,
+        )
+        .with_policies(SchedulePolicies {
+            missed_policy: Some(MissedPolicy::Skip),
+            concurrency_policy: Some(ConcurrencyPolicy::Allow),
+            max_executions_per_hour: max_per_hour,
+        })
+    }
+
     fn interval_schedule(id: &str) -> Schedule {
         Schedule::new(
             id,
@@ -2982,6 +3015,7 @@ mod tests {
         Running,
         Terminal,
         Renew,
+        HourlyHistory,
     }
 
     struct OccurrenceRecordingPersistence {
@@ -3087,7 +3121,22 @@ mod tests {
                 | OccurrenceFailure::ReserveCommitted
                 | OccurrenceFailure::Running
                 | OccurrenceFailure::Terminal
-                | OccurrenceFailure::Renew => Ok(()),
+                | OccurrenceFailure::Renew
+                | OccurrenceFailure::HourlyHistory => Ok(()),
+            }
+        }
+
+        async fn executions_started_since(
+            &self,
+            _schedule_id: &str,
+            _since: DateTime<Utc>,
+        ) -> Result<u64, PersistenceError> {
+            if self.failure == OccurrenceFailure::HourlyHistory {
+                Err(PersistenceError::new(
+                    "injected hourly history read failure",
+                ))
+            } else {
+                Ok(0)
             }
         }
 
@@ -3480,6 +3529,100 @@ mod tests {
             })
             .await
             .expect("trigger queue accepts one-time occurrence");
+    }
+
+    #[tokio::test]
+    async fn latched_one_time_block_precedes_mutating_hourly_limit_preflight() {
+        let manager = SchedulerManager::with_defaults();
+        let persistence = Arc::new(RecordingPersistence {
+            persisted_started: AtomicUsize::new(1),
+            ..RecordingPersistence::default()
+        });
+        manager.set_persistence(persistence.clone()).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        manager
+            .register(future_one_time_with_hourly_limit("blocked-once", 1))
+            .await;
+        manager
+            .register(policy_schedule(
+                "recurring-sentinel",
+                ConcurrencyPolicy::Allow,
+                0,
+            ))
+            .await;
+        manager.block_one_time("journal is unavailable").await;
+        manager.start(Duration::from_mins(1)).await;
+
+        send_one_time_now(&manager, "blocked-once").await;
+        send_now(&manager, "recurring-sentinel").await;
+        wait_for_dispatches(&dispatcher, 1).await;
+
+        assert_eq!(dispatcher.calls_for("blocked-once").await, 0);
+        assert_eq!(dispatcher.calls_for("wf").await, 1);
+        assert_eq!(
+            manager.get_schedule("blocked-once").await.unwrap().last_fire,
+            None
+        );
+        assert!(manager.execution_history("blocked-once").await.is_empty());
+        assert!(!persistence
+            .last_fire_updates
+            .lock()
+            .await
+            .iter()
+            .any(|(schedule_id, _)| schedule_id == "blocked-once"));
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn one_time_hourly_history_read_failure_latches_without_mutation() {
+        let (manager, persistence) =
+            manager_and_persistence(OccurrenceFailure::HourlyHistory).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        manager
+            .register(future_one_time_with_hourly_limit(
+                "hourly-history-unavailable",
+                1,
+            ))
+            .await;
+        manager
+            .register(policy_schedule(
+                "recurring-sentinel",
+                ConcurrencyPolicy::Allow,
+                0,
+            ))
+            .await;
+        manager.start(Duration::from_mins(1)).await;
+
+        send_one_time_now(&manager, "hourly-history-unavailable").await;
+        send_now(&manager, "recurring-sentinel").await;
+        wait_for_dispatches(&dispatcher, 1).await;
+
+        assert_eq!(dispatcher.calls_for("hourly-history-unavailable").await, 0);
+        assert_eq!(dispatcher.calls_for("wf").await, 1);
+        assert_eq!(
+            manager
+                .get_schedule("hourly-history-unavailable")
+                .await
+                .unwrap()
+                .last_fire,
+            None
+        );
+        assert!(manager
+            .execution_history("hourly-history-unavailable")
+            .await
+            .is_empty());
+        assert_eq!(
+            manager.one_time_block_reason().await.as_deref(),
+            Some("one-time hourly execution history is unavailable")
+        );
+        assert_eq!(persistence.occurrence_calls.load(Ordering::SeqCst), 0);
+        assert!(!persistence
+            .schedule_updates
+            .lock()
+            .await
+            .iter()
+            .any(|schedule| schedule.id == "hourly-history-unavailable"));
+        manager.stop().await;
     }
 
     #[tokio::test]

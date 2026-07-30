@@ -303,20 +303,25 @@ The one-time branch in `SchedulerManager::handle_fired_trigger` uses this
 ordering:
 
 1. Load and validate the schedule.
-2. Apply rate, concurrency, and parameter preflight.
-3. Construct stable occurrence and execution identifiers and a pending
+2. Check the global and schedule-specific one-time journal health before any
+   preflight that can mutate the cursor or execution history.
+3. Apply rate, concurrency, and parameter preflight. If reading persisted
+   hourly history fails, latch the global one-time journal block and leave the
+   cursor and execution history unchanged; recurring hourly-policy behavior is
+   unaffected.
+4. Construct stable occurrence and execution identifiers and a pending
    execution record.
-4. Reserve the receipt and pending execution transactionally.
-5. If an existing receipt is returned, suppress dispatch, align the in-memory
+5. Reserve the receipt and pending execution transactionally.
+6. If an existing receipt is returned, suppress dispatch, align the in-memory
    cursor to the receipt timestamp, and request durable JSON reconciliation.
-6. If a new receipt is returned, update the in-memory `last_fire`.
-7. Persist the JSON schedule cursor and await success.
-8. Spawn and synchronously register the tracked asynchronous task without an
+7. If a new receipt is returned, update the in-memory `last_fire`.
+8. Persist the JSON schedule cursor and await success.
+9. Spawn and synchronously register the tracked asynchronous task without an
    intervening cancellation point.
-9. After the task acquires its serialization and global execution permits,
+10. After the task acquires its serialization and global execution permits,
    transition the receipt and execution to `running`.
-10. Only after the running transaction commits, call `WorkflowDispatcher`.
-11. Atomically persist the terminal receipt and execution state.
+11. Only after the running transaction commits, call `WorkflowDispatcher`.
+12. Atomically persist the terminal receipt and execution state.
 
 There is no cancellation point between spawning the task and registering its
 tracked handle. Existing graceful scheduler shutdown continues to cancel and
