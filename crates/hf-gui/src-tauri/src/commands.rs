@@ -1088,6 +1088,31 @@ pub async fn schedule_list(
         .map_err(|error| error.to_string())
 }
 
+/// List one-time campaign receipts that require operator acknowledgement.
+#[tauri::command]
+pub async fn schedule_recovery_list(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<Vec<hf_service::scheduler::OneTimeRecoveryView>, String> {
+    state
+        .scheduler
+        .list_one_time_recoveries()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Record an eligible one-time recovery outcome as cancelled.
+#[tauri::command]
+pub async fn schedule_recovery_acknowledge(
+    state: tauri::State<'_, crate::state::AppState>,
+    occurrence_id: String,
+) -> Result<hf_service::scheduler::OneTimeRecoveryView, String> {
+    state
+        .scheduler
+        .acknowledge_one_time_recovery(&occurrence_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Recent scheduled-campaign executions (newest first).
 #[tauri::command]
 pub async fn schedule_history(
