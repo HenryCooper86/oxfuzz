@@ -372,7 +372,7 @@ Binary Tool integration is outside this release's scope.
 | `ingest <project> <file>` | Ingest a document (PDF/Office/HTML) into the knowledge base. |
 | `knowledge index\|search <project> [query]` | Index a project for search, or run a full-text (BM25) query over it. |
 | `agent <project> "<message>"` | Drive the conversational agent from the terminal. |
-| `schedule list\|create\|history\|... ` | Manage scheduled headless fuzzing campaigns. |
+| `schedule list\|create\|history\|recovery list\|recovery acknowledge <occurrence-id>\|... ` | Manage scheduled headless fuzzing campaigns and acknowledge an ambiguous one-time occurrence as cancelled. |
 | `session list\|history\|new\|... ` | Manage chat sessions and their checkpoints. |
 | `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
@@ -385,6 +385,27 @@ The REST API exposes discovery, harness, user-space run start/status/cancel,
 corpus, triage, reporting, and management endpoints. Syzkaller remains a
 trusted-local-desktop workflow because its kernel, rootfs, SSH, and VM inputs
 require a stronger boundary.
+
+#### Recover an ambiguous one-time campaign
+
+```bash
+oxfuzz schedule recovery list
+oxfuzz schedule recovery acknowledge <occurrence-id>
+```
+
+Acknowledgement records an expired, non-terminal occurrence with an unknown
+prior outcome as cancelled and permanently consumes that one-time schedule. It
+does not prove or force the termination of an orphaned sandbox process. To
+retry, create a new one-time schedule so it receives a new schedule identifier
+and a new durable receipt. Recurring schedules remain available when the
+one-time journal is blocked.
+
+The equivalent REST operations are:
+
+```text
+GET  /schedule/recovery
+POST /schedule/recovery/{occurrence_id}/acknowledge
+```
 
 ### Optional automotive protocol workflows
 
@@ -828,7 +849,7 @@ oxfuzz triage /path/to/project --target parse_value
 | `ingest <project> <file>` | 将一份文档（PDF/Office/HTML）摄取到知识库。 |
 | `knowledge index\|search <project> [query]` | 为项目建立搜索索引，或对其执行全文（BM25）查询。 |
 | `agent <project> "<message>"` | 从终端驱动对话式代理。 |
-| `schedule list\|create\|history\|... ` | 管理计划化的无头模糊 campaign。 |
+| `schedule list\|create\|history\|recovery list\|recovery acknowledge <occurrence-id>\|... ` | 管理计划化的无头模糊 campaign，并将含糊的一次性 occurrence 确认记录为已取消。 |
 | `session list\|history\|new\|... ` | 管理聊天会话及其检查点。 |
 | `report <project> --target <sym> --out report.md` | 渲染一份完整的 Markdown campaign 报告。 |
 | `export [project] --output evidence.json` | 导出一个可复现的证据包，包含限定范围的目标、运行、测试桩、崩溃、语料库与文件系统证据。 |
@@ -838,6 +859,22 @@ oxfuzz triage /path/to/project --target parse_value
 引擎：`afl++`、`honggfuzz`、`libfuzzer`、`clusterfuzzlite`、`syzkaller`。
 
 REST API 暴露发现、测试桩、用户态运行的启动/状态/取消、语料库、三查、报告与管理端点。Syzkaller 仍是一个受信任的本地桌面工作流，因为它的内核、rootfs、SSH 与虚拟机输入需要更强的边界。
+
+#### 恢复含糊的一次性 campaign
+
+```bash
+oxfuzz schedule recovery list
+oxfuzz schedule recovery acknowledge <occurrence-id>
+```
+
+确认会将先前结果未知的已过期非终态 occurrence 记录为已取消，并永久消耗该一次性计划。它不证明也不强制终止孤立的沙箱进程。若要重试，请创建一个新的一次性计划，使其获得新的计划标识符和新的持久化回执。当一次性 journal 被阻塞时，循环计划仍可使用。
+
+等效的 REST 操作是：
+
+```text
+GET  /schedule/recovery
+POST /schedule/recovery/{occurrence_id}/acknowledge
+```
 
 ### 可选的汽车协议工作流
 
