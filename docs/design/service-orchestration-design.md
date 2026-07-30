@@ -158,7 +158,10 @@ conversion and quarantines each identifiable malformed receipt before cursor
 restoration or schedule-file writes. An undecodable schedule identity
 quarantines the complete startup definition snapshot, so later full writes
 cannot overwrite unknown damaged evidence; recurring schedules still execute
-from their in-memory definitions.
+from their in-memory definitions. Recovery acknowledgement serializes cursor
+reconciliation with direct remove and enable/disable, then re-reads and updates
+only the current definition; it never recreates a removed schedule or restores
+a stale enabled value.
 
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist

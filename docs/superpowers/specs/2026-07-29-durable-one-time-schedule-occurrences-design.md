@@ -446,9 +446,14 @@ Acknowledgement:
    lease;
 2. atomically sets both receipt and execution to `cancelled`;
 3. records a bounded operator-acknowledgement reason;
-4. preserves the schedule's consumed cursor;
-5. clears only the manager's recovery-required presentation state; and
-6. returns the terminal DTO.
+4. acquires the same schedule-mutation admission guard used by remove and
+   enable/disable;
+5. re-reads the current schedule definition after acquiring that guard;
+6. when the definition still exists, advances only its consumed cursor while
+   preserving every current field, including `enabled`, and persists it;
+7. when a concurrent remove won admission first, leaves the definition absent;
+8. clears only the manager's recovery-required presentation state; and
+9. returns the terminal DTO.
 
 Acknowledging an already cancelled receipt returns the same result. Attempting
 to acknowledge a completed or failed receipt returns a conflict. The operation
@@ -533,6 +538,12 @@ Two schedulers may evaluate the same stale JSON definition concurrently. They
 may both construct candidate identifiers, but only one reservation commits.
 Only the winner may persist the cursor and enter `WorkflowDispatcher`. The
 loser reads the winning receipt and suppresses its task.
+
+Within one service process, acknowledgement cursor reconciliation, remove, and
+enable/disable share one mutation-admission boundary. Whichever operation wins
+the boundary first completes its current-definition read and JSON persistence
+before the other proceeds. Acknowledgement never re-registers a pre-admission
+schedule clone.
 
 An unexpired receipt lease is the cross-process liveness signal for recovery
 presentation. Only the owning instance may renew it. Lease expiry makes

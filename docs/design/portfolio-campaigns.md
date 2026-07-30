@@ -104,7 +104,11 @@ acknowledgement as cancelled and never retry automatically. Recurring schedules
 do not use occurrence APIs. SQLite unique constraints, not process-local
 scheduler locks or the JSON write mutex, are the cross-process admission
 authority. Retrying work requires a newly created one-time schedule with a new
-schedule identifier.
+schedule identifier. Acknowledgement cursor reconciliation shares the
+service-local mutation-admission boundary with remove and enable/disable,
+re-reads the current definition under that boundary, and advances only its
+cursor; a removed definition stays absent and a current enabled state is
+preserved.
 
 Recovery creates compact batches rather than filling the trigger channel before
 its receiver exists. `Skip` advances to the latest due occurrence without
