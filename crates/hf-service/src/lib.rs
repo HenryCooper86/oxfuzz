@@ -45,6 +45,8 @@ pub mod semgrep;
 pub mod semgrep_recovery;
 pub mod system;
 mod syzkaller;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod verification;
 pub mod workbench;
 
