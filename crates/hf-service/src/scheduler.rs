@@ -59,18 +59,59 @@ pub struct CampaignNotice {
 }
 
 /// Serialized, atomic repository for persisted schedule definitions.
+#[cfg(test)]
+struct ScheduleRaceHook {
+    paused: tokio::sync::Barrier,
+    resumed: tokio::sync::Barrier,
+}
+
+#[cfg(test)]
+impl ScheduleRaceHook {
+    fn new() -> Self {
+        Self {
+            paused: tokio::sync::Barrier::new(2),
+            resumed: tokio::sync::Barrier::new(2),
+        }
+    }
+
+    async fn pause(&self) {
+        self.paused.wait().await;
+        self.resumed.wait().await;
+    }
+
+    async fn wait_until_paused(&self) {
+        self.paused.wait().await;
+    }
+
+    async fn resume(&self) {
+        self.resumed.wait().await;
+    }
+}
+
 struct ScheduleFileStore {
     path: PathBuf,
+    // Outermost lock for direct ID mutation and quarantine establishment.
+    // Nested repository locks always follow write_lock -> quarantined_schedules.
+    mutation_admission: AsyncMutex<()>,
     write_lock: AsyncMutex<()>,
     quarantined_schedules: AsyncMutex<HashMap<String, Option<Schedule>>>,
+    #[cfg(test)]
+    direct_mutation_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
+    #[cfg(test)]
+    quarantine_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
 }
 
 impl ScheduleFileStore {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
+            mutation_admission: AsyncMutex::new(()),
             write_lock: AsyncMutex::new(()),
             quarantined_schedules: AsyncMutex::new(HashMap::new()),
+            #[cfg(test)]
+            direct_mutation_hook: Mutex::new(None),
+            #[cfg(test)]
+            quarantine_hook: Mutex::new(None),
         }
     }
 
@@ -109,6 +150,9 @@ impl ScheduleFileStore {
     }
 
     async fn quarantine(&self, schedule_id: &str) -> Result<(), StateFileError> {
+        #[cfg(test)]
+        self.pause_quarantine_for_test().await;
+        let _admission_guard = self.mutation_admission.lock().await;
         let _guard = self.write_lock.lock().await;
         let mut quarantined = self.quarantined_schedules.lock().await;
         if quarantined.contains_key(schedule_id) {
@@ -126,6 +170,46 @@ impl ScheduleFileStore {
             .lock()
             .await
             .contains_key(schedule_id)
+    }
+
+    #[cfg(test)]
+    fn set_direct_mutation_hook(&self, hook: Option<Arc<ScheduleRaceHook>>) {
+        *self
+            .direct_mutation_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn set_quarantine_hook(&self, hook: Option<Arc<ScheduleRaceHook>>) {
+        *self
+            .quarantine_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    async fn pause_direct_mutation_for_test(&self) {
+        let hook = self
+            .direct_mutation_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_quarantine_for_test(&self) {
+        let hook = self
+            .quarantine_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
     }
 
     async fn restore_quarantined_schedules(&self, schedules: &mut Vec<Schedule>) {
@@ -2042,7 +2126,9 @@ impl CampaignScheduler {
     /// state-file error after restoring the in-memory schedule if the
     /// definition file cannot be replaced.
     pub async fn try_remove(&self, id: &str) -> Result<bool, CampaignSchedulerError> {
-        self.reject_quarantined_schedule_mutation(id).await?;
+        #[cfg(test)]
+        self.schedules.pause_direct_mutation_for_test().await;
+        let _admission_guard = self.admit_schedule_mutation(id).await?;
         let previous = self.manager.get_schedule(id).await;
         let removed = self.manager.remove(id).await;
         if removed {
@@ -2079,7 +2165,9 @@ impl CampaignScheduler {
         id: &str,
         enabled: bool,
     ) -> Result<bool, CampaignSchedulerError> {
-        self.reject_quarantined_schedule_mutation(id).await?;
+        #[cfg(test)]
+        self.schedules.pause_direct_mutation_for_test().await;
+        let _admission_guard = self.admit_schedule_mutation(id).await?;
         let previous = self.manager.get_schedule(id).await;
         let ok = if enabled {
             self.manager.resume(id).await
@@ -2101,16 +2189,17 @@ impl CampaignScheduler {
         Ok(ok)
     }
 
-    async fn reject_quarantined_schedule_mutation(
+    async fn admit_schedule_mutation(
         &self,
         schedule_id: &str,
-    ) -> Result<(), CampaignSchedulerError> {
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, CampaignSchedulerError> {
+        let admission_guard = self.schedules.mutation_admission.lock().await;
         if self.schedules.is_quarantined(schedule_id).await {
             return Err(CampaignSchedulerError::OccurrenceJournal(
                 "schedule mutation is blocked by corrupt one-time occurrence evidence".to_owned(),
             ));
         }
-        Ok(())
+        Ok(admission_guard)
     }
 
     async fn persist(&self) -> Result<(), StateFileError> {
@@ -2586,6 +2675,212 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum RacedScheduleMutation {
+        Remove,
+        SetEnabled(bool),
+    }
+
+    impl RacedScheduleMutation {
+        fn initial_enabled(self) -> bool {
+            match self {
+                Self::Remove | Self::SetEnabled(false) => true,
+                Self::SetEnabled(true) => false,
+            }
+        }
+    }
+
+    async fn apply_raced_schedule_mutation(
+        scheduler: Arc<CampaignScheduler>,
+        mutation: RacedScheduleMutation,
+    ) -> Result<bool, CampaignSchedulerError> {
+        match mutation {
+            RacedScheduleMutation::Remove => scheduler.try_remove("recurring").await,
+            RacedScheduleMutation::SetEnabled(enabled) => {
+                scheduler.try_set_enabled("recurring", enabled).await
+            }
+        }
+    }
+
+    async fn start_runtime_mismatch_race(
+        mutation: RacedScheduleMutation,
+    ) -> (
+        SchedulerFixture,
+        Arc<CampaignScheduler>,
+        Schedule,
+        Vec<u8>,
+        ScheduleOccurrenceRecord,
+    ) {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_event_with_enabled("recurring", mutation.initial_enabled());
+        let scheduler = Arc::new(fixture.start().await.unwrap());
+        fixture
+            .reserve_expired_receipt(
+                "recurring",
+                "occ-mismatch",
+                "exec-mismatch",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
+        let manager_before = scheduler.manager.get_schedule("recurring").await.unwrap();
+        let file_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let receipt_before = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            fixture,
+            scheduler,
+            manager_before,
+            file_before,
+            receipt_before,
+        )
+    }
+
+    async fn assert_quarantine_wins_schedule_mutation_race(mutation: RacedScheduleMutation) {
+        let (fixture, scheduler, manager_before, file_before, receipt_before) =
+            start_runtime_mismatch_race(mutation).await;
+        let hook = Arc::new(ScheduleRaceHook::new());
+        scheduler
+            .schedules
+            .set_direct_mutation_hook(Some(Arc::clone(&hook)));
+        let mutation_task = tokio::spawn(apply_raced_schedule_mutation(
+            Arc::clone(&scheduler),
+            mutation,
+        ));
+
+        hook.wait_until_paused().await;
+        assert!(matches!(
+            scheduler.list_one_time_recoveries().await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        hook.resume().await;
+        let mutation_result = mutation_task.await.unwrap();
+        scheduler.schedules.set_direct_mutation_hook(None);
+
+        assert!(
+            matches!(
+                mutation_result,
+                Err(CampaignSchedulerError::OccurrenceJournal(_))
+            ),
+            "quarantine must reject {mutation:?} before manager mutation"
+        );
+        assert_mismatched_recurring_unchanged(
+            &fixture,
+            &scheduler,
+            &manager_before,
+            &file_before,
+            &receipt_before,
+        )
+        .await;
+        scheduler.stop().await;
+    }
+
+    async fn assert_mutation_wins_schedule_quarantine_race(mutation: RacedScheduleMutation) {
+        let (fixture, scheduler, _manager_before, _file_before, receipt_before) =
+            start_runtime_mismatch_race(mutation).await;
+        let hook = Arc::new(ScheduleRaceHook::new());
+        scheduler
+            .schedules
+            .set_quarantine_hook(Some(Arc::clone(&hook)));
+        let refresh_scheduler = Arc::clone(&scheduler);
+        let refresh_task =
+            tokio::spawn(async move { refresh_scheduler.list_one_time_recoveries().await });
+
+        hook.wait_until_paused().await;
+        let mutation_result = apply_raced_schedule_mutation(Arc::clone(&scheduler), mutation).await;
+        assert_eq!(
+            mutation_result.unwrap(),
+            true,
+            "{mutation:?} must complete before quarantine capture"
+        );
+        hook.resume().await;
+        assert!(matches!(
+            refresh_task.await.unwrap(),
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        scheduler.schedules.set_quarantine_hook(None);
+
+        let receipt_after_mutation = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt_after_mutation, receipt_before);
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        match mutation {
+            RacedScheduleMutation::Remove => {
+                assert!(scheduler.manager.get_schedule("recurring").await.is_none());
+                assert!(!durable.iter().any(|schedule| schedule.id == "recurring"));
+
+                let recoveries = scheduler.list_one_time_recoveries().await.unwrap();
+                assert_eq!(recoveries.len(), 1);
+                assert_eq!(recoveries[0].occurrence_id, "occ-mismatch");
+                assert!(!recoveries[0].schedule_exists);
+                let acknowledged = scheduler
+                    .acknowledge_one_time_recovery("occ-mismatch")
+                    .await
+                    .unwrap();
+                assert_eq!(acknowledged.state, "cancelled");
+                assert!(!acknowledged.schedule_exists);
+                assert_eq!(
+                    fixture
+                        .store
+                        .as_ref()
+                        .unwrap()
+                        .schedule_occurrence("occ-mismatch")
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    "cancelled"
+                );
+            }
+            RacedScheduleMutation::SetEnabled(enabled) => {
+                let manager_schedule = scheduler.manager.get_schedule("recurring").await.unwrap();
+                assert_eq!(manager_schedule.enabled, enabled);
+                let durable_schedule = durable
+                    .iter()
+                    .find(|schedule| schedule.id == "recurring")
+                    .unwrap();
+                assert_eq!(durable_schedule.enabled, enabled);
+                assert_eq!(
+                    serde_json::to_value(durable_schedule).unwrap(),
+                    serde_json::to_value(manager_schedule).unwrap()
+                );
+                assert!(matches!(
+                    scheduler.list_one_time_recoveries().await,
+                    Err(CampaignSchedulerError::OccurrenceJournal(_))
+                ));
+                assert!(matches!(
+                    scheduler
+                        .acknowledge_one_time_recovery("occ-mismatch")
+                        .await,
+                    Err(CampaignSchedulerError::OccurrenceJournal(_))
+                ));
+                assert_eq!(
+                    fixture
+                        .store
+                        .as_ref()
+                        .unwrap()
+                        .schedule_occurrence("occ-mismatch")
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    receipt_before
+                );
+            }
+        }
+        scheduler.stop().await;
+    }
+
     #[tokio::test]
     async fn startup_reconciles_receipt_before_a_stale_one_time_cursor_can_fire() {
         let fixture = scheduler_fixture_with_store().await;
@@ -3012,6 +3307,40 @@ mod tests {
         assert_eq!(receipt.state, "reserved");
         assert_eq!(receipt.execution_status.as_deref(), Some("pending"));
         scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn schedule_mutation_quarantine_race_quarantine_wins_remove() {
+        assert_quarantine_wins_schedule_mutation_race(RacedScheduleMutation::Remove).await;
+    }
+
+    #[tokio::test]
+    async fn schedule_mutation_quarantine_race_quarantine_wins_disable() {
+        assert_quarantine_wins_schedule_mutation_race(RacedScheduleMutation::SetEnabled(false))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn schedule_mutation_quarantine_race_quarantine_wins_enable() {
+        assert_quarantine_wins_schedule_mutation_race(RacedScheduleMutation::SetEnabled(true))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn schedule_mutation_quarantine_race_remove_completes_before_capture() {
+        assert_mutation_wins_schedule_quarantine_race(RacedScheduleMutation::Remove).await;
+    }
+
+    #[tokio::test]
+    async fn schedule_mutation_quarantine_race_disable_completes_before_capture() {
+        assert_mutation_wins_schedule_quarantine_race(RacedScheduleMutation::SetEnabled(false))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn schedule_mutation_quarantine_race_enable_completes_before_capture() {
+        assert_mutation_wins_schedule_quarantine_race(RacedScheduleMutation::SetEnabled(true))
+            .await;
     }
 
     #[tokio::test]
