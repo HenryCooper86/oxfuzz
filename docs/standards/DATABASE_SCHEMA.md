@@ -499,16 +499,32 @@ paired transitions, and retention protection.
 | `schedule_id` | `TEXT NOT NULL UNIQUE` | one receipt per one-time schedule |
 | `execution_id` | `TEXT NOT NULL UNIQUE` | soft reference to `schedule_executions` |
 | `triggered_at` | `TEXT NOT NULL` | durable trigger timestamp |
-| `state` | `TEXT NOT NULL` | `reserved`, `running`, `completed`, `failed`, or `cancelled` |
+| `state` | `TEXT NOT NULL CHECK (state IN ('reserved', 'running', 'completed', 'failed', 'cancelled'))` | durable occurrence state |
 | `owner_id` | `TEXT NOT NULL` | scheduler-instance owner |
 | `lease_expires_at` | `TEXT` | required for non-terminal states and cleared for terminal states |
-| `recovery_detail` | `TEXT` | limited to 4,096 bytes |
+| `recovery_detail` | `TEXT CHECK (recovery_detail IS NULL OR length(CAST(recovery_detail AS BLOB)) <= 4096)` | bounded UTF-8 recovery detail |
+| `created_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | receipt creation time |
+| `updated_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | receipt update time |
 
-The schema requires a non-null lease for `reserved` and `running`, and a null
-lease for `completed`, `failed`, and `cancelled`. Receipt and execution state
-transitions are paired atomic transactions. Retention and explicit history
-clearing protect every execution referenced by a non-terminal receipt; receipts
-are retained permanently.
+The table requires this lease-shape check:
+
+```sql
+CHECK (
+    (
+        state IN ('reserved', 'running')
+        AND lease_expires_at IS NOT NULL
+    )
+    OR (
+        state IN ('completed', 'failed', 'cancelled')
+        AND lease_expires_at IS NULL
+    )
+)
+```
+
+Index: `idx_schedule_occurrences_state(state, lease_expires_at, updated_at)`.
+Receipt and execution state transitions are paired atomic transactions.
+Retention and explicit history clearing protect every execution referenced by a
+non-terminal receipt; receipts are retained permanently.
 
 ### `project_settings`
 
