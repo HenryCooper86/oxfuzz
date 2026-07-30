@@ -260,3 +260,18 @@ grok-build's discipline is the contrast: it wires what it builds. Before adoptin
 idea, the higher-leverage move is to **wire or delete** this dead framework — several lessons above
 (L1, L3, L5) are partly a matter of connecting components we already built. The claim/reality gap
 in our own docs is itself a trust and maintenance hazard.
+
+## July 29, 2026 follow-up
+
+- Fresh upstream revision inspected: 5da6962e4adb9c857f3def762542b52b4ec3e522.
+- July 22 sync a5727c5960452e7527a154b25cb5bf00cda0545e introduced
+  the applicable durable one-shot occurrence-journal lesson.
+- oxfuzz adopted only the architectural lesson: a permanent unique receipt,
+  transactional pending history, fail-closed restart reconciliation, and
+  explicit recovery.
+- oxfuzz added its own 60-second renewable owner lease and 15-second heartbeat
+  so a second process cannot acknowledge work still owned by a live scheduler.
+- No grok-build implementation code or agent-specific notification protocol
+  was copied.
+- Exact repeated tool-call stationarity remains a separate candidate because
+  oxfuzz already has loop guards and coverage-stagnation controls.

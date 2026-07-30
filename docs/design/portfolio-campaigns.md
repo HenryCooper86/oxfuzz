@@ -88,9 +88,29 @@ surface are integration-tested.
 ## Restart and shutdown durability
 
 Every changed `Schedule`, including `last_fire`, is written back to
-`schedules.json`. Existing installations whose schedule definitions predate
-that cursor are repaired once from persisted execution history before recovery
-is planned.
+`schedules.json`. Existing recurring schedule definitions whose cursor predates
+this persistence are repaired once from persisted execution history before
+recovery is planned. One-time recovery instead loads and validates occurrence
+receipts before planning, then reconciles a stale JSON cursor from the durable
+receipt timestamp; terminal execution history may have been cleared.
+
+Only one-time triggers use permanent SQLite occurrence receipts. Their admission
+first checks global and schedule-specific journal health before any hourly or
+other preflight that can mutate the cursor or execution history. Its durable
+admission order is receipt+pending transaction -> JSON `last_fire` -> tracked
+task -> running transaction -> dispatcher -> terminal transaction. A 60-second
+owner lease renews every 15 seconds. Expired non-terminal receipts require
+acknowledgement as cancelled and never retry automatically. Recurring schedules
+do not use occurrence APIs. SQLite unique constraints, not process-local
+scheduler locks or the JSON write mutex, are the cross-process admission
+authority. Retrying work requires a newly created one-time schedule with a new
+schedule identifier. Acknowledgement cursor reconciliation shares the
+service-local mutation-admission boundary with remove and enable/disable,
+re-reads the current definition under that boundary, and advances only its
+cursor; a removed definition stays absent and a current enabled state is
+preserved. An exact terminal transition remains receipt-idempotent after
+terminal history clearing only when all permanent receipt metadata matches; the
+replay never recreates cleared execution history.
 
 Recovery creates compact batches rather than filling the trigger channel before
 its receiver exists. `Skip` advances to the latest due occurrence without
@@ -100,8 +120,11 @@ the scheduler-wide semaphore bounds active workflow execution.
 
 The scheduler retains every spawned workflow task. `stop` first stops trigger
 production and queue consumption, then aborts and joins active campaign tasks and
-reconciles their execution records from `Running` to `Cancelled`. The service-level
-`CampaignScheduler::stop` exposes this lifecycle boundary.
+reconciles recurring execution records from `Running` to `Cancelled`. For
+one-time tasks, cancellation uses the paired terminal receipt-and-execution
+transaction; a failed terminal transition leaves the receipt non-terminal for
+acknowledgement after its lease expires. The service-level `CampaignScheduler::stop`
+exposes this lifecycle boundary.
 
 ## Schedule policy enforcement
 
