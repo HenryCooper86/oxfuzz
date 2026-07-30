@@ -153,7 +153,12 @@ For one-time schedule creation and execution, `hf-service` requires readable
 SQLite. It loads and validates occurrence receipts before recovery planning,
 reconciles stale JSON cursors before ticking, and owns recovery DTOs plus
 acknowledgement. Corrupt or unavailable receipt evidence blocks one-time work
-only.
+only. Startup preserves a safely decoded schedule identity before strict row
+conversion and quarantines each identifiable malformed receipt before cursor
+restoration or schedule-file writes. An undecodable schedule identity
+quarantines the complete startup definition snapshot, so later full writes
+cannot overwrite unknown damaged evidence; recurring schedules still execute
+from their in-memory definitions.
 
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist
