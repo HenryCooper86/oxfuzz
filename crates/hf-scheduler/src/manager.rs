@@ -1,6 +1,6 @@
 //! `SchedulerManager`: top-level entry point that owns the async trigger loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -15,8 +15,8 @@ use crate::dispatcher::WorkflowDispatcher;
 use crate::event_bridge::{EventBridge, IncomingEvent};
 use crate::executor::{ExecutionStatus, ExecutionStore, ScheduleExecution, ScheduleExecutor};
 use crate::occurrence::{
-    OneTimeAcknowledgement, OneTimeOccurrence, OneTimeOccurrenceTransition, OneTimeReservation,
-    OneTimeRuntimeStatus, OneTimeTransitionResult,
+    OneTimeAcknowledgement, OneTimeOccurrence, OneTimeOccurrenceState, OneTimeOccurrenceTransition,
+    OneTimeReservation, OneTimeRuntimeStatus, OneTimeTransitionResult, ONE_TIME_LEASE,
 };
 use crate::queue::{trigger_queue, TriggerReceiver, TriggerSender};
 use crate::recovery;
@@ -612,7 +612,31 @@ impl SchedulerManager {
         let (recovery_plan, advanced_schedules) = {
             let mut store_guard = self.store.lock().await;
             let recovery_now = Utc::now();
-            let plan = recovery::recover_missed(&store_guard, recovery_now);
+            let one_time_ids: HashSet<String> = store_guard
+                .list_enabled()
+                .into_iter()
+                .filter(|schedule| {
+                    matches!(
+                        schedule.trigger,
+                        crate::store::TriggerConfig::OneTime { .. }
+                    )
+                })
+                .map(|schedule| schedule.id.clone())
+                .collect();
+            let mut plan = recovery::recover_missed(&store_guard, recovery_now);
+            plan.batches
+                .retain(|batch| !one_time_ids.contains(&batch.schedule_id));
+            plan.advances
+                .retain(|advance| !one_time_ids.contains(&advance.schedule_id));
+            plan.result
+                .caught_up
+                .retain(|schedule_id| !one_time_ids.contains(schedule_id));
+            plan.result
+                .skipped
+                .retain(|schedule_id| !one_time_ids.contains(schedule_id));
+            plan.result
+                .backfilled
+                .retain(|(schedule_id, _)| !one_time_ids.contains(schedule_id));
             let mut advanced = Vec::with_capacity(plan.advances.len());
             for advance in &plan.advances {
                 store_guard.update_last_fire(&advance.schedule_id, advance.last_fire);
@@ -647,6 +671,10 @@ impl SchedulerManager {
         let exec_slots = Arc::clone(&self.execution_slots);
         let exec_serial_locks = Arc::clone(&self.serial_locks);
         let exec_tasks = Arc::clone(&self.dispatch_tasks);
+        let exec_one_time_status = Arc::clone(&self.one_time_status);
+        let exec_one_time_global_block = Arc::clone(&self.one_time_global_block);
+        let exec_occurrence_metrics = Arc::clone(&self.occurrence_metrics);
+        let exec_owner_id = self.owner_id.clone();
         let exec_handle = tokio::spawn(async move {
             Self::executor_loop(
                 rx,
@@ -658,6 +686,10 @@ impl SchedulerManager {
                 exec_slots,
                 exec_serial_locks,
                 exec_tasks,
+                exec_one_time_status,
+                exec_one_time_global_block,
+                exec_occurrence_metrics,
+                exec_owner_id,
                 exec_shutdown,
             )
             .await;
@@ -754,6 +786,10 @@ impl SchedulerManager {
         execution_slots: Arc<Semaphore>,
         serial_locks: SerialLocks,
         dispatch_tasks: DispatchTasks,
+        one_time_status: Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+        one_time_global_block: Arc<Mutex<Option<String>>>,
+        occurrence_metrics: Arc<OccurrenceMetrics>,
+        owner_id: String,
         shutdown: Arc<Notify>,
     ) {
         loop {
@@ -777,6 +813,10 @@ impl SchedulerManager {
                             &serial_locks,
                             &dispatch_tasks,
                             &execution_slots,
+                            &one_time_status,
+                            &one_time_global_block,
+                            &occurrence_metrics,
+                            &owner_id,
                         ).await;
                     } else {
                         info!("Trigger queue closed, executor stopping");
@@ -793,6 +833,26 @@ impl SchedulerManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         tasks.retain(|task| !task.handle.is_finished());
         tasks.iter().any(|task| task.schedule_id == schedule_id)
+    }
+
+    async fn mark_consumed(statuses: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>, id: &str) {
+        statuses
+            .lock()
+            .await
+            .insert(id.to_owned(), OneTimeRuntimeStatus::Consumed);
+    }
+
+    async fn mark_recovery_required(
+        statuses: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+        id: &str,
+        detail: impl Into<String>,
+    ) {
+        statuses.lock().await.insert(
+            id.to_owned(),
+            OneTimeRuntimeStatus::RecoveryRequired {
+                detail: detail.into(),
+            },
+        );
     }
 
     fn take_active_dispatches(
@@ -945,6 +1005,403 @@ impl SchedulerManager {
         Self::persist_record(persistence, &record).await;
     }
 
+    async fn handle_one_time_trigger(
+        fired: FiredTrigger,
+        schedule: Schedule,
+        store: &Arc<Mutex<ScheduleStore>>,
+        executor: &Arc<Mutex<ScheduleExecutor>>,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        dispatcher: Option<Arc<dyn WorkflowDispatcher>>,
+        persistence: Option<Arc<dyn SchedulerPersistence>>,
+        serial_locks: &SerialLocks,
+        dispatch_tasks: &DispatchTasks,
+        execution_slots: &Arc<Semaphore>,
+        one_time_status: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+        one_time_global_block: &Arc<Mutex<Option<String>>>,
+        occurrence_metrics: &Arc<OccurrenceMetrics>,
+        owner_id: &str,
+    ) {
+        if let Some(detail) = one_time_global_block.lock().await.clone() {
+            warn!(
+                schedule_id = %schedule.id,
+                reason = %detail,
+                "One-time schedule blocked by journal health"
+            );
+            return;
+        }
+        match one_time_status.lock().await.get(&schedule.id).cloned() {
+            Some(OneTimeRuntimeStatus::Consumed) => {
+                debug!(
+                    schedule_id = %schedule.id,
+                    "Consumed one-time schedule suppressed"
+                );
+                return;
+            }
+            Some(OneTimeRuntimeStatus::RecoveryRequired { detail }) => {
+                warn!(
+                    schedule_id = %schedule.id,
+                    reason = %detail,
+                    "One-time schedule requires recovery"
+                );
+                return;
+            }
+            Some(OneTimeRuntimeStatus::Ready) | None => {}
+        }
+
+        let Some(dispatcher) = dispatcher else {
+            let detail = "one-time workflow dispatcher is unavailable";
+            Self::mark_recovery_required(one_time_status, &schedule.id, detail).await;
+            warn!(
+                schedule_id = %schedule.id,
+                "One-time schedule dispatch unavailable"
+            );
+            return;
+        };
+        let Some(persistence) = persistence else {
+            let detail = "durable one-time occurrence persistence is unavailable";
+            Self::mark_recovery_required(one_time_status, &schedule.id, detail).await;
+            warn!(
+                schedule_id = %schedule.id,
+                "One-time occurrence persistence unavailable"
+            );
+            return;
+        };
+
+        let concurrency_policy = schedule.policies.effective_concurrency_policy();
+        match concurrency_policy {
+            ConcurrencyPolicy::SkipIfRunning
+                if Self::schedule_has_active_dispatch(dispatch_tasks, &schedule.id) =>
+            {
+                Self::record_policy_skip(
+                    &fired,
+                    &schedule,
+                    "previous execution is still running".to_owned(),
+                    store,
+                    execution_store,
+                    Some(&persistence),
+                )
+                .await;
+                return;
+            }
+            ConcurrencyPolicy::CancelPrevious => {
+                Self::cancel_previous_dispatches(
+                    dispatch_tasks,
+                    execution_store,
+                    Some(&persistence),
+                    &schedule.id,
+                )
+                .await;
+            }
+            ConcurrencyPolicy::Allow
+            | ConcurrencyPolicy::Queue
+            | ConcurrencyPolicy::SkipIfRunning => {}
+        }
+
+        let sequence = executor.lock().await.next_sequence_for(&schedule.id);
+        let context = crate::params::ResolutionContext {
+            trigger_time: fired.fired_at,
+            trigger_type: fired.trigger_type,
+            execution_sequence: sequence,
+            event_payload: fired.event_payload.clone(),
+        };
+        let parameter_values = match crate::params::resolve_parameters(
+            &serde_json::json!({}),
+            &schedule.parameter_values,
+            &context,
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                Self::record_dispatch_failure(
+                    &fired,
+                    &schedule,
+                    format!("parameter resolution failed: {error}"),
+                    store,
+                    execution_store,
+                    Some(&persistence),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let now = Utc::now();
+        let occurrence_id = format!("occ-{}-{}", schedule.id, uuid::Uuid::new_v4());
+        let execution_id = format!("exec-{}-{}", schedule.id, uuid::Uuid::new_v4());
+        let lease_expires_at = now
+            + chrono::Duration::from_std(ONE_TIME_LEASE)
+                .expect("one-time lease duration fits chrono");
+        let occurrence = OneTimeOccurrence {
+            id: occurrence_id,
+            schedule_id: schedule.id.clone(),
+            execution_id: execution_id.clone(),
+            triggered_at: fired.fired_at,
+            state: OneTimeOccurrenceState::Reserved,
+            owner_id: owner_id.to_owned(),
+            lease_expires_at: Some(lease_expires_at),
+            recovery_detail: None,
+        };
+        let request_summary = serde_json::json!({
+            "schedule_id": schedule.id,
+            "schedule_name": schedule.name,
+            "workflow_id": schedule.workflow_id,
+            "trigger": serde_json::to_value(&schedule.trigger).unwrap_or_default(),
+            "parameter_values": parameter_values,
+            "execution_sequence": sequence,
+            "trigger_time": fired.fired_at.to_rfc3339(),
+        });
+        let pending = ScheduleExecution {
+            execution_id,
+            schedule_id: schedule.id.clone(),
+            triggered_at: fired.fired_at,
+            started_at: None,
+            completed_at: None,
+            status: ExecutionStatus::Pending,
+            workflow_execution_id: None,
+            request_summary,
+            response_summary: serde_json::json!({}),
+            error_message: None,
+        };
+
+        let occurrence = match persistence
+            .reserve_one_time_occurrence(&occurrence, &pending)
+            .await
+        {
+            Ok(OneTimeReservation::Reserved(reserved)) => {
+                occurrence_metrics.record_reservation_win();
+                execution_store.lock().await.record(pending.clone());
+                reserved
+            }
+            Ok(OneTimeReservation::Existing(existing)) => {
+                occurrence_metrics.record_duplicate_suppression();
+                let updated = {
+                    let mut schedules = store.lock().await;
+                    schedules.update_last_fire(&schedule.id, existing.triggered_at);
+                    schedules.get(&schedule.id).cloned()
+                };
+                if let Some(updated) = updated {
+                    if persistence.update_schedule(&updated).await.is_err() {
+                        Self::mark_recovery_required(
+                            one_time_status,
+                            &schedule.id,
+                            "receipt exists but the JSON cursor could not be reconciled",
+                        )
+                        .await;
+                    } else {
+                        Self::mark_consumed(one_time_status, &schedule.id).await;
+                    }
+                }
+                return;
+            }
+            Err(error) => {
+                let recovered = persistence
+                    .get_one_time_occurrence(&occurrence.id)
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(existing) = recovered {
+                    let updated = {
+                        let mut schedules = store.lock().await;
+                        schedules.update_last_fire(&schedule.id, existing.triggered_at);
+                        schedules.get(&schedule.id).cloned()
+                    };
+                    let cursor_durable = match updated {
+                        Some(updated) => persistence.update_schedule(&updated).await.is_ok(),
+                        None => false,
+                    };
+                    if !existing.terminal() {
+                        let _released = persistence
+                            .release_one_time_lease(
+                                &existing.id,
+                                &existing.owner_id,
+                                Utc::now(),
+                                "reservation result was ambiguous",
+                            )
+                            .await;
+                    }
+                    if existing.terminal() && cursor_durable {
+                        Self::mark_consumed(one_time_status, &schedule.id).await;
+                    } else {
+                        Self::mark_recovery_required(
+                            one_time_status,
+                            &schedule.id,
+                            "reservation committed but dispatch admission is ambiguous",
+                        )
+                        .await;
+                    }
+                } else {
+                    Self::mark_recovery_required(
+                        one_time_status,
+                        &schedule.id,
+                        "one-time occurrence reservation is unavailable",
+                    )
+                    .await;
+                }
+                warn!(
+                    occurrence_id = %occurrence.id,
+                    schedule_id = %schedule.id,
+                    execution_id = %occurrence.execution_id,
+                    error = %error,
+                    "One-time occurrence reservation failed closed"
+                );
+                return;
+            }
+        };
+
+        let updated_schedule = {
+            let mut schedules = store.lock().await;
+            schedules.update_last_fire(&schedule.id, fired.fired_at.max(now));
+            schedules.get(&schedule.id).cloned()
+        };
+        let cursor_persisted = match updated_schedule {
+            Some(updated) => persistence.update_schedule(&updated).await.is_ok(),
+            None => false,
+        };
+        if !cursor_persisted {
+            let detail = "schedule cursor persistence failed after durable reservation";
+            let released_at = Utc::now();
+            let _released = persistence
+                .release_one_time_lease(&occurrence.id, owner_id, released_at, detail)
+                .await;
+            Self::mark_recovery_required(one_time_status, &schedule.id, detail).await;
+            warn!(
+                occurrence_id = %occurrence.id,
+                schedule_id = %schedule.id,
+                execution_id = %occurrence.execution_id,
+                "Reserved one-time occurrence quarantined before dispatch"
+            );
+            return;
+        }
+        Self::mark_consumed(one_time_status, &schedule.id).await;
+
+        Self::spawn_one_time_dispatch(
+            schedule,
+            pending,
+            occurrence,
+            parameter_values,
+            concurrency_policy,
+            dispatcher,
+            persistence,
+            serial_locks,
+            dispatch_tasks,
+            execution_store,
+            execution_slots,
+        )
+        .await;
+    }
+
+    async fn spawn_one_time_dispatch(
+        schedule: Schedule,
+        pending: ScheduleExecution,
+        occurrence: OneTimeOccurrence,
+        parameter_values: serde_json::Value,
+        concurrency_policy: ConcurrencyPolicy,
+        dispatcher: Arc<dyn WorkflowDispatcher>,
+        persistence: Arc<dyn SchedulerPersistence>,
+        serial_locks: &SerialLocks,
+        dispatch_tasks: &DispatchTasks,
+        execution_store: &Arc<Mutex<ExecutionStore>>,
+        execution_slots: &Arc<Semaphore>,
+    ) {
+        let workflow_id = schedule.workflow_id.clone();
+        let exec_store_clone = Arc::clone(execution_store);
+        let exec_id_clone = pending.execution_id.clone();
+        let persistence_clone = Arc::clone(&persistence);
+        let execution_slots_clone = Arc::clone(execution_slots);
+        let serial_lock = if concurrency_policy == ConcurrencyPolicy::Queue {
+            let mut locks = serial_locks.lock().await;
+            Some(
+                locks
+                    .entry(schedule.id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone(),
+            )
+        } else {
+            None
+        };
+
+        let handle = tokio::spawn(async move {
+            let _serial_guard = match serial_lock {
+                Some(lock) => Some(lock.lock_owned().await),
+                None => None,
+            };
+            let _execution_permit = execution_slots_clone
+                .acquire_owned()
+                .await
+                .expect("scheduler execution semaphore is never closed");
+            let started = {
+                let mut executions = exec_store_clone.lock().await;
+                executions.update(&exec_id_clone, |record| {
+                    record.status = ExecutionStatus::Running;
+                    record.started_at = Some(Utc::now());
+                });
+                executions.get(&exec_id_clone).cloned()
+            };
+            if let Some(started) = started {
+                Self::persist_update(Some(&persistence_clone), &started).await;
+            }
+            let dispatch_start = std::time::Instant::now();
+            match dispatcher.dispatch(&workflow_id, parameter_values).await {
+                Ok(result) => {
+                    let duration_ms =
+                        u64::try_from(dispatch_start.elapsed().as_millis()).unwrap_or(0);
+                    let mut executions = exec_store_clone.lock().await;
+                    executions.update(&exec_id_clone, |record| {
+                        record.status = if result.success {
+                            ExecutionStatus::Completed
+                        } else {
+                            ExecutionStatus::Failed
+                        };
+                        record.completed_at = Some(Utc::now());
+                        record.response_summary = serde_json::json!({
+                            "status": if result.success { "completed" } else { "failed" },
+                            "summary": result.summary,
+                            "output": result.output,
+                            "duration_ms": duration_ms,
+                        });
+                        if !result.success {
+                            record.error_message = result.error;
+                        }
+                    });
+                    let updated = executions.get(&exec_id_clone).cloned();
+                    drop(executions);
+                    if let Some(updated) = updated {
+                        Self::persist_update(Some(&persistence_clone), &updated).await;
+                    }
+                    debug!(execution_id = %exec_id_clone, "Dispatched workflow completed");
+                }
+                Err(error) => {
+                    let mut executions = exec_store_clone.lock().await;
+                    executions.update(&exec_id_clone, |record| {
+                        record.status = ExecutionStatus::Failed;
+                        record.completed_at = Some(Utc::now());
+                        record.response_summary = serde_json::json!({
+                            "status": "failed",
+                            "error": error.to_string(),
+                        });
+                        record.error_message = Some(error.to_string());
+                    });
+                    let updated = executions.get(&exec_id_clone).cloned();
+                    drop(executions);
+                    if let Some(updated) = updated {
+                        Self::persist_update(Some(&persistence_clone), &updated).await;
+                    }
+                    warn!(execution_id = %exec_id_clone, error = %error, "Workflow dispatch error");
+                }
+            }
+        });
+        let mut tasks = dispatch_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tasks.retain(|task| !task.handle.is_finished());
+        tasks.push(TrackedDispatch {
+            execution_id: pending.execution_id,
+            schedule_id: schedule.id,
+            occurrence_id: Some(occurrence.id),
+            owner_id: Some(occurrence.owner_id),
+            handle,
+        });
+    }
+
     /// Handle a single fired trigger.
     ///
     /// When a `WorkflowDispatcher` is available, creates a `Running` execution
@@ -963,6 +1420,10 @@ impl SchedulerManager {
         serial_locks: &SerialLocks,
         dispatch_tasks: &DispatchTasks,
         execution_slots: &Arc<Semaphore>,
+        one_time_status: &Arc<Mutex<HashMap<String, OneTimeRuntimeStatus>>>,
+        one_time_global_block: &Arc<Mutex<Option<String>>>,
+        occurrence_metrics: &Arc<OccurrenceMetrics>,
+        owner_id: &str,
     ) {
         let schedule = {
             let store_guard = store.lock().await;
@@ -1021,6 +1482,30 @@ impl SchedulerManager {
                 .await;
                 return;
             }
+        }
+
+        if matches!(
+            schedule.trigger,
+            crate::store::TriggerConfig::OneTime { .. }
+        ) {
+            Self::handle_one_time_trigger(
+                fired,
+                schedule,
+                store,
+                executor,
+                execution_store,
+                dispatcher,
+                persistence,
+                serial_locks,
+                dispatch_tasks,
+                execution_slots,
+                one_time_status,
+                one_time_global_block,
+                occurrence_metrics,
+                owner_id,
+            )
+            .await;
+            return;
         }
 
         if let Some(disp) = dispatcher {
@@ -1429,8 +1914,12 @@ mod tests {
     use super::*;
     use crate::config::{ConcurrencyPolicy, MissedPolicy};
     use crate::dispatcher::{DispatchError, DispatchResult};
-    use crate::occurrence::OneTimeRuntimeStatus;
+    use crate::occurrence::{
+        OneTimeOccurrenceState, OneTimeOccurrenceTransition, OneTimeRuntimeStatus,
+        OneTimeTransitionResult,
+    };
     use crate::store::{SchedulePolicies, TriggerConfig};
+    use crate::trigger::TriggerType;
     use chrono::{DateTime, TimeDelta, Utc};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -1612,6 +2101,108 @@ mod tests {
         persisted_started: AtomicUsize,
     }
 
+    #[derive(Default)]
+    struct CountingDispatcher {
+        workflows: AsyncMutex<Vec<String>>,
+    }
+
+    impl CountingDispatcher {
+        async fn calls_for(&self, workflow_id: &str) -> usize {
+            self.workflows
+                .lock()
+                .await
+                .iter()
+                .filter(|seen| seen.as_str() == workflow_id)
+                .count()
+        }
+
+        async fn total_calls(&self) -> usize {
+            self.workflows.lock().await.len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowDispatcher for CountingDispatcher {
+        async fn dispatch(
+            &self,
+            workflow_id: &str,
+            _parameter_values: serde_json::Value,
+        ) -> Result<DispatchResult, DispatchError> {
+            self.workflows.lock().await.push(workflow_id.to_owned());
+            Ok(DispatchResult {
+                success: true,
+                summary: "ok".to_owned(),
+                output: serde_json::Value::Null,
+                duration_ms: 1,
+                error: None,
+            })
+        }
+    }
+
+    fn due_one_time(id: &str) -> Schedule {
+        Schedule::new(
+            id,
+            id,
+            TriggerConfig::OneTime {
+                at: Utc::now() - chrono::Duration::seconds(1),
+            },
+            id,
+        )
+    }
+
+    fn interval_schedule(id: &str) -> Schedule {
+        Schedule::new(
+            id,
+            id,
+            TriggerConfig::Interval {
+                interval_secs: 3_600,
+            },
+            id,
+        )
+    }
+
+    async fn wait_for_dispatches(dispatcher: &CountingDispatcher, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while dispatcher.total_calls().await < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatcher did not receive expected calls");
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum OccurrenceFailure {
+        None,
+        Reserve,
+        Cursor,
+        Running,
+        Terminal,
+        Renew,
+    }
+
+    struct OccurrenceRecordingPersistence {
+        failure: OccurrenceFailure,
+        occurrence: AsyncMutex<Option<OneTimeOccurrence>>,
+        execution: AsyncMutex<Option<ScheduleExecution>>,
+        transitions: AsyncMutex<Vec<(OneTimeOccurrenceState, OneTimeOccurrenceState)>>,
+        renewals: AsyncMutex<Vec<(String, String)>>,
+        occurrence_calls: AtomicUsize,
+    }
+
+    impl OccurrenceRecordingPersistence {
+        fn new(failure: OccurrenceFailure) -> Self {
+            Self {
+                failure,
+                occurrence: AsyncMutex::new(None),
+                execution: AsyncMutex::new(None),
+                transitions: AsyncMutex::new(Vec::new()),
+                renewals: AsyncMutex::new(Vec::new()),
+                occurrence_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
     #[async_trait::async_trait]
     impl SchedulerPersistence for RecordingPersistence {
         async fn record_execution(
@@ -1645,6 +2236,443 @@ mod tests {
         ) -> Result<u64, PersistenceError> {
             Ok(u64::try_from(self.persisted_started.load(Ordering::SeqCst)).unwrap_or(u64::MAX))
         }
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPersistence for OccurrenceRecordingPersistence {
+        async fn record_execution(
+            &self,
+            _execution: &ScheduleExecution,
+        ) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        async fn update_execution(
+            &self,
+            _execution: &ScheduleExecution,
+        ) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        async fn update_schedule(&self, _schedule: &Schedule) -> Result<(), PersistenceError> {
+            if self.failure == OccurrenceFailure::Cursor {
+                Err(PersistenceError::new("injected cursor failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn reserve_one_time_occurrence(
+            &self,
+            candidate: &OneTimeOccurrence,
+            execution: &ScheduleExecution,
+        ) -> Result<OneTimeReservation, PersistenceError> {
+            self.occurrence_calls.fetch_add(1, Ordering::SeqCst);
+            if self.failure == OccurrenceFailure::Reserve {
+                return Err(PersistenceError::new("injected reserve failure"));
+            }
+            let mut stored = self.occurrence.lock().await;
+            if let Some(existing) = stored.as_ref() {
+                return Ok(OneTimeReservation::Existing(existing.clone()));
+            }
+            *stored = Some(candidate.clone());
+            *self.execution.lock().await = Some(execution.clone());
+            Ok(OneTimeReservation::Reserved(candidate.clone()))
+        }
+
+        async fn transition_one_time_occurrence(
+            &self,
+            transition: &OneTimeOccurrenceTransition,
+            execution: &ScheduleExecution,
+        ) -> Result<OneTimeTransitionResult, PersistenceError> {
+            if (transition.to == OneTimeOccurrenceState::Running
+                && self.failure == OccurrenceFailure::Running)
+                || (transition.to != OneTimeOccurrenceState::Running
+                    && self.failure == OccurrenceFailure::Terminal)
+            {
+                return Err(PersistenceError::new("injected transition failure"));
+            }
+            let mut stored = self.occurrence.lock().await;
+            let Some(current) = stored.as_mut() else {
+                return Ok(OneTimeTransitionResult::Missing);
+            };
+            if current.state == transition.to {
+                return Ok(OneTimeTransitionResult::Idempotent(current.clone()));
+            }
+            if current.state != transition.from
+                || current.id != transition.occurrence_id
+                || current.schedule_id != transition.schedule_id
+                || current.execution_id != transition.execution_id
+                || current.owner_id != transition.owner_id
+            {
+                return Ok(OneTimeTransitionResult::Conflict(current.clone()));
+            }
+            self.transitions
+                .lock()
+                .await
+                .push((transition.from, transition.to));
+            current.state = transition.to;
+            current.lease_expires_at = transition.lease_expires_at;
+            current
+                .recovery_detail
+                .clone_from(&transition.recovery_detail);
+            *self.execution.lock().await = Some(execution.clone());
+            Ok(OneTimeTransitionResult::Applied(current.clone()))
+        }
+
+        async fn renew_one_time_lease(
+            &self,
+            occurrence_id: &str,
+            owner_id: &str,
+            lease_expires_at: DateTime<Utc>,
+        ) -> Result<bool, PersistenceError> {
+            self.renewals
+                .lock()
+                .await
+                .push((occurrence_id.to_owned(), owner_id.to_owned()));
+            if self.failure == OccurrenceFailure::Renew {
+                return Err(PersistenceError::new("injected renew failure"));
+            }
+            let mut stored = self.occurrence.lock().await;
+            let updated = stored.as_mut().is_some_and(|current| {
+                if current.id == occurrence_id
+                    && current.owner_id == owner_id
+                    && !current.terminal()
+                {
+                    current.lease_expires_at = Some(lease_expires_at);
+                    true
+                } else {
+                    false
+                }
+            });
+            Ok(updated)
+        }
+
+        async fn release_one_time_lease(
+            &self,
+            occurrence_id: &str,
+            owner_id: &str,
+            released_at: DateTime<Utc>,
+            recovery_detail: &str,
+        ) -> Result<bool, PersistenceError> {
+            let mut stored = self.occurrence.lock().await;
+            let updated = stored.as_mut().is_some_and(|current| {
+                if current.id == occurrence_id
+                    && current.owner_id == owner_id
+                    && !current.terminal()
+                {
+                    current.lease_expires_at = Some(released_at);
+                    current.recovery_detail = Some(recovery_detail.to_owned());
+                    true
+                } else {
+                    false
+                }
+            });
+            Ok(updated)
+        }
+
+        async fn get_one_time_occurrence(
+            &self,
+            occurrence_id: &str,
+        ) -> Result<Option<OneTimeOccurrence>, PersistenceError> {
+            Ok(self
+                .occurrence
+                .lock()
+                .await
+                .clone()
+                .filter(|occurrence| occurrence.id == occurrence_id))
+        }
+    }
+
+    fn fixture_occurrence(state: OneTimeOccurrenceState) -> OneTimeOccurrence {
+        OneTimeOccurrence {
+            id: "occ-existing".to_owned(),
+            schedule_id: "once-existing".to_owned(),
+            execution_id: "exec-existing".to_owned(),
+            triggered_at: Utc::now() - chrono::Duration::seconds(1),
+            state,
+            owner_id: "owner-existing".to_owned(),
+            lease_expires_at: (!matches!(
+                state,
+                OneTimeOccurrenceState::Completed
+                    | OneTimeOccurrenceState::Failed
+                    | OneTimeOccurrenceState::Cancelled
+            ))
+            .then(|| Utc::now() + chrono::Duration::seconds(60)),
+            recovery_detail: None,
+        }
+    }
+
+    async fn manager_and_persistence(
+        failure: OccurrenceFailure,
+    ) -> (SchedulerManager, Arc<OccurrenceRecordingPersistence>) {
+        let manager = SchedulerManager::with_defaults();
+        let persistence = Arc::new(OccurrenceRecordingPersistence::new(failure));
+        manager.set_persistence(persistence.clone()).await;
+        (manager, persistence)
+    }
+
+    async fn manager_with_occurrence_failure(failure: OccurrenceFailure) -> SchedulerManager {
+        manager_and_persistence(failure).await.0
+    }
+
+    async fn attached_counting_dispatcher(manager: &SchedulerManager) -> Arc<CountingDispatcher> {
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        manager.set_dispatcher(dispatcher.clone()).await;
+        dispatcher
+    }
+
+    async fn wait_for_occurrence(persistence: &OccurrenceRecordingPersistence) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while persistence.occurrence.lock().await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("occurrence was not reserved");
+    }
+
+    async fn wait_for_state(
+        persistence: &OccurrenceRecordingPersistence,
+        expected: OneTimeOccurrenceState,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while persistence
+                .occurrence
+                .lock()
+                .await
+                .as_ref()
+                .map(|occurrence| occurrence.state)
+                != Some(expected)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("occurrence did not reach expected state");
+    }
+
+    async fn send_one_time_now(manager: &SchedulerManager, schedule_id: &str) {
+        manager
+            .trigger_sender()
+            .expect("scheduler is running")
+            .send(FiredTrigger {
+                schedule_id: schedule_id.to_owned(),
+                fired_at: Utc::now(),
+                trigger_type: TriggerType::OneTime,
+                is_recovery: false,
+                event_payload: None,
+            })
+            .await
+            .expect("trigger queue accepts one-time occurrence");
+    }
+
+    #[tokio::test]
+    async fn missing_occurrence_persistence_blocks_only_one_time_dispatch() {
+        let manager = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        manager.set_dispatcher(dispatcher.clone()).await;
+        manager.register(due_one_time("once")).await;
+        manager.register(interval_schedule("recurring")).await;
+        manager.start(Duration::from_millis(10)).await;
+        wait_for_dispatches(&dispatcher, 1).await;
+        manager.stop().await;
+        assert_eq!(dispatcher.calls_for("once").await, 0);
+        assert!(dispatcher.calls_for("recurring").await >= 1);
+    }
+
+    #[tokio::test]
+    async fn missing_occurrence_persistence_precedes_parameter_failure_recording() {
+        let manager = SchedulerManager::with_defaults();
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        manager.set_dispatcher(dispatcher.clone()).await;
+        manager
+            .register(
+                due_one_time("once-bad-params")
+                    .with_params(serde_json::json!({"value": "{{ unknown.value }}"})),
+            )
+            .await;
+        manager.start(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        manager.stop().await;
+
+        assert_eq!(dispatcher.total_calls().await, 0);
+        assert_eq!(
+            manager
+                .get_schedule("once-bad-params")
+                .await
+                .unwrap()
+                .last_fire,
+            None
+        );
+        assert!(manager
+            .execution_history("once-bad-params")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_receipt_suppresses_dispatch_and_consumes_cursor() {
+        let manager = SchedulerManager::with_defaults();
+        let persistence = Arc::new(OccurrenceRecordingPersistence::new(OccurrenceFailure::None));
+        let stored = fixture_occurrence(OneTimeOccurrenceState::Completed);
+        *persistence.occurrence.lock().await = Some(stored.clone());
+        manager.set_persistence(persistence).await;
+        let dispatcher = Arc::new(CountingDispatcher::default());
+        manager.set_dispatcher(dispatcher.clone()).await;
+        manager.register(due_one_time(&stored.schedule_id)).await;
+        manager.start(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        manager.stop().await;
+
+        assert_eq!(dispatcher.total_calls().await, 0);
+        assert_eq!(
+            manager
+                .get_schedule(&stored.schedule_id)
+                .await
+                .unwrap()
+                .last_fire,
+            Some(stored.triggered_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_failure_never_advances_cursor_or_dispatches() {
+        let manager = manager_with_occurrence_failure(OccurrenceFailure::Reserve).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        manager.register(due_one_time("reserve-fails")).await;
+        manager.start(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        manager.stop().await;
+
+        assert_eq!(dispatcher.total_calls().await, 0);
+        assert_eq!(
+            manager
+                .get_schedule("reserve-fails")
+                .await
+                .unwrap()
+                .last_fire,
+            None
+        );
+        assert!(matches!(
+            manager.one_time_runtime_status("reserve-fails").await,
+            OneTimeRuntimeStatus::RecoveryRequired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cursor_failure_after_reservation_releases_lease_without_dispatch() {
+        let (manager, persistence) = manager_and_persistence(OccurrenceFailure::Cursor).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        manager.register(due_one_time("cursor-fails")).await;
+        manager.start(Duration::from_millis(10)).await;
+        wait_for_occurrence(&persistence).await;
+        wait_for_state(&persistence, OneTimeOccurrenceState::Reserved).await;
+        manager.stop().await;
+
+        assert_eq!(dispatcher.total_calls().await, 0);
+        let receipt = persistence.occurrence.lock().await.clone().unwrap();
+        assert_eq!(receipt.state, OneTimeOccurrenceState::Reserved);
+        assert!(receipt
+            .lease_expires_at
+            .is_some_and(|lease| lease <= Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn repeated_local_one_time_triggers_dispatch_once() {
+        let (manager, persistence) = manager_and_persistence(OccurrenceFailure::None).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        manager
+            .register(Schedule::new(
+                "once-local-race",
+                "once-local-race",
+                TriggerConfig::OneTime {
+                    at: Utc::now() + chrono::Duration::hours(1),
+                },
+                "once-local-race",
+            ))
+            .await;
+        manager.start(Duration::from_mins(1)).await;
+
+        send_one_time_now(&manager, "once-local-race").await;
+        send_one_time_now(&manager, "once-local-race").await;
+        wait_for_dispatches(&dispatcher, 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        manager.stop().await;
+
+        assert_eq!(dispatcher.calls_for("once-local-race").await, 1);
+        assert_eq!(persistence.occurrence_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recurring_and_event_triggers_do_not_reserve_one_time_occurrences() {
+        let (manager, persistence) = manager_and_persistence(OccurrenceFailure::None).await;
+        let dispatcher = attached_counting_dispatcher(&manager).await;
+        let mut interval = interval_schedule("recurring-interval");
+        interval.last_fire = Some(Utc::now());
+        let mut cron = Schedule::new(
+            "recurring-cron",
+            "recurring-cron",
+            TriggerConfig::Cron {
+                expression: "0 0 1 1 *".to_owned(),
+                timezone: "UTC".to_owned(),
+            },
+            "recurring-cron",
+        );
+        cron.last_fire = Some(Utc::now());
+        manager.register(interval).await;
+        manager.register(cron).await;
+        manager
+            .register(Schedule::new(
+                "recurring-event",
+                "recurring-event",
+                TriggerConfig::Event {
+                    event_type: "run.completed".to_owned(),
+                    debounce_secs: 0,
+                    filter: None,
+                },
+                "recurring-event",
+            ))
+            .await;
+        manager.start(Duration::from_mins(1)).await;
+        persistence.occurrence_calls.store(0, Ordering::SeqCst);
+        let sender = manager.trigger_sender().expect("scheduler is running");
+        for (schedule_id, trigger_type) in [
+            ("recurring-interval", TriggerType::Interval),
+            ("recurring-cron", TriggerType::Cron),
+        ] {
+            sender
+                .send(FiredTrigger {
+                    schedule_id: schedule_id.to_owned(),
+                    fired_at: Utc::now(),
+                    trigger_type,
+                    is_recovery: false,
+                    event_payload: None,
+                })
+                .await
+                .expect("trigger queue accepts recurring occurrence");
+        }
+        assert_eq!(
+            manager
+                .emit_event(IncomingEvent {
+                    event_type: "run.completed".to_owned(),
+                    payload: Some(serde_json::json!({"run_id": "run-1"})),
+                    timestamp: Utc::now(),
+                })
+                .await,
+            ["recurring-event".to_owned()]
+        );
+        wait_for_dispatches(&dispatcher, 3).await;
+        manager.stop().await;
+
+        for workflow_id in ["recurring-interval", "recurring-cron", "recurring-event"] {
+            assert_eq!(dispatcher.calls_for(workflow_id).await, 1);
+        }
+        assert_eq!(
+            persistence.occurrence_calls.load(Ordering::SeqCst),
+            0,
+            "recurring and event triggers must not enter one-time persistence"
+        );
     }
 
     #[async_trait::async_trait]
