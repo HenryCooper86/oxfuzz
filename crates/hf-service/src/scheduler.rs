@@ -2038,9 +2038,11 @@ impl CampaignScheduler {
     /// Remove and atomically persist a schedule.
     ///
     /// # Errors
-    /// Returns a state-file error and restores the in-memory schedule if the
+    /// Returns an occurrence-journal error for a quarantined schedule, or a
+    /// state-file error after restoring the in-memory schedule if the
     /// definition file cannot be replaced.
     pub async fn try_remove(&self, id: &str) -> Result<bool, CampaignSchedulerError> {
+        self.reject_quarantined_schedule_mutation(id).await?;
         let previous = self.manager.get_schedule(id).await;
         let removed = self.manager.remove(id).await;
         if removed {
@@ -2070,12 +2072,14 @@ impl CampaignScheduler {
     /// Enable or disable a schedule and atomically persist the definition list.
     ///
     /// # Errors
-    /// Returns a state-file error if the durable definition cannot be replaced.
+    /// Returns an occurrence-journal error for a quarantined schedule, or a
+    /// state-file error if the durable definition cannot be replaced.
     pub async fn try_set_enabled(
         &self,
         id: &str,
         enabled: bool,
     ) -> Result<bool, CampaignSchedulerError> {
+        self.reject_quarantined_schedule_mutation(id).await?;
         let previous = self.manager.get_schedule(id).await;
         let ok = if enabled {
             self.manager.resume(id).await
@@ -2095,6 +2099,18 @@ impl CampaignScheduler {
             }
         }
         Ok(ok)
+    }
+
+    async fn reject_quarantined_schedule_mutation(
+        &self,
+        schedule_id: &str,
+    ) -> Result<(), CampaignSchedulerError> {
+        if self.schedules.is_quarantined(schedule_id).await {
+            return Err(CampaignSchedulerError::OccurrenceJournal(
+                "schedule mutation is blocked by corrupt one-time occurrence evidence".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn persist(&self) -> Result<(), StateFileError> {
@@ -2279,19 +2295,23 @@ mod tests {
         }
 
         fn write_event(&self, id: &str) {
-            self.push_schedule(
-                Schedule::new(
-                    id,
-                    id,
-                    TriggerConfig::Event {
-                        event_type: EVENT_RUN_COMPLETED.to_owned(),
-                        debounce_secs: 0,
-                        filter: None,
-                    },
-                    CAMPAIGN_KIND,
-                )
-                .with_params(serde_json::to_value(self.params()).unwrap()),
-            );
+            self.write_event_with_enabled(id, true);
+        }
+
+        fn write_event_with_enabled(&self, id: &str, enabled: bool) {
+            let mut schedule = Schedule::new(
+                id,
+                id,
+                TriggerConfig::Event {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    debounce_secs: 0,
+                    filter: None,
+                },
+                CAMPAIGN_KIND,
+            )
+            .with_params(serde_json::to_value(self.params()).unwrap());
+            schedule.enabled = enabled;
+            self.push_schedule(schedule);
         }
 
         async fn start(&self) -> Result<CampaignScheduler, CampaignSchedulerError> {
@@ -2513,6 +2533,57 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("one-time scheduling was not blocked");
+    }
+
+    async fn start_mismatched_recurring(enabled: bool) -> (SchedulerFixture, CampaignScheduler) {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_event_with_enabled("recurring", enabled);
+        fixture
+            .reserve_expired_receipt(
+                "recurring",
+                "occ-mismatch",
+                "exec-mismatch",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
+        let scheduler = fixture.start().await.unwrap();
+        (fixture, scheduler)
+    }
+
+    async fn assert_mismatched_recurring_unchanged(
+        fixture: &SchedulerFixture,
+        scheduler: &CampaignScheduler,
+        manager_before: &Schedule,
+        file_before: &[u8],
+        receipt_before: &ScheduleOccurrenceRecord,
+    ) {
+        assert!(matches!(
+            scheduler.list_one_time_recoveries().await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert!(matches!(
+            scheduler
+                .acknowledge_one_time_recovery("occ-mismatch")
+                .await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert_eq!(
+            serde_json::to_value(scheduler.manager.get_schedule("recurring").await.unwrap())
+                .unwrap(),
+            serde_json::to_value(manager_before).unwrap()
+        );
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), file_before);
+        assert_eq!(
+            &fixture
+                .store
+                .as_ref()
+                .unwrap()
+                .schedule_occurrence("occ-mismatch")
+                .await
+                .unwrap()
+                .unwrap(),
+            receipt_before
+        );
     }
 
     #[tokio::test]
@@ -2940,6 +3011,93 @@ mod tests {
             .unwrap();
         assert_eq!(receipt.state, "reserved");
         assert_eq!(receipt.execution_status.as_deref(), Some("pending"));
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn quarantined_schedule_direct_remove_is_rejected_before_manager_mutation() {
+        let (fixture, scheduler) = start_mismatched_recurring(true).await;
+        let file_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let manager_before = scheduler.manager.get_schedule("recurring").await.unwrap();
+        let receipt_before = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            scheduler.try_remove("recurring").await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert_mismatched_recurring_unchanged(
+            &fixture,
+            &scheduler,
+            &manager_before,
+            &file_before,
+            &receipt_before,
+        )
+        .await;
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn quarantined_schedule_direct_disable_is_rejected_before_manager_mutation() {
+        let (fixture, scheduler) = start_mismatched_recurring(true).await;
+        let file_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let manager_before = scheduler.manager.get_schedule("recurring").await.unwrap();
+        let receipt_before = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            scheduler.try_set_enabled("recurring", false).await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert_mismatched_recurring_unchanged(
+            &fixture,
+            &scheduler,
+            &manager_before,
+            &file_before,
+            &receipt_before,
+        )
+        .await;
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn quarantined_schedule_direct_enable_is_rejected_before_manager_mutation() {
+        let (fixture, scheduler) = start_mismatched_recurring(false).await;
+        let file_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let manager_before = scheduler.manager.get_schedule("recurring").await.unwrap();
+        let receipt_before = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            scheduler.try_set_enabled("recurring", true).await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert_mismatched_recurring_unchanged(
+            &fixture,
+            &scheduler,
+            &manager_before,
+            &file_before,
+            &receipt_before,
+        )
+        .await;
         scheduler.stop().await;
     }
 
