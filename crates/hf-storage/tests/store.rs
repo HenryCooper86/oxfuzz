@@ -14,10 +14,10 @@ use hf_storage::{
     AutoRevertEvent, AutomotiveOperationRecord, AutomotiveOperationStatus,
     AutomotiveStateCorpusRecord, GuardrailDecisionRecord, HarnessApprovalKind,
     NewScheduleOccurrence, ProjectAutoRevert, RunKind, RunRecord, RunStatus,
-    ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
-    ScheduleOccurrenceTransitionResult, SemgrepFindingRecord, SemgrepFindingSeverity,
-    SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus, SemgrepTargetScoreRecord, StorageError,
-    Store,
+    ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection, ScheduleOccurrenceReservation,
+    ScheduleOccurrenceTransition, ScheduleOccurrenceTransitionResult, SemgrepFindingRecord,
+    SemgrepFindingSeverity, SemgrepPublication, SemgrepRunRecord, SemgrepRunStatus,
+    SemgrepTargetScoreRecord, StorageError, Store,
 };
 use uuid::Uuid;
 
@@ -2462,6 +2462,34 @@ async fn occurrence_constraints_reject_invalid_lease_shape() {
     .execute(store.pool())
     .await;
     assert!(terminal_with_lease.is_err());
+}
+
+#[tokio::test]
+async fn occurrence_inspection_preserves_safe_identity_for_malformed_rows() {
+    let (store, _dir) = temp_store().await;
+    sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+         VALUES
+            ('occ-identifiable', 'schedule-identifiable', x'ff',
+             '2026-07-30T00:00:00Z', 'completed', 'owner', NULL),
+            ('occ-undecodable', x'ff', 'exec-undecodable',
+             '2026-07-30T00:00:01Z', 'completed', 'owner', NULL)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let inspected = store.inspect_schedule_occurrences().await.unwrap();
+    assert_eq!(
+        inspected,
+        [
+            ScheduleOccurrenceInspection::Malformed {
+                schedule_id: Some("schedule-identifiable".to_owned()),
+            },
+            ScheduleOccurrenceInspection::Malformed { schedule_id: None },
+        ]
+    );
 }
 
 #[tokio::test]
