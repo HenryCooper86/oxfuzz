@@ -108,7 +108,9 @@ schedule identifier. Acknowledgement cursor reconciliation shares the
 service-local mutation-admission boundary with remove and enable/disable,
 re-reads the current definition under that boundary, and advances only its
 cursor; a removed definition stays absent and a current enabled state is
-preserved.
+preserved. An exact terminal transition remains receipt-idempotent after
+terminal history clearing only when all permanent receipt metadata matches; the
+replay never recreates cleared execution history.
 
 Recovery creates compact batches rather than filling the trigger channel before
 its receiver exists. `Skip` advances to the latest due occurrence without

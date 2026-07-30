@@ -290,8 +290,13 @@ running  -> cancelled
 ```
 
 Repeating the exact same transition with the same terminal execution is
-idempotent. A different transition from a terminal state is a conflict and
-does not modify either row.
+idempotent. After explicit history clearing removes that terminal execution,
+the replay is receipt-idempotent only when the permanent occurrence,
+schedule, execution, owner, destination-state, lease, and recovery-detail
+fields all match. The incoming serialized execution cannot be verified after
+clearing, is not treated as durable evidence, and is never recreated by this
+receipt-only replay. Any permanent receipt mismatch or a different transition
+from a terminal state is a conflict and does not modify either row.
 
 Terminal transitions clear `lease_expires_at`. A scheduler that stops before a
 terminal transition explicitly releases the lease when possible; if storage is
@@ -526,7 +531,8 @@ Explicit history clearing:
 - reports only the number of execution-history rows actually deleted.
 
 This preserves recovery evidence without making ordinary terminal history
-undeletable.
+undeletable. Exact terminal transition replay remains idempotent from matching
+permanent receipt fields and never recreates a cleared execution row.
 
 ## 14. Concurrency
 
