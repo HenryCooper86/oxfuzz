@@ -15,8 +15,8 @@ pub mod transcript_display;
 
 pub use checkpoint_store::SqliteChatCheckpointStore;
 pub use schedule_occurrence_store::{
-    NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceRecord,
-    ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
+    NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
+    ScheduleOccurrenceRecord, ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
     ScheduleOccurrenceTransitionResult,
 };
 pub use session_store::SqliteSessionStore;

@@ -43,6 +43,21 @@ pub struct ScheduleOccurrenceRecord {
     pub execution_data_json: Option<String>,
 }
 
+/// Per-row occurrence inspection that preserves a safely decoded schedule
+/// identity even when another column makes the receipt malformed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleOccurrenceInspection {
+    /// Every storage column decoded and passed structural validation.
+    Valid(ScheduleOccurrenceRecord),
+    /// The row is malformed; `schedule_id` is retained only when it is
+    /// non-empty UTF-8 text.
+    Malformed {
+        /// Schedule identity that can be quarantined without interpreting any
+        /// other damaged receipt field.
+        schedule_id: Option<String>,
+    },
+}
+
 /// Input used to atomically reserve an occurrence and pending execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewScheduleOccurrence {
@@ -371,9 +386,42 @@ impl Store {
     pub async fn list_schedule_occurrences(
         &self,
     ) -> Result<Vec<ScheduleOccurrenceRecord>, StorageError> {
+        self.inspect_schedule_occurrences()
+            .await?
+            .into_iter()
+            .map(|inspection| match inspection {
+                ScheduleOccurrenceInspection::Valid(record) => Ok(record),
+                ScheduleOccurrenceInspection::Malformed { .. } => Err(StorageError::InvalidData(
+                    "invalid stored one-time occurrence".to_owned(),
+                )),
+            })
+            .collect()
+    }
+
+    /// Inspect every durable occurrence receipt without discarding the safe
+    /// schedule identity of an individually malformed row.
+    ///
+    /// # Errors
+    /// Returns an error only when SQLite cannot fetch the row set. Column
+    /// decoding and structural failures are returned as per-row malformed
+    /// inspections.
+    pub async fn inspect_schedule_occurrences(
+        &self,
+    ) -> Result<Vec<ScheduleOccurrenceInspection>, StorageError> {
         let query = format!("{OCCURRENCE_SELECT} ORDER BY o.triggered_at, o.id");
         let rows = sqlx::query(&query).fetch_all(self.pool()).await?;
-        rows.iter().map(record_from_row).collect()
+        Ok(rows
+            .iter()
+            .map(|row| match record_from_row(row) {
+                Ok(record) => ScheduleOccurrenceInspection::Valid(record),
+                Err(_) => ScheduleOccurrenceInspection::Malformed {
+                    schedule_id: row
+                        .try_get::<String, _>("schedule_id")
+                        .ok()
+                        .filter(|schedule_id| !schedule_id.is_empty()),
+                },
+            })
+            .collect())
     }
 
     /// Acknowledge an expired non-terminal occurrence as cancelled.

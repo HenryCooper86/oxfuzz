@@ -23,8 +23,8 @@ use hf_scheduler::{
     ScheduleExecution, SchedulerManager, SchedulerPersistence, TriggerConfig,
 };
 use hf_storage::{
-    NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceRecord,
-    ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
+    NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,
+    ScheduleOccurrenceRecord, ScheduleOccurrenceReservation, ScheduleOccurrenceTransition,
     ScheduleOccurrenceTransitionResult, StorageError, Store,
 };
 use serde::{Deserialize, Serialize};
@@ -1509,89 +1509,100 @@ impl CampaignScheduler {
         let mut restored = false;
         let mut receipt_cursor_restored = false;
         let journal_readable = if let Some(store) = &store {
-            match store.list_schedule_occurrences().await {
-                Ok(rows) => {
-                    let receipts = rows
-                        .iter()
-                        .map(row_to_occurrence)
-                        .collect::<Result<Vec<_>, _>>();
-                    if let Ok(receipts) = receipts {
-                        let mismatched_schedule_ids: HashSet<_> = receipts
-                            .iter()
-                            .filter_map(|receipt| {
-                                loaded
-                                    .iter()
-                                    .find(|schedule| schedule.id == receipt.schedule_id)
-                                    .filter(|schedule| {
-                                        !matches!(schedule.trigger, TriggerConfig::OneTime { .. })
-                                    })
-                                    .map(|schedule| schedule.id.clone())
-                            })
-                            .collect();
-                        if mismatched_schedule_ids.is_empty() {
-                            let now = chrono::Utc::now();
-                            for schedule in &mut loaded {
-                                if !matches!(schedule.trigger, TriggerConfig::OneTime { .. }) {
-                                    continue;
-                                }
-                                let receipt = receipts
-                                    .iter()
-                                    .find(|receipt| receipt.schedule_id == schedule.id);
-                                match receipt {
-                                    Some(receipt) if receipt.recovery_eligible(now) => {
-                                        manager.record_expired_one_time_occurrence();
-                                        let reconciled = schedule
-                                            .last_fire
-                                            .map_or(receipt.triggered_at, |last| {
-                                                last.max(receipt.triggered_at)
-                                            });
-                                        if schedule.last_fire != Some(reconciled) {
-                                            schedule.last_fire = Some(reconciled);
-                                            restored = true;
-                                            receipt_cursor_restored = true;
-                                        }
-                                        manager
-                                            .mark_one_time_recovery_required(
-                                                &schedule.id,
-                                                receipt.recovery_detail.clone().unwrap_or_else(
-                                                    || "expired non-terminal occurrence".to_owned(),
-                                                ),
-                                            )
-                                            .await;
+            match store.inspect_schedule_occurrences().await {
+                Ok(inspections) => {
+                    let mut receipts = Vec::new();
+                    let mut malformed_schedule_ids = Vec::new();
+                    for inspection in inspections {
+                        match inspection {
+                            ScheduleOccurrenceInspection::Valid(row) => {
+                                match row_to_occurrence(&row) {
+                                    Ok(receipt) => receipts.push(receipt),
+                                    Err(_) => {
+                                        malformed_schedule_ids.push(Some(row.schedule_id.clone()));
                                     }
-                                    Some(receipt) => {
-                                        let reconciled = schedule
-                                            .last_fire
-                                            .map_or(receipt.triggered_at, |last| {
-                                                last.max(receipt.triggered_at)
-                                            });
-                                        if schedule.last_fire != Some(reconciled) {
-                                            schedule.last_fire = Some(reconciled);
-                                            restored = true;
-                                            receipt_cursor_restored = true;
-                                        }
-                                        manager.mark_one_time_consumed(&schedule.id).await;
-                                    }
-                                    None if schedule.last_fire.is_some() => {
-                                        manager.mark_one_time_consumed(&schedule.id).await;
-                                    }
-                                    None => {}
                                 }
                             }
-                            true
-                        } else {
-                            for schedule_id in &mismatched_schedule_ids {
-                                occurrences.quarantine_schedule(schedule_id).await?;
+                            ScheduleOccurrenceInspection::Malformed { schedule_id } => {
+                                malformed_schedule_ids.push(schedule_id);
                             }
-                            manager.record_corrupt_one_time_journal();
-                            manager.block_one_time(JOURNAL_CORRUPT_REASON).await;
-                            true
                         }
-                    } else {
+                    }
+
+                    let preserve_complete_snapshot =
+                        malformed_schedule_ids.iter().any(Option::is_none);
+                    let mut quarantine_ids: HashSet<String> =
+                        malformed_schedule_ids.into_iter().flatten().collect();
+                    quarantine_ids.extend(receipts.iter().filter_map(|receipt| {
+                        loaded
+                            .iter()
+                            .find(|schedule| schedule.id == receipt.schedule_id)
+                            .filter(|schedule| {
+                                !matches!(schedule.trigger, TriggerConfig::OneTime { .. })
+                            })
+                            .map(|schedule| schedule.id.clone())
+                    }));
+                    if preserve_complete_snapshot {
+                        quarantine_ids.extend(loaded.iter().map(|schedule| schedule.id.clone()));
+                    }
+                    if !quarantine_ids.is_empty() || preserve_complete_snapshot {
+                        for schedule_id in &quarantine_ids {
+                            occurrences.quarantine_schedule(schedule_id).await?;
+                        }
                         manager.record_corrupt_one_time_journal();
                         manager.block_one_time(JOURNAL_CORRUPT_REASON).await;
-                        true
                     }
+
+                    let now = chrono::Utc::now();
+                    for schedule in &mut loaded {
+                        if !matches!(schedule.trigger, TriggerConfig::OneTime { .. })
+                            || occurrences.schedule_is_quarantined(&schedule.id).await
+                        {
+                            continue;
+                        }
+                        let receipt = receipts
+                            .iter()
+                            .find(|receipt| receipt.schedule_id == schedule.id);
+                        match receipt {
+                            Some(receipt) if receipt.recovery_eligible(now) => {
+                                manager.record_expired_one_time_occurrence();
+                                let reconciled =
+                                    schedule.last_fire.map_or(receipt.triggered_at, |last| {
+                                        last.max(receipt.triggered_at)
+                                    });
+                                if schedule.last_fire != Some(reconciled) {
+                                    schedule.last_fire = Some(reconciled);
+                                    restored = true;
+                                    receipt_cursor_restored = true;
+                                }
+                                manager
+                                    .mark_one_time_recovery_required(
+                                        &schedule.id,
+                                        receipt.recovery_detail.clone().unwrap_or_else(|| {
+                                            "expired non-terminal occurrence".to_owned()
+                                        }),
+                                    )
+                                    .await;
+                            }
+                            Some(receipt) => {
+                                let reconciled =
+                                    schedule.last_fire.map_or(receipt.triggered_at, |last| {
+                                        last.max(receipt.triggered_at)
+                                    });
+                                if schedule.last_fire != Some(reconciled) {
+                                    schedule.last_fire = Some(reconciled);
+                                    restored = true;
+                                    receipt_cursor_restored = true;
+                                }
+                                manager.mark_one_time_consumed(&schedule.id).await;
+                            }
+                            None if schedule.last_fire.is_some() => {
+                                manager.mark_one_time_consumed(&schedule.id).await;
+                            }
+                            None => {}
+                        }
+                    }
+                    true
                 }
                 Err(error) => {
                     if matches!(
@@ -3156,6 +3167,214 @@ mod tests {
             .execution_history("healthy-interval")
             .await
             .is_empty());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn identifiable_malformed_receipt_quarantines_schedule_before_snapshot_writes() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_event("affected-recurring");
+        let original = load_schedules(&fixture.schedules_path).unwrap().remove(0);
+        let store = fixture.store.as_ref().unwrap();
+        sqlx::query(
+            "INSERT INTO schedule_occurrences
+                (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+             VALUES
+                ('occ-malformed', 'affected-recurring', 'exec-malformed',
+                 'not-rfc3339', 'completed', 'owner', NULL)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        let history_at = Utc::now() - chrono::Duration::minutes(1);
+        let history = schedule_execution(
+            "history-affected",
+            "affected-recurring",
+            history_at,
+            ExecutionStatus::Completed,
+        );
+        store
+            .upsert_schedule_execution(
+                &history.execution_id,
+                &history.schedule_id,
+                &history.triggered_at.to_rfc3339(),
+                &history.status.to_string(),
+                &serde_json::to_string(&history).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let scheduler = fixture.start().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                load_schedules(&fixture.schedules_path)
+                    .unwrap()
+                    .iter()
+                    .find(|schedule| schedule.id == original.id)
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+
+        assert_eq!(
+            scheduler
+                .manager
+                .emit_event(IncomingEvent {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    payload: None,
+                    timestamp: Utc::now(),
+                })
+                .await,
+            vec!["affected-recurring"]
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while scheduler
+                .manager
+                .execution_history("affected-recurring")
+                .await
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("quarantined recurring schedule did not execute in memory");
+
+        let unrelated = scheduler
+            .try_create(
+                "unrelated",
+                &fixture.params(),
+                TriggerConfig::Event {
+                    event_type: EVENT_CRASH_FOUND.to_owned(),
+                    debounce_secs: 0,
+                    filter: None,
+                },
+            )
+            .await
+            .unwrap();
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                durable
+                    .iter()
+                    .find(|schedule| schedule.id == original.id)
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert!(durable.iter().any(|schedule| schedule.id == unrelated.id));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT triggered_at FROM schedule_occurrences WHERE id = 'occ-malformed'",
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+            "not-rfc3339"
+        );
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn undecodable_receipt_identity_preserves_the_complete_startup_snapshot() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_event("first-recurring");
+        fixture.write_event("second-recurring");
+        let originals = load_schedules(&fixture.schedules_path).unwrap();
+        let store = fixture.store.as_ref().unwrap();
+        sqlx::query(
+            "INSERT INTO schedule_occurrences
+                (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
+             VALUES
+                ('occ-undecodable', x'ff', 'exec-undecodable',
+                 '2026-07-30T00:00:00Z', 'completed', 'owner', NULL)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        let history_at = Utc::now() - chrono::Duration::minutes(1);
+        let history = schedule_execution(
+            "history-first",
+            "first-recurring",
+            history_at,
+            ExecutionStatus::Completed,
+        );
+        store
+            .upsert_schedule_execution(
+                &history.execution_id,
+                &history.schedule_id,
+                &history.triggered_at.to_rfc3339(),
+                &history.status.to_string(),
+                &serde_json::to_string(&history).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let scheduler = fixture.start().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(load_schedules(&fixture.schedules_path).unwrap()).unwrap(),
+            serde_json::to_value(&originals).unwrap()
+        );
+        let fired = scheduler
+            .manager
+            .emit_event(IncomingEvent {
+                event_type: EVENT_RUN_COMPLETED.to_owned(),
+                payload: None,
+                timestamp: Utc::now(),
+            })
+            .await;
+        assert_eq!(fired, ["first-recurring", "second-recurring"]);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while scheduler
+                .manager
+                .execution_history("first-recurring")
+                .await
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recurring schedule did not execute under global one-time block");
+
+        let unrelated = scheduler
+            .try_create(
+                "unrelated",
+                &fixture.params(),
+                TriggerConfig::Event {
+                    event_type: EVENT_CRASH_FOUND.to_owned(),
+                    debounce_secs: 0,
+                    filter: None,
+                },
+            )
+            .await
+            .unwrap();
+        let durable = load_schedules(&fixture.schedules_path).unwrap();
+        for original in &originals {
+            assert_eq!(
+                serde_json::to_value(
+                    durable
+                        .iter()
+                        .find(|schedule| schedule.id == original.id)
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+        assert!(durable.iter().any(|schedule| schedule.id == unrelated.id));
+        assert_eq!(
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT typeof(schedule_id), hex(schedule_id)
+                 FROM schedule_occurrences WHERE id = 'occ-undecodable'",
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+            ("blob".to_owned(), "FF".to_owned())
+        );
         scheduler.stop().await;
     }
 

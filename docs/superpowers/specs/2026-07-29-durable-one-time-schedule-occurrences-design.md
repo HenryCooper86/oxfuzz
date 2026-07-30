@@ -379,7 +379,15 @@ execution state, impossible lease shape, or missing non-terminal execution row
 makes journal health corrupt. The service starts cron, interval, and event
 scheduling but blocks all one-time evaluation and creation. It exposes a
 bounded health error and does not delete, rewrite, or guess at damaged
-evidence.
+evidence. Startup inspects rows individually and preserves a safely decoded,
+non-empty text `schedule_id` before strict receipt conversion. Every identifiable
+malformed row quarantines that schedule definition before cursor/history
+reconciliation or any schedule-file write. If the schedule identity itself
+cannot be decoded, the service quarantines the complete startup definition
+snapshot. Later full-snapshot writes restore those captured definitions.
+Recurring schedules remain registered and executable in memory, but a
+quarantined definition's cursor or direct mutations are not persisted until
+the journal is repaired.
 
 ## 10. Startup Reconciliation
 
