@@ -93,6 +93,11 @@ const COMMAND_MAP: Record<string, { method: string; path: string }> = {
   schedule_create: { method: "POST", path: "/schedule" },
   schedule_history: { method: "GET", path: "/schedule/history" },
   schedule_history_clear: { method: "POST", path: "/schedule/history/clear" },
+  schedule_recovery_list: { method: "GET", path: "/schedule/recovery" },
+  schedule_recovery_acknowledge: {
+    method: "POST",
+    path: "/schedule/recovery/{occurrenceId}/acknowledge",
+  },
   schedule_targets: { method: "POST", path: "/schedule/targets" },
   schedule_concurrency_get: { method: "GET", path: "/schedule/concurrency" },
   schedule_concurrency_limits: { method: "GET", path: "/schedule/concurrency/limits" },
@@ -200,8 +205,9 @@ function buildRequest(
 ): { url: string; body: Record<string, unknown> } {
   const rest: Record<string, unknown> = { ...(toWebArgs(args) ?? {}) };
   const path = endpoint.path.replace(/\{(\w+)\}/g, (_, key: string) => {
-    const value = rest[key];
-    delete rest[key];
+    const restKey = key in rest ? key : camelToSnake(key);
+    const value = rest[restKey];
+    delete rest[restKey];
     return encodeURIComponent(String(value ?? ""));
   });
   const body = rest;
