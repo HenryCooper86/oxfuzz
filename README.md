@@ -395,10 +395,10 @@ oxfuzz schedule recovery acknowledge <occurrence-id>
 
 Acknowledgement records an expired, non-terminal occurrence with an unknown
 prior outcome as cancelled and permanently consumes that one-time schedule. It
-does not prove or force the termination of an orphaned sandbox process. To
-retry, create a new one-time schedule so it receives a new schedule identifier
-and a new durable receipt. Recurring schedules remain available when the
-one-time journal is blocked.
+does not stop, resume, or adopt an orphaned sandbox process, and does not prove
+its termination. To retry, create a new one-time schedule so it receives a new
+schedule identifier and a new durable receipt. Recurring schedules remain
+available when the one-time journal is blocked.
 
 The equivalent REST operations are:
 
@@ -867,7 +867,7 @@ oxfuzz schedule recovery list
 oxfuzz schedule recovery acknowledge <occurrence-id>
 ```
 
-确认会将先前结果未知的已过期非终态 occurrence 记录为已取消，并永久消耗该一次性计划。它不证明也不强制终止孤立的沙箱进程。若要重试，请创建一个新的一次性计划，使其获得新的计划标识符和新的持久化回执。当一次性 journal 被阻塞时，循环计划仍可使用。
+确认会将先前结果未知的已过期非终态 occurrence 记录为已取消，并永久消耗该一次性计划。它不会停止、恢复或接管孤立的沙箱进程，也不证明其已终止。若要重试，请创建一个新的一次性计划，使其获得新的计划标识符和新的持久化回执。当一次性 journal 被阻塞时，循环计划仍可使用。
 
 等效的 REST 操作是：
 
