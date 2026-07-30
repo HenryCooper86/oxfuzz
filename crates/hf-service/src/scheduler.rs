@@ -4092,7 +4092,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(scheduler.manager.get_schedule(&recurring.id).await.is_some());
+        assert!(scheduler
+            .manager
+            .get_schedule(&recurring.id)
+            .await
+            .is_some());
         scheduler.stop().await;
     }
 
