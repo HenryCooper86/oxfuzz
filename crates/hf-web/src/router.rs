@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 
-use hf_service::scheduler::CampaignSchedulerError;
+use hf_service::scheduler::{CampaignSchedulerError, RecoveryPublicError, RecoveryPublicErrorCode};
 use hf_service::{
     ClassifiedError, EngineKind, FuzzProgress, Message, Role, RunCancelOutcome, RunLifecycleStatus,
     ServiceContainer, SessionId, TargetLanguage,
@@ -198,8 +198,16 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Debug, Serialize)]
+struct RecoveryErrorResponse {
+    code: RecoveryPublicErrorCode,
+    error: &'static str,
+}
+
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
 type ApiError = (StatusCode, Json<ErrorResponse>);
+type RecoveryApiResult<T> = Result<Json<T>, (StatusCode, Json<RecoveryErrorResponse>)>;
+type RecoveryApiError = (StatusCode, Json<RecoveryErrorResponse>);
 
 fn map_err<E: std::fmt::Display>(
     status: StatusCode,
@@ -247,6 +255,26 @@ fn scheduler_api_error(error: CampaignSchedulerError) -> ApiError {
         ),
         other => classified_api_error(other),
     }
+}
+
+fn recovery_api_error(public: RecoveryPublicError) -> RecoveryApiError {
+    let status = match public.code {
+        RecoveryPublicErrorCode::NotFound => StatusCode::NOT_FOUND,
+        RecoveryPublicErrorCode::Conflict => StatusCode::CONFLICT,
+        RecoveryPublicErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        RecoveryPublicErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(RecoveryErrorResponse {
+            code: public.code,
+            error: public.message,
+        }),
+    )
+}
+
+fn scheduler_recovery_api_error(error: CampaignSchedulerError) -> RecoveryApiError {
+    recovery_api_error(error.into_public_recovery_error())
 }
 
 fn missing_schedule_error(id: &str) -> ApiError {
@@ -2135,12 +2163,14 @@ async fn schedule_list(State(state): State<AppState>) -> ApiResult<serde_json::V
     Ok(Json(public_value(views)))
 }
 
-async fn schedule_recovery_list(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
+async fn schedule_recovery_list(
+    State(state): State<AppState>,
+) -> RecoveryApiResult<serde_json::Value> {
     let recoveries = match &state.scheduler {
         Some(scheduler) => scheduler
             .list_one_time_recoveries()
             .await
-            .map_err(scheduler_api_error)?,
+            .map_err(scheduler_recovery_api_error)?,
         None => Vec::new(),
     };
     Ok(Json(public_value(recoveries)))
@@ -2149,14 +2179,15 @@ async fn schedule_recovery_list(State(state): State<AppState>) -> ApiResult<serd
 async fn schedule_recovery_acknowledge(
     State(state): State<AppState>,
     Path(occurrence_id): Path<String>,
-) -> ApiResult<serde_json::Value> {
-    let scheduler = state.scheduler.as_ref().ok_or_else(|| {
-        map_err(StatusCode::SERVICE_UNAVAILABLE)("campaign scheduler is unavailable".to_owned())
-    })?;
+) -> RecoveryApiResult<serde_json::Value> {
+    let scheduler = state
+        .scheduler
+        .as_ref()
+        .ok_or_else(|| recovery_api_error(RecoveryPublicError::unavailable()))?;
     let recovery = scheduler
         .acknowledge_one_time_recovery(&occurrence_id)
         .await
-        .map_err(scheduler_api_error)?;
+        .map_err(scheduler_recovery_api_error)?;
     Ok(Json(public_value(recovery)))
 }
 
