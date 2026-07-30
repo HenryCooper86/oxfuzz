@@ -47,7 +47,10 @@ authorization headers, environment-variable secret names, or raw secret config
 values. Path-bearing service records retain their shape where browser parity
 requires it, but absolute path values are replaced by an explicit redaction
 marker. Provider and raw-config reads clear secret fields. Desktop commands are
-not changed; their trusted local presentation can continue to show local paths.
+not changed in general; their trusted local presentation can continue to show
+local paths. One-time recovery is stricter across every presentation: REST,
+Tauri, and CLI use the service-owned bounded recovery error code and message,
+never the underlying path-, SQL-, OS-, or stored-JSON-bearing cause.
 
 DefectDojo and issue-tracker settings use dedicated typed GET/PATCH routes. Their
 public DTOs replace secrets, secret environment names, and compose-file paths
@@ -101,6 +104,11 @@ validation is `400`, harness/engine execution rejection is `422`, provider
 failure is `502`, sandbox unavailability is `503`, timeout is `504`, and
 storage/internal failure is `500`. Handlers do not choose a different status
 for the same service error category.
+
+One-time recovery uses its narrower service-owned public mapping:
+`not_found` is `404`, `conflict` is `409`, `unavailable` is `503`, and
+`internal` is `500`. Recovery error JSON includes that stable code and a
+bounded message.
 
 ## 6. Validation
 

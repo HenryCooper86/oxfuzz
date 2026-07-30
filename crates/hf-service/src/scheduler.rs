@@ -1479,6 +1479,101 @@ pub enum CampaignSchedulerError {
     OccurrenceConflict(String),
 }
 
+/// Stable presentation category for one-time recovery failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryPublicErrorCode {
+    /// The requested occurrence does not exist.
+    NotFound,
+    /// The durable occurrence is not eligible for the requested action.
+    Conflict,
+    /// Required recovery persistence or journal state is unavailable.
+    Unavailable,
+    /// An unexpected recovery failure occurred.
+    Internal,
+}
+
+impl RecoveryPublicErrorCode {
+    /// Stable wire and CLI spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl std::fmt::Display for RecoveryPublicErrorCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Bounded service-owned error safe for REST, Tauri, and CLI recovery surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RecoveryPublicError {
+    /// Stable presentation category.
+    pub code: RecoveryPublicErrorCode,
+    /// Static message that contains no persistence details or user data.
+    pub message: &'static str,
+}
+
+impl RecoveryPublicError {
+    /// Error returned when the scheduler or its durable recovery state is not
+    /// currently available.
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self {
+            code: RecoveryPublicErrorCode::Unavailable,
+            message: "one-time recovery is temporarily unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for RecoveryPublicError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for RecoveryPublicError {}
+
+impl CampaignSchedulerError {
+    /// Convert a detailed internal scheduler failure into the bounded error
+    /// contract used only by one-time recovery presentations.
+    #[must_use]
+    pub fn into_public_recovery_error(self) -> RecoveryPublicError {
+        let public = match &self {
+            Self::OccurrenceNotFound(_) => RecoveryPublicError {
+                code: RecoveryPublicErrorCode::NotFound,
+                message: "one-time recovery occurrence was not found",
+            },
+            Self::OccurrenceConflict(_) => RecoveryPublicError {
+                code: RecoveryPublicErrorCode::Conflict,
+                message: "one-time recovery occurrence cannot be acknowledged",
+            },
+            Self::State(_)
+            | Self::History(_)
+            | Self::InvalidLastFire { .. }
+            | Self::DurabilityUnavailable(_)
+            | Self::OccurrenceJournal(_) => RecoveryPublicError::unavailable(),
+            Self::Validation(_) => RecoveryPublicError {
+                code: RecoveryPublicErrorCode::Internal,
+                message: "one-time recovery request failed",
+            },
+        };
+        tracing::warn!(
+            error = %self,
+            public_code = %public.code,
+            "redacting detailed one-time recovery error for presentation"
+        );
+        public
+    }
+}
+
 impl From<CampaignSchedulerError> for ClassifiedError {
     fn from(error: CampaignSchedulerError) -> Self {
         match error {
@@ -4443,6 +4538,37 @@ mod tests {
     fn scheduler_state_errors_use_the_storage_transport_classification() {
         let classified = ClassifiedError::from(CampaignSchedulerError::History("closed".into()));
         assert!(matches!(classified, ClassifiedError::Storage(_)));
+    }
+
+    #[test]
+    fn recovery_public_errors_have_stable_codes_and_redacted_messages() {
+        let unavailable = CampaignSchedulerError::State(StateFileError::Io {
+            operation: "replace",
+            path: PathBuf::from("/PRIVATE_PATH_MARKER/schedules.json"),
+            source: std::io::Error::other("OS_PRIVATE_MARKER"),
+        })
+        .into_public_recovery_error();
+        assert_eq!(unavailable.code, RecoveryPublicErrorCode::Unavailable);
+        assert_eq!(
+            unavailable.message,
+            "one-time recovery is temporarily unavailable"
+        );
+        let serialized = serde_json::to_string(&unavailable).unwrap();
+        assert!(!serialized.contains("PRIVATE_PATH_MARKER"));
+        assert!(!serialized.contains("OS_PRIVATE_MARKER"));
+
+        assert_eq!(
+            CampaignSchedulerError::OccurrenceNotFound("PRIVATE_ID".to_owned())
+                .into_public_recovery_error()
+                .code,
+            RecoveryPublicErrorCode::NotFound
+        );
+        assert_eq!(
+            CampaignSchedulerError::OccurrenceConflict("PRIVATE_STATE".to_owned())
+                .into_public_recovery_error()
+                .code,
+            RecoveryPublicErrorCode::Conflict
+        );
     }
 
     #[tokio::test]

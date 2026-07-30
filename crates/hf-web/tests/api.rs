@@ -2,6 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -49,7 +50,8 @@ fn allow_open_dev_mode() {
 }
 
 struct WebRecoveryFixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
+    schedules_path: PathBuf,
     scheduler: Arc<hf_service::scheduler::CampaignScheduler>,
     app: axum::Router,
 }
@@ -65,7 +67,7 @@ async fn web_scheduler_with_occurrence(expired: bool) -> WebRecoveryFixture {
     use hf_storage::{NewScheduleOccurrence, ScheduleOccurrenceTransition, Store};
 
     let directory = tempfile::tempdir().unwrap();
-    let schedules_path = directory.path().join("schedules.json");
+    let schedules_path = directory.path().join("PRIVATE_PATH_MARKER.json");
     let database_path = directory.path().join("scheduler.db");
     let store = Arc::new(Store::connect(&database_path).await.unwrap());
     let triggered_at = chrono::Utc::now() - chrono::Duration::seconds(1);
@@ -153,7 +155,7 @@ async fn web_scheduler_with_occurrence(expired: bool) -> WebRecoveryFixture {
     let scheduler = Arc::new(
         hf_service::scheduler::CampaignScheduler::try_start(
             container.clone(),
-            schedules_path,
+            schedules_path.clone(),
             None,
         )
         .await
@@ -163,7 +165,8 @@ async fn web_scheduler_with_occurrence(expired: bool) -> WebRecoveryFixture {
         hf_web::router::AppState::new(container).with_scheduler(Arc::clone(&scheduler)),
     );
     WebRecoveryFixture {
-        _directory: directory,
+        directory,
+        schedules_path,
         scheduler,
         app,
     }
@@ -230,6 +233,17 @@ async fn recovery_mutation_without_scheduler_is_unavailable() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(
+        body["error"],
+        "one-time recovery is temporarily unavailable"
+    );
 }
 
 #[tokio::test]
@@ -249,6 +263,17 @@ async fn schedule_recovery_acknowledge_maps_missing_and_live_conflicts() {
         .await
         .unwrap();
     assert_eq!(live.status(), StatusCode::CONFLICT);
+    let live_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(live.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(live_body["code"], "conflict");
+    assert_eq!(
+        live_body["error"],
+        "one-time recovery occurrence cannot be acknowledged"
+    );
 
     let missing = app
         .oneshot(
@@ -261,6 +286,53 @@ async fn schedule_recovery_acknowledge_maps_missing_and_live_conflicts() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(missing.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(missing_body["code"], "not_found");
+    assert_eq!(
+        missing_body["error"],
+        "one-time recovery occurrence was not found"
+    );
+    fixture.scheduler.stop().await;
+}
+
+#[tokio::test]
+async fn schedule_recovery_persistence_failure_redacts_the_host_path() {
+    allow_open_dev_mode();
+    let fixture = web_scheduler_with_occurrence(true).await;
+    std::fs::remove_file(&fixture.schedules_path).unwrap();
+    std::fs::create_dir(&fixture.schedules_path).unwrap();
+
+    let response = fixture
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/schedule/recovery/occ-web/acknowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["code"], "unavailable");
+    assert_eq!(
+        body["error"],
+        "one-time recovery is temporarily unavailable"
+    );
+    let public_body = body.to_string();
+    assert!(!public_body.contains("PRIVATE_PATH_MARKER"));
+    assert!(!public_body.contains(fixture.directory.path().to_string_lossy().as_ref()));
     fixture.scheduler.stop().await;
 }
 
