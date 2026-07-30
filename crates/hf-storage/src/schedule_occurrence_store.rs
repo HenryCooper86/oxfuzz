@@ -482,16 +482,16 @@ fn record_from_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ScheduleOccurrenceRecord, StorageError> {
     let record = ScheduleOccurrenceRecord {
-        id: row.try_get("id")?,
-        schedule_id: row.try_get("schedule_id")?,
-        execution_id: row.try_get("execution_id")?,
-        triggered_at: row.try_get("triggered_at")?,
-        state: row.try_get("state")?,
-        owner_id: row.try_get("owner_id")?,
-        lease_expires_at: row.try_get("lease_expires_at")?,
-        recovery_detail: row.try_get("recovery_detail")?,
-        execution_status: row.try_get("execution_status")?,
-        execution_data_json: row.try_get("execution_data_json")?,
+        id: occurrence_column(row.try_get("id"))?,
+        schedule_id: occurrence_column(row.try_get("schedule_id"))?,
+        execution_id: occurrence_column(row.try_get("execution_id"))?,
+        triggered_at: occurrence_column(row.try_get("triggered_at"))?,
+        state: occurrence_column(row.try_get("state"))?,
+        owner_id: occurrence_column(row.try_get("owner_id"))?,
+        lease_expires_at: occurrence_column(row.try_get("lease_expires_at"))?,
+        recovery_detail: occurrence_column(row.try_get("recovery_detail"))?,
+        execution_status: occurrence_column(row.try_get("execution_status"))?,
+        execution_data_json: occurrence_column(row.try_get("execution_data_json"))?,
     };
     if record.id.is_empty()
         || record.schedule_id.is_empty()
@@ -505,6 +505,15 @@ fn record_from_row(
         ));
     }
     Ok(record)
+}
+
+fn occurrence_column<T>(result: Result<T, sqlx::Error>) -> Result<T, StorageError> {
+    result.map_err(|error| match error {
+        sqlx::Error::ColumnDecode { .. } => {
+            StorageError::InvalidData("invalid stored one-time occurrence column".to_owned())
+        }
+        other => StorageError::Db(other),
+    })
 }
 
 fn lease_matches_state(state: &str, lease_expires_at: Option<&str>) -> bool {

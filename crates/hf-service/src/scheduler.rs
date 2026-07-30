@@ -6,6 +6,7 @@
 //! headlessly through the [`ServiceContainer`] when a schedule fires, ticks in
 //! the background, and persists schedules to JSON so they survive restarts.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -101,9 +102,32 @@ struct CampaignSchedulerPersistence {
     store: Option<Arc<Store>>,
     schedules: Arc<ScheduleFileStore>,
     history_retention_limit: usize,
+    quarantined_schedules: Arc<AsyncMutex<HashSet<String>>>,
+    manager: Weak<SchedulerManager>,
+}
+
+#[derive(Clone, Copy)]
+enum OccurrenceJournalFailure {
+    Corrupt,
+    Unavailable,
 }
 
 impl CampaignSchedulerPersistence {
+    fn new(
+        store: Option<Arc<Store>>,
+        schedules: Arc<ScheduleFileStore>,
+        history_retention_limit: usize,
+        manager: Weak<SchedulerManager>,
+    ) -> Self {
+        Self {
+            store,
+            schedules,
+            history_retention_limit,
+            quarantined_schedules: Arc::new(AsyncMutex::new(HashSet::new())),
+            manager,
+        }
+    }
+
     async fn upsert(&self, ex: &ScheduleExecution) -> Result<(), PersistenceError> {
         let Some(store) = &self.store else {
             return Ok(());
@@ -132,6 +156,77 @@ impl CampaignSchedulerPersistence {
         self.store.as_deref().ok_or_else(|| {
             PersistenceError::new("SQLite storage is required for durable one-time scheduling")
         })
+    }
+
+    async fn quarantine_schedule(&self, schedule_id: &str) {
+        self.quarantined_schedules
+            .lock()
+            .await
+            .insert(schedule_id.to_owned());
+    }
+
+    async fn schedule_is_quarantined(&self, schedule_id: &str) -> bool {
+        self.quarantined_schedules
+            .lock()
+            .await
+            .contains(schedule_id)
+    }
+
+    async fn map_storage_result<T>(
+        &self,
+        result: Result<T, StorageError>,
+    ) -> Result<T, PersistenceError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let failure = match &error {
+                    StorageError::InvalidData(_)
+                    | StorageError::Serde(_)
+                    | StorageError::Timestamp(_)
+                    | StorageError::NotFound(_) => OccurrenceJournalFailure::Corrupt,
+                    StorageError::Db(_) | StorageError::Migrate(_) => {
+                        OccurrenceJournalFailure::Unavailable
+                    }
+                };
+                self.latch_journal_failure(failure).await;
+                Err(PersistenceError::new(error.to_string()))
+            }
+        }
+    }
+
+    async fn decode_occurrence(
+        &self,
+        row: &ScheduleOccurrenceRecord,
+    ) -> Result<OneTimeOccurrence, PersistenceError> {
+        match row_to_occurrence(row) {
+            Ok(occurrence) => Ok(occurrence),
+            Err(error) => {
+                self.latch_journal_failure(OccurrenceJournalFailure::Corrupt)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn latch_journal_failure(&self, failure: OccurrenceJournalFailure) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        let (reason, corrupt) = match failure {
+            OccurrenceJournalFailure::Corrupt => (JOURNAL_CORRUPT_REASON, true),
+            OccurrenceJournalFailure::Unavailable => (JOURNAL_UNAVAILABLE_REASON, false),
+        };
+        let current = manager.one_time_block_reason().await;
+        if current.as_deref() == Some(JOURNAL_CORRUPT_REASON)
+            || current.as_deref() == Some(reason)
+            || (!corrupt && current.is_some())
+        {
+            return;
+        }
+        if corrupt {
+            manager.record_corrupt_one_time_journal();
+        }
+        manager.block_one_time(reason).await;
     }
 }
 
@@ -181,21 +276,15 @@ fn validate_row_execution(
     };
     match (&row.execution_status, &row.execution_data_json) {
         (None, None) if occurrence.terminal() => Ok(None),
-        (None, None) => {
-            Err(PersistenceError::new(
-                "non-terminal occurrence is missing its execution",
-            ))
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            Err(PersistenceError::new(
-                "occurrence execution record is incomplete",
-            ))
-        }
-        (Some(actual), Some(_)) if actual != expected_status => {
-            Err(PersistenceError::new(
-                "occurrence and execution states do not match",
-            ))
-        }
+        (None, None) => Err(PersistenceError::new(
+            "non-terminal occurrence is missing its execution",
+        )),
+        (Some(_), None) | (None, Some(_)) => Err(PersistenceError::new(
+            "occurrence execution record is incomplete",
+        )),
+        (Some(actual), Some(_)) if actual != expected_status => Err(PersistenceError::new(
+            "occurrence and execution states do not match",
+        )),
         (Some(_), Some(data)) => {
             let execution: ScheduleExecution = serde_json::from_str(data)
                 .map_err(|_| PersistenceError::new("invalid occurrence execution data"))?;
@@ -228,6 +317,11 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
         self.upsert(execution).await
     }
     async fn update_schedule(&self, schedule: &Schedule) -> Result<(), PersistenceError> {
+        if self.schedule_is_quarantined(&schedule.id).await {
+            return Err(PersistenceError::new(
+                "schedule cursor writes are blocked by one-time journal corruption",
+            ));
+        }
         self.schedules
             .upsert(schedule)
             .await
@@ -269,17 +363,18 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
             execution_status: execution.status.to_string(),
             execution_data_json,
         };
-        match store
-            .reserve_schedule_occurrence(&new)
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))?
-        {
-            ScheduleOccurrenceReservation::Reserved(row) => {
-                row_to_occurrence(&row).map(OneTimeReservation::Reserved)
-            }
-            ScheduleOccurrenceReservation::Existing(row) => {
-                row_to_occurrence(&row).map(OneTimeReservation::Existing)
-            }
+        let reservation = self
+            .map_storage_result(store.reserve_schedule_occurrence(&new).await)
+            .await?;
+        match reservation {
+            ScheduleOccurrenceReservation::Reserved(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeReservation::Reserved),
+            ScheduleOccurrenceReservation::Existing(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeReservation::Existing),
         }
     }
 
@@ -304,20 +399,22 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
             execution_data_json: serde_json::to_string(execution)
                 .map_err(|error| PersistenceError::new(error.to_string()))?,
         };
-        match store
-            .transition_schedule_occurrence(&request)
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))?
-        {
-            ScheduleOccurrenceTransitionResult::Applied(row) => {
-                row_to_occurrence(&row).map(OneTimeTransitionResult::Applied)
-            }
-            ScheduleOccurrenceTransitionResult::Idempotent(row) => {
-                row_to_occurrence(&row).map(OneTimeTransitionResult::Idempotent)
-            }
-            ScheduleOccurrenceTransitionResult::Conflict(row) => {
-                row_to_occurrence(&row).map(OneTimeTransitionResult::Conflict)
-            }
+        let result = self
+            .map_storage_result(store.transition_schedule_occurrence(&request).await)
+            .await?;
+        match result {
+            ScheduleOccurrenceTransitionResult::Applied(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeTransitionResult::Applied),
+            ScheduleOccurrenceTransitionResult::Idempotent(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeTransitionResult::Idempotent),
+            ScheduleOccurrenceTransitionResult::Conflict(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeTransitionResult::Conflict),
             ScheduleOccurrenceTransitionResult::Missing => Ok(OneTimeTransitionResult::Missing),
         }
     }
@@ -328,14 +425,15 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
         owner_id: &str,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, PersistenceError> {
-        self.occurrence_store()?
+        let result = self
+            .occurrence_store()?
             .renew_schedule_occurrence_lease(
                 occurrence_id,
                 owner_id,
                 &lease_expires_at.to_rfc3339(),
             )
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))
+            .await;
+        self.map_storage_result(result).await
     }
 
     async fn release_one_time_lease(
@@ -345,54 +443,63 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
         released_at: chrono::DateTime<chrono::Utc>,
         recovery_detail: &str,
     ) -> Result<bool, PersistenceError> {
-        self.occurrence_store()?
+        let result = self
+            .occurrence_store()?
             .release_schedule_occurrence_lease(
                 occurrence_id,
                 owner_id,
                 &released_at.to_rfc3339(),
                 recovery_detail,
             )
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))
+            .await;
+        self.map_storage_result(result).await
     }
 
     async fn load_one_time_occurrences(&self) -> Result<Vec<OneTimeOccurrence>, PersistenceError> {
-        self.occurrence_store()?
-            .list_schedule_occurrences()
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))?
-            .iter()
-            .map(row_to_occurrence)
-            .collect()
+        let result = self.occurrence_store()?.list_schedule_occurrences().await;
+        let rows = self.map_storage_result(result).await?;
+        let mut occurrences = Vec::with_capacity(rows.len());
+        for row in &rows {
+            occurrences.push(self.decode_occurrence(row).await?);
+        }
+        Ok(occurrences)
     }
 
     async fn get_one_time_occurrence(
         &self,
         occurrence_id: &str,
     ) -> Result<Option<OneTimeOccurrence>, PersistenceError> {
-        self.occurrence_store()?
+        let result = self
+            .occurrence_store()?
             .schedule_occurrence(occurrence_id)
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))?
-            .as_ref()
-            .map(row_to_occurrence)
-            .transpose()
+            .await;
+        let row = self.map_storage_result(result).await?;
+        match row {
+            Some(row) => self.decode_occurrence(&row).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     async fn get_one_time_execution(
         &self,
         occurrence_id: &str,
     ) -> Result<Option<ScheduleExecution>, PersistenceError> {
-        let Some(row) = self
+        let result = self
             .occurrence_store()?
             .schedule_occurrence(occurrence_id)
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))?
-        else {
+            .await;
+        let Some(row) = self.map_storage_result(result).await? else {
             return Ok(None);
         };
-        let occurrence = row_to_occurrence(&row)?;
-        validate_row_execution(&row, &occurrence)
+        let occurrence = self.decode_occurrence(&row).await?;
+        match validate_row_execution(&row, &occurrence) {
+            Ok(execution) => Ok(execution),
+            Err(error) => {
+                self.latch_journal_failure(OccurrenceJournalFailure::Corrupt)
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     async fn acknowledge_one_time_occurrence(
@@ -404,7 +511,7 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
     ) -> Result<OneTimeAcknowledgement, PersistenceError> {
         let execution_data_json = serde_json::to_string(execution)
             .map_err(|error| PersistenceError::new(error.to_string()))?;
-        match self
+        let result = self
             .occurrence_store()?
             .acknowledge_schedule_occurrence(
                 occurrence_id,
@@ -413,18 +520,20 @@ impl SchedulerPersistence for CampaignSchedulerPersistence {
                 &execution.status.to_string(),
                 &execution_data_json,
             )
-            .await
-            .map_err(|error| PersistenceError::new(error.to_string()))?
-        {
-            ScheduleOccurrenceAcknowledgement::Acknowledged(row) => {
-                row_to_occurrence(&row).map(OneTimeAcknowledgement::Acknowledged)
-            }
-            ScheduleOccurrenceAcknowledgement::AlreadyCancelled(row) => {
-                row_to_occurrence(&row).map(OneTimeAcknowledgement::AlreadyCancelled)
-            }
-            ScheduleOccurrenceAcknowledgement::Conflict(row) => {
-                row_to_occurrence(&row).map(OneTimeAcknowledgement::Conflict)
-            }
+            .await;
+        match self.map_storage_result(result).await? {
+            ScheduleOccurrenceAcknowledgement::Acknowledged(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeAcknowledgement::Acknowledged),
+            ScheduleOccurrenceAcknowledgement::AlreadyCancelled(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeAcknowledgement::AlreadyCancelled),
+            ScheduleOccurrenceAcknowledgement::Conflict(row) => self
+                .decode_occurrence(&row)
+                .await
+                .map(OneTimeAcknowledgement::Conflict),
             ScheduleOccurrenceAcknowledgement::Missing => Ok(OneTimeAcknowledgement::Missing),
         }
     }
@@ -1258,11 +1367,12 @@ impl CampaignScheduler {
             manager: Arc::downgrade(&manager),
         });
         manager.set_dispatcher(dispatcher).await;
-        let occurrences = Arc::new(CampaignSchedulerPersistence {
-            store: store.clone(),
-            schedules: Arc::clone(&schedules),
+        let occurrences = Arc::new(CampaignSchedulerPersistence::new(
+            store.clone(),
+            Arc::clone(&schedules),
             history_retention_limit,
-        });
+            Arc::downgrade(&manager),
+        ));
         manager
             .set_persistence(Arc::clone(&occurrences) as Arc<dyn SchedulerPersistence>)
             .await;
@@ -1277,17 +1387,23 @@ impl CampaignScheduler {
                         .iter()
                         .map(row_to_occurrence)
                         .collect::<Result<Vec<_>, _>>();
-                    match receipts {
-                        Ok(receipts)
-                            if receipts.iter().all(|receipt| {
+                    if let Ok(receipts) = receipts {
+                        let mismatched_schedule_ids: HashSet<_> = receipts
+                            .iter()
+                            .filter_map(|receipt| {
                                 loaded
                                     .iter()
                                     .find(|schedule| schedule.id == receipt.schedule_id)
-                                    .is_none_or(|schedule| {
-                                        matches!(schedule.trigger, TriggerConfig::OneTime { .. })
+                                    .filter(|schedule| {
+                                        !matches!(
+                                            schedule.trigger,
+                                            TriggerConfig::OneTime { .. }
+                                        )
                                     })
-                            }) =>
-                        {
+                                    .map(|schedule| schedule.id.clone())
+                            })
+                            .collect();
+                        if mismatched_schedule_ids.is_empty() {
                             let now = chrono::Utc::now();
                             for schedule in &mut loaded {
                                 if !matches!(schedule.trigger, TriggerConfig::OneTime { .. }) {
@@ -1313,7 +1429,10 @@ impl CampaignScheduler {
                                             .mark_one_time_recovery_required(
                                                 &schedule.id,
                                                 receipt.recovery_detail.clone().unwrap_or_else(
-                                                    || "expired non-terminal occurrence".to_owned(),
+                                                    || {
+                                                        "expired non-terminal occurrence"
+                                                            .to_owned()
+                                                    },
                                                 ),
                                             )
                                             .await;
@@ -1338,12 +1457,18 @@ impl CampaignScheduler {
                                 }
                             }
                             true
-                        }
-                        Ok(_) | Err(_) => {
+                        } else {
+                            for schedule_id in &mismatched_schedule_ids {
+                                occurrences.quarantine_schedule(schedule_id).await;
+                            }
                             manager.record_corrupt_one_time_journal();
                             manager.block_one_time(JOURNAL_CORRUPT_REASON).await;
                             true
                         }
+                    } else {
+                        manager.record_corrupt_one_time_journal();
+                        manager.block_one_time(JOURNAL_CORRUPT_REASON).await;
+                        true
                     }
                 }
                 Err(error) => {
@@ -1382,6 +1507,7 @@ impl CampaignScheduler {
             for schedule in &mut loaded {
                 if !matches!(schedule.trigger, TriggerConfig::OneTime { .. })
                     && schedule.last_fire.is_none()
+                    && !occurrences.schedule_is_quarantined(&schedule.id).await
                 {
                     if let Some(value) = fires.get(&schedule.id) {
                         schedule.last_fire = Some(value.parse().map_err(|_| {
@@ -1492,6 +1618,9 @@ impl CampaignScheduler {
                 .collect(),
             None => std::collections::HashMap::new(),
         };
+        if self.store.is_some() {
+            self.refresh_one_time_receipt_statuses(&schedules).await?;
+        }
         let mut views = Vec::with_capacity(schedules.len());
         for schedule in &schedules {
             let mut view = view_of(schedule);
@@ -1528,16 +1657,13 @@ impl CampaignScheduler {
         &self,
     ) -> Result<Vec<OneTimeRecoveryView>, CampaignSchedulerError> {
         let schedules = self.manager.list_schedules().await;
+        let occurrences = self.refresh_one_time_receipt_statuses(&schedules).await?;
         let names: std::collections::HashMap<_, _> = schedules
             .iter()
             .map(|schedule| (schedule.id.clone(), schedule.name.clone()))
             .collect();
         let now = chrono::Utc::now();
-        let mut recoveries: Vec<_> = self
-            .occurrences
-            .load_one_time_occurrences()
-            .await
-            .map_err(occurrence_journal_error)?
+        let mut recoveries: Vec<_> = occurrences
             .into_iter()
             .filter(|occurrence| occurrence.recovery_eligible(now))
             .map(|occurrence| OneTimeRecoveryView {
@@ -1576,6 +1702,13 @@ impl CampaignScheduler {
             .map_err(occurrence_journal_error)?
             .ok_or_else(|| CampaignSchedulerError::OccurrenceNotFound(occurrence_id.to_owned()))?;
 
+        if let Some(schedule) = self.manager.get_schedule(&occurrence.schedule_id).await {
+            self.reject_receipts_attached_to_recurring_schedules(
+                std::slice::from_ref(&occurrence),
+                std::slice::from_ref(&schedule),
+            )
+            .await?;
+        }
         if occurrence.state == OneTimeOccurrenceState::Cancelled {
             return self.finish_one_time_acknowledgement(&occurrence).await;
         }
@@ -1630,6 +1763,81 @@ impl CampaignScheduler {
             self.manager.record_one_time_acknowledgement();
         }
         self.finish_one_time_acknowledgement(&acknowledged).await
+    }
+
+    async fn refresh_one_time_receipt_statuses(
+        &self,
+        schedules: &[Schedule],
+    ) -> Result<Vec<OneTimeOccurrence>, CampaignSchedulerError> {
+        let occurrences = self
+            .occurrences
+            .load_one_time_occurrences()
+            .await
+            .map_err(occurrence_journal_error)?;
+        self.reject_receipts_attached_to_recurring_schedules(&occurrences, schedules)
+            .await?;
+
+        let now = chrono::Utc::now();
+        for occurrence in occurrences
+            .iter()
+            .filter(|occurrence| occurrence.recovery_eligible(now))
+        {
+            let belongs_to_one_time = schedules.iter().any(|schedule| {
+                schedule.id == occurrence.schedule_id
+                    && matches!(schedule.trigger, TriggerConfig::OneTime { .. })
+            });
+            if belongs_to_one_time
+                && !matches!(
+                    self.manager
+                        .one_time_runtime_status(&occurrence.schedule_id)
+                        .await,
+                    OneTimeRuntimeStatus::RecoveryRequired { .. }
+                )
+            {
+                self.manager.record_expired_one_time_occurrence();
+                self.manager
+                    .mark_one_time_recovery_required(
+                        &occurrence.schedule_id,
+                        occurrence
+                            .recovery_detail
+                            .clone()
+                            .unwrap_or_else(|| "expired non-terminal occurrence".to_owned()),
+                    )
+                    .await;
+            }
+        }
+        Ok(occurrences)
+    }
+
+    async fn reject_receipts_attached_to_recurring_schedules(
+        &self,
+        occurrences: &[OneTimeOccurrence],
+        schedules: &[Schedule],
+    ) -> Result<(), CampaignSchedulerError> {
+        let mismatched_schedule_ids: HashSet<_> = occurrences
+            .iter()
+            .filter_map(|occurrence| {
+                schedules
+                    .iter()
+                    .find(|schedule| schedule.id == occurrence.schedule_id)
+                    .filter(|schedule| !matches!(schedule.trigger, TriggerConfig::OneTime { .. }))
+                    .map(|schedule| schedule.id.clone())
+            })
+            .collect();
+        if mismatched_schedule_ids.is_empty() {
+            return Ok(());
+        }
+
+        for schedule_id in mismatched_schedule_ids {
+            self.occurrences.quarantine_schedule(&schedule_id).await;
+        }
+        if self.manager.one_time_block_reason().await.as_deref() != Some(JOURNAL_CORRUPT_REASON) {
+            self.manager.record_corrupt_one_time_journal();
+            self.manager.block_one_time(JOURNAL_CORRUPT_REASON).await;
+        }
+        Err(CampaignSchedulerError::OccurrenceJournal(
+            "occurrence receipt is not attached to a one-time schedule".to_owned(),
+        ))
     }
 
     async fn finish_one_time_acknowledgement(
@@ -1873,7 +2081,9 @@ fn load_schedules(path: &Path) -> Result<Vec<Schedule>, StateFileError> {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
-    use hf_scheduler::{ExecutionStatus, OneTimeOccurrenceState};
+    use hf_scheduler::{
+        ExecutionStatus, FiredTrigger, IncomingEvent, OneTimeOccurrenceState, TriggerType,
+    };
     use hf_storage::ScheduleOccurrenceRecord;
 
     use super::*;
@@ -2003,6 +2213,20 @@ mod tests {
             );
         }
 
+        fn write_future_one_time(&self, id: &str) {
+            self.push_schedule(
+                Schedule::new(
+                    id,
+                    id,
+                    TriggerConfig::OneTime {
+                        at: Utc::now() + chrono::Duration::hours(1),
+                    },
+                    CAMPAIGN_KIND,
+                )
+                .with_params(serde_json::to_value(self.params()).unwrap()),
+            );
+        }
+
         fn write_interval(&self, id: &str) {
             let mut schedule = Schedule::new(
                 id,
@@ -2014,6 +2238,22 @@ mod tests {
             schedule.policies.missed_policy = Some(hf_scheduler::MissedPolicy::CatchUp);
             schedule.last_fire = Some(Utc::now() - chrono::Duration::seconds(2));
             self.push_schedule(schedule);
+        }
+
+        fn write_event(&self, id: &str) {
+            self.push_schedule(
+                Schedule::new(
+                    id,
+                    id,
+                    TriggerConfig::Event {
+                        event_type: EVENT_RUN_COMPLETED.to_owned(),
+                        debounce_secs: 0,
+                        filter: None,
+                    },
+                    CAMPAIGN_KIND,
+                )
+                .with_params(serde_json::to_value(self.params()).unwrap()),
+            );
         }
 
         async fn start(&self) -> Result<CampaignScheduler, CampaignSchedulerError> {
@@ -2207,6 +2447,31 @@ mod tests {
         TriggerConfig::OneTime {
             at: Utc::now() - chrono::Duration::seconds(1),
         }
+    }
+
+    async fn wait_for_execution(scheduler: &CampaignScheduler, schedule_id: &str) {
+        for _ in 0..100 {
+            if !scheduler
+                .manager
+                .execution_history(schedule_id)
+                .await
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("schedule {schedule_id} did not dispatch");
+    }
+
+    async fn wait_for_one_time_block(scheduler: &CampaignScheduler) -> String {
+        for _ in 0..100 {
+            if let Some(reason) = scheduler.manager.one_time_block_reason().await {
+                return reason;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("one-time scheduling was not blocked");
     }
 
     #[tokio::test]
@@ -2467,6 +2732,176 @@ mod tests {
             .execution_history("healthy-interval")
             .await
             .is_empty());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn receipt_attached_to_recurring_schedule_is_quarantined_without_stopping_dispatch() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_event("recurring");
+        fixture
+            .reserve_expired_receipt(
+                "recurring",
+                "occ-mismatch",
+                "exec-mismatch",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
+        let before = std::fs::read(&fixture.schedules_path).unwrap();
+
+        let scheduler = fixture.start().await.unwrap();
+        assert_eq!(
+            scheduler
+                .manager
+                .emit_event(IncomingEvent {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    payload: None,
+                    timestamp: Utc::now(),
+                })
+                .await,
+            vec!["recurring"]
+        );
+        wait_for_execution(&scheduler, "recurring").await;
+
+        assert!(matches!(
+            scheduler
+                .acknowledge_one_time_recovery("occ-mismatch")
+                .await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        assert!(matches!(
+            scheduler.list_one_time_recoveries().await,
+            Err(CampaignSchedulerError::OccurrenceJournal(_))
+        ));
+        let receipt = fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .schedule_occurrence("occ-mismatch")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.state, "reserved");
+        assert_eq!(receipt.execution_status.as_deref(), Some("pending"));
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn post_start_journal_failure_blocks_new_one_time_work_but_not_recurring_dispatch() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_future_one_time("once");
+        fixture.write_event("recurring");
+        let scheduler = fixture.start().await.unwrap();
+        fixture.store.as_ref().unwrap().pool().close().await;
+
+        scheduler
+            .manager
+            .trigger_sender()
+            .unwrap()
+            .send(FiredTrigger {
+                schedule_id: "once".to_owned(),
+                fired_at: Utc::now(),
+                trigger_type: TriggerType::OneTime,
+                is_recovery: false,
+                event_payload: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_for_one_time_block(&scheduler).await,
+            JOURNAL_UNAVAILABLE_REASON
+        );
+        assert!(matches!(
+            scheduler
+                .try_create("new once", &fixture.params(), due_trigger())
+                .await,
+            Err(CampaignSchedulerError::DurabilityUnavailable(_))
+        ));
+
+        assert_eq!(
+            scheduler
+                .manager
+                .emit_event(IncomingEvent {
+                    event_type: EVENT_RUN_COMPLETED.to_owned(),
+                    payload: None,
+                    timestamp: Utc::now(),
+                })
+                .await,
+            vec!["recurring"]
+        );
+        wait_for_execution(&scheduler, "recurring").await;
+        assert!(scheduler.manager.is_running());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn foreign_live_receipt_becomes_recovery_required_when_its_lease_expires() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_due_one_time("once");
+        fixture
+            .reserve_live_receipt("once", "occ-live", "exec-live")
+            .await;
+        fixture
+            .store
+            .as_ref()
+            .unwrap()
+            .renew_schedule_occurrence_lease(
+                "occ-live",
+                "fixture-owner",
+                &(Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            )
+            .await
+            .unwrap();
+
+        let scheduler = fixture.start().await.unwrap();
+        assert_eq!(
+            scheduler.list_views().await.unwrap()[0].durability_status,
+            CampaignDurabilityStatus::Consumed
+        );
+        let mut recoveries = Vec::new();
+        for _ in 0..200 {
+            recoveries = scheduler.list_one_time_recoveries().await.unwrap();
+            if !recoveries.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!recoveries.is_empty(), "live receipt lease did not expire");
+        assert_eq!(recoveries[0].occurrence_id, "occ-live");
+        assert_eq!(
+            scheduler.list_views().await.unwrap()[0].durability_status,
+            CampaignDurabilityStatus::RecoveryRequired
+        );
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn occurrence_column_decode_failure_is_classified_as_corrupt_journal_data() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.write_due_one_time("once");
+        fixture
+            .reserve_live_receipt("once", "occ-invalid-type", "exec-invalid-type")
+            .await;
+        sqlx::query(
+            "UPDATE schedule_occurrences SET owner_id = X'80' WHERE id = 'occ-invalid-type'",
+        )
+        .execute(fixture.store.as_ref().unwrap().pool())
+        .await
+        .unwrap();
+
+        let scheduler = fixture.start().await.unwrap();
+        assert_eq!(
+            scheduler.manager.one_time_block_reason().await.as_deref(),
+            Some(JOURNAL_CORRUPT_REASON)
+        );
+        assert_eq!(
+            scheduler
+                .manager
+                .occurrence_metrics()
+                .corrupt_journal_blocks,
+            1
+        );
         scheduler.stop().await;
     }
 
@@ -2837,11 +3272,7 @@ mod tests {
         );
         atomic_write_schedules(&path, &[schedule.clone()]).unwrap();
         let repository = Arc::new(ScheduleFileStore::new(path.clone()));
-        let persistence = CampaignSchedulerPersistence {
-            store: None,
-            schedules: repository,
-            history_retention_limit: 100,
-        };
+        let persistence = CampaignSchedulerPersistence::new(None, repository, 100, Weak::new());
 
         let fired_at = chrono::Utc::now();
         schedule.last_fire = Some(fired_at);
@@ -2856,11 +3287,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::connect(dir.path().join("history.db")).await.unwrap());
         let repository = Arc::new(ScheduleFileStore::new(dir.path().join("schedules.json")));
-        let persistence = CampaignSchedulerPersistence {
-            store: Some(Arc::clone(&store)),
-            schedules: repository,
-            history_retention_limit: 2,
-        };
+        let persistence =
+            CampaignSchedulerPersistence::new(Some(Arc::clone(&store)), repository, 2, Weak::new());
         let now = chrono::Utc::now();
         for index in 0..3 {
             let at = if index == 0 {
