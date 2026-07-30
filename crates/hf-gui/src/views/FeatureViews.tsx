@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from "react";
 import { Button, IconButton, EmptyState, Input, LoadingState, Select, SeverityBadge, Textarea, ViewHeader } from "../components/ui";
 import { Puzzle, BookOpen, Zap, Target, FileCode, Activity, Bug, Crosshair, Play, Loader2, Plus, Trash2, RotateCw, RotateCcw, Copy, Square, Bot, Shield, Database, Pencil, Save, X, Search, FilePlus, FolderOpen, Layers } from "lucide-react";
 import { getTransport, pickFile, pickFolder, emitDataChanged } from "../lib";
@@ -17,7 +17,12 @@ import {
   ScheduleRecoveryPanel,
   type OneTimeRecoveryView,
 } from "../components/ScheduleRecoveryPanel";
-import { acknowledgeRecoveryWithRefresh } from "../lib/scheduleRecovery";
+import {
+  acknowledgeRecoveryWithRefresh,
+  createLatestRefresh,
+  initialRecoveryLoadState,
+  recoveryLoadReducer,
+} from "../lib/scheduleRecovery";
 
 // ---------------------------------------------------------------------------
 // Agents
@@ -1244,6 +1249,10 @@ export function AutomationView() {
   const [campaigns, setCampaigns] = useState<CampaignView[]>([]);
   const [history, setHistory] = useState<ExecutionView[]>([]);
   const [recoveries, setRecoveries] = useState<OneTimeRecoveryView[]>([]);
+  const [recoveryLoad, dispatchRecoveryLoad] = useReducer(
+    recoveryLoadReducer,
+    initialRecoveryLoadState,
+  );
   const [triggerKind, setTriggerKind] = useState<"interval" | "cron" | "once">("interval");
   const [triggerValue, setTriggerValue] = useState("3600");
   const [durationOverride, setDurationOverride] = useState<number | null>(null);
@@ -1274,19 +1283,44 @@ export function AutomationView() {
     return [...new Set(all)];
   }, [project, activeProject, recentProjects]);
 
-  const refreshAutomation = useCallback(async () => {
-    const [nextCampaigns, nextHistory, nextRecoveries] = await Promise.all([
-      getTransport().invoke<CampaignView[]>("schedule_list"),
-      getTransport().invoke<ExecutionView[]>("schedule_history", { limit: 20 }),
-      getTransport().invoke<OneTimeRecoveryView[]>("schedule_recovery_list"),
-    ]);
-    setCampaigns(nextCampaigns);
-    setHistory(nextHistory);
-    setRecoveries(nextRecoveries);
-  }, []);
+  const automationRefresh = useMemo(
+    () => createLatestRefresh({
+      onStart: () => dispatchRecoveryLoad("start"),
+      load: () => Promise.allSettled([
+        getTransport().invoke<CampaignView[]>("schedule_list"),
+        getTransport().invoke<ExecutionView[]>("schedule_history", { limit: 20 }),
+        getTransport().invoke<OneTimeRecoveryView[]>("schedule_recovery_list"),
+      ] as const),
+      commit: ([nextCampaigns, nextHistory, nextRecoveries]) => {
+        if (nextCampaigns.status === "fulfilled") {
+          setCampaigns(nextCampaigns.value);
+        } else {
+          setError(String(nextCampaigns.reason));
+        }
+        if (nextHistory.status === "fulfilled") {
+          setHistory(nextHistory.value);
+        } else {
+          setError(String(nextHistory.reason));
+        }
+        if (nextRecoveries.status === "fulfilled") {
+          setRecoveries(nextRecoveries.value);
+          dispatchRecoveryLoad("success");
+        } else {
+          setRecoveries([]);
+          dispatchRecoveryLoad("error");
+        }
+      },
+    }),
+    [],
+  );
+  const refreshAutomation = useCallback(
+    () => automationRefresh.refresh(),
+    [automationRefresh],
+  );
 
   // Load + light poll so campaign state, recoveries, and history stay aligned.
   useEffect(() => {
+    automationRefresh.activate();
     void Promise.resolve()
       .then(refreshAutomation)
       .catch((cause: unknown) => setError(String(cause)));
@@ -1305,8 +1339,11 @@ export function AutomationView() {
     const intervalId = window.setInterval(() => {
       void refreshAutomation().catch((cause: unknown) => setError(String(cause)));
     }, 10_000);
-    return () => window.clearInterval(intervalId);
-  }, [refreshAutomation]);
+    return () => {
+      window.clearInterval(intervalId);
+      automationRefresh.deactivate();
+    };
+  }, [automationRefresh, refreshAutomation]);
 
   // Only promoted harnesses can be scheduled; ask the backend which those are.
   // The answer is stored with the project it belongs to, so a slow reply for a
@@ -1571,6 +1608,10 @@ export function AutomationView() {
         title={t("automation.recoveryTitle")}
         actionLabel={t("automation.recoveryAcknowledgeAction")}
         unknownScheduleLabel={t("automation.recoveryUnknownSchedule")}
+        loading={recoveryLoad.loading}
+        error={recoveryLoad.error}
+        loadingLabel={t("automation.recoveryLoading")}
+        errorLabel={t("automation.recoveryUnavailable")}
         onAcknowledge={(occurrenceId) => void acknowledgeRecovery(occurrenceId)}
       />
 
