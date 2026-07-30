@@ -12,6 +12,7 @@ default = ["automotive-scapy", "proof-carrying", "semgrep-enrichment"]
 automotive-scapy = ["dep:hf-automotive", "hf-automotive/automotive-scapy"]
 proof-carrying = ["hf-coverage/campaign-advisor", "hf-crash/remediation-handoff"]
 semgrep-enrichment = ["hf-discovery/semgrep-enrichment"]
+test-support = []
 
 [dependencies]
 hf-core = { workspace = true }
