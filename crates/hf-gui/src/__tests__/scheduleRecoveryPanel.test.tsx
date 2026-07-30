@@ -21,6 +21,10 @@ describe("ScheduleRecoveryPanel", () => {
         title="Recovery required"
         actionLabel="Acknowledge as cancelled"
         unknownScheduleLabel="Deleted schedule"
+        loading={false}
+        error={false}
+        loadingLabel="Loading recovery state"
+        errorLabel="Recovery state unavailable"
         onAcknowledge={() => undefined}
       />,
     );
@@ -31,13 +35,53 @@ describe("ScheduleRecoveryPanel", () => {
     expect(html).toContain("Acknowledge as cancelled");
   });
 
-  it("renders nothing when no recovery is required", () => {
+  it("renders a distinct loading state before recovery is available", () => {
     const html = renderToStaticMarkup(
       <ScheduleRecoveryPanel
         recoveries={[]}
         title="Recovery required"
         actionLabel="Acknowledge as cancelled"
         unknownScheduleLabel="Deleted schedule"
+        loading
+        error={false}
+        loadingLabel="Loading recovery state"
+        errorLabel="Recovery state unavailable"
+        onAcknowledge={() => undefined}
+      />,
+    );
+    expect(html).toContain('role="status"');
+    expect(html).toContain("Loading recovery state");
+  });
+
+  it("renders recovery unavailability next to the recovery surface", () => {
+    const html = renderToStaticMarkup(
+      <ScheduleRecoveryPanel
+        recoveries={[]}
+        title="Recovery required"
+        actionLabel="Acknowledge as cancelled"
+        unknownScheduleLabel="Deleted schedule"
+        loading={false}
+        error
+        loadingLabel="Loading recovery state"
+        errorLabel="Recovery state unavailable"
+        onAcknowledge={() => undefined}
+      />,
+    );
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Recovery state unavailable");
+  });
+
+  it("renders nothing after a successful empty recovery response", () => {
+    const html = renderToStaticMarkup(
+      <ScheduleRecoveryPanel
+        recoveries={[]}
+        title="Recovery required"
+        actionLabel="Acknowledge as cancelled"
+        unknownScheduleLabel="Deleted schedule"
+        loading={false}
+        error={false}
+        loadingLabel="Loading recovery state"
+        errorLabel="Recovery state unavailable"
         onAcknowledge={() => undefined}
       />,
     );
