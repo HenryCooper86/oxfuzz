@@ -2290,9 +2290,14 @@ impl Store {
         data_json: &str,
     ) -> Result<(), StorageError> {
         sqlx::query(
-            "INSERT OR REPLACE INTO schedule_executions
+            "INSERT INTO schedule_executions
                 (id, schedule_id, triggered_at, status, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                schedule_id = excluded.schedule_id,
+                triggered_at = excluded.triggered_at,
+                status = excluded.status,
+                data_json = excluded.data_json",
         )
         .bind(id)
         .bind(schedule_id)
@@ -2332,6 +2337,11 @@ impl Store {
                    )
                    ELSE FALSE
                END
+               AND id NOT IN (
+                   SELECT execution_id
+                   FROM schedule_occurrences
+                   WHERE state IN ('reserved', 'running')
+               )
                AND id NOT IN (
                    SELECT id FROM schedule_executions
                    WHERE schedule_id = ?1
@@ -2399,19 +2409,27 @@ impl Store {
             .collect())
     }
 
-    /// Delete all persisted schedule executions, returning how many were removed.
+    /// Delete clearable schedule executions, returning how many were removed.
     ///
     /// Execution history is deliberately decoupled from the schedules themselves
     /// (so a run's outcome survives its schedule being deleted), which means the
     /// failures of a long-gone campaign otherwise sit in the history forever.
-    /// This is how an operator clears them.
+    /// This is how an operator clears them. Executions referenced by non-terminal
+    /// one-time occurrence receipts remain protected.
     ///
     /// # Errors
     /// Returns an error on a SQL failure.
     pub async fn clear_schedule_executions(&self) -> Result<u64, StorageError> {
-        let result = sqlx::query("DELETE FROM schedule_executions")
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "DELETE FROM schedule_executions
+             WHERE id NOT IN (
+                 SELECT execution_id
+                 FROM schedule_occurrences
+                 WHERE state IN ('reserved', 'running')
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected())
     }
 
