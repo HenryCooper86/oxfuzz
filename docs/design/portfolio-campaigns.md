@@ -92,6 +92,13 @@ Every changed `Schedule`, including `last_fire`, is written back to
 that cursor are repaired once from persisted execution history before recovery
 is planned.
 
+Only one-time triggers use permanent SQLite occurrence receipts. Their admission
+order is receipt+pending transaction -> JSON `last_fire` -> tracked task ->
+running transaction -> dispatcher -> terminal transaction. A 60-second owner
+lease renews every 15 seconds. Expired non-terminal receipts require
+acknowledgement as cancelled and never retry automatically. Recurring schedules
+do not use occurrence APIs.
+
 Recovery creates compact batches rather than filling the trigger channel before
 its receiver exists. `Skip` advances to the latest due occurrence without
 dispatching, `CatchUp` queues one occurrence, and `Backfill` lazily submits every

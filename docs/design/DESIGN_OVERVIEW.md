@@ -40,6 +40,7 @@ all under human-in-the-loop supervision.
 | Skill evolution | hf-skills | `SkillRegistry` | (reuse y-agent) |
 | Agent prompt security | hf-prompt | - | agent-prompt-security-design.md |
 | Service orchestration | hf-service | - | service-orchestration-design.md |
+| Durable one-time schedule occurrences | hf-scheduler + hf-storage + hf-service | `OneTimeOccurrence`, `OneTimeRecoveryView` | portfolio-campaigns.md + service-orchestration-design.md + DATABASE_SCHEMA.md |
 | Agent loop | hf-agent | `AgentDelegator` | agent-prompt-security-design.md |
 | Web API security / transport | hf-web | - | web-api-security-design.md |
 | Remediation handoff | hf-crash + hf-service | versioned remediation DTO | proof-carrying-campaign-intelligence.md |
@@ -113,6 +114,9 @@ absent. Once resolved, concurrency and hourly-rate policies are enforced before
 dispatch, and every policy skip or cancellation remains visible in execution
 history. Cron expressions are evaluated in their persisted IANA timezone; new
 non-UTC schedules use the explicit `CRON_TZ=<zone> <expression>` form.
+
+One-time schedules use a durable SQLite occurrence receipt before dispatch;
+recurring schedules retain their existing scheduling path.
 
 ## 5. Open Questions
 
