@@ -1088,6 +1088,35 @@ pub async fn schedule_list(
         .map_err(|error| error.to_string())
 }
 
+/// List one-time campaign receipts that require operator acknowledgement.
+#[tauri::command]
+pub async fn schedule_recovery_list(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<Vec<hf_service::scheduler::OneTimeRecoveryView>, String> {
+    state
+        .scheduler
+        .list_one_time_recoveries()
+        .await
+        .map_err(recovery_command_error)
+}
+
+/// Record an eligible one-time recovery outcome as cancelled.
+#[tauri::command]
+pub async fn schedule_recovery_acknowledge(
+    state: tauri::State<'_, crate::state::AppState>,
+    occurrence_id: String,
+) -> Result<hf_service::scheduler::OneTimeRecoveryView, String> {
+    state
+        .scheduler
+        .acknowledge_one_time_recovery(&occurrence_id)
+        .await
+        .map_err(recovery_command_error)
+}
+
+fn recovery_command_error(error: hf_service::scheduler::CampaignSchedulerError) -> String {
+    error.into_public_recovery_error().to_string()
+}
+
 /// Recent scheduled-campaign executions (newest first).
 #[tauri::command]
 pub async fn schedule_history(
@@ -2998,4 +3027,25 @@ pub fn config_toml_to_value(content: String) -> Result<serde_json::Value, String
 #[tauri::command]
 pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> {
     hf_service::config::json_to_toml(&value)
+}
+
+#[cfg(test)]
+mod recovery_command_tests {
+    use hf_service::scheduler::CampaignSchedulerError;
+
+    use super::recovery_command_error;
+
+    #[test]
+    fn tauri_recovery_error_excludes_sql_diagnostics() {
+        let public = recovery_command_error(CampaignSchedulerError::OccurrenceJournal(
+            "SQL_PRIVATE_MARKER: SELECT secret_json FROM schedule_occurrences".to_owned(),
+        ));
+
+        assert_eq!(
+            public,
+            "one-time recovery is temporarily unavailable".to_owned()
+        );
+        assert!(!public.contains("SQL_PRIVATE_MARKER"));
+        assert!(!public.contains("SELECT"));
+    }
 }

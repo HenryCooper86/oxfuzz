@@ -598,14 +598,25 @@ describe("transport", () => {
       // the id is part of the path, not the body.
       await transport.invoke("schedule_delete", { id: "abc-123" });
       await transport.invoke("schedule_set_enabled", { id: "abc-123", enabled: false });
+      await transport.invoke("schedule_recovery_list");
+      await transport.invoke("schedule_recovery_acknowledge", {
+        occurrenceId: "occ/a b",
+      });
 
-      expect(calls.map((c) => c.url)).toEqual([
+      expect(calls.slice(0, 2).map((c) => c.url)).toEqual([
         "http://localhost:8081/schedule/abc-123",
         "http://localhost:8081/schedule/abc-123/enabled",
       ]);
       expect(calls[0].init.method).toBe("DELETE");
       expect(calls[1].init.method).toBe("POST");
       expect(JSON.parse(String(calls[1].init.body))).toEqual({ enabled: false });
+      expect(calls.slice(-2).map((call) => call.url)).toEqual([
+        "http://localhost:8081/schedule/recovery",
+        "http://localhost:8081/schedule/recovery/occ%2Fa%20b/acknowledge",
+      ]);
+      expect(calls.at(-2)?.init.method).toBe("GET");
+      expect(calls.at(-1)?.init.method).toBe("POST");
+      expect(JSON.parse(String(calls.at(-1)?.init.body))).toEqual({});
     } finally {
       globalThis.fetch = originalFetch;
     }

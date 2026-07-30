@@ -481,6 +481,56 @@ is still inside the rolling one-hour admission window. Hourly counts likewise
 read the serialized `started_at`; trigger time is not a substitute for a real
 execution start.
 
+### `schedule_occurrences`
+
+Migration `0023_schedule_occurrences.sql` creates permanent
+`schedule_occurrences` receipts. Each receipt is unique per `schedule_id` and
+`execution_id`; the execution reference is intentionally soft so terminal
+history can be cleared while durable occurrence evidence remains.
+
+Migration 0023 creates permanent schedule_occurrences receipts, one receipt per
+schedule_id and execution_id, non-terminal lease requirements, terminal lease
+clearing, a 4,096-byte recovery_detail check, soft execution references, atomic
+paired transitions, and retention protection.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `id` | `TEXT PRIMARY KEY` | occurrence identifier |
+| `schedule_id` | `TEXT NOT NULL UNIQUE` | one receipt per one-time schedule |
+| `execution_id` | `TEXT NOT NULL UNIQUE` | soft reference to `schedule_executions` |
+| `triggered_at` | `TEXT NOT NULL` | durable trigger timestamp |
+| `state` | `TEXT NOT NULL CHECK (state IN ('reserved', 'running', 'completed', 'failed', 'cancelled'))` | durable occurrence state |
+| `owner_id` | `TEXT NOT NULL` | scheduler-instance owner |
+| `lease_expires_at` | `TEXT` | required for non-terminal states and cleared for terminal states |
+| `recovery_detail` | `TEXT CHECK (recovery_detail IS NULL OR length(CAST(recovery_detail AS BLOB)) <= 4096)` | bounded UTF-8 recovery detail |
+| `created_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | receipt creation time |
+| `updated_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | receipt update time |
+
+The table requires this lease-shape check:
+
+```sql
+CHECK (
+    (
+        state IN ('reserved', 'running')
+        AND lease_expires_at IS NOT NULL
+    )
+    OR (
+        state IN ('completed', 'failed', 'cancelled')
+        AND lease_expires_at IS NULL
+    )
+)
+```
+
+Index: `idx_schedule_occurrences_state(state, lease_expires_at, updated_at)`.
+Receipt and execution state transitions are paired atomic transactions.
+Retention and explicit history clearing protect every execution referenced by a
+non-terminal receipt; receipts are retained permanently. When terminal history
+still exists, an idempotent transition replay must match both the receipt and
+serialized execution. After that history is explicitly cleared, replay is
+idempotent only from an exact match of the permanent occurrence, schedule,
+execution, owner, destination-state, lease, and recovery-detail fields. Such a
+receipt-only replay never recreates the cleared execution row.
+
 ### `project_settings`
 
 | column | SQLite declaration |
@@ -558,6 +608,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0020_harness_approvals.sql` | creates atomic, digest-bound human harness-promotion provenance |
 | `0021_run_provenance_components.sql` | adds independently verifiable source, corpus, and sandbox-reference digests to runs |
 | `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
+| `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
 
 ## 7. Read failure contract
 

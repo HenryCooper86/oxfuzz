@@ -149,6 +149,23 @@ compacting ambiguous evidence away. This bounded JSONL WAL is owned directly by
 `hf-service` and is the sole recovery-state model; there is no parallel
 in-memory scope journal.
 
+For one-time schedule creation and execution, `hf-service` requires readable
+SQLite. It loads and validates occurrence receipts before recovery planning,
+reconciles stale JSON cursors before ticking, and owns recovery DTOs plus
+acknowledgement. Corrupt or unavailable receipt evidence blocks one-time work
+only. Startup preserves a safely decoded schedule identity before strict row
+conversion and quarantines each identifiable malformed receipt before cursor
+restoration or schedule-file writes. An undecodable schedule identity
+quarantines the complete startup definition snapshot, so later full writes
+cannot overwrite unknown damaged evidence; recurring schedules still execute
+from their in-memory definitions. Recovery acknowledgement serializes cursor
+reconciliation with direct remove and enable/disable, then re-reads and updates
+only the current definition; it never recreates a removed schedule or restores
+a stale enabled value. The service maps recovery failures to stable public
+`not_found`, `conflict`, `unavailable`, or `internal` codes and bounded messages.
+REST, Tauri, and CLI never format the underlying path-, SQL-, OS-, or
+stored-JSON-bearing error directly.
+
 Persistent chat context is session-owned. Presentation-supplied session ids are
 validated before transcript file I/O, and the session metadata row must exist
 before the service loads model context or retains a per-session turn lock. Raw
