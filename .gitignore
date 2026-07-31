@@ -90,3 +90,6 @@ config/issue_tracker.toml
 
 ### TypeScript incremental build cache
 *.tsbuildinfo
+
+### Subagent-driven development scratch (ledgers, briefs, review packages)
+.superpowers/
