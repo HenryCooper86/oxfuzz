@@ -1,0 +1,71 @@
+# oxfuzz CI.
+#
+# This pipeline and .github/workflows/ci.yml both invoke named gates from
+# scripts/tests/gates.sh, which stays the single definition of what a gate
+# means. GitLab gates merges on the current origin; the GitHub workflow gates
+# the public repository.
+#
+# Jobs are split so a red pipeline identifies which category broke without
+# opening a log.
+
+stages:
+  - gate
+
+default:
+  interruptible: true
+
+variables:
+  # Keep the cargo registry inside the project so it can be cached; GitLab only
+  # caches paths under the build directory.
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+
+rust:
+  stage: gate
+  # rustup in this image honors rust-toolchain.toml, which pins 1.94.0. Pinning
+  # the image tag as well keeps the base layer stable without overriding it.
+  image: rust:1.94
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry
+      - target/
+  script:
+    - scripts/tests/gates.sh fmt
+    - scripts/tests/gates.sh clippy
+    - scripts/tests/gates.sh check
+    - scripts/tests/gates.sh test
+    - scripts/tests/gates.sh doc
+
+frontend:
+  stage: gate
+  image: node:22
+  cache:
+    key:
+      files:
+        - crates/hf-gui/package-lock.json
+    paths:
+      - crates/hf-gui/node_modules
+  script:
+    - scripts/tests/gates.sh frontend-test
+    - scripts/tests/gates.sh frontend-lint
+
+script-tests:
+  stage: gate
+  # Its own job rather than riding along with rust: the Rust image has no
+  # python3, and installing one there would cost more than this job does.
+  image: python:3.12-slim
+  script:
+    - scripts/tests/gates.sh script-tests
+
+supply-chain:
+  stage: gate
+  image: rust:1.94
+  cache:
+    key: cargo-deny
+    paths:
+      - .cargo/bin
+  script:
+    - command -v cargo-deny || cargo install cargo-deny --locked
+    - scripts/tests/gates.sh deny
