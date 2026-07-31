@@ -3,11 +3,13 @@
 use std::path::Path;
 
 use hf_core::error::ClassifiedError;
+#[cfg(feature = "semgrep-enrichment")]
 use hf_core::target::{TargetInventory, TargetLanguage};
 use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
 use super::guards::StagingDirectoryGuard;
+#[cfg(feature = "semgrep-enrichment")]
 use super::project_identity::{project_lookup_identity, stored_project_matches};
 use super::workspace::{document_staging_dir, prepare_configured_workspace_root};
 use super::{MemorySnapshot, ProviderSnapshot, ServiceContainer, SystemSnapshot};
