@@ -531,8 +531,8 @@ mod workspace_tests {
     use super::{
         document_staging_dir, prepare_managed_workspace_root,
         prepare_managed_workspace_root_with_adoption, project_workspace_dir, run_output_relative,
-        workspace_dir, workspace_lock_file, workspace_root_selection, ServiceContainer,
-        WORKSPACE_MANIFEST_FILE,
+        workspace_dir, workspace_lock_file, workspace_manifest, workspace_root_selection,
+        ServiceContainer, WORKSPACE_MANIFEST_FILE,
     };
     use std::path::{Component, Path};
 
@@ -967,6 +967,41 @@ mod workspace_tests {
         assert_eq!(
             workspace_dir(project, "../.."),
             base(project).join("default")
+        );
+    }
+
+    #[test]
+    fn explicit_override_without_a_manifest_is_never_adopted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("explicit");
+        std::fs::create_dir_all(root.join("legacy-project")).expect("legacy artifact");
+
+        let adopted = prepare_managed_workspace_root_with_adoption(&root, false);
+
+        assert!(
+            adopted.is_err(),
+            "an explicit override must not adopt unmanaged artifacts"
+        );
+    }
+
+    #[test]
+    fn implicit_default_adopts_pre_manifest_artifacts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("implicit");
+        std::fs::create_dir_all(root.join("legacy-project")).expect("legacy artifact");
+
+        let adopted =
+            prepare_managed_workspace_root_with_adoption(&root, true).expect("adoption allowed");
+
+        // Compare against the canonicalized root, not the raw tempdir path: on
+        // macOS `$TMPDIR` resolves through a `/var` -> `/private/var` symlink,
+        // and `prepare_managed_workspace_root_with_adoption` always returns the
+        // canonical form (see the sibling `managed_workspace_preparation_*`
+        // tests above, which canonicalize for the same reason).
+        assert_eq!(adopted, std::fs::canonicalize(&root).unwrap());
+        assert!(
+            workspace_manifest(&root).is_file(),
+            "manifest written on adoption"
         );
     }
 }
