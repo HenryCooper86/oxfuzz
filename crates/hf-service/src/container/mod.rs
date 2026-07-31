@@ -6,6 +6,7 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (AGENTS.md 2.12).
 
+mod output_budget;
 mod staging;
 mod workspace;
 
@@ -31,6 +32,10 @@ use hf_storage::{
     AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert, RunKind, RunRecord, RunStatus,
     Store,
 };
+use output_budget::{
+    monitor_run_output, output_budget_status, run_artifacts_within_budget, OutputBudget,
+    MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_ENTRIES,
+};
 use staging::{
     minimization_failure_with_rollback, minimization_sandbox_options, qualification_evidence,
     quarantine_corpus_entry, resolve_run_sandbox_image, retain_run_context, run_binary_path,
@@ -47,8 +52,6 @@ use workspace::{
     workspace_operation_gate,
 };
 
-const MAX_RUN_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_RUN_OUTPUT_ENTRIES: usize = 100_000;
 const SMOKE_FUZZ_SECS: u64 = 60;
 const COVERAGE_PRUNE_OPERATION_SECS: u64 = 600;
 const COVERAGE_PRUNE_COMMAND_SECS: u64 = 10;
@@ -243,156 +246,6 @@ pub(crate) fn ensure_workspace_directory(
         )));
     }
     Ok(resolved)
-}
-
-/// Outcome of scanning a run-owned output tree against its retained-evidence
-/// budget.
-///
-/// The third state matters: a running fuzzer creates, renames, and deletes
-/// files continuously, so an entry enumerated by `read_dir` can vanish before
-/// its `symlink_metadata` call. That transient race must not be conflated with
-/// a genuine budget overflow -- doing so let the live monitor kill a perfectly
-/// valid campaign and discard its results.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum OutputBudget {
-    /// Definitely within budget.
-    Within,
-    /// A definite violation: total/file bytes or entry count over the limit, or
-    /// a symlink/special file that actually exists in the tree.
-    Exceeded,
-    /// The scan could not be completed because the tree changed underneath it
-    /// (a transient `NotFound`/read error). Neither within nor over budget.
-    Indeterminate,
-}
-
-/// Scan a run-owned output tree, distinguishing a real budget overflow from a
-/// transient filesystem race. A definite overflow or structural violation
-/// (symlink/special file) is [`OutputBudget::Exceeded`]; a metadata/read error
-/// on an individual entry is [`OutputBudget::Indeterminate`] rather than a
-/// false overflow.
-fn output_budget_status(
-    root: &Path,
-    max_bytes: u64,
-    max_entries: usize,
-    max_file_bytes: u64,
-) -> OutputBudget {
-    let mut pending = vec![root.to_path_buf()];
-    let mut total_bytes = 0_u64;
-    let mut entries = 0usize;
-    while let Some(directory) = pending.pop() {
-        let Ok(metadata) = std::fs::symlink_metadata(&directory) else {
-            return OutputBudget::Indeterminate;
-        };
-        if !metadata.file_type().is_dir() {
-            return OutputBudget::Exceeded;
-        }
-        let Ok(children) = std::fs::read_dir(&directory) else {
-            return OutputBudget::Indeterminate;
-        };
-        for child in children {
-            let Ok(child) = child else {
-                return OutputBudget::Indeterminate;
-            };
-            entries += 1;
-            if entries > max_entries {
-                return OutputBudget::Exceeded;
-            }
-            let path = child.path();
-            let metadata = match std::fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                // The entry vanished between enumeration and stat -- normal
-                // fuzzer churn, not an overflow. Skip it.
-                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return OutputBudget::Indeterminate,
-            };
-            if metadata.file_type().is_dir() {
-                pending.push(path);
-            } else if metadata.file_type().is_file() {
-                if metadata.len() > max_file_bytes {
-                    return OutputBudget::Exceeded;
-                }
-                let Some(next) = total_bytes.checked_add(metadata.len()) else {
-                    return OutputBudget::Exceeded;
-                };
-                total_bytes = next;
-                if total_bytes > max_bytes {
-                    return OutputBudget::Exceeded;
-                }
-            } else {
-                return OutputBudget::Exceeded;
-            }
-        }
-    }
-    OutputBudget::Within
-}
-
-async fn monitor_run_output(
-    output: PathBuf,
-    corpus: PathBuf,
-    max_output_file_bytes: u64,
-    run_cancel: CancellationToken,
-    stop: CancellationToken,
-    exceeded: Arc<std::sync::atomic::AtomicBool>,
-) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-    loop {
-        tokio::select! {
-            () = stop.cancelled() => return,
-            _ = interval.tick() => {
-                let path = output.clone();
-                let corpus_path = corpus.clone();
-                // Only a *definite* overflow cancels the run. A transient scan
-                // error (a file the fuzzer just deleted) is Indeterminate and is
-                // retried on the next tick rather than latching a false kill.
-                let exceeded_now = tokio::task::spawn_blocking(move || {
-                    output_budget_status(
-                        &path,
-                        MAX_RUN_OUTPUT_BYTES,
-                        MAX_RUN_OUTPUT_ENTRIES,
-                        max_output_file_bytes,
-                    ) == OutputBudget::Exceeded
-                        || output_budget_status(
-                            &corpus_path,
-                            hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
-                            hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
-                            hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
-                        ) == OutputBudget::Exceeded
-                })
-                .await
-                .unwrap_or(false);
-                if exceeded_now {
-                    exceeded.store(true, std::sync::atomic::Ordering::Release);
-                    run_cancel.cancel();
-                    return;
-                }
-            }
-        }
-    }
-}
-
-/// Whether a finished run's artifacts may be retained. Returns false only on a
-/// *definite* overflow; a transient scan race (Indeterminate) does not fail a
-/// completed run, mirroring the live monitor so results are not discarded over
-/// a filesystem hiccup.
-async fn run_artifacts_within_budget(artifacts: &RunArtifacts, max_output_file_bytes: u64) -> bool {
-    let output = artifacts.output_host.clone();
-    let corpus = artifacts.corpus_host.clone();
-    tokio::task::spawn_blocking(move || {
-        output_budget_status(
-            &output,
-            MAX_RUN_OUTPUT_BYTES,
-            MAX_RUN_OUTPUT_ENTRIES,
-            max_output_file_bytes,
-        ) != OutputBudget::Exceeded
-            && output_budget_status(
-                &corpus,
-                hf_corpus::DEFAULT_CORPUS_LIMITS.max_total_bytes,
-                hf_corpus::DEFAULT_CORPUS_LIMITS.max_entries,
-                hf_corpus::DEFAULT_CORPUS_LIMITS.max_input_bytes,
-            ) != OutputBudget::Exceeded
-    })
-    .await
-    .unwrap_or(false)
 }
 
 async fn merge_run_discoveries(
