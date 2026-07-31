@@ -509,16 +509,15 @@ stages:
 default:
   interruptible: true
 
-variables:
-  # Keep the cargo registry inside the project so it can be cached; GitLab only
-  # caches paths under the build directory.
-  CARGO_HOME: $CI_PROJECT_DIR/.cargo
-
 rust:
   stage: gate
   # rustup in this image honors rust-toolchain.toml, which pins 1.94.0. Pinning
   # the image tag as well keeps the base layer stable without overriding it.
   image: rust:1.94
+  variables:
+    # Keep the cargo registry inside the project so it can be cached; GitLab only
+    # caches paths under the build directory.
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
   cache:
     key:
       files:
@@ -536,12 +535,16 @@ rust:
 frontend:
   stage: gate
   image: node:22
+  variables:
+    # npm ci wipes node_modules every run, so caching it saves nothing. The
+    # download cache is the part that survives and speeds up reinstall.
+    npm_config_cache: $CI_PROJECT_DIR/.npm
   cache:
     key:
       files:
         - crates/hf-gui/package-lock.json
     paths:
-      - crates/hf-gui/node_modules
+      - .npm
   script:
     - scripts/tests/gates.sh frontend-test
     - scripts/tests/gates.sh frontend-lint
@@ -557,18 +560,34 @@ script-tests:
 supply-chain:
   stage: gate
   image: rust:1.94
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
   cache:
     key: cargo-deny
     paths:
       - .cargo/bin
+  before_script:
+    # cargo install honors CARGO_HOME, but the rust image bakes PATH at build
+    # time, so the installed binary is invisible without this.
+    - export PATH="$CARGO_HOME/bin:$PATH"
   script:
     - command -v cargo-deny || cargo install cargo-deny --locked
     - scripts/tests/gates.sh deny
 ```
 
-Note the difference from the GitHub workflow: `script-tests` is its own job here
-because the GitLab jobs pick their own images and the Rust image has no
-`python3`, whereas the GitHub runner has both preinstalled.
+Three things in that file are load-bearing and easy to get wrong:
+
+- `script-tests` is its own job because GitLab jobs pick their own images and
+  `rust:1.94` has no `python3`, whereas the GitHub runner has both preinstalled.
+- `CARGO_HOME` is job-scoped, never global. It exists so the cargo registry sits
+  inside the build directory, which is the only place GitLab can cache. A global
+  setting would leak into `supply-chain`.
+- `supply-chain` must export `$CARGO_HOME/bin` onto `PATH` before running the
+  gate. `cargo install` honors `CARGO_HOME`, but the `rust` image bakes
+  `PATH=/usr/local/cargo/bin:$PATH` at image build time, so the freshly
+  installed `cargo-deny` is otherwise invisible — and `gate_deny`'s fallback
+  looks in `${HOME}/.cargo/bin`, which is `/root/.cargo/bin` in that image, not
+  the project directory. Without the export the job fails on every run.
 
 - [ ] **Step 3: Validate both files parse**
 
