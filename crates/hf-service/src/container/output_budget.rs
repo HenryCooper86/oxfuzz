@@ -186,9 +186,10 @@ mod tests {
             MAX_RUN_OUTPUT_BYTES,
         );
 
-        assert!(
-            !matches!(status, OutputBudget::Exceeded),
-            "a transient read race must not be reported as a budget violation"
+        assert_eq!(
+            status,
+            OutputBudget::Indeterminate,
+            "a transient read race must classify as indeterminate, not as within budget or as a violation"
         );
     }
 
