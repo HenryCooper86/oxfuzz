@@ -33,7 +33,8 @@
 
 | Path | Responsibility |
 | --- | --- |
-| `.github/workflows/ci.yml` | Three parallel Linux jobs invoking named gates |
+| `.github/workflows/ci.yml` | Three parallel Linux jobs invoking named gates (public repo) |
+| `.gitlab-ci.yml` | Four parallel jobs invoking named gates (current origin, merge gate) |
 | `scripts/tests/test_gates.py` | Regression tests for the gate dispatcher |
 | `crates/hf-service/src/container/mod.rs` | `ServiceContainer` struct, shared constants, private helpers, submodule declarations, re-exports |
 | `crates/hf-service/src/container/workspace.rs` | Managed workspace boundary: root resolution, ownership manifest, lock file, symlink-refusing directory resolution |
@@ -374,10 +375,11 @@ jobs invoking the gates from Task 1.
 
 **Files:**
 - Create: `.github/workflows/ci.yml`
+- Create: `.gitlab-ci.yml`
 
 **Interfaces:**
 - Consumes: `scripts/tests/gates.sh <name>` from Task 1, with the nine gate names defined there.
-- Produces: three job names — `rust`, `frontend`, `supply-chain` — for branch protection rules.
+- Produces: GitHub job names `rust`, `frontend`, `supply-chain`; GitLab job names `rust`, `frontend`, `script-tests`, `supply-chain`. Task 15 describes these in `CONTRIBUTING.md`.
 
 - [ ] **Step 1: Write the workflow**
 
@@ -481,30 +483,126 @@ jobs:
         run: scripts/tests/gates.sh deny
 ```
 
-- [ ] **Step 2: Validate the workflow parses**
+- [ ] **Step 2: Write the GitLab pipeline**
 
-Run: `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml')); print('ok')"`
+`origin` is `git@gitlab-ce.orb.local:hobot/oxfuzz.git`. GitHub Actions gates the
+public repository the project is being open-sourced to; GitLab gates the merges
+that happen today. Both call the same named gates, so neither restates a
+command.
 
-Expected: `ok`. If PyYAML is unavailable, run `npx --yes yaml-lint .github/workflows/ci.yml` instead.
+Create `.gitlab-ci.yml`:
 
-- [ ] **Step 3: Verify each job's gate sequence runs locally**
+```yaml
+# oxfuzz CI.
+#
+# This pipeline and .github/workflows/ci.yml both invoke named gates from
+# scripts/tests/gates.sh, which stays the single definition of what a gate
+# means. GitLab gates merges on the current origin; the GitHub workflow gates
+# the public repository.
+#
+# Jobs are split so a red pipeline identifies which category broke without
+# opening a log.
+
+stages:
+  - gate
+
+default:
+  interruptible: true
+
+variables:
+  # Keep the cargo registry inside the project so it can be cached; GitLab only
+  # caches paths under the build directory.
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+
+rust:
+  stage: gate
+  # rustup in this image honors rust-toolchain.toml, which pins 1.94.0. Pinning
+  # the image tag as well keeps the base layer stable without overriding it.
+  image: rust:1.94
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry
+      - target/
+  script:
+    - scripts/tests/gates.sh fmt
+    - scripts/tests/gates.sh clippy
+    - scripts/tests/gates.sh check
+    - scripts/tests/gates.sh test
+    - scripts/tests/gates.sh doc
+
+frontend:
+  stage: gate
+  image: node:22
+  cache:
+    key:
+      files:
+        - crates/hf-gui/package-lock.json
+    paths:
+      - crates/hf-gui/node_modules
+  script:
+    - scripts/tests/gates.sh frontend-test
+    - scripts/tests/gates.sh frontend-lint
+
+script-tests:
+  stage: gate
+  # Its own job rather than riding along with rust: the Rust image has no
+  # python3, and installing one there would cost more than this job does.
+  image: python:3.12-slim
+  script:
+    - scripts/tests/gates.sh script-tests
+
+supply-chain:
+  stage: gate
+  image: rust:1.94
+  cache:
+    key: cargo-deny
+    paths:
+      - .cargo/bin
+  script:
+    - command -v cargo-deny || cargo install cargo-deny --locked
+    - scripts/tests/gates.sh deny
+```
+
+Note the difference from the GitHub workflow: `script-tests` is its own job here
+because the GitLab jobs pick their own images and the Rust image has no
+`python3`, whereas the GitHub runner has both preinstalled.
+
+- [ ] **Step 3: Validate both files parse**
+
+Run:
+
+```bash
+python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); yaml.safe_load(open('.gitlab-ci.yml')); print('ok')"
+```
+
+Expected: `ok`. If PyYAML is unavailable, run
+`npx --yes yaml-lint .github/workflows/ci.yml .gitlab-ci.yml` instead.
+
+- [ ] **Step 4: Verify the gate sequence runs locally**
 
 Run: `scripts/tests/gates.sh script-tests fmt check`
 
 Expected: exit 0. This is the cheap subset of the `rust` job; the full sequence
-is verified by the workflow itself in Step 5.
+is verified by the pipeline itself in Step 6.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add .github/workflows/ci.yml
+git add .github/workflows/ci.yml .gitlab-ci.yml
 git commit -m "$(cat <<'EOF'
-ci: gate every push and pull request
+ci: gate every push and merge request
 
-Adds three parallel Linux jobs invoking the gates defined by
-scripts/tests/gates.sh: Rust format/clippy/check/test/doc plus the Python script
-tests, the frontend test/build/lint set, and cargo-deny. Jobs are split so a red
-badge identifies which category broke without opening the log.
+Nothing ran tests, lints, or dependency checks on push. scripts/tests/gates.sh
+defined the gate set but only ran when someone remembered to invoke it.
+
+Adds two pipelines that both call named gates from that script, so neither
+restates a command and the two cannot drift: .gitlab-ci.yml gates merges on the
+current origin, and .github/workflows/ci.yml gates the public repository. Jobs
+are split so a red pipeline identifies which category broke without opening a
+log.
 
 Linux only. release.yml already proves the four platform bundles build on tag,
 and the workspace is platform-agnostic.
@@ -514,21 +612,27 @@ EOF
 )"
 ```
 
-- [ ] **Step 5: Verify the workflow runs green, then verify it can go red**
+- [ ] **Step 6: Report what can and cannot be verified here**
 
-Push the branch and confirm all three jobs pass. Then confirm the gate actually
-gates, one job at a time:
+Do not push in this task. Two things make live pipeline verification the
+controller's call, not the implementer's:
 
-```bash
-# Rust job: introduce a clippy failure.
-printf '\npub fn ci_probe(v: &Vec<String>) -> usize { v.len() }\n' >> crates/hf-core/src/lib.rs
-git commit -am "test: confirm CI rejects a clippy failure" && git push
-# Expect: `rust` red on Clippy (ptr_arg), `frontend` and `supply-chain` green.
-git revert --no-edit HEAD && git push
-```
+- The GitLab instance runs in OrbStack and may have no runner registered, in
+  which case a pushed pipeline sits pending rather than failing — a state that
+  looks like breakage but is not.
+- GitHub Actions cannot run at all until the repository is pushed to GitHub,
+  which has not happened.
 
-Expected: the `rust` job fails on Clippy while the other two still report their
-own status. Revert before continuing. Record the run URL in the merge request.
+Instead, report in your task report:
+
+1. that both files parse (Step 3 output);
+2. that the local gate subset passes (Step 4 output);
+3. the exact commands a human should run to verify live, namely
+   `git push -u origin code-health-and-ci-20260731` followed by checking the
+   pipeline on the GitLab instance.
+
+The controller records live verification as a deferred item and resolves it
+outside this task.
 
 ---
 
@@ -2042,13 +2146,14 @@ Run:
 
 ```bash
 ls crates | grep -E 'hf-mcp|hf-hooks' ; echo "crates found above (expect none)"
-ls .gitlab-ci.yml 2>/dev/null ; echo "gitlab ci above (expect none)"
+ls .gitlab-ci.yml .github/workflows/ci.yml
 ls crates/hf-storage/migrations/0018_guardrail_decisions.sql
 grep -rn 'policy_decisions' crates/hf-web/src/router.rs | head -2
 ```
 
-Expected: no `hf-mcp` or `hf-hooks` crate, no `.gitlab-ci.yml`, the migration
-present, and the REST route registered.
+Expected: no `hf-mcp` or `hf-hooks` crate; both CI files present (Task 2 created
+them, which is why the documentation claim can now be made true rather than
+merely deleted); the migration present; and the REST route registered.
 
 - [ ] **Step 2: Fix the TODO entries**
 
@@ -2085,6 +2190,10 @@ with:
 
 - [ ] **Step 3: Fix the CI claims**
 
+The old text described GitLab CI jobs that did not exist. Task 2 created a real
+`.gitlab-ci.yml`, so the fix is to describe what it actually runs, not to swap
+in a different unproven claim.
+
 In `CONTRIBUTING.md`, replace lines 65 through 67:
 
 ```
@@ -2098,20 +2207,36 @@ with:
 ```
 Use `./scripts/tests/gates.sh` for the full local gate set, or
 `./scripts/tests/gates.sh <gate>` for one of `fmt`, `clippy`, `check`, `test`,
-`doc`, `deny`, `script-tests`, `frontend-test`, `frontend-lint`. The same gates
-run in GitHub Actions (`.github/workflows/ci.yml`) on every push and pull
-request, and a merge requires them green.
+`doc`, `deny`, `script-tests`, `frontend-test`, `frontend-lint`.
+
+The same gates run in CI, so a green local run predicts a green pipeline.
+`.gitlab-ci.yml` is the merge gate on this remote; `.github/workflows/ci.yml`
+runs the same gates on the public GitHub repository. Both invoke
+`scripts/tests/gates.sh` by gate name rather than restating commands, so the
+three cannot drift apart.
 ```
 
-Then check the README for the same claim:
+Then find every remaining CI claim in the README:
 
 ```bash
-grep -n 'GitLab' README.md
+grep -n 'GitLab CI' README.md
 ```
 
-Replace every occurrence describing GitLab CI as a live gate with the GitHub
-Actions workflow. Leave references to the GitLab remote itself alone: that is
-where the repository is hosted today.
+Four occurrences exist, two of them in the Chinese half of the document
+(around lines 167, 250, 713, and 774). Rewrite each to describe the real
+pipeline:
+
+- The Node version notes ("GitLab CI uses Node 22") stay true as written --
+  `.gitlab-ci.yml` uses `node:22`. Leave them.
+- The Release Readiness sentence claims "GitLab CI jobs for locked all-feature
+  coverage". Replace the claim with what the pipeline does run: the nine gates
+  on every push, split across rust, frontend, script-tests, and supply-chain
+  jobs. Do not claim all-feature coverage; no job passes `--all-features`.
+- Keep the Chinese text in step with the English. Match the existing
+  translation's register rather than translating literally.
+
+Leave references to the GitLab remote itself alone: that is where the
+repository is hosted today.
 
 - [ ] **Step 4: Verify no contradicted claim remains**
 
