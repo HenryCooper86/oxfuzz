@@ -86,11 +86,11 @@ fn workspace_root_selection(override_dir: Option<std::ffi::OsString>) -> (PathBu
     (workspace_root_from(override_dir), uses_trusted_default)
 }
 
-pub(crate) fn configured_workspace_root() -> (PathBuf, bool) {
+pub(super) fn configured_workspace_root() -> (PathBuf, bool) {
     workspace_root_selection(std::env::var_os("HF_WORKSPACE_DIR"))
 }
 
-pub(crate) fn workspace_operation_gate(
+pub(super) fn workspace_operation_gate(
     root: &Path,
 ) -> Result<(PathBuf, Arc<WorkspaceOperationGate>), ClassifiedError> {
     let key = comparable_path(root).ok_or_else(|| {
@@ -109,7 +109,7 @@ pub(crate) fn workspace_operation_gate(
     Ok((key, gate))
 }
 
-pub(crate) fn workspace_lock_file(root: &Path) -> Result<File, ClassifiedError> {
+pub(super) fn workspace_lock_file(root: &Path) -> Result<File, ClassifiedError> {
     use sha2::{Digest as _, Sha256};
 
     // Keep the lock outside the deletable workspace. The digest gives every
@@ -138,7 +138,7 @@ pub(crate) fn workspace_lock_file(root: &Path) -> Result<File, ClassifiedError> 
         })
 }
 
-pub(crate) fn workspace_lock_error(error: TryLockError, cleanup: bool) -> ClassifiedError {
+pub(super) fn workspace_lock_error(error: TryLockError, cleanup: bool) -> ClassifiedError {
     match error {
         TryLockError::WouldBlock if cleanup => {
             ClassifiedError::Validation(WORKSPACE_CLEANUP_BUSY_MESSAGE.to_owned())
@@ -309,7 +309,7 @@ fn write_workspace_manifest(root: &Path) -> Result<(), ClassifiedError> {
 /// Create a new managed workspace root, or verify the ownership manifest of an
 /// existing one. Only the implicit per-user default may adopt legacy artifacts;
 /// a non-empty `HF_WORKSPACE_DIR` override without a manifest is never adopted.
-pub(crate) fn prepare_managed_workspace_root_with_adoption(
+pub(super) fn prepare_managed_workspace_root_with_adoption(
     root: &Path,
     adopt_legacy_default: bool,
 ) -> Result<PathBuf, ClassifiedError> {
@@ -383,12 +383,12 @@ fn prepare_managed_workspace_root(root: &Path) -> Result<PathBuf, ClassifiedErro
     prepare_managed_workspace_root_with_adoption(root, false)
 }
 
-pub(crate) fn prepare_configured_workspace_root() -> Result<PathBuf, ClassifiedError> {
+pub(super) fn prepare_configured_workspace_root() -> Result<PathBuf, ClassifiedError> {
     let (root, uses_trusted_default) = configured_workspace_root();
     prepare_managed_workspace_root_with_adoption(&root, uses_trusted_default)
 }
 
-pub(crate) fn clear_managed_workspace_root(root: &Path) -> Result<(), ClassifiedError> {
+pub(super) fn clear_managed_workspace_root(root: &Path) -> Result<(), ClassifiedError> {
     let metadata = match std::fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -453,7 +453,7 @@ pub fn project_workspace_dir(project: &Path) -> PathBuf {
 /// Unique service-owned staging directory for one sandboxed document import.
 /// It must live below the runtime's approved workspace root, while remaining a
 /// sibling of target workspaces so a running fuzzer cannot mutate the input.
-pub(crate) fn document_staging_dir(project: &Path, import_id: Uuid) -> PathBuf {
+pub(super) fn document_staging_dir(project: &Path, import_id: Uuid) -> PathBuf {
     project_workspace_dir(project)
         .join(".service")
         .join("document-import")
@@ -461,13 +461,13 @@ pub(crate) fn document_staging_dir(project: &Path, import_id: Uuid) -> PathBuf {
 }
 
 /// Workspace-relative output directory owned by one fuzz or smoke run.
-pub(crate) fn run_output_relative(run_id: Uuid) -> PathBuf {
+pub(super) fn run_output_relative(run_id: Uuid) -> PathBuf {
     PathBuf::from("runs").join(run_id.to_string()).join("out")
 }
 
 /// Resolve an existing regular directory below a workspace without accepting
 /// symlinks in any component.
-pub(crate) fn resolve_workspace_directory(
+pub(super) fn resolve_workspace_directory(
     workspace: &Path,
     relative: &Path,
 ) -> Result<PathBuf, ClassifiedError> {
