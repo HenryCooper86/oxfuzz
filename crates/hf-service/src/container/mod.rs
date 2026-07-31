@@ -15,7 +15,9 @@ pub use workspace::{
 };
 
 use std::fmt::Write;
-use std::fs::{File, TryLockError};
+use std::fs::File;
+#[cfg(feature = "semgrep-enrichment")]
+use std::fs::TryLockError;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
