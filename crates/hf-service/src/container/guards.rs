@@ -88,7 +88,7 @@ impl Drop for ProviderHealthTask {
 /// exhausted quota) without a process restart.
 ///
 /// The loop reads the pool from the shared cell on every tick, so a pool
-/// swapped in by [`ServiceContainer::reload_providers`] is picked up without
+/// swapped in by [`super::ServiceContainer::reload_providers`] is picked up without
 /// respawning the task, and runs an initial check immediately so providers
 /// frozen before a restart recover without waiting a full interval.
 pub(super) fn spawn_provider_health_checks(
