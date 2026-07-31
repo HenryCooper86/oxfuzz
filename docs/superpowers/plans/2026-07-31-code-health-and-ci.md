@@ -1050,9 +1050,14 @@ mod tests {
         // live fuzzer does between iterations.
         let status = output_budget_status(&missing, MAX_RUN_OUTPUT_BYTES);
 
-        assert!(
-            !matches!(status, OutputBudget::Exceeded { .. }),
-            "a transient read race must not be reported as a budget violation"
+        // Assert the specific variant, not merely "not Exceeded". The enum has
+        // three states, so a not-Exceeded assertion would also pass if a bug
+        // classified the vanished entry as Within -- an equally wrong answer,
+        // and the one this module exists to prevent.
+        assert_eq!(
+            status,
+            OutputBudget::Indeterminate,
+            "a transient read race must classify as indeterminate, not as within budget or as a violation"
         );
     }
 
