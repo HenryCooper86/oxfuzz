@@ -6,9 +6,11 @@
 //! ensures every build / fuzz run goes through `hf-runtime` sandboxing
 //! (AGENTS.md 2.12).
 
+mod coverage_cache;
 mod crash_inputs;
 mod harness_workspace;
 mod output_budget;
+mod project_identity;
 mod staging;
 mod workspace;
 
@@ -25,6 +27,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use coverage_cache::{
+    coverage_signature, export_cache, frontier_refine_lines, parse_covered_functions,
+};
 use crash_inputs::{
     bucket_by_cluster, casrep_input_path, collect_casreps, collect_crash_inputs,
     collect_legacy_crash_inputs, collect_workspace_crash_inputs, deterministic_crash_id,
@@ -51,6 +56,10 @@ use hf_storage::{
 use output_budget::{
     monitor_run_output, output_budget_status, run_artifacts_within_budget, OutputBudget,
     MAX_RUN_OUTPUT_BYTES, MAX_RUN_OUTPUT_ENTRIES,
+};
+use project_identity::{
+    canonical_project_root, defectdojo_project_name, project_lookup_identity, project_slug,
+    select_target_candidate, stored_project_matches,
 };
 use staging::{
     minimization_failure_with_rollback, minimization_sandbox_options, qualification_evidence,
@@ -390,108 +399,6 @@ impl Drop for StagingDirectoryGuard {
     }
 }
 
-/// A human-readable `DefectDojo` product name for a project: its directory
-/// basename, falling back to the full path when there is no basename.
-fn defectdojo_project_name(project: &Path) -> String {
-    project
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| project.to_string_lossy().into_owned())
-}
-
-fn canonical_project_root(project: &Path) -> Result<PathBuf, ClassifiedError> {
-    let canonical = std::fs::canonicalize(project).map_err(|error| {
-        ClassifiedError::Validation(format!(
-            "resolve project root {}: {error}",
-            project.display()
-        ))
-    })?;
-    let metadata = std::fs::metadata(&canonical).map_err(|error| {
-        ClassifiedError::Validation(format!(
-            "inspect project root {}: {error}",
-            canonical.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(ClassifiedError::Validation(format!(
-            "project root {} is not a directory",
-            canonical.display()
-        )));
-    }
-    Ok(canonical)
-}
-
-fn stored_project_matches(stored: &Path, canonical: &Path) -> bool {
-    stored == canonical || std::fs::canonicalize(stored).is_ok_and(|resolved| resolved == canonical)
-}
-
-fn project_lookup_identity(project: &Path) -> PathBuf {
-    std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf())
-}
-
-/// Select the candidate referenced by `target` from `candidates`.
-///
-/// `target` is either a plain symbol or a file-qualified `file::symbol` (the
-/// file relative to the project root, matching `TargetCandidate::relative_file`).
-/// A plain symbol matching zero candidates yields `Ok(None)` (the caller
-/// reports "not found"); exactly one yields that candidate; more than one is a
-/// `Validation` error listing the file-qualified forms so the user can
-/// disambiguate. When no plain match exists and the string carries a `::`
-/// qualifier, the part before the last `::` is matched exactly against each
-/// candidate's root-relative file. The plain match is tried first so a symbol
-/// that itself contains `::` (C++-style) still resolves.
-fn select_target_candidate<'c>(
-    candidates: &'c [TargetCandidate],
-    target: &str,
-) -> Result<Option<&'c TargetCandidate>, ClassifiedError> {
-    let mut plain = candidates.iter().filter(|c| c.symbol == target);
-    if let Some(first) = plain.next() {
-        if plain.next().is_some() {
-            let mut qualified: Vec<String> = candidates
-                .iter()
-                .filter(|c| c.symbol == target)
-                .map(|c| format!("{}::{}", c.relative_file(), c.symbol))
-                .collect();
-            qualified.sort();
-            qualified.dedup();
-            return Err(ClassifiedError::Validation(format!(
-                "target '{target}' is ambiguous; qualify it with the defining file: {}",
-                qualified.join(", ")
-            )));
-        }
-        return Ok(Some(first));
-    }
-    if let Some((file, symbol)) = target.rsplit_once("::") {
-        if !file.is_empty() && !symbol.is_empty() {
-            return Ok(candidates
-                .iter()
-                .find(|c| c.symbol == symbol && c.relative_file() == file));
-        }
-    }
-    Ok(None)
-}
-
-/// A per-project workspace directory name: the human-readable basename plus a
-/// short deterministic hash of the full path. The hash disambiguates projects
-/// that share a basename (e.g. `/a/libfoo` and `/b/libfoo`) so their persistent
-/// workspaces -- and thus compiled binaries, corpora, and crash reproducers --
-/// never collide, while the basename keeps the directory recognizable. Stable
-/// across processes (SHA-256, unlike `DefaultHasher`), so the same project maps
-/// to the same workspace on every invocation.
-fn project_slug(project: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let identity = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
-    let name = identity
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("default");
-    let mut hasher = Sha256::new();
-    hasher.update(identity.to_string_lossy().as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    format!("{name}-{}", &digest[..8])
-}
-
 /// Resolve a per-project directory beneath an explicit managed workspace root.
 #[must_use]
 #[cfg(feature = "automotive-scapy")]
@@ -515,123 +422,6 @@ fn syz_kvm_usable(platform: &str) -> bool {
         let _ = platform;
         false
     }
-}
-
-/// Cache value: the signature the export was computed for + the raw
-/// `llvm-cov export` JSON.
-type ExportCache = std::sync::Mutex<std::collections::HashMap<String, (u64, String)>>;
-
-/// Process-global cache of raw `llvm-cov export` JSON, keyed by `project::target`
-/// and tagged with the corpus+harness signature it was computed for. The
-/// covered-set, summary, and frontier accessors all parse from this single
-/// cached export, so the expensive (~180s) coverage pipeline runs at most once
-/// per signature instead of once per accessor.
-fn export_cache() -> &'static ExportCache {
-    static CACHE: std::sync::OnceLock<ExportCache> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Build the uncovered-frontier lines for the refine prompt: the target's
-/// reachable functions that `llvm-cov` shows as unreached, each annotated with
-/// its `file:line:col` location, deduplicated to the first location per
-/// function. Falls back to the full frontier when none of the reachable names
-/// match the frontier (e.g. llvm-cov name mangling on C++/Rust), so refinement
-/// is never left blind while still carrying locations.
-fn frontier_refine_lines(
-    reachable: &[String],
-    frontier: &[hf_coverage::UncoveredRegion],
-) -> Vec<String> {
-    let format_region = |region: &hf_coverage::UncoveredRegion| {
-        if region.file.is_empty() {
-            region.function.clone()
-        } else {
-            format!(
-                "{} ({}:{}:{})",
-                region.function, region.file, region.line, region.col
-            )
-        }
-    };
-    let reachable_set: std::collections::HashSet<&str> =
-        reachable.iter().map(String::as_str).collect();
-    let mut seen = std::collections::HashSet::new();
-    let targeted: Vec<String> = frontier
-        .iter()
-        .filter(|region| reachable_set.contains(region.function.as_str()))
-        .filter(|region| seen.insert(region.function.clone()))
-        .map(&format_region)
-        .collect();
-    if !targeted.is_empty() {
-        return targeted;
-    }
-    let mut seen = std::collections::HashSet::new();
-    frontier
-        .iter()
-        .filter(|region| seen.insert(region.function.clone()))
-        .map(format_region)
-        .collect()
-}
-
-/// A cheap fingerprint of the inputs that affect coverage: stable corpus file
-/// metadata plus the canonical active harness source. Changes when a run grows
-/// the corpus or a successful build commits a new harness, invalidating caches.
-fn coverage_signature(workspace: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    use std::time::UNIX_EPOCH;
-
-    let modified_nanos = |meta: &std::fs::Metadata| -> u128 {
-        meta.modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos())
-    };
-
-    let mut corpus_metadata = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(workspace.join("corpus")) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                corpus_metadata.push((entry.file_name(), meta.len(), modified_nanos(&meta)));
-            }
-        }
-    }
-    corpus_metadata.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    corpus_metadata.hash(&mut hasher);
-    read_current_harness_source(workspace).hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Parse `llvm-cov export` JSON, returning the names of functions with a
-/// non-zero execution count (the covered set).
-fn parse_covered_functions(json: &str) -> Vec<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let mut covered: Vec<String> = value
-        .get("data")
-        .and_then(|d| d.get(0))
-        .and_then(|d| d.get("functions"))
-        .and_then(serde_json::Value::as_array)
-        .map(|funcs| {
-            funcs
-                .iter()
-                .filter(|f| {
-                    f.get("count")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0)
-                        > 0
-                })
-                .filter_map(|f| {
-                    f.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(ToOwned::to_owned)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    covered.sort();
-    covered.dedup();
-    covered
 }
 
 /// Build the sandbox image from the repo's Dockerfile for a given platform.
@@ -8878,111 +8668,6 @@ mod semgrep_ranking_consumer_tests {
 }
 
 #[cfg(test)]
-mod target_resolution_tests {
-    use super::select_target_candidate;
-    use hf_core::error::ClassifiedError;
-    use hf_core::target::{
-        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
-    };
-    use std::path::PathBuf;
-
-    fn candidate(file: &str, symbol: &str) -> TargetCandidate {
-        TargetCandidate {
-            id: uuid::Uuid::new_v4(),
-            project_root: PathBuf::from("/proj"),
-            language: TargetLanguage::C,
-            symbol: symbol.to_owned(),
-            kind: TargetKind::Parser,
-            location: SourceLocation {
-                file: PathBuf::from(file),
-                line: 1,
-                col: 1,
-                end_line: None,
-                end_col: None,
-            },
-            signature: None,
-            input_surface: InputSurface::Bytes,
-            complexity: 1,
-            fit_score: 0.5,
-            sanitizers: vec![Sanitizer::Address],
-            rationale: String::new(),
-            reachable_functions: Vec::new(),
-            accumulated_complexity: 0,
-        }
-    }
-
-    #[test]
-    fn unique_plain_symbol_resolves() {
-        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
-        let found = select_target_candidate(&candidates, "parse_opts").unwrap();
-        assert_eq!(found.map(|c| c.id), Some(candidates[0].id));
-    }
-
-    #[test]
-    fn unknown_plain_symbol_is_not_found() {
-        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
-        assert!(select_target_candidate(&candidates, "missing")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn ambiguous_plain_symbol_errors_with_file_qualified_forms() {
-        let candidates = vec![
-            candidate("/proj/src/a.c", "parse_opts"),
-            candidate("/proj/src/b.c", "parse_opts"),
-            candidate("/proj/src/c.c", "unique_fn"),
-        ];
-        let Err(ClassifiedError::Validation(message)) =
-            select_target_candidate(&candidates, "parse_opts")
-        else {
-            panic!("an ambiguous symbol must be a validation error");
-        };
-        assert!(
-            message.contains("src/a.c::parse_opts"),
-            "lists the src/a.c qualifier: {message}"
-        );
-        assert!(
-            message.contains("src/b.c::parse_opts"),
-            "lists the src/b.c qualifier: {message}"
-        );
-        assert!(
-            !message.contains("unique_fn"),
-            "unrelated symbols are not listed: {message}"
-        );
-    }
-
-    #[test]
-    fn file_qualified_symbol_resolves_exactly() {
-        let candidates = vec![
-            candidate("/proj/src/a.c", "parse_opts"),
-            candidate("/proj/src/b.c", "parse_opts"),
-        ];
-        let found = select_target_candidate(&candidates, "src/b.c::parse_opts").unwrap();
-        assert_eq!(found.map(|c| c.id), Some(candidates[1].id));
-    }
-
-    #[test]
-    fn file_qualified_symbol_with_unknown_file_is_not_found() {
-        let candidates = vec![candidate("/proj/src/a.c", "parse_opts")];
-        assert!(
-            select_target_candidate(&candidates, "src/missing.c::parse_opts")
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn symbol_containing_colons_prefers_the_plain_match() {
-        // A symbol that itself contains `::` (C++-style) still resolves as a
-        // plain symbol; the qualifier split is only a fallback.
-        let candidates = vec![candidate("/proj/src/ns.c", "ns::func")];
-        let found = select_target_candidate(&candidates, "ns::func").unwrap();
-        assert_eq!(found.map(|c| c.id), Some(candidates[0].id));
-    }
-}
-
-#[cfg(test)]
 mod coverage_feedback_tests {
     use super::{CoverageFeedback, FuzzProgress};
     use hf_coverage::{StagnationPolicy, StagnationProposal};
@@ -9107,87 +8792,6 @@ mod coverage_feedback_tests {
         let fb = CoverageFeedback::new(run_id, policy(0), &emit);
         fb.on_edges(100);
         assert_eq!(fb.tracker.lock().unwrap().run_id(), run_id);
-    }
-}
-
-#[cfg(test)]
-mod coverage_tests {
-    use super::parse_covered_functions;
-
-    #[test]
-    fn parses_covered_functions_from_llvm_cov_json() {
-        let json = r#"{"data":[{"functions":[
-            {"name":"parse_entry","count":5},
-            {"name":"validate","count":2},
-            {"name":"never_called","count":0},
-            {"name":"decode","count":3}
-        ]}]}"#;
-        let covered = parse_covered_functions(json);
-        assert_eq!(covered, vec!["decode", "parse_entry", "validate"]);
-        assert!(!covered.contains(&"never_called".to_owned()));
-    }
-
-    #[test]
-    fn parse_handles_garbage() {
-        assert!(parse_covered_functions("not json").is_empty());
-        assert!(parse_covered_functions("{}").is_empty());
-    }
-
-    #[test]
-    fn coverage_signature_changes_when_corpus_grows() {
-        use super::coverage_signature;
-        let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path();
-        std::fs::write(ws.join("harness.c"), "x").unwrap();
-        std::fs::create_dir_all(ws.join("corpus")).unwrap();
-        std::fs::write(ws.join("corpus/a"), "1").unwrap();
-
-        let sig1 = coverage_signature(ws);
-        // Same inputs -> same signature (cache hit).
-        assert_eq!(sig1, coverage_signature(ws));
-        // A new corpus file -> different signature (cache invalidated).
-        std::fs::write(ws.join("corpus/b"), "2").unwrap();
-        assert_ne!(sig1, coverage_signature(ws));
-    }
-
-    fn region(function: &str, file: &str, line: u32) -> hf_coverage::UncoveredRegion {
-        hf_coverage::UncoveredRegion {
-            function: function.to_owned(),
-            file: file.to_owned(),
-            line,
-            col: 1,
-        }
-    }
-
-    #[test]
-    fn frontier_refine_lines_targets_reachable_functions_with_locations() {
-        use super::frontier_refine_lines;
-        let reachable = vec!["parse_header".to_owned(), "decode_body".to_owned()];
-        let frontier = vec![
-            region("parse_header", "parser.c", 42),
-            // A second region of the same function collapses to the first line.
-            region("parse_header", "parser.c", 51),
-            // Not reachable -> excluded when a reachable match exists.
-            region("internal_helper", "util.c", 9),
-        ];
-        let lines = frontier_refine_lines(&reachable, &frontier);
-        assert_eq!(lines, vec!["parse_header (parser.c:42:1)".to_owned()]);
-    }
-
-    #[test]
-    fn frontier_refine_lines_falls_back_to_full_frontier_when_no_reachable_match() {
-        use super::frontier_refine_lines;
-        // llvm-cov names (mangled) do not intersect the scanner's plain names.
-        let reachable = vec!["parse_header".to_owned()];
-        let frontier = vec![
-            region("_Z6mangledv", "parser.cc", 7),
-            region("", "", 0), // empty file -> bare function name
-        ];
-        let lines = frontier_refine_lines(&reachable, &frontier);
-        assert_eq!(
-            lines,
-            vec!["_Z6mangledv (parser.cc:7:1)".to_owned(), String::new()]
-        );
     }
 }
 
