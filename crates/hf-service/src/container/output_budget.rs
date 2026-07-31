@@ -167,3 +167,42 @@ pub(super) async fn run_artifacts_within_budget(
     .await
     .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_vanishing_entry_is_indeterminate_not_a_violation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("gone");
+
+        // A path enumerated by read_dir and deleted before stat: exactly what a
+        // live fuzzer does between iterations.
+        let status = output_budget_status(
+            &missing,
+            MAX_RUN_OUTPUT_BYTES,
+            MAX_RUN_OUTPUT_ENTRIES,
+            MAX_RUN_OUTPUT_BYTES,
+        );
+
+        assert!(
+            !matches!(status, OutputBudget::Exceeded),
+            "a transient read race must not be reported as a budget violation"
+        );
+    }
+
+    #[test]
+    fn an_empty_tree_is_within_budget() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let status = output_budget_status(
+            dir.path(),
+            MAX_RUN_OUTPUT_BYTES,
+            MAX_RUN_OUTPUT_ENTRIES,
+            MAX_RUN_OUTPUT_BYTES,
+        );
+
+        assert!(matches!(status, OutputBudget::Within));
+    }
+}
