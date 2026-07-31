@@ -26,7 +26,7 @@ impl Drop for StagingDirectoryGuard {
 
 /// RAII guard that keeps an agent turn registered in the container's
 /// `active_agents` list for its lifetime, removing it on drop (even if the turn
-/// panics or is cancelled). Returned by [`ServiceContainer::track_agent`].
+/// panics or is cancelled). Returned by [`super::ServiceContainer::track_agent`].
 #[must_use = "the agent turn is only tracked while this guard is alive"]
 pub struct AgentTurnGuard {
     pub(super) active_agents: Arc<std::sync::Mutex<Vec<String>>>,
