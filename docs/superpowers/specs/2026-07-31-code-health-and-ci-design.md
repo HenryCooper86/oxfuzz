@@ -22,7 +22,9 @@ Scope of this increment:
 - `crates/hf-service/src/container.rs` becomes a `container/` module tree;
 - security-relevant free functions in that file become named, independently
   testable modules;
-- three small corrections that belong with this work.
+- the repository's Python script tests gain a gate that runs them;
+- the desktop app gains a view for guardrail decisions it already persists;
+- documentation claims contradicted by the codebase are corrected.
 
 Out of scope: cross-platform test matrices, feature-flag matrices, sub-service
 extraction from `ServiceContainer`, and any change to public service, REST, or
@@ -32,8 +34,9 @@ Tauri APIs.
 
 1. Continuous integration runs on Linux only. Cross-platform coverage stays
    with `release.yml`, which already builds all four platform bundles on tag.
-2. All eight gates defined by `scripts/tests/gates.sh` run in continuous
-   integration. None are dropped for speed.
+2. All gates defined by `scripts/tests/gates.sh` run in continuous integration.
+   None are dropped for speed. The existing eight are joined by a ninth,
+   `script-tests`, covering the repository's Python script tests.
 3. `scripts/tests/gates.sh` remains the single definition of what a gate is.
    Continuous integration invokes it rather than re-listing commands.
 4. The container decomposition changes no public API. `hf-cli`, `hf-web`, and
@@ -98,19 +101,36 @@ The script sets `set -euo pipefail`. When filtered output exceeds 200 lines,
 therefore fail the gate. Continuous integration is about to depend on this
 script, so the truncation must go.
 
-### 3.4 Stale backlog entries
+### 3.4 A test suite nothing runs
 
-Two `TODO.md` items no longer describe reality:
+`scripts/tests/test_validate_semgrep_smoke.py` contains two regression tests for
+the host-side Semgrep smoke report validator, covering a FIFO rejection path and
+an output size limit. No script, gate, or workflow invokes it. It passes today
+(`python3 -m unittest discover -s scripts/tests -t scripts/tests`), which means
+it is correct and unprotected: the next change to
+`scripts/validate-semgrep-smoke.py` can break it silently.
 
-- Line 99 asks to complete or remove `hf-mcp` and `hf-hooks`. Neither crate
-  exists in `crates/`.
-- Lines 176 and 177 state that guardrail authorization decisions are only
-  traced, never persisted. Migration `0018_guardrail_decisions.sql`,
+This is the same defect class as the missing workflow, so it is fixed here
+rather than tracked separately.
+
+### 3.5 Stale backlog entries
+
+Three documented claims no longer describe reality:
+
+- `TODO.md` line 99 asks to complete or remove `hf-mcp` and `hf-hooks`. Neither
+  crate exists in `crates/`.
+- `TODO.md` lines 176 and 177 state that guardrail authorization decisions are
+  only traced, never persisted. Migration `0018_guardrail_decisions.sql`,
   `Store::list_guardrail_decisions`, `ServiceContainer::policy_decisions`, the
   CLI `policy decisions` subcommand, and the REST `/policy/decisions` route all
   exist and are covered by tests.
+- `CONTRIBUTING.md` lines 65 through 67 tell contributors that "GitLab CI
+  remains the merge gate and adds locked all-feature checks, release-readiness
+  tests, the automotive sidecar, and release CLI verification." No
+  `.gitlab-ci.yml` exists in the repository. A public contributor would be told
+  their change is gated by a system that is not there.
 
-### 3.5 Persisted decisions with no desktop surface
+### 3.6 Persisted decisions with no desktop surface
 
 The persistence described above has no Tauri command and no desktop view.
 `crates/hf-gui/src/views/AuditView.tsx` line 43 invokes `auto_revert_events`
@@ -160,7 +180,9 @@ Three jobs run in parallel on `ubuntu-latest`.
 **`rust`** runs the five Rust gates in the order `AGENTS.md` section 4.5
 mandates: format check, Clippy with warnings denied, workspace check, workspace
 test, and documentation build. The toolchain comes from `rust-toolchain.toml`;
-`Swatinem/rust-cache` absorbs the cold build cost.
+`Swatinem/rust-cache` absorbs the cold build cost. The `script-tests` gate rides
+along as this job's first step: it needs no Rust toolchain, but it costs under a
+second and a fourth job for it would not earn its own runner.
 
 `cargo clippy --fix` is intentionally absent. It mutates the working tree,
 which is correct locally and wrong in continuous integration. The check-only
@@ -187,20 +209,38 @@ scripts/tests/gates.sh              # every gate, in mandated order (unchanged)
 scripts/tests/gates.sh fmt clippy   # named subset, same definitions
 ```
 
-Gate names are `fmt`, `clippy`, `check`, `test`, `doc`, `deny`,
+Gate names are `fmt`, `clippy`, `check`, `test`, `doc`, `deny`, `script-tests`,
 `frontend-test`, and `frontend-lint`. Each becomes a shell function; the
 no-argument path calls them in the existing order, preserving current local
 behavior exactly. An unrecognized name exits non-zero with the valid list.
+
+`script-tests` is new and runs
+`python3 -m unittest discover -s scripts/tests -t scripts/tests -p 'test_*.py'`,
+which is what currently reaches `test_validate_semgrep_smoke.py` — nothing else
+does.
 
 Continuous integration invokes named gates one step at a time, so GitHub
 annotates each gate separately while the script remains authoritative about
 what each gate means.
 
-### 5.4 The `head -200` removal
+### 5.4 Making the `test` gate report the compiler, not the filter
 
-Gate `test` drops the `| head -200` truncation. The `grep -v` noise filter
-stays, since it is what makes local output readable. Continuous integration
-captures full output because a truncated failure log is not actionable.
+Gate `test` drops the `| head -200` truncation. Continuous integration captures
+full output because a truncated failure log is not actionable, and locally the
+truncation is what creates the SIGPIPE failure in section 3.3.
+
+The `grep -v` noise filter stays, since it is what makes local output readable,
+but it moves inside a group that cannot fail the gate:
+
+```bash
+cargo test --workspace 2>&1 | { grep -v '<noise pattern>' || true; }
+```
+
+Under `pipefail` a failing `cargo test` still fails the pipeline, because its
+non-zero status propagates. The `|| true` covers the second latent failure in
+the current line: `grep -v` exits 1 when it filters every line, which would also
+report a passing run as a failed gate. After this change the gate's status is
+`cargo test`'s status and nothing else.
 
 ## 6. Container Decomposition
 
@@ -313,12 +353,21 @@ taking a bounded limit and delegating to `ServiceContainer::policy_decisions`.
 It mirrors the existing `auto_revert_events` command and the REST
 `/policy/decisions` route; no service logic is added.
 
-`crates/hf-gui/src/views/AuditView.tsx` renders persisted guardrail decisions
-alongside auto-revert events. Each row shows the decision timestamp, action
-kind, risk tier, decision outcome, originating service entry point, project
-where present, and bounded policy detail where present — the full
-`GuardrailDecisionRecord` shape. `crates/hf-gui/src/lib/httpTransport.ts` gains
-the matching route so browser mode reaches the same data.
+Rendering follows the established desktop pattern: a presentational component
+takes data and labels as props, and the view supplies them. A new
+`crates/hf-gui/src/components/PolicyDecisionList.tsx` renders the decision rows;
+`crates/hf-gui/src/views/AuditView.tsx` loads both sources and shows decisions
+alongside auto-revert events. This split exists so the component is testable
+with `renderToStaticMarkup`, which is how `ScheduleRecoveryPanel` and its
+siblings are tested — the Vitest environment is `node`, so hook- and
+context-bound views cannot be rendered directly.
+
+Each row shows the decision timestamp, action kind, risk tier, decision
+outcome, originating service entry point, project where present, and bounded
+policy detail where present: the full `GuardrailDecisionRecord` shape.
+`crates/hf-gui/src/lib/httpTransport.ts` gains the matching route so browser
+mode reaches the same data, and `crates/hf-gui/src/i18n.extra.ts` gains the
+`audit.decisions.*` keys alongside the existing `audit.*` entries.
 
 Retention is unchanged: the service prunes beyond `GUARDRAIL_DECISION_RETENTION`
 on write, and the view requests a bounded limit.
@@ -391,10 +440,11 @@ the current truncation with status 141, then passes once truncation is removed.
 A second test asserts an unrecognized gate name exits non-zero, and a third
 asserts the no-argument invocation still runs every gate in the mandated order.
 
-**Policy audit surface.** Failing test first. A vitest case renders
-`AuditView` against a mocked transport returning decision records and asserts
-each field appears. It fails before the view change. The Tauri command follows
-the existing command test pattern.
+**Policy audit surface.** Failing test first. A Vitest case renders
+`PolicyDecisionList` through `renderToStaticMarkup` with a fixture decision
+record and asserts every field appears, matching how `ScheduleRecoveryPanel` is
+tested. It fails before the component exists. A second case asserts the empty
+state renders its own message rather than an empty list.
 
 **Continuous integration.** Verified empirically: push a branch and confirm all
 three jobs pass, then push a deliberate single-gate break and confirm that job
@@ -402,22 +452,30 @@ alone goes red while the others still report.
 
 ## 11. Success Criteria
 
-1. `.github/workflows/ci.yml` runs all eight gates on push and pull request and
-   passes on `main`.
-2. A deliberately introduced Clippy warning, test failure, frontend lint error,
-   and dependency policy violation each turn the corresponding job red.
+1. `.github/workflows/ci.yml` runs all nine gates on push and pull request and
+   passes on `main`. The baseline supports this: as of 2026-07-31 the workspace
+   test suite passes in 69 seconds with no failures, `cargo deny check` reports
+   `advisories ok, bans ok, licenses ok, sources ok`, and the Python script
+   tests pass. No gate is expected to be red on first run.
+2. A deliberately introduced Clippy warning turns the `rust` job red while
+   `frontend` and `supply-chain` still report their own status, then reverts
+   clean. One break is enough to prove the mechanism: all three jobs run gates
+   through the same dispatcher, whose non-zero exit paths are covered by the
+   dispatcher's own tests.
 3. `scripts/tests/gates.sh` with no arguments behaves exactly as before.
 4. A passing test run producing more than 200 lines of filtered output exits
-   zero.
-5. No file under `crates/hf-service/src/container/` exceeds roughly 1500 lines.
-6. `hf-cli`, `hf-web`, and `hf-gui/src-tauri` compile unchanged against the
+   zero, as does one whose output the filter removes entirely.
+5. `scripts/tests/test_validate_semgrep_smoke.py` runs as part of the gate set.
+6. No file under `crates/hf-service/src/container/` exceeds roughly 1500 lines.
+7. `hf-cli`, `hf-web`, and `hf-gui/src-tauri` compile unchanged against the
    decomposed module tree.
-7. Every `#[cfg(test)]` block colocated with extracted code moved with it, and
+8. Every `#[cfg(test)]` block colocated with extracted code moved with it, and
    the two boundaries named in section 10 gained new focused tests.
-8. The desktop Policy Audit view shows persisted guardrail decisions with every
-   `GuardrailDecisionRecord` field.
-9. `TODO.md` contains no entry contradicted by the codebase.
-10. The full gate sequence passes in the order `AGENTS.md` section 4.5
+9. The desktop Policy Audit view shows persisted guardrail decisions with every
+   `GuardrailDecisionRecord` field, in both desktop and browser transports.
+10. `TODO.md` and `CONTRIBUTING.md` contain no statement contradicted by the
+    codebase.
+11. The full gate sequence passes in the order `AGENTS.md` section 4.5
     mandates.
 
 ## 12. Rejected Alternatives
