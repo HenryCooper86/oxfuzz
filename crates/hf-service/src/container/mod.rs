@@ -585,7 +585,6 @@ fn chat_storage_error(context: &str, error: impl std::fmt::Display) -> Classifie
 }
 
 impl ServiceContainer {
-
     async fn create_chat_checkpoint_unlocked(
         &self,
         session: &hf_core::types::SessionId,
@@ -2958,7 +2957,6 @@ impl ServiceContainer {
         }
         Ok(added)
     }
-
 }
 
 // ---------------------------------------------------------------------------
