@@ -15,8 +15,8 @@ because it is the safety net the others land against.
 
 Scope of this increment:
 
-- a GitHub Actions workflow running the repository's mandated gates on push
-  and pull request;
+- CI pipelines running the repository's mandated gates on push: GitLab for the
+  current origin, GitHub Actions for the public repository;
 - `scripts/tests/gates.sh` gains selectable gate arguments so continuous
   integration and local runs share one definition;
 - `crates/hf-service/src/container.rs` becomes a `container/` module tree;
@@ -34,6 +34,13 @@ Tauri APIs.
 
 1. Continuous integration runs on Linux only. Cross-platform coverage stays
    with `release.yml`, which already builds all four platform bundles on tag.
+1a. Two pipelines exist, because two hosts matter. `origin` is
+   `git@gitlab-ce.orb.local:hobot/oxfuzz.git`, so `.gitlab-ci.yml` is the gate
+   for merges that happen today; `.github/workflows/ci.yml` is the gate for the
+   public repository the project is being open-sourced to. Both invoke gates by
+   name from `scripts/tests/gates.sh`, so the duplication is a job list, not a
+   command list. This decision replaced a GitHub-only design that would have
+   gated nothing on the only remote that exists.
 2. All gates defined by `scripts/tests/gates.sh` run in continuous integration.
    None are dropped for speed. The existing eight are joined by a ninth,
    `script-tests`, covering the repository's Python script tests.
@@ -452,16 +459,17 @@ alone goes red while the others still report.
 
 ## 11. Success Criteria
 
-1. `.github/workflows/ci.yml` runs all nine gates on push and pull request and
-   passes on `main`. The baseline supports this: as of 2026-07-31 the workspace
-   test suite passes in 69 seconds with no failures, `cargo deny check` reports
-   `advisories ok, bans ok, licenses ok, sources ok`, and the Python script
-   tests pass. No gate is expected to be red on first run.
-2. A deliberately introduced Clippy warning turns the `rust` job red while
-   `frontend` and `supply-chain` still report their own status, then reverts
-   clean. One break is enough to prove the mechanism: all three jobs run gates
-   through the same dispatcher, whose non-zero exit paths are covered by the
-   dispatcher's own tests.
+1. `.gitlab-ci.yml` and `.github/workflows/ci.yml` each run all nine gates and
+   parse cleanly. The baseline supports a green first run: as of 2026-07-31 the
+   workspace test suite passes in 69 seconds with no failures, `cargo deny
+   check` reports `advisories ok, bans ok, licenses ok, sources ok`, and the
+   Python script tests pass.
+2. Live pipeline verification is explicitly deferred and tracked, not claimed.
+   The GitLab instance runs in OrbStack and may have no registered runner, and
+   the GitHub repository does not exist yet. What this increment proves is that
+   both files parse, that every command they run is a `gates.sh` gate, and that
+   the gate set passes locally. A human confirms the live pipeline by pushing to
+   `origin`.
 3. `scripts/tests/gates.sh` with no arguments behaves exactly as before.
 4. A passing test run producing more than 200 lines of filtered output exits
    zero, as does one whose output the filter removes entirely.
