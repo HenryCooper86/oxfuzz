@@ -121,10 +121,13 @@ pub struct Labels {
     pub crashes_summary_rank: &'static str,
     pub inline_engine: &'static str,
     pub inline_status: &'static str,
-    // Punctuation the two narrative sentences above assemble around their
-    // slots. Not markdown (`**` stays literal in the template -- it is
-    // formatting, not punctuation); these are the comma/parentheses/full stop
-    // a language's own convention supplies (e.g. Chinese "，（）。").
+    // Punctuation the renderer joins around label/value slots wherever the
+    // same mark serves the same purpose -- reused rather than duplicated
+    // per-callsite (e.g. `narrative_comma` also separates the corpus
+    // bullet's two values; the parens here also wrap the bug-report
+    // severity guess). Not markdown (`**` stays literal in templates -- it
+    // is formatting, not punctuation); these are the comma/parentheses/full
+    // stop a language's own convention supplies (e.g. Chinese "，（）。").
     pub narrative_comma: &'static str,
     pub narrative_open_paren: &'static str,
     pub narrative_close_paren: &'static str,
@@ -188,6 +191,11 @@ pub struct Labels {
     pub col_location: &'static str,
     pub no_crashes_found: &'static str,
     // Finding detail
+    // bullet_colon is the ": " joiner every "- Label: value" line in the
+    // document uses (also the H1 title, the "## Finding N:" heading, and the
+    // executive-summary bullets) -- one field, reused everywhere the mark is
+    // the same, rather than a colon field per call site.
+    pub bullet_colon: &'static str,
     pub bullet_kind: &'static str,
     pub bullet_stack_signature: &'static str,
     pub bullet_input: &'static str,
@@ -299,6 +307,7 @@ impl Labels {
             col_severity: "Severity",
             col_location: "Location",
             no_crashes_found: "No crashes were found. There is nothing to triage.",
+            bullet_colon: ":",
             bullet_kind: "Kind",
             bullet_stack_signature: "Stack signature",
             bullet_input: "Input",
@@ -348,7 +357,11 @@ impl Labels {
 pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
     let mut md = String::with_capacity(4096);
 
-    let _ = writeln!(md, "# {}: `{}`", labels.title_prefix, data.target);
+    let _ = writeln!(
+        md,
+        "# {}{} `{}`",
+        labels.title_prefix, labels.bullet_colon, data.target
+    );
     let _ = writeln!(md);
     let _ = writeln!(md, "| | |");
     let _ = writeln!(md, "|---|---|");
@@ -370,8 +383,12 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
     let _ = writeln!(md);
     let _ = writeln!(
         md,
-        "_{} {} {} {}._",
-        labels.generated_by, data.tool_version, labels.footer_on, data.generated_at
+        "_{} {} {} {}{}_",
+        labels.generated_by,
+        data.tool_version,
+        labels.footer_on,
+        data.generated_at,
+        labels.narrative_full_stop
     );
     md
 }
@@ -433,15 +450,29 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
         );
     }
     let _ = writeln!(md);
-    let _ = writeln!(md, "- {}: **{total}**", labels.unique_crashes);
-    let _ = writeln!(md, "- {}: **{exploitable}**", labels.exploitable_line);
-    let _ = writeln!(md, "- {}: **{cov}**", labels.line_coverage);
     let _ = writeln!(
         md,
-        "- {}: **{} {}**, {}",
+        "- {}{} **{total}**",
+        labels.unique_crashes, labels.bullet_colon
+    );
+    let _ = writeln!(
+        md,
+        "- {}{} **{exploitable}**",
+        labels.exploitable_line, labels.bullet_colon
+    );
+    let _ = writeln!(
+        md,
+        "- {}{} **{cov}**",
+        labels.line_coverage, labels.bullet_colon
+    );
+    let _ = writeln!(
+        md,
+        "- {}{} **{} {}**{} {}",
         labels.corpus_line,
+        labels.bullet_colon,
         data.corpus.count,
         labels.corpus_input_unit,
+        labels.narrative_comma,
         human_bytes(data.corpus.total_bytes)
     );
     let _ = writeln!(md);
@@ -795,27 +826,34 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         .unwrap_or_else(|| c.summary.clone());
     let _ = writeln!(
         md,
-        "### {} {n}: {}",
+        "### {} {n}{} {}",
         labels.finding_prefix,
+        labels.bullet_colon,
         escape_inline(&title)
     );
     let _ = writeln!(md);
-    let _ = writeln!(md, "- {}: `{:?}`", labels.bullet_kind, c.kind);
     let _ = writeln!(
         md,
-        "- {}: `{}`",
-        labels.bullet_stack_signature, c.stack_signature
+        "- {}{} `{:?}`",
+        labels.bullet_kind, labels.bullet_colon, c.kind
     );
     let _ = writeln!(
         md,
-        "- {}: `{}`",
+        "- {}{} `{}`",
+        labels.bullet_stack_signature, labels.bullet_colon, c.stack_signature
+    );
+    let _ = writeln!(
+        md,
+        "- {}{} `{}`",
         labels.bullet_input,
+        labels.bullet_colon,
         c.input_path.display()
     );
     let _ = writeln!(
         md,
-        "- {}: {}",
+        "- {}{} {}",
         labels.bullet_minimized,
+        labels.bullet_colon,
         if c.minimized {
             labels.bool_yes
         } else {
@@ -826,14 +864,22 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     if let Some(casr) = &c.casr {
         let _ = writeln!(
             md,
-            "- {}: **{:?}** ({})",
-            labels.bullet_casr_severity, casr.severity, casr.severity_short
+            "- {}{} **{:?}** ({})",
+            labels.bullet_casr_severity, labels.bullet_colon, casr.severity, casr.severity_short
         );
         if !casr.crashline.is_empty() {
-            let _ = writeln!(md, "- {}: `{}`", labels.bullet_crash_line, casr.crashline);
+            let _ = writeln!(
+                md,
+                "- {}{} `{}`",
+                labels.bullet_crash_line, labels.bullet_colon, casr.crashline
+            );
         }
         if let Some(cluster) = casr.cluster {
-            let _ = writeln!(md, "- {}: {cluster}", labels.bullet_cluster);
+            let _ = writeln!(
+                md,
+                "- {}{} {cluster}",
+                labels.bullet_cluster, labels.bullet_colon
+            );
         }
         if !casr.stack.is_empty() {
             let _ = writeln!(md);
@@ -851,8 +897,12 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         let _ = writeln!(md);
         let _ = writeln!(
             md,
-            "**{}** ({} {})",
-            labels.bug_report_heading, labels.severity_guess_label, report.severity_guess
+            "**{}** {}{} {}{}",
+            labels.bug_report_heading,
+            labels.narrative_open_paren,
+            labels.severity_guess_label,
+            report.severity_guess,
+            labels.narrative_close_paren
         );
         let _ = writeln!(md);
         if !report.summary.trim().is_empty() {
@@ -964,8 +1014,12 @@ pub fn ensure_graphs(ai_markdown: &str, data: &ReportData, labels: &Labels) -> S
     }
     let _ = write!(
         out,
-        "\n---\n\n_{} {} {} {}._\n",
-        labels.composed_by, data.tool_version, labels.footer_on, data.generated_at
+        "\n---\n\n_{} {} {} {}{}_\n",
+        labels.composed_by,
+        data.tool_version,
+        labels.footer_on,
+        data.generated_at,
+        labels.narrative_full_stop
     );
     out
 }
