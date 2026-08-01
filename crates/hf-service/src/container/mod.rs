@@ -1757,7 +1757,7 @@ struct LlmProviderBridge {
 /// Map a task label to soft-preferred provider tags so, in a tagged deployment,
 /// authoring/triage work routes to a `reasoning`-tagged model and mechanical
 /// work to a `fast` one. Untagged deployments are unaffected (the preference is
-/// soft -- see [`RouteRequest::preferred_tags`]).
+/// soft -- see [`hf_core::provider::RouteRequest::preferred_tags`]).
 fn preferred_tags_for_task(task: &str) -> Vec<String> {
     let task = task.to_ascii_lowercase();
     if task.contains("harness")

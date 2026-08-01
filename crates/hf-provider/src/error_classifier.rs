@@ -281,7 +281,7 @@ pub(crate) fn http_failure_to_provider_error(
 }
 
 /// Convert a mid-stream `{"error": {...}}` frame into a classified
-/// [`ProviderError`].
+/// [`hf_core::provider::ProviderError`].
 ///
 /// OpenAI-compatible relays and content filters deliver terminal errors as an
 /// SSE data frame at HTTP 200 rather than a non-2xx status. Mirroring the
