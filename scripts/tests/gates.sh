@@ -47,7 +47,11 @@ gate_test() {
 }
 
 gate_doc() {
-  cargo doc --workspace --no-deps
+  # -D warnings because rustdoc warnings are not errors by default, so a broken
+  # intra-doc link otherwise ships green. --document-private-items because
+  # rustdoc does not link-check non-public items at all, and this crate has many
+  # pub(super) ones.
+  RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 }
 
 gate_deny() {
