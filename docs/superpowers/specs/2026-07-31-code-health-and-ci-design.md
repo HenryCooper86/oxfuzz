@@ -334,11 +334,11 @@ them.
 | `container/system.rs` | `system_snapshot`, `provider_statuses`, `thaw_provider`, `cost_summary`, `workbench_dashboard`, `ingest_document` |
 
 `mod.rs` retains the `ServiceContainer` struct, its remaining private helpers
-(`build_cost_map`, `build_session_managers`, `spawn_provider_health_checks`,
-`bounded_guardrail_detail`, `chat_storage_error`, `fuzzing_policy_error`,
-`require_fuzzing_harness_engine`, `resolve_fuzzing_run`, `resolve_internal_run`,
-`run_has_crash_evidence`), the shared constants, and `pub use` re-exports so
-every path currently importable from `hf_service::container` still resolves.
+(`build_cost_map`, `build_session_managers`, `bounded_guardrail_detail`,
+`chat_storage_error`, `fuzzing_policy_error`, `require_fuzzing_harness_engine`,
+`resolve_fuzzing_run`, `resolve_internal_run`, `run_has_crash_evidence`), the
+shared constants, and `pub use` re-exports so every path currently importable
+from `hf_service::container` still resolves.
 
 Target: no resulting file exceeds roughly 1500 lines.
 
