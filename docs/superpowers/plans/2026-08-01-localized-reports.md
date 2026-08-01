@@ -1110,6 +1110,41 @@ Find them with `grep -n 'Labels::english()' crates/hf-service/src/container/expo
 Missing the second one is not cosmetic: a Chinese report whose graphs the model dropped would get English-labelled graphs back, and every AI-composed Chinese report would end with an English footer. That is precisely the defect Task 2 fixed in `ensure_graphs`, reintroduced one layer up.
 - `export_report` gains `language: ReportLanguage` as its last parameter and forwards it to `generate_report`.
 
+**`generate_report` has nine call sites across four crates, not three.** Adding a
+parameter breaks every one. Seven are mechanical; one needs a deliberate
+decision. Enumerate with:
+
+```bash
+grep -rn 'generate_report\b' --include='*.rs' crates/ | grep -v automotive
+```
+
+| Site | What to pass |
+| --- | --- |
+| `crates/hf-cli/src/main.rs` | the new `--lang` flag |
+| `crates/hf-web/src/router.rs` | the request body's `language` field |
+| `crates/hf-gui/src-tauri/src/commands.rs` | the command's resolved `language` |
+| `crates/hf-service/src/container/export.rs` (`export_report` -> `generate_report`) | its own new `language` parameter |
+| `crates/hf-service/src/scheduler.rs` (`save_crash_report`) | **see below -- a decision, not a mechanical fix** |
+| `tests/storage_read_failures.rs`, `tests/campaign.rs`, `tests/container.rs` (x2) | `ReportLanguage::En` |
+
+**The scheduler site.** `save_crash_report` generates a report for a scheduled
+campaign. There is no request to carry a language, and the desktop app's locale
+lives client-side in the frontend i18n layer -- it is never persisted to the
+service -- so the scheduler genuinely cannot know the user's language. Pass
+`ReportLanguage::En`, which is the spec's documented default, and add a comment
+at the call site saying why:
+
+```rust
+// Scheduled campaigns have no request-scoped language, and the UI locale is
+// never persisted to the service, so scheduled reports use the documented
+// English default. Localizing these needs a stored preference -- see the
+// known limitation in the design doc.
+```
+
+Do not let this become a silent gap: a Chinese user's scheduled reports will
+arrive in English, and that must be a documented limitation rather than an
+accident of threading.
+
 - [ ] **Step 2: Update the CLI**
 
 In `crates/hf-cli/src/main.rs`, add to the `report` subcommand's argument struct:
