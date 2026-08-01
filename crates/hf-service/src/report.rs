@@ -162,6 +162,7 @@ pub struct Labels {
     pub col_index: &'static str,
     pub col_severity: &'static str,
     pub col_location: &'static str,
+    pub no_crashes_found: &'static str,
     // Finding detail
     pub bullet_kind: &'static str,
     pub bullet_stack_signature: &'static str,
@@ -170,6 +171,7 @@ pub struct Labels {
     pub bullet_crash_line: &'static str,
     pub bullet_cluster: &'static str,
     pub bullet_minimized: &'static str,
+    pub stack_trace: &'static str,
     pub bug_report_heading: &'static str,
     pub reproduction: &'static str,
     pub root_cause: &'static str,
@@ -247,6 +249,7 @@ impl Labels {
             col_index: "#",
             col_severity: "Severity",
             col_location: "Location",
+            no_crashes_found: "No crashes were found. There is nothing to triage.",
             bullet_kind: "Kind",
             bullet_stack_signature: "Stack signature",
             bullet_input: "Input",
@@ -254,6 +257,7 @@ impl Labels {
             bullet_crash_line: "Crash line",
             bullet_cluster: "Cluster",
             bullet_minimized: "Minimized",
+            stack_trace: "Stack trace:",
             bug_report_heading: "Bug report",
             reproduction: "Reproduction:",
             root_cause: "Root cause:",
@@ -668,7 +672,7 @@ fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
     let _ = writeln!(md, "## {}", labels.findings_section);
     let _ = writeln!(md);
     if data.crashes.is_empty() {
-        let _ = writeln!(md, "No crashes were found. There is nothing to triage.");
+        let _ = writeln!(md, "{}", labels.no_crashes_found);
         let _ = writeln!(md);
         return;
     }
@@ -760,7 +764,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         }
         if !casr.stack.is_empty() {
             let _ = writeln!(md);
-            let _ = writeln!(md, "Stack trace:");
+            let _ = writeln!(md, "{}", labels.stack_trace);
             let _ = writeln!(md);
             let _ = writeln!(md, "```");
             for frame in &casr.stack {
