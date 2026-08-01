@@ -468,4 +468,14 @@ fn casr_severities_are_translated_wherever_they_render() {
         !zh.contains("| Exploitable |"),
         "findings table leaked an untranslated severity"
     );
+    // The bullet bolds the label directly (`**{label}**`), which the table's
+    // pipe-delimited cell never does. Without this, a bullet regression back
+    // to `format!("{:?}", casr.severity)` renders "**Exploitable**" in
+    // otherwise-Chinese prose and trips neither assertion above: the first
+    // is already satisfied by the pie chart alone, and the second only
+    // matches the table's `| ... |` shape.
+    assert!(
+        zh.contains("**可利用 (Exploitable)**"),
+        "CASR bullet still renders raw Debug output"
+    );
 }
