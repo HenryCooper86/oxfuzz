@@ -16,7 +16,7 @@ const ReportPreview = lazy(() =>
 );
 
 export function TriageView({ embedded = false }: { embedded?: boolean }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { activeProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   // The target + crash count from the most recent run, so triage scans the
@@ -90,9 +90,11 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
     [activeProject, lastTarget],
   );
 
+  // `locale` is already "en" | "zh", the identifiers the service parses, so the
+  // current interface language passes through unmapped.
   const reportArgs = useCallback(
-    () => ({ project: activeProject || ".", target: lastTarget }),
-    [activeProject, lastTarget],
+    () => ({ project: activeProject || ".", target: lastTarget, language: locale }),
+    [activeProject, lastTarget, locale],
   );
 
   // Browser blob download (web mode, or when the native dialog is unavailable).
@@ -125,7 +127,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       }
       setReportMd(md);
       await getTransport().invoke("save_report_draft", {
-        title: `Triage report — ${lastTarget || "target"}`,
+        // Persisted with the draft and shown in the Reports list, so it follows
+        // the interface language the body was just composed in. The target
+        // symbol is a technical token and is interpolated verbatim.
+        title: t("reports.triageDraftTitle", { target: lastTarget || t("reports.unknownTarget") }),
         project: activeProject || ".",
         target: lastTarget || undefined,
         status: "Draft",
@@ -151,6 +156,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
             project: activeProject || ".",
             target: lastTarget,
             format,
+            language: locale,
           });
           if (saved) setReportMsg(t("triage.reportSaved", { format: format.toUpperCase(), path: saved }));
         } else if (format === "md" && reportMd) {
@@ -163,7 +169,7 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
         setReportMsg(t("triage.exportFailed", { error: String(e) }));
       }
     },
-    [activeProject, lastTarget, reportMd, browserDownload, t],
+    [activeProject, lastTarget, reportMd, browserDownload, locale, t],
   );
 
   // Export a self-contained reproduction bundle (harness + crash input +

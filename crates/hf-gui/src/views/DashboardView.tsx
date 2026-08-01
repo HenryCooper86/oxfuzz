@@ -128,10 +128,14 @@ function emptyDashboard(project: string | null, target: string | null): Workbenc
   };
 }
 
-function emptyEditor(project: string, target: string): ReportEditorState {
+// The draft title is persisted with the report and listed in the Reports view,
+// so it has to follow the interface language or a Chinese user accumulates a
+// list of English titles. This is module scope with no hook available, so the
+// caller threads its own `t` in.
+function emptyEditor(project: string, target: string, t: TFn): ReportEditorState {
   return {
     id: null,
-    title: target ? `${target} fuzzing report` : "Untitled fuzzing report",
+    title: target ? t("reports.targetDraftTitle", { target }) : t("reports.untitledDraftTitle"),
     project,
     target,
     status: "Draft",
@@ -144,12 +148,12 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const { target } = useTarget();
   const { toast } = useToast();
   const confirm = useConfirm();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { configured: defectDojoOn } = useDefectDojo();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
   const [reports, setReports] = useState<ReportDraft[]>([]);
-  const [editor, setEditor] = useState<ReportEditorState>(() => emptyEditor(activeProject, target));
+  const [editor, setEditor] = useState<ReportEditorState>(() => emptyEditor(activeProject, target, t));
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -273,7 +277,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   }
 
   function startBlankReport() {
-    setEditor(emptyEditor(activeProject, target));
+    setEditor(emptyEditor(activeProject, target, t));
     setNotice(null);
     setError(null);
     setTab("reports");
@@ -291,10 +295,13 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       const content = await getTransport().invoke<string>("generate_report", {
         project: activeProject,
         target,
+        language: locale,
       });
       setEditor({
         id: null,
-        title: `${target} fuzzing report`,
+        // Persisted with the draft and shown in the Reports list, so it follows
+        // the interface language the body was just composed in.
+        title: t("reports.targetDraftTitle", { target }),
         project: activeProject,
         target,
         status: "Draft",
@@ -335,7 +342,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
     try {
       await getTransport().invoke("delete_report_draft", { id: report.id });
       const next = await reloadReports();
-      setEditor(next[0] ? editorFromReport(next[0]) : emptyEditor(activeProject, target));
+      setEditor(next[0] ? editorFromReport(next[0]) : emptyEditor(activeProject, target, t));
       setNotice(t("dashboard.reportDeleted"));
     } catch (e) {
       setError(t("dashboard.deleteFailed", { error: String(e) }));
