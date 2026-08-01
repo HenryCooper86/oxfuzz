@@ -1009,33 +1009,6 @@ impl ServiceContainer {
         self.runtime_adapter()
     }
 
-    /// A snapshot of the agent turns currently executing.
-    fn active_agent_pool(&self) -> AgentPoolSnapshot {
-        let labels = self
-            .active_agents
-            .lock()
-            .map(|a| a.clone())
-            .unwrap_or_default();
-        let instances: Vec<AgentInstanceSnapshot> = labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| AgentInstanceSnapshot {
-                instance_id: format!("turn-{i}"),
-                agent_name: label.clone(),
-                state: "running".to_owned(),
-                elapsed_ms: 0,
-                iterations: 0,
-                tokens_used: 0,
-            })
-            .collect();
-        AgentPoolSnapshot {
-            active_instances: instances.len(),
-            available_slots: 0,
-            total_instances: instances.len(),
-            instances,
-        }
-    }
-
     /// Enter a workspace-backed service operation. Both guards are `Send`, so
     /// callers may retain the lease across sandbox, storage, and provider awaits.
     pub(crate) async fn acquire_workspace_operation(
