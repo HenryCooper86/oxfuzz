@@ -64,7 +64,6 @@ use hf_guardrails::{Action, Decision, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, RunKind, RunRecord, RunStatus, Store};
 use output_budget::{monitor_run_output, run_artifacts_within_budget};
-use policy::GUARDRAIL_DECISION_RETENTION;
 use project_identity::{
     canonical_project_root, project_slug, select_target_candidate, stored_project_matches,
 };
@@ -89,6 +88,9 @@ const CORPUS_MINIMIZE_SECS: u64 = 300;
 /// Bound on the stored policy reason; denial reasons embed action labels that
 /// can carry long parameters (e.g. a shell command).
 const MAX_GUARDAIL_DETAIL_CHARS: usize = 256;
+/// Newest decisions retained in the audit trail; recording prunes beyond this
+/// window on write (mirrors schedule-execution history retention).
+const GUARDRAIL_DECISION_RETENTION: usize = 1000;
 pub(crate) const WORKSPACE_CLEANUP_BUSY_MESSAGE: &str =
     "workspace cannot be cleared while another workspace operation is active";
 pub(crate) const EXACT_DOCKER_IMAGE_REV_PREFIX: &str = "docker-image-id-sha256:";
