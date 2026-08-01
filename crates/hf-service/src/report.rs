@@ -661,6 +661,18 @@ fn coverage_mermaid(c: CoverageSummary, labels: &Labels) -> String {
     )
 }
 
+/// Resolve a CASR severity to its label. `Debug` output is the raw English
+/// variant name, which is correct only by coincidence in an English report
+/// and wrong in every other language.
+const fn casr_severity_label(severity: CrashSeverity, labels: &Labels) -> &'static str {
+    match severity {
+        CrashSeverity::Exploitable => labels.casr_exploitable,
+        CrashSeverity::ProbablyExploitable => labels.casr_probably_exploitable,
+        CrashSeverity::NotExploitable => labels.casr_not_exploitable,
+        CrashSeverity::Undefined => labels.casr_undefined,
+    }
+}
+
 /// A Mermaid pie chart of crash exploitability (CASR severity).
 fn severity_pie_mermaid(crashes: &[Crash], labels: &Labels) -> String {
     let mut exploitable = 0;
@@ -892,10 +904,9 @@ fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
     );
     let _ = writeln!(md, "|---:|---|---|---|---|");
     for (i, c) in data.crashes.iter().enumerate() {
-        let severity = c.casr.as_ref().map_or_else(
-            || labels.casr_undefined.to_owned(),
-            |r| format!("{:?}", r.severity),
-        );
+        let severity = c.casr.as_ref().map_or(labels.casr_undefined, |r| {
+            casr_severity_label(r.severity, labels)
+        });
         let location = c
             .casr
             .as_ref()
@@ -907,7 +918,7 @@ fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
             "| {} | {:?} | {} | `{}` | `{}` |",
             i + 1,
             c.kind,
-            escape_inline(&severity),
+            escape_inline(severity),
             escape_inline(&location),
             escape_inline(&truncate(&c.stack_signature, 60))
         );
@@ -967,8 +978,13 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     if let Some(casr) = &c.casr {
         let _ = writeln!(
             md,
-            "- {}{}**{:?}** ({})",
-            labels.bullet_casr_severity, labels.bullet_colon, casr.severity, casr.severity_short
+            "- {}{}**{}**{}{}{}",
+            labels.bullet_casr_severity,
+            labels.bullet_colon,
+            casr_severity_label(casr.severity, labels),
+            labels.narrative_open_paren,
+            casr.severity_short,
+            labels.narrative_close_paren
         );
         if !casr.crashline.is_empty() {
             let _ = writeln!(
