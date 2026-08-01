@@ -79,7 +79,7 @@ pub fn line_reports_finding(line: &str) -> bool {
 }
 
 /// Whether a (lowercased) line signals a fuzzer finding -- a crash, OOM, leak,
-/// or timeout. Covers libFuzzer's "Test unit written to <artifact>" save line
+/// or timeout. Covers libFuzzer's "Test unit written to `<artifact>`" save line
 /// (one per saved finding of any type), the `crash-<hash>` artifact-filename
 /// prefix, and the common sanitizer/signal phrasings.
 ///
