@@ -43,7 +43,7 @@ use chrono::Utc;
 use coverage_cache::{coverage_signature, export_cache};
 use crash_inputs::{
     bucket_by_cluster, casrep_input_path, collect_casreps, collect_crash_inputs,
-    collect_legacy_crash_inputs, deterministic_crash_id, is_regular_file, stage_crash_inputs,
+    deterministic_crash_id, is_regular_file, stage_crash_inputs,
 };
 use guards::{
     close_run_journal, ensure_run_journal_durable, ActiveRunGuard, PersistedRunGuard,
@@ -2621,48 +2621,6 @@ impl ServiceContainer {
     }
 
     // -- Corpus -----------------------------------------------------------
-
-    async fn corpus_absorb_run_record(
-        &self,
-        project: &Path,
-        target: &str,
-        run: Option<RunRecord>,
-    ) -> Result<usize, ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
-        self.authorize_recorded(Action::CorpusOp, "corpus_absorb_crashes", Some(project))
-            .await?;
-        prepare_configured_workspace_root()?;
-        let workspace = workspace_dir(project, target);
-        let corpus_dir = workspace.join("corpus");
-
-        // Prefer the deduplicated crash set triage persisted for the latest run;
-        // fall back to whatever crash inputs are staged under the run output.
-        let mut inputs: Vec<PathBuf> = Vec::new();
-        if let Some(store) = &self.store {
-            if let Some(run) = &run {
-                let crashes = store.list_crashes_by_run(run.id).await?;
-                inputs.extend(crashes.into_iter().map(|c| c.input_path));
-            }
-        }
-        if inputs.is_empty() {
-            let out_dir = match run.as_ref() {
-                Some(run) => run_output_dir(&workspace, run)?,
-                None => workspace.join("out"),
-            };
-            inputs = run.as_ref().map_or_else(
-                || collect_legacy_crash_inputs(&out_dir),
-                |run| collect_crash_inputs(run.engine, &out_dir),
-            );
-        }
-
-        let (mut corpus, added) = hf_corpus::absorb(&corpus_dir, &inputs)?;
-        if self.store.is_some() {
-            let target_id = self.resolve_target_id_any_language(project, target).await?;
-            corpus.target_id = target_id;
-            self.persist_corpus(target_id, &corpus).await?;
-        }
-        Ok(added)
-    }
 }
 
 // ---------------------------------------------------------------------------
