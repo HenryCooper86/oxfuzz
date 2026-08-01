@@ -218,6 +218,22 @@ What does remain English is any value that genuinely reaches the report through
 `Debug` rather than through a mapping. Task 2 should confirm which those are by
 reading, rather than trusting this document a second time.
 
+### 9.5 The interpretation size bound is bytes, so Chinese gets less of it
+
+`validate_ai_interpretation` rejects an interpretation over 24000 **bytes**. A
+CJK character costs three bytes in UTF-8 where a Latin one costs one, so a
+Chinese interpretation has roughly a third of the character budget an English
+one does -- about 8000 characters against 24000.
+
+The bound was deliberately not touched when validation became language-aware,
+because widening a safety limit is not a translation change. The practical
+impact is low: 8000 Chinese characters is a long interpretation, and the
+consequence of hitting the bound is a clear rejection rather than a silent
+truncation.
+
+Recorded because the asymmetry only became reachable when Chinese did, and it
+existed nowhere in writing before.
+
 ### 9.4 Operation result summaries stay English
 
 `automotive::automotive_result_summary` builds sentences like
