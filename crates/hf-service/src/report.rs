@@ -252,8 +252,8 @@ impl Labels {
             crashes_summary_rank: "rank as exploitable or probably exploitable",
             inline_engine: "engine",
             inline_status: "status",
-            narrative_comma: ",",
-            narrative_open_paren: "(",
+            narrative_comma: ", ",
+            narrative_open_paren: " (",
             narrative_close_paren: ")",
             narrative_full_stop: ".",
             unique_crashes: "Unique crashes",
@@ -527,7 +527,7 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
     if total == 0 {
         let _ = writeln!(
             md,
-            "{summary} {op}{engine_word} {engine}{comma} {status_word} {status}{cp}{stop}",
+            "{summary}{op}{engine_word} {engine}{comma}{status_word} {status}{cp}{stop}",
             summary = labels.no_crashes_summary,
             op = labels.narrative_open_paren,
             engine_word = labels.inline_engine,
@@ -539,7 +539,7 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
     } else {
         let _ = writeln!(
             md,
-            "{lead} **{total} {unit}**{comma} {of_which} **{exploitable}** {rank} {op}{engine_word} {engine}{comma} {status_word} {status}{cp}{stop}",
+            "{lead} **{total} {unit}**{comma}{of_which} **{exploitable}** {rank}{op}{engine_word} {engine}{comma}{status_word} {status}{cp}{stop}",
             lead = labels.crashes_summary_lead,
             unit = labels.crashes_summary_unit,
             comma = labels.narrative_comma,
