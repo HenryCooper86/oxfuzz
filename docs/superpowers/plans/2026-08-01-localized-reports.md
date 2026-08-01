@@ -209,6 +209,20 @@ Separating this from the translation matters. If translation and refactor land t
 - Consumes: `ReportLanguage` from Task 1.
 - Produces: `pub struct Labels` with `Labels::english()`, `Labels::chinese()`, and `Labels::for_language(ReportLanguage) -> Labels`; `render_markdown(data: &ReportData, labels: &Labels) -> String`. Task 3 fills in `chinese()`. Task 5 calls `for_language`.
 
+> **Historical note, added after the branch shipped.** The field list in this
+> task is the one the plan was written with -- 75 fields. The shipped struct has
+> 101: six fix rounds across Tasks 2, 3, 3b and 5 found literals the initial
+> extraction missed, and those rounds updated Task 3's Chinese block without
+> updating this declaration or the `english()` block beside it. So this task's
+> struct and Task 3's translations no longer agree with each other, and neither
+> matches the code.
+>
+> Do not reconcile them by editing this plan. `Labels` in
+> `crates/hf-service/src/report.rs` is the authoritative list, and it is the only
+> one that cannot drift -- the compiler rejects any field `english()` or
+> `chinese()` fails to populate. This note exists so a later reader trusts the
+> struct over the plan rather than discovering the gap by debugging.
+
 - [ ] **Step 1: Write the failing test**
 
 Append to `crates/hf-service/tests/report.rs`:
