@@ -496,3 +496,51 @@ The branch is done when `scripts/tests/gates.sh` passes all ten gates and:
 2. A Chinese AI interpretation validates rather than being discarded.
 3. Omitting the language anywhere yields today's English output, unchanged.
 4. Rendering the Chinese report and reading the Limitations section confirms each caveat is as strong as its English counterpart.
+
+---
+
+## Task 4 review notes
+
+Recorded at the close of the branch. Nothing here blocks the feature; all ten
+gates pass and every success criterion in section 11 of the design was checked
+against a real rendering.
+
+**The call-site count was seven**, exactly as the brief's pre-verification said:
+the internal delegation inside `generate_automotive_report`, three in-file tests
+in `automotive.rs`, the CLI, the REST handler and the Tauri command. The route
+registration and the command registration carry no value.
+
+**The English `lang` attribute is not a draft-only problem.** Design section 9.1
+has been corrected in place. Short version: `export_markdown` hardcodes
+`ReportLanguage::En`, so a directly exported Chinese automotive report -- CLI
+`--output` or desktop export, neither of which is a draft -- is served as
+`<html lang="en">`. The title is correct; the attribute is not. Fixing it is a
+design decision about a shared service method, not a pass-through, so it was
+left for a follow-up rather than made incidentally.
+
+**Two title sites became three.** The brief named the desktop view's two. The
+CLI built a third, `format!("Automotive Fuzzing Campaign Report: {}", ...)`,
+duplicating `AutomotiveLabels::english().title_prefix` as a literal, and it
+titles the exported document. It is now assembled from the same label set the
+body was rendered from, so it follows the language with no new string. The
+English rendering is byte-identical and is asserted as such.
+
+**The CLI command body moved behind an injected service.** `AutomotiveOp::Report`
+handled its own bootstrap inline, which left the hand-off unobservable; a
+hardcoded language there would have passed every test. It now follows the shape
+`run_report_command` already established on the previous branch. One behavior
+changed as a consequence, deliberately and consistently with `oxfuzz report`: an
+unknown `--report-lang` is rejected before the container is bootstrapped.
+
+**`automotive.report.title` was already taken** -- it is the workspace section
+heading, "Campaign synthesis and report". The document title key is
+`automotive.report.documentTitle`.
+
+**Mutation testing.** Nine single-line reversions were run, each confirmed to
+turn red only the test naming it: the label resolution, the interpretation
+composition and the settings-resolving delegation in `hf-service`; the handler
+in `hf-web`; the service hand-off and the export title in `hf-cli`; the hook
+destructure, the compose argument, both desktop title sites, the Chinese
+dictionary entry and the `language` field in `lib/automotive.ts`. The two
+carried-forward tests were checked the same way, `[STATE:]` and `[TRANSCRIPT:]`
+independently.
