@@ -1756,18 +1756,51 @@ async fn cmd_campaign(
     Ok(())
 }
 
-async fn cmd_report(
-    project: PathBuf,
+/// The single service call `oxfuzz report` makes. Behind a trait so a test can
+/// observe the language the command hands over without bootstrapping a real
+/// container -- the parse and the hand-off are otherwise unobservable together.
+#[async_trait::async_trait]
+trait ReportCommandService {
+    async fn compose_report(
+        &self,
+        project: &std::path::Path,
+        target: &str,
+        language: hf_service::ReportLanguage,
+    ) -> Result<String, hf_service::ClassifiedError>;
+}
+
+#[async_trait::async_trait]
+impl ReportCommandService for ServiceContainer {
+    async fn compose_report(
+        &self,
+        project: &std::path::Path,
+        target: &str,
+        language: hf_service::ReportLanguage,
+    ) -> Result<String, hf_service::ClassifiedError> {
+        self.generate_report(project, target, language).await
+    }
+}
+
+/// Parse the language, build the service, compose, then emit. `bootstrap` is
+/// injected rather than called directly so the whole path -- flag string in,
+/// `ReportLanguage` at the service boundary, document out -- is one testable
+/// unit, and so a rejected language is provably free of bootstrap side effects.
+async fn run_report_command<S, Bootstrap, BootstrapFuture>(
+    project: &std::path::Path,
     target: &str,
     out: Option<&std::path::Path>,
     lang: &str,
-) -> anyhow::Result<()> {
+    bootstrap: Bootstrap,
+) -> anyhow::Result<()>
+where
+    S: ReportCommandService + Sync,
+    Bootstrap: FnOnce() -> BootstrapFuture,
+    BootstrapFuture: std::future::Future<Output = S>,
+{
     // An unknown identifier is rejected here, before any composition work.
     let language = lang.parse::<hf_service::ReportLanguage>()?;
-    let container = ServiceContainer::bootstrap().await;
-    let markdown = container
-        .generate_report(&project, target, language)
-        .await?;
+    let service = bootstrap().await;
+    let markdown = service.compose_report(project, target, language).await?;
     match out {
         Some(path) => {
             std::fs::write(path, &markdown)?;
@@ -1776,6 +1809,15 @@ async fn cmd_report(
         None => println!("{markdown}"),
     }
     Ok(())
+}
+
+async fn cmd_report(
+    project: PathBuf,
+    target: &str,
+    out: Option<&std::path::Path>,
+    lang: &str,
+) -> anyhow::Result<()> {
+    run_report_command(&project, target, out, lang, ServiceContainer::bootstrap).await
 }
 
 /// Parse a comma-separated list of unsigned integers, each decimal or `0x` hex.
@@ -2263,9 +2305,102 @@ mod automotive_tests {
 
 #[cfg(test)]
 mod report_cli_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use clap::Parser as _;
 
-    use super::{Cli, Commands};
+    use super::{run_report_command, Cli, Commands, ReportCommandService};
+
+    /// Records the language the command handed to the service.
+    #[derive(Default)]
+    struct RecordingReportService {
+        received: Arc<Mutex<Option<hf_service::ReportLanguage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReportCommandService for RecordingReportService {
+        async fn compose_report(
+            &self,
+            _project: &std::path::Path,
+            target: &str,
+            language: hf_service::ReportLanguage,
+        ) -> Result<String, hf_service::ClassifiedError> {
+            *self.received.lock().unwrap() = Some(language);
+            Ok(format!("# report for {target} composed as {language:?}\n"))
+        }
+    }
+
+    /// Drive the command end to end and report which language the service saw.
+    async fn language_handed_to_the_service(flag: &str) -> hf_service::ReportLanguage {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("report.md");
+        let received = Arc::new(Mutex::new(None));
+        let service = RecordingReportService {
+            received: Arc::clone(&received),
+        };
+
+        run_report_command(
+            std::path::Path::new("/tmp/project"),
+            "parse_header",
+            Some(&out),
+            flag,
+            move || std::future::ready(service),
+        )
+        .await
+        .unwrap();
+
+        // The composed document is what reaches the file, so this also pins
+        // that the service's output is the thing written out.
+        let written = std::fs::read_to_string(&out).unwrap();
+        assert!(written.contains("parse_header"), "{written}");
+
+        let language = received.lock().unwrap().unwrap();
+        assert!(
+            written.contains(&format!("{language:?}")),
+            "the written document must be the one the service composed: {written}"
+        );
+        language
+    }
+
+    #[tokio::test]
+    async fn the_parsed_language_reaches_the_service() {
+        // The hand-off, not the parse: `--lang zh` must arrive at
+        // generate_report rather than being parsed and then discarded.
+        assert_eq!(
+            language_handed_to_the_service("zh").await,
+            hf_service::ReportLanguage::Zh
+        );
+        assert_eq!(
+            language_handed_to_the_service("en").await,
+            hf_service::ReportLanguage::En
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_language_is_rejected_before_any_bootstrap() {
+        let bootstrapped = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&bootstrapped);
+
+        let error = run_report_command(
+            std::path::Path::new("/tmp/project"),
+            "parse_header",
+            None,
+            "fr",
+            move || {
+                called.store(true, Ordering::SeqCst);
+                std::future::ready(RecordingReportService::default())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown report language 'fr'"));
+        assert!(
+            !bootstrapped.load(Ordering::SeqCst),
+            "an unusable language must cost nothing: no container is built"
+        );
+    }
 
     #[test]
     fn report_language_defaults_to_english_and_accepts_chinese() {
