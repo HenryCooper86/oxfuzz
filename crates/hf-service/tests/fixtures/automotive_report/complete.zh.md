@@ -63,11 +63,11 @@
 
 | 操作证据 | 阶段 | 模式 / 协议 | 状态 | 已验证结果 | 请求摘要 | 记录证据 | 产物目录 |
 |---|---|---|---|---|---|---|---|
-| [OP:00000000-0000-0000-0000-000000000001] | `capabilities` | `offline_pcap` / `uds` | 已完成 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/capabilities` |
-| [OP:00000000-0000-0000-0000-000000000002] | `analyze_capture` | `offline_pcap` / `uds` | 已完成 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/analyze_capture` |
-| [OP:00000000-0000-0000-0000-000000000003] | `generate_mutations` | `offline_pcap` / `uds` | 已完成 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/generate_mutations` |
-| [OP:00000000-0000-0000-0000-000000000004] | `build_replay_plan` | `offline_pcap` / `uds` | 已完成 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/build_replay_plan` |
-| [OP:00000000-0000-0000-0000-000000000005] | `execute_replay` | `virtual_can` / `uds` | 已完成 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/execute_replay` |
+| [OP:00000000-0000-0000-0000-000000000001] | `capabilities` | `offline_pcap` / `uds` | 已结束 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/capabilities` |
+| [OP:00000000-0000-0000-0000-000000000002] | `analyze_capture` | `offline_pcap` / `uds` | 已结束 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/analyze_capture` |
+| [OP:00000000-0000-0000-0000-000000000003] | `generate_mutations` | `offline_pcap` / `uds` | 已结束 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/generate_mutations` |
+| [OP:00000000-0000-0000-0000-000000000004] | `build_replay_plan` | `offline_pcap` / `uds` | 已结束 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/build_replay_plan` |
+| [OP:00000000-0000-0000-0000-000000000005] | `execute_replay` | `virtual_can` / `uds` | 已结束 | complete | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/execute_replay` |
 
 ## 限制
 

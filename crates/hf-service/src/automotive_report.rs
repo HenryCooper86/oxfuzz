@@ -407,6 +407,10 @@ pub struct AutomotiveLabels {
     // Evidence manifest. The status words are a separate vocabulary from the
     // executive summary's count words: the summary distinguishes "completed"
     // from "partial", while the durable lifecycle has "done" and no partial.
+    // Every language must keep them apart. A `Done` operation whose typed
+    // result did not complete is counted `partial` and never `completed`, so a
+    // `status_done` that reads as "completed" would have the manifest call an
+    // operation complete on the same page the summary counts zero of them.
     pub manifest_section: &'static str,
     pub manifest_none: &'static str,
     pub col_operation_evidence: &'static str,
@@ -777,7 +781,14 @@ impl AutomotiveLabels {
             value_not_retained: "未保留",
             value_not_applicable: "不适用",
             status_running: "运行中",
-            status_done: "已完成",
+            // "已结束", not "已完成": this is the durable lifecycle reaching a
+            // terminal state, which says nothing about whether the typed result
+            // completed. "已完成" belongs to `workflow_complete` and
+            // `summary_completed`, and a `Done` operation with an incomplete
+            // result is counted "个部分完成" there -- reusing the word here
+            // would have the manifest contradict the summary about the same
+            // operation, a contradiction the English "done" cannot express.
+            status_done: "已结束",
             status_failed: "失败",
             status_cancelled: "已取消",
             limitations_section: "限制",
