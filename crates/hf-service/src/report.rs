@@ -307,7 +307,7 @@ impl Labels {
             col_severity: "Severity",
             col_location: "Location",
             no_crashes_found: "No crashes were found. There is nothing to triage.",
-            bullet_colon: ":",
+            bullet_colon: ": ",
             bullet_kind: "Kind",
             bullet_stack_signature: "Stack signature",
             bullet_input: "Input",
@@ -429,8 +429,8 @@ impl Labels {
             status_unknown: "无运行记录",
             engine_unknown: "不适用",
             coverage_unknown: "不可用",
-            no_crashes_summary: "最近一次测试未发现崩溃",
-            crashes_summary_lead: "本次测试发现",
+            no_crashes_summary: "最近一次测试活动未发现崩溃",
+            crashes_summary_lead: "本次测试活动发现",
             crashes_summary_unit: "个去重崩溃",
             crashes_summary_of_which: "其中",
             crashes_summary_rank: "个被判定为可利用或可能可利用",
@@ -462,7 +462,7 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
 
     let _ = writeln!(
         md,
-        "# {}{} `{}`",
+        "# {}{}`{}`",
         labels.title_prefix, labels.bullet_colon, data.target
     );
     let _ = writeln!(md);
@@ -555,22 +555,22 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
     let _ = writeln!(md);
     let _ = writeln!(
         md,
-        "- {}{} **{total}**",
+        "- {}{}**{total}**",
         labels.unique_crashes, labels.bullet_colon
     );
     let _ = writeln!(
         md,
-        "- {}{} **{exploitable}**",
+        "- {}{}**{exploitable}**",
         labels.exploitable_line, labels.bullet_colon
     );
     let _ = writeln!(
         md,
-        "- {}{} **{cov}**",
+        "- {}{}**{cov}**",
         labels.line_coverage, labels.bullet_colon
     );
     let _ = writeln!(
         md,
-        "- {}{} **{} {}**{}{}",
+        "- {}{}**{} {}**{}{}",
         labels.corpus_line,
         labels.bullet_colon,
         data.corpus.count,
@@ -929,7 +929,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         .unwrap_or_else(|| c.summary.clone());
     let _ = writeln!(
         md,
-        "### {} {n}{} {}",
+        "### {} {n}{}{}",
         labels.finding_prefix,
         labels.bullet_colon,
         escape_inline(&title)
@@ -937,24 +937,24 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     let _ = writeln!(md);
     let _ = writeln!(
         md,
-        "- {}{} `{:?}`",
+        "- {}{}`{:?}`",
         labels.bullet_kind, labels.bullet_colon, c.kind
     );
     let _ = writeln!(
         md,
-        "- {}{} `{}`",
+        "- {}{}`{}`",
         labels.bullet_stack_signature, labels.bullet_colon, c.stack_signature
     );
     let _ = writeln!(
         md,
-        "- {}{} `{}`",
+        "- {}{}`{}`",
         labels.bullet_input,
         labels.bullet_colon,
         c.input_path.display()
     );
     let _ = writeln!(
         md,
-        "- {}{} {}",
+        "- {}{}{}",
         labels.bullet_minimized,
         labels.bullet_colon,
         if c.minimized {
@@ -967,20 +967,20 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     if let Some(casr) = &c.casr {
         let _ = writeln!(
             md,
-            "- {}{} **{:?}** ({})",
+            "- {}{}**{:?}** ({})",
             labels.bullet_casr_severity, labels.bullet_colon, casr.severity, casr.severity_short
         );
         if !casr.crashline.is_empty() {
             let _ = writeln!(
                 md,
-                "- {}{} `{}`",
+                "- {}{}`{}`",
                 labels.bullet_crash_line, labels.bullet_colon, casr.crashline
             );
         }
         if let Some(cluster) = casr.cluster {
             let _ = writeln!(
                 md,
-                "- {}{} {cluster}",
+                "- {}{}{cluster}",
                 labels.bullet_cluster, labels.bullet_colon
             );
         }

@@ -364,6 +364,32 @@ fn bug_report_heading_is_assembled_correctly() {
 }
 
 #[test]
+fn corpus_bullet_is_assembled_correctly_in_chinese() {
+    // The Chinese counterpart of `corpus_bullet_is_assembled_correctly`. Round
+    // 2 pinned only the English rendering of this line and left the Chinese
+    // rendering checked by a probe test that was then deleted -- exactly the
+    // hole a future change to `narrative_comma` or `bullet_colon` could walk
+    // through with the suite staying green. No ASCII space belongs next to
+    // the full-width colon or comma here.
+    let md = render_markdown(&populated(), &Labels::chinese());
+    assert!(
+        md.contains("- 语料库：**25 个输入**，4.0 KiB"),
+        "Chinese corpus bullet mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn bug_report_heading_is_assembled_correctly_in_chinese() {
+    // The Chinese counterpart of `bug_report_heading_is_assembled_correctly`,
+    // for the same reason as the corpus-bullet Chinese test above.
+    let md = render_markdown(&populated(), &Labels::chinese());
+    assert!(
+        md.contains("**缺陷报告**（严重程度推测： High）"),
+        "Chinese bug report heading mismatch:\n{md}"
+    );
+}
+
+#[test]
 fn chinese_labels_translate_the_scaffolding_in_both_directions() {
     let md = render_markdown(&populated(), &Labels::chinese());
 
