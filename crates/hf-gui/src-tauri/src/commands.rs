@@ -1809,16 +1809,24 @@ pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
 }
 
 /// Compose the Markdown campaign report for a target and return it as a string,
-/// so the GUI can preview or download it.
+/// so the GUI can preview or download it. `language` is the caller's UI locale
+/// (`en` / `zh`); omitting it composes in English.
 #[tauri::command]
 pub async fn generate_report(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: String,
+    language: Option<String>,
 ) -> Result<String, String> {
+    let language = match language {
+        Some(value) => value
+            .parse::<hf_service::ReportLanguage>()
+            .map_err(|error| error.to_string())?,
+        None => hf_service::ReportLanguage::default(),
+    };
     state
         .container
-        .generate_report(std::path::Path::new(&project), &target)
+        .generate_report(std::path::Path::new(&project), &target, language)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2203,9 +2211,16 @@ pub async fn export_report(
     project: String,
     target: String,
     format: String,
+    language: Option<String>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let language = match language {
+        Some(value) => value
+            .parse::<hf_service::ReportLanguage>()
+            .map_err(|error| error.to_string())?,
+        None => hf_service::ReportLanguage::default(),
+    };
     let ext = match format.trim().to_ascii_lowercase().as_str() {
         "md" | "markdown" => "md",
         "html" | "htm" => "html",
@@ -2229,7 +2244,13 @@ pub async fn export_report(
         .map_err(|e| format!("invalid save path: {e}"))?;
     state
         .container
-        .export_report(std::path::Path::new(&project), &target, ext, &path)
+        .export_report(
+            std::path::Path::new(&project),
+            &target,
+            ext,
+            &path,
+            language,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(Some(path.to_string_lossy().to_string()))
