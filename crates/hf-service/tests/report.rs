@@ -452,3 +452,20 @@ fn casr_terms_keep_the_original_alongside_the_translation() {
     assert!(zh.casr_not_exploitable.contains("Not exploitable"));
     assert!(zh.casr_undefined.contains("Undefined"));
 }
+
+#[test]
+fn casr_severities_are_translated_wherever_they_render() {
+    let data = populated();
+    let zh = render_markdown(&data, &Labels::chinese());
+
+    // The pie chart already used the labels. These two sites did not.
+    assert!(
+        zh.contains("可利用 (Exploitable)"),
+        "findings table or CASR bullet still renders raw Debug output"
+    );
+    // Raw Debug output must not appear anywhere in a Chinese report.
+    assert!(
+        !zh.contains("| Exploitable |"),
+        "findings table leaked an untranslated severity"
+    );
+}
