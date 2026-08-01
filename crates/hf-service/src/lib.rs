@@ -88,6 +88,7 @@ pub use defectdojo_lifecycle::{DefectDojoState, DefectDojoStatus};
 pub use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, ProjectAutoRevert};
 pub use init::{init_at, init_workspace, InitReport};
 pub use issue_tracker::{CreatedIssue, IssueTrackerConfig};
+pub use report::ReportLanguage;
 pub use report_store::ReportDraft;
 #[cfg(feature = "semgrep-enrichment")]
 pub use semgrep::{

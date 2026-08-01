@@ -14,9 +14,40 @@
 use std::fmt::Write as _;
 
 use hf_core::crash::{Crash, CrashSeverity};
+use hf_core::error::ClassifiedError;
 use hf_core::target::TargetCandidate;
 use hf_coverage::CoverageSummary;
 use hf_storage::RunRecord;
+
+/// The language a report is composed in.
+///
+/// Serializes as the identifiers the desktop app's `Locale` already uses, so the
+/// GUI passes its current selection through unchanged. Two variants because two
+/// languages exist; a third later is a compile error at every match site, which
+/// is the intended behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportLanguage {
+    /// English. The default when a caller specifies nothing.
+    #[default]
+    En,
+    /// Simplified Chinese.
+    Zh,
+}
+
+impl std::str::FromStr for ReportLanguage {
+    type Err = ClassifiedError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "en" => Ok(Self::En),
+            "zh" => Ok(Self::Zh),
+            other => Err(ClassifiedError::Validation(format!(
+                "unknown report language '{other}'; accepted values are 'en' and 'zh'"
+            ))),
+        }
+    }
+}
 
 /// Corpus composition for the report.
 #[derive(Debug, Clone, Copy, Default)]
