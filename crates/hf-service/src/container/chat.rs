@@ -2,10 +2,34 @@
 
 use hf_core::error::ClassifiedError;
 use hf_guardrails::Action;
+use uuid::Uuid;
 
 use super::{chat_storage_error, ServiceContainer};
 
 impl ServiceContainer {
+    async fn create_chat_checkpoint_unlocked(
+        &self,
+        session: &hf_core::types::SessionId,
+        message_count_before: u32,
+    ) -> Result<(), ClassifiedError> {
+        let manager = self.chat_checkpoint_manager()?;
+        let turn = manager
+            .current_turn(session)
+            .await
+            .map_err(|error| chat_storage_error("read current chat turn", error))?
+            .saturating_add(1);
+        manager
+            .create_checkpoint(
+                session,
+                turn,
+                message_count_before,
+                Uuid::new_v4().to_string(),
+            )
+            .await
+            .map_err(|error| chat_storage_error("create chat checkpoint", error))?;
+        Ok(())
+    }
+
     /// Create a turn checkpoint recording the transcript length before this
     /// turn (so a later rollback restores the pre-turn state).
     ///
