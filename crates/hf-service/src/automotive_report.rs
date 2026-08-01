@@ -251,7 +251,7 @@ pub struct AutomotiveLabels {
     pub evidence_window_unit: &'static str,
     // Punctuation the renderer joins around label and value slots. Each field
     // carries its own spacing so a language whose full-width marks supply their
-    // own spacing (Chinese ",（）。：；") needs no ASCII space beside them.
+    // own spacing (Chinese "，（）。：；") needs no ASCII space beside them.
     // `label_colon` is the single ": " joiner used by the document title, the
     // "### Heading: `value`" finding headings and every "- Label: value"
     // bullet -- one field, reused wherever the mark serves the same purpose.
@@ -259,7 +259,19 @@ pub struct AutomotiveLabels {
     // separates two sentences that share a line, where a language supplies the
     // separator itself rather than an ASCII space after the stop.
     pub label_colon: &'static str,
+    // `narrative_comma` separates *clauses*: the comma after a parenthetical
+    // in the state-evidence bullet, the one before "artifact digest" in the
+    // promoted bullet, and the one after "Next". `list_separator` joins *items
+    // of a list*: the executive summary's run of status counts, the evidence
+    // citations after "observed by", and the allowed-protocol and allowed-mode
+    // cells. The two are the same ", " in English and must not be merged:
+    // Chinese writes a clause comma as the fullwidth "，" and a list comma as
+    // the enumeration mark "、", so a single field would be wrong in one of the
+    // two roles whichever mark it held.
     pub narrative_comma: &'static str,
+    pub list_separator: &'static str,
+    // Also embedded, deliberately, inside `bench_approval_detail`'s separator
+    // slot -- see the physical-bench fields below.
     pub narrative_semicolon: &'static str,
     pub narrative_open_paren: &'static str,
     pub narrative_close_paren: &'static str,
@@ -288,6 +300,11 @@ pub struct AutomotiveLabels {
     // English word order.
     pub summary_novelty_disclaimer: &'static str,
     // Footer.
+    // `oxfuzz` is the product name and must survive translation verbatim
+    // inside this sentence, exactly as `virtual-CAN` must inside
+    // `recommendation_virtual_replay`. It is embedded rather than a separate
+    // slot so the sentence stays translatable as a sentence, matching the main
+    // report's `generated_by`.
     pub footer_generated_by: &'static str,
     pub footer_on: &'static str,
     // Scope and safety posture.
@@ -304,8 +321,17 @@ pub struct AutomotiveLabels {
     pub row_virtual_interfaces: &'static str,
     pub virtual_interface_unit: &'static str,
     pub row_physical_bench: &'static str,
-    pub bench_approval_required: &'static str,
-    pub bench_approval_missing: &'static str,
+    // The physical-bench cell is assembled as head + separator + tail so that
+    // the marks inside it come from the same fields as the marks around it.
+    // The enabled-but-unapproved posture used to be one field reading
+    // "enabled; fresh approval required", which put a literal "; " next to the
+    // `narrative_semicolon` that follows it in the same cell, and a second copy
+    // of `posture_enabled`'s word inside it. Both could drift under
+    // translation. The `Disabled` arm has no tail and passes an empty
+    // separator, which is structure rather than prose and stays inline.
+    pub bench_approval_detail: &'static str,
+    pub bench_invalid: &'static str,
+    pub bench_approval_missing_detail: &'static str,
     pub physical_interface_unit: &'static str,
     pub row_dangerous_services: &'static str,
     pub dangerous_denied: &'static str,
@@ -367,6 +393,13 @@ pub struct AutomotiveLabels {
     pub manifest_section: &'static str,
     pub manifest_none: &'static str,
     pub col_operation_evidence: &'static str,
+    // The " / " inside this header joins two translated words and so belongs to
+    // the field. The visually matching " / " in the data cell below joins two
+    // backticked technical tokens (`offline_pcap` / `can`) and stays inline
+    // with them: it is part of the token region, and hoisting it into a shared
+    // field would mean splitting this header into two fields whose casing
+    // conflicts with the existing `bullet_mode` and `col_protocol`. The two
+    // slashes are allowed to differ; neither is prose a reader parses.
     pub col_mode_protocol: &'static str,
     pub col_validated_result: &'static str,
     pub col_request_digest: &'static str,
@@ -418,6 +451,7 @@ impl AutomotiveLabels {
             evidence_window_unit: "retained operation(s)",
             label_colon: ": ",
             narrative_comma: ", ",
+            list_separator: ", ",
             narrative_semicolon: "; ",
             narrative_open_paren: " (",
             narrative_close_paren: ")",
@@ -457,8 +491,9 @@ impl AutomotiveLabels {
             row_virtual_interfaces: "Virtual interfaces",
             virtual_interface_unit: "allowlisted",
             row_physical_bench: "Physical bench",
-            bench_approval_required: "enabled; fresh approval required",
-            bench_approval_missing: "invalid: enabled without required approval",
+            bench_approval_detail: "fresh approval required",
+            bench_invalid: "invalid",
+            bench_approval_missing_detail: "enabled without required approval",
             physical_interface_unit: "allowlisted interface(s)",
             row_dangerous_services: "Dangerous diagnostic services",
             dangerous_denied: "denied",
@@ -611,9 +646,9 @@ pub fn render_automotive_report(data: &AutomotiveReportData, labels: &Automotive
     let _ = writeln!(report, "## {}\n", labels.executive_summary);
     let _ = writeln!(
         report,
-        "{lead} **{total} {operation_unit}**{colon}**{done} {done_word}**{comma}\
-         **{partial} {partial_word}**{comma}**{failed} {failed_word}**{comma}\
-         **{running} {running_word}**{comma}{and} **{cancelled} {cancelled_word}**{sentence_break}\
+        "{lead} **{total} {operation_unit}**{colon}**{done} {done_word}**{item}\
+         **{partial} {partial_word}**{item}**{failed} {failed_word}**{item}\
+         **{running} {running_word}**{item}{and} **{cancelled} {cancelled_word}**{sentence_break}\
          {bounded} **{states} {state_unit}** {and} **{promoted} {promoted_unit}** \
          {across} **{protocols} {protocol_unit}**{stop}\n",
         lead = labels.summary_lead,
@@ -622,7 +657,8 @@ pub fn render_automotive_report(data: &AutomotiveReportData, labels: &Automotive
         colon = labels.label_colon,
         done = counts.done,
         done_word = labels.summary_completed,
-        comma = labels.narrative_comma,
+        // The status counts are an enumerated list, not a run of clauses.
+        item = labels.list_separator,
         partial = counts.partial,
         partial_word = labels.summary_partial,
         failed = counts.failed,
@@ -711,19 +747,27 @@ fn render_safety_posture(
         safety.virtual_interface_count,
         labels.virtual_interface_unit
     );
+    // Assembled from three label slots so that the mark inside the posture and
+    // the `narrative_semicolon` that follows it cannot diverge under
+    // translation. The empty separator on the `Disabled` arm is structure, not
+    // prose.
+    let (bench_posture, bench_separator, bench_detail) = match safety.physical_bench {
+        AutomotivePhysicalBenchPosture::Disabled => (labels.posture_disabled, "", ""),
+        AutomotivePhysicalBenchPosture::EnabledApprovalRequired => (
+            labels.posture_enabled,
+            labels.narrative_semicolon,
+            labels.bench_approval_detail,
+        ),
+        AutomotivePhysicalBenchPosture::EnabledApprovalMissing => (
+            labels.bench_invalid,
+            labels.label_colon,
+            labels.bench_approval_missing_detail,
+        ),
+    };
     let _ = writeln!(
         report,
-        "| {} | {}{}{} {} |",
+        "| {} | {bench_posture}{bench_separator}{bench_detail}{}{} {} |",
         labels.row_physical_bench,
-        match safety.physical_bench {
-            AutomotivePhysicalBenchPosture::Disabled => labels.posture_disabled,
-            AutomotivePhysicalBenchPosture::EnabledApprovalRequired => {
-                labels.bench_approval_required
-            }
-            AutomotivePhysicalBenchPosture::EnabledApprovalMissing => {
-                labels.bench_approval_missing
-            }
-        },
         labels.narrative_semicolon,
         safety.physical_interface_count,
         labels.physical_interface_unit,
@@ -859,7 +903,7 @@ fn render_state_exploration(
             close = labels.narrative_close_paren,
             comma = labels.narrative_comma,
             observed = labels.state_observed_by,
-            sources = sources.join(labels.narrative_comma),
+            sources = sources.join(labels.list_separator),
             stop = labels.narrative_full_stop,
         );
     }
@@ -1309,7 +1353,7 @@ fn joined_or_none(values: &[String], labels: &AutomotiveLabels) -> String {
             .iter()
             .map(|value| format!("`{}`", escape_inline(value)))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(labels.list_separator)
     }
 }
 
