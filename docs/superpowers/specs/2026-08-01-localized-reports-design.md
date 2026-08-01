@@ -247,11 +247,12 @@ everywhere they render, per decision 2.5.
 ### 9.2 Known limitation: scheduled reports are always English
 
 `ServiceContainer::generate_report` takes the language as an explicit parameter,
-so every caller must supply one. Eight callers have a language to supply: the
-CLI has `--lang`, the REST route has a request field, the desktop commands have
-the resolved UI locale, and the tests choose one.
+so every caller must supply one. All but one have a language to supply: the CLI
+has `--lang`, the REST route has a request field, the desktop commands have the
+resolved UI locale, `export_report` has its own parameter, and the tests choose
+one.
 
-The ninth does not. `scheduler::save_crash_report` composes a report when a
+The exception is `scheduler::save_crash_report`, which composes a report when a
 scheduled campaign finishes. There is no request in scope, and the desktop
 locale lives in the frontend i18n layer and is never persisted to the service,
 so the scheduler cannot discover the user's language. It passes
