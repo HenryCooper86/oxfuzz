@@ -2915,12 +2915,19 @@ struct AutomotiveOperationListRequest {
     limit: Option<u32>,
 }
 
+/// The automotive report request body. It has its own struct rather than
+/// sharing [`AutomotiveOperationListRequest`]: that route returns evidence rows
+/// and no prose, so advertising a language on it would promise something it
+/// cannot deliver. Omitting the field yields English, so existing clients are
+/// unaffected.
 #[cfg(feature = "automotive-scapy")]
 #[derive(Debug, Deserialize)]
 struct AutomotiveReportRequest {
     project_root: PathBuf,
     #[serde(default)]
     include_ai: bool,
+    #[serde(default)]
+    language: hf_service::ReportLanguage,
 }
 
 #[cfg(feature = "automotive-scapy")]
@@ -2931,7 +2938,7 @@ async fn generate_automotive_report(
     let project_root = approved_project(&state, &request.project_root)?;
     state
         .container
-        .generate_automotive_report(&project_root, request.include_ai)
+        .generate_automotive_report(&project_root, request.include_ai, request.language)
         .await
         .map(Json)
         .map_err(classified_api_error)
