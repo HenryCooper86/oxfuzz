@@ -331,6 +331,10 @@ export function AutomotiveView() {
           content: report.markdown,
           title: t("automotive.report.documentTitle", { project: report.project_name }),
           format,
+          // This report was composed in `locale` a moment ago, so the exported
+          // document declares it. ReportsView deliberately omits this: a stored
+          // draft records no language and must not be guessed at.
+          language: locale,
         });
         if (saved) {
           toast({

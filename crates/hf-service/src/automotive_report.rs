@@ -1596,7 +1596,9 @@ pub fn validate_ai_interpretation(
 /// that the section is not evidence and does not displace the fact sheet it
 /// follows. It is rendered from `labels` so a reader of the Chinese report meets
 /// it in the language the rest of the document is in. The model identifier is a
-/// technical token and is emitted verbatim.
+/// technical token, so it is never translated -- but it is provider-supplied
+/// text landing inside a Markdown code span, so a backtick or pipe in it is
+/// escaped before it is written, in either language.
 #[must_use]
 pub fn append_ai_interpretation(
     facts: &str,

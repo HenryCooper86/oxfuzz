@@ -2078,6 +2078,7 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
                 &format,
                 output.as_deref(),
                 &report_lang,
+                &mut std::io::stdout(),
                 ServiceContainer::bootstrap,
             )
             .await?;
@@ -2105,6 +2106,7 @@ trait AutomotiveReportCommandService {
         title: &str,
         format: &str,
         out_path: &std::path::Path,
+        language: hf_service::ReportLanguage,
     ) -> Result<(), hf_service::ClassifiedError>;
 }
 
@@ -2128,15 +2130,18 @@ impl AutomotiveReportCommandService for ServiceContainer {
         title: &str,
         format: &str,
         out_path: &std::path::Path,
+        language: hf_service::ReportLanguage,
     ) -> Result<(), hf_service::ClassifiedError> {
-        self.export_markdown(markdown, title, format, out_path)
+        self.export_markdown(markdown, title, format, out_path, language)
     }
 }
 
 /// Parse the language, build the service, compose, then emit. `bootstrap` is
 /// injected for the same reason `run_report_command` injects it: the whole path
 /// -- flag string in, `ReportLanguage` at the service boundary, document out --
-/// becomes one testable unit.
+/// becomes one testable unit. `sink` is the emission target for the same
+/// reason: without it neither the printed Markdown nor the printed export path
+/// is observable, so deleting either changes nothing a test can see.
 #[cfg(feature = "automotive-scapy")]
 async fn run_automotive_report_command<S, Bootstrap, BootstrapFuture>(
     project: &std::path::Path,
@@ -2144,6 +2149,7 @@ async fn run_automotive_report_command<S, Bootstrap, BootstrapFuture>(
     format: &str,
     output: Option<&std::path::Path>,
     lang: &str,
+    sink: &mut dyn std::io::Write,
     bootstrap: Bootstrap,
 ) -> anyhow::Result<()>
 where
@@ -2167,13 +2173,15 @@ where
             "{}{}{}",
             labels.title_prefix, labels.label_colon, report.project_name
         );
-        service.export_automotive_markdown(&report.markdown, &title, format, output)?;
-        println!("{}", output.display());
+        // The report was composed here, so its language is known and the
+        // exported document declares it rather than the global English default.
+        service.export_automotive_markdown(&report.markdown, &title, format, output, language)?;
+        writeln!(sink, "{}", output.display())?;
     } else {
         if !matches!(format, "md" | "markdown") {
             anyhow::bail!("--format requires --output for automotive reports");
         }
-        println!("{}", report.markdown);
+        writeln!(sink, "{}", report.markdown)?;
     }
     Ok(())
 }
@@ -2449,11 +2457,21 @@ mod automotive_report_cli_tests {
 
     use super::{run_automotive_report_command, AutomotiveReportCommandService};
 
+    /// Everything the command handed to the service, so each argument it
+    /// forwards can be asserted on its own.
+    #[derive(Clone, Debug, Default)]
+    struct Handoff {
+        language: Option<hf_service::ReportLanguage>,
+        include_ai: Option<bool>,
+        exported_title: Option<String>,
+        exported_format: Option<String>,
+        exported_language: Option<hf_service::ReportLanguage>,
+    }
+
     /// Records what the command handed to the service.
     #[derive(Default)]
     struct RecordingAutomotiveReportService {
-        language: Arc<Mutex<Option<hf_service::ReportLanguage>>>,
-        exported_title: Arc<Mutex<Option<String>>>,
+        handoff: Arc<Mutex<Handoff>>,
     }
 
     #[async_trait::async_trait]
@@ -2461,10 +2479,14 @@ mod automotive_report_cli_tests {
         async fn compose_automotive_report(
             &self,
             _project: &std::path::Path,
-            _include_ai: bool,
+            include_ai: bool,
             language: hf_service::ReportLanguage,
         ) -> Result<AutomotiveCampaignReport, hf_service::ClassifiedError> {
-            *self.language.lock().unwrap() = Some(language);
+            {
+                let mut handoff = self.handoff.lock().unwrap();
+                handoff.language = Some(language);
+                handoff.include_ai = Some(include_ai);
+            }
             Ok(AutomotiveCampaignReport {
                 generated_at: "2026-07-16T09:00:00Z".to_owned(),
                 project_name: "vehicle-gateway".to_owned(),
@@ -2482,12 +2504,43 @@ mod automotive_report_cli_tests {
             &self,
             _markdown: &str,
             title: &str,
-            _format: &str,
+            format: &str,
             _out_path: &std::path::Path,
+            language: hf_service::ReportLanguage,
         ) -> Result<(), hf_service::ClassifiedError> {
-            *self.exported_title.lock().unwrap() = Some(title.to_owned());
+            let mut handoff = self.handoff.lock().unwrap();
+            handoff.exported_title = Some(title.to_owned());
+            handoff.exported_format = Some(format.to_owned());
+            handoff.exported_language = Some(language);
             Ok(())
         }
+    }
+
+    /// Drive the command and return what the service saw alongside everything
+    /// written to the command's emission sink.
+    async fn drive(
+        include_ai: bool,
+        format: &str,
+        output: Option<&std::path::Path>,
+        flag: &str,
+    ) -> anyhow::Result<(Handoff, String)> {
+        let service = RecordingAutomotiveReportService::default();
+        let handoff = Arc::clone(&service.handoff);
+        let mut sink = Vec::new();
+
+        run_automotive_report_command(
+            std::path::Path::new("/tmp/project"),
+            include_ai,
+            format,
+            output,
+            flag,
+            &mut sink,
+            move || std::future::ready(service),
+        )
+        .await?;
+
+        let recorded = handoff.lock().unwrap().clone();
+        Ok((recorded, String::from_utf8(sink).unwrap()))
     }
 
     /// Drive the export path and report the language the service saw together
@@ -2495,24 +2548,15 @@ mod automotive_report_cli_tests {
     async fn export_under(flag: &str) -> (hf_service::ReportLanguage, String) {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("report.html");
-        let service = RecordingAutomotiveReportService::default();
-        let language = Arc::clone(&service.language);
-        let exported_title = Arc::clone(&service.exported_title);
+        let (handoff, emitted) = drive(false, "html", Some(&out), flag).await.unwrap();
 
-        run_automotive_report_command(
-            std::path::Path::new("/tmp/project"),
-            false,
-            "html",
-            Some(&out),
-            flag,
-            move || std::future::ready(service),
+        // The export path reports where it wrote. Deleting that line would
+        // otherwise be invisible.
+        assert_eq!(emitted, format!("{}\n", out.display()));
+        (
+            handoff.language.unwrap(),
+            handoff.exported_title.clone().unwrap(),
         )
-        .await
-        .unwrap();
-
-        let language = language.lock().unwrap().unwrap();
-        let title = exported_title.lock().unwrap().clone().unwrap();
-        (language, title)
     }
 
     #[tokio::test]
@@ -2541,9 +2585,77 @@ mod automotive_report_cli_tests {
     }
 
     #[tokio::test]
+    async fn the_exported_document_declares_the_report_language() {
+        // The title being Chinese does not make the document Chinese. The
+        // `lang` attribute assistive technology reads comes from this argument,
+        // and until it was threaded a Chinese report was served as English.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("report.html");
+
+        let (chinese, _) = drive(false, "html", Some(&out), "zh").await.unwrap();
+        assert_eq!(
+            chinese.exported_language,
+            Some(hf_service::ReportLanguage::Zh)
+        );
+        // And the format reaches the export unchanged, so the assertion above
+        // cannot be satisfied by an export that ignored its arguments.
+        assert_eq!(chinese.exported_format.as_deref(), Some("html"));
+
+        let (english, _) = drive(false, "html", Some(&out), "en").await.unwrap();
+        assert_eq!(
+            english.exported_language,
+            Some(hf_service::ReportLanguage::En)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ai_flag_reaches_the_service() {
+        // `--ai` is the difference between a deterministic fact sheet and one
+        // carrying a provider interpretation. Silently ignoring it would have
+        // passed every other test here.
+        assert_eq!(
+            drive(true, "md", None, "en").await.unwrap().0.include_ai,
+            Some(true)
+        );
+        assert_eq!(
+            drive(false, "md", None, "en").await.unwrap().0.include_ai,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stdout_path_emits_the_composed_markdown() {
+        let (handoff, emitted) = drive(false, "md", None, "zh").await.unwrap();
+        assert_eq!(handoff.language, Some(hf_service::ReportLanguage::Zh));
+        assert_eq!(emitted, "# composed as Zh\n\n");
+        // Nothing was exported: the stdout path must not write a file.
+        assert_eq!(handoff.exported_title, None);
+    }
+
+    #[tokio::test]
+    async fn a_non_markdown_format_without_an_output_path_is_rejected() {
+        // A user-facing error: `--format html` alone silently printing Markdown
+        // would be worse than refusing.
+        for format in ["html", "pdf", "docx"] {
+            let error = drive(false, format, None, "en").await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("--format requires --output for automotive reports"),
+                "{format}: {error}"
+            );
+        }
+        // And the two formats that mean Markdown are accepted.
+        for format in ["md", "markdown"] {
+            assert!(drive(false, format, None, "en").await.is_ok(), "{format}");
+        }
+    }
+
+    #[tokio::test]
     async fn an_unknown_report_language_is_rejected_before_any_bootstrap() {
         let bootstrapped = Arc::new(AtomicBool::new(false));
         let called = Arc::clone(&bootstrapped);
+        let mut sink = Vec::new();
 
         let error = run_automotive_report_command(
             std::path::Path::new("/tmp/project"),
@@ -2551,6 +2663,7 @@ mod automotive_report_cli_tests {
             "md",
             None,
             "fr",
+            &mut sink,
             move || {
                 called.store(true, Ordering::SeqCst);
                 std::future::ready(RecordingAutomotiveReportService::default())
