@@ -12,6 +12,18 @@ use std::process::{Command, Stdio};
 
 use hf_core::error::ClassifiedError;
 
+use crate::report::ReportLanguage;
+
+/// The BCP 47 language tag an exported document declares. `zh-CN` (Simplified
+/// Chinese) rather than bare `zh`, matching what the desktop app already sets on
+/// `document.documentElement.lang`.
+const fn html_lang_tag(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "en",
+        ReportLanguage::Zh => "zh-CN",
+    }
+}
+
 /// Output document format for an exported report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportFormat {
@@ -66,6 +78,10 @@ pub fn available_formats() -> Vec<String> {
 
 /// Render `markdown` (a composed report) to `out_path` in `format`.
 ///
+/// `language` is the language `markdown` is written in; it is declared on the
+/// HTML document so assistive technology picks the right voice and browsers pick
+/// the right fonts and line-breaking rules.
+///
 /// # Errors
 /// Returns an error on IO failure, or when a required external tool (pandoc, or
 /// a PDF engine) is unavailable for the requested format.
@@ -74,6 +90,7 @@ pub fn write_report(
     title: &str,
     format: ReportFormat,
     out_path: &Path,
+    language: ReportLanguage,
 ) -> Result<(), ClassifiedError> {
     match format {
         // Markdown is the canonical source: keep the Mermaid diagrams so a
@@ -86,7 +103,7 @@ pub fn write_report(
         // tables. The GUI preview keeps the original markdown and renders Mermaid.
         ReportFormat::Html => std::fs::write(
             out_path,
-            markdown_to_html(&strip_mermaid_blocks(markdown), title),
+            markdown_to_html(&strip_mermaid_blocks(markdown), title, language),
         )
         .map_err(|e| ClassifiedError::Internal(format!("write report: {e}"))),
         ReportFormat::Docx => pandoc_convert(&strip_mermaid_blocks(markdown), out_path, None),
@@ -169,8 +186,9 @@ fn strip_mermaid_blocks(md: &str) -> String {
 }
 
 /// Convert Markdown to a standalone, styled HTML document (pure Rust, GFM).
+/// `language` is declared as the document's `lang` attribute.
 #[must_use]
-pub fn markdown_to_html(markdown: &str, title: &str) -> String {
+pub fn markdown_to_html(markdown: &str, title: &str, language: ReportLanguage) -> String {
     let mut opts = comrak::Options::default();
     opts.extension.table = true;
     opts.extension.strikethrough = true;
@@ -178,10 +196,11 @@ pub fn markdown_to_html(markdown: &str, title: &str) -> String {
     opts.extension.tasklist = true;
     let body = comrak::markdown_to_html(markdown, &opts);
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+        "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{REPORT_CSS}</style>\n</head>\n<body>\n\
          <main class=\"report\">\n{body}\n</main>\n</body>\n</html>\n",
+        lang = html_lang_tag(language),
         title = html_escape(title),
     )
 }
@@ -355,11 +374,44 @@ mod tests {
 
     #[test]
     fn markdown_to_html_wraps_body_and_renders_tables() {
-        let html = markdown_to_html("# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n", "My Report");
+        let html = markdown_to_html(
+            "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "My Report",
+            ReportLanguage::En,
+        );
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("<title>My Report</title>"));
         assert!(html.contains("<table>"));
         assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<html lang=\"en\">"));
+    }
+
+    #[test]
+    fn html_declares_the_document_language() {
+        // Assistive technology picks a voice from this attribute, and browsers
+        // pick fonts and line-breaking rules from it, so a Chinese document
+        // must not claim to be English.
+        let zh = markdown_to_html("# 标题\n", "报告", ReportLanguage::Zh);
+        assert!(
+            zh.contains("<html lang=\"zh-CN\">"),
+            "a Chinese document must declare zh-CN"
+        );
+        assert!(!zh.contains("<html lang=\"en\">"));
+
+        let en = markdown_to_html("# Title\n", "Report", ReportLanguage::En);
+        assert!(en.contains("<html lang=\"en\">"));
+        assert!(!en.contains("zh-CN"));
+    }
+
+    #[test]
+    fn write_html_carries_the_language_into_the_document() {
+        // The exported file, not just the in-memory string: `write_report` is
+        // what every export path calls.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.html");
+        write_report("# Hi\n", "t", ReportFormat::Html, &path, ReportLanguage::Zh).unwrap();
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(html.contains("<html lang=\"zh-CN\">"));
     }
 
     #[test]
@@ -374,10 +426,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let md = "# Hi\n\nbody\n";
         let mdp = dir.path().join("r.md");
-        write_report(md, "t", ReportFormat::Md, &mdp).unwrap();
+        write_report(md, "t", ReportFormat::Md, &mdp, ReportLanguage::En).unwrap();
         assert_eq!(std::fs::read_to_string(&mdp).unwrap(), md);
         let htmlp = dir.path().join("r.html");
-        write_report(md, "t", ReportFormat::Html, &htmlp).unwrap();
+        write_report(md, "t", ReportFormat::Html, &htmlp, ReportLanguage::En).unwrap();
         let html = std::fs::read_to_string(&htmlp).unwrap();
         assert!(html.contains("<h1>Hi</h1>"));
     }
