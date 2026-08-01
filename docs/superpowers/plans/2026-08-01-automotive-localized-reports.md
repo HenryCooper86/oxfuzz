@@ -376,6 +376,25 @@ Revert the language resolution to the hardcoded English headings, confirm `a_chi
 
 ## Task 4: Thread the language through the surfaces
 
+### Carried forward from Task 3's review
+
+Two test gaps, both small, both in files this task already touches.
+
+**1. `escape_inline(model)` is unguarded.** `automotive_report.rs:1616` escapes
+the provider-supplied model identifier before it lands inside a Markdown code
+span. The escape is correct and does real work -- it converts backticks to
+apostrophes and escapes pipes -- but removing it leaves all 20 tests green. A
+model id containing a backtick would break out of the span. Add an assertion
+that passes a model id containing a backtick and a pipe and pins the escaped
+rendering.
+
+**2. The citation *accept* path is pinned for `[OP:]` only.** Committed tests
+assert `[STATE:]` and `[TRANSCRIPT:]` are rejected when unknown, but only
+`[OP:]` is asserted accepted when known. A validator that rejected every state
+citation outright would pass the current suite. Add the accepted-when-known case
+for both.
+
+
 **Files:**
 - Modify: `crates/hf-service/src/automotive.rs`
 - Modify: `crates/hf-cli/src/main.rs`
