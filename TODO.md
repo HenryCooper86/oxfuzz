@@ -96,8 +96,9 @@ Status legend: [x] done - [~] partial - [ ] not started.
   Tauri commands, and REST twins), and the Knowledge view shows the real
   per-project index status (`knowledge_stats`: size, build time, ingested
   documents, retrieval config). Remaining: sub-agent pools.
-- [ ] Review and either complete or remove the remaining thin extension
-  surfaces: hf-mcp, hf-skills, hf-hooks, and hf-test-utils.
+- [ ] Review and either complete or remove `hf-skills`. `hf-mcp` and `hf-hooks`
+  were removed; `hf-test-utils` is consumed by `hf-harness`, `hf-service`, and
+  `hf-session` and is doing its job.
 
 ## Integrations
 
@@ -172,9 +173,9 @@ fixed the following; open design decisions are listed at the end.
   layout ingestion accepts; stale hf-scheduler doc references corrected.
 
 ### Open design decisions (status after TODO batches 1-2)
-- [ ] Guardrail authorization decisions are only traced, never persisted; the
-  GUI "Policy Audit" view shows auto-revert events instead. Persisting
-  decisions (who/what/when/outcome) would close the audit-trail gap.
+- [x] Guardrail authorization decisions persist to storage (migration 0018) and
+  surface through the CLI `policy decisions`, REST `/policy/decisions`, and the
+  desktop Policy Audit view.
 - [~] Unwired-but-designed subsystems:
   - [x] guardrail authorization of discover/corpus/chat actions (batch 1);
   - [x] knowledge-augmented harness/triage prompts via the live retrieval path
