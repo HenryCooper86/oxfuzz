@@ -272,6 +272,28 @@ beyond this feature's scope.
 Recorded so the English scheduled report is a known limitation rather than an
 accident of parameter threading.
 
+### 9.3 Known limitation: re-exporting a saved draft declares English
+
+`ServiceContainer::export_report` composes and exports in one step, so it knows
+the language and stamps it on the document (title noun, and the HTML `lang`
+attribute). `export_markdown` does not compose: it writes back content that was
+already composed, which the Workbench "Composed Reports" list and the automotive
+report path both use.
+
+Nothing tells it what language that content is in. Report drafts do not record
+the language they were composed in, and the exporting user's current UI locale
+is not the same thing -- a report composed in Chinese can be exported by the
+same user after switching the interface back to English, and vice versa.
+Passing the locale would therefore be wrong exactly as often as it is right.
+It passes `ReportLanguage::En`, which is the documented default and matches the
+behavior before this feature.
+
+The visible consequence is narrow: a Chinese draft exported to HTML from the
+Workbench carries `lang="en"`. The body is unaffected -- the stored Markdown is
+written out unchanged -- so this is an accessibility-metadata defect, not a
+language defect. Closing it means persisting the language on the draft record,
+which is a schema change.
+
 ## 10. Testing Strategy
 
 No test invokes a provider.
