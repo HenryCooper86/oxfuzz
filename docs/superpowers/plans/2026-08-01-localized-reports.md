@@ -797,6 +797,134 @@ EOF
 
 ---
 
+---
+
+### Task 3b: Wire the CASR severity labels into the places readers look
+
+Design decision 2.5 says CASR exploitability classifications render translated
+with the original in parentheses -- `可利用 (Exploitable)` -- so the term reads
+naturally and stays greppable against CASR output. Task 2 created the four
+fields and Task 3 translated them.
+
+They are used in one place: the Visual Summary pie chart legend
+(`crates/hf-service/src/report.rs:683-686`). The two places a reader actually
+reads a severity render raw English `Debug` output instead:
+
+- `report.rs:897` -- the Findings summary table, via `format!("{:?}", r.severity)`
+- `report.rs:971` -- the per-finding CASR bullet, via `casr.severity` directly
+
+So a Chinese report shows `| Asan | Exploitable | ... |` in the table and
+`CASR 严重程度：**Exploitable**` in the bullet: untranslated English sitting
+beside Chinese labels, in the section a security reader spends the most time in.
+
+This predates Task 3 and no test catches it -- the existing assertions render
+English, where `Debug` output and the label happen to read the same.
+
+**Files:**
+- Modify: `crates/hf-service/src/report.rs`
+- Test: `crates/hf-service/tests/report.rs`
+
+**Interfaces:**
+- Consumes: `Labels`, `ReportLanguage`, and the four `casr_*` fields.
+- Produces: no new names. One private helper mapping a `CrashSeverity` to its label.
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[test]
+fn casr_severities_are_translated_wherever_they_render() {
+    let data = populated();
+    let zh = render_markdown(&data, &Labels::chinese());
+
+    // The pie chart already used the labels. These two sites did not.
+    assert!(
+        zh.contains("可利用 (Exploitable)"),
+        "findings table or CASR bullet still renders raw Debug output"
+    );
+    // Raw Debug output must not appear anywhere in a Chinese report.
+    assert!(
+        !zh.contains("| Exploitable |"),
+        "findings table leaked an untranslated severity"
+    );
+}
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cargo test -p hf-service --test report casr_severities -- --nocapture`
+
+Expected: FAIL. The Chinese report contains `Exploitable` from `Debug`, not
+`可利用 (Exploitable)`.
+
+- [ ] **Step 3: Add the mapping helper and use it at both sites**
+
+```rust
+/// Resolve a CASR severity to its label. `Debug` output is the raw English
+/// variant name, which is correct only by coincidence in an English report.
+const fn casr_severity_label(severity: CrashSeverity, labels: &Labels) -> &'static str {
+    match severity {
+        CrashSeverity::Exploitable => labels.casr_exploitable,
+        CrashSeverity::ProbablyExploitable => labels.casr_probably_exploitable,
+        CrashSeverity::NotExploitable => labels.casr_not_exploitable,
+        _ => labels.casr_undefined,
+    }
+}
+```
+
+Match the enum's real variants -- read `crates/hf-core/src/crash.rs` rather than
+trusting the arms above, and use an exhaustive match if the variant set allows
+it, so a future variant is a compile error rather than a silent `Undefined`.
+
+Replace `format!("{:?}", r.severity)` at `report.rs:897` and the direct
+`casr.severity` at `report.rs:971` with calls to it.
+
+`severity_short` beside the bullet stays untouched: it is CASR's own text,
+carried verbatim from the tool's JSON, and is data rather than scaffolding.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cargo test -p hf-service --test report 2>&1 | tail -20`
+
+Expected: PASS, and every pre-existing test still passes. **English output must
+stay byte-identical** -- the English labels read the same as the `Debug` names,
+so a correct change moves nothing in the English render.
+
+- [ ] **Step 5: Check the whole Chinese report for other raw Debug leaks**
+
+Render the Chinese report and search for any remaining English enum name:
+`Asan`, `Ubsan`, `Segv`, `Done`, `LibFuzzer`, and the severity variants.
+
+Some are correct and must stay -- engine and sanitizer names are technical
+tokens the design pins as verbatim. Crash *kinds* are a judgment call: report
+what you find with your recommendation rather than translating them.
+
+- [ ] **Step 6: Run the gates and commit**
+
+```bash
+cargo fmt --all
+cargo clippy --workspace -- -D warnings
+cargo check -p hf-service --no-default-features
+```
+
+```bash
+git add crates/hf-service/src/report.rs crates/hf-service/tests/report.rs
+git commit -m "$(cat <<'EOF'
+fix: translate CASR severities everywhere they render, not just in the chart
+
+The four casr_* labels existed and were translated, but only the Visual Summary
+pie chart used them. The Findings table and the per-finding bullet both rendered
+raw Debug output, so a Chinese report showed "Exploitable" beside Chinese labels
+in the section a security reader reads most.
+
+Invisible in English, where the Debug variant name and the label read the same,
+and invisible to the tests for the same reason.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+
 ### Task 4: Localize the narrative prompts
 
 **Files:**
