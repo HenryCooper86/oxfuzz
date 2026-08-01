@@ -1,11 +1,11 @@
 //! Retained evidence: run history, artifacts, deletion, and export.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use hf_core::error::ClassifiedError;
 use hf_core::harness::Harness;
-use hf_storage::{RunKind, RunStatus};
+use hf_storage::{RunKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
 use super::crash_inputs::collect_workspace_crash_inputs;
@@ -17,13 +17,91 @@ use super::project_identity::{
     canonical_project_root, project_lookup_identity, stored_project_matches,
 };
 use super::staging::quarantine_corpus_entry;
-use super::workspace::workspace_dir;
+use super::workspace::{resolve_workspace_directory, run_output_relative, workspace_dir};
 use super::{
     auto_revert_comparison_key, run_has_crash_evidence, ArtifactSummary, CoverageSample,
     RunHistoryItem, ServiceContainer,
 };
 
 impl ServiceContainer {
+    async fn ensure_run_is_not_qualification(
+        &self,
+        store: &Store,
+        run_id: Uuid,
+    ) -> Result<(), ClassifiedError> {
+        let referenced = store
+            .list_all_harnesses()
+            .await
+            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
+            .into_iter()
+            .any(|harness| {
+                harness.smoke_run.as_ref().and_then(|smoke| smoke.run_id) == Some(run_id)
+            });
+        if referenced {
+            return Err(ClassifiedError::Validation(format!(
+                "run {run_id} is retained harness qualification evidence"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn run_evidence_root(
+        &self,
+        store: &Store,
+        run: &RunRecord,
+    ) -> Result<Option<PathBuf>, ClassifiedError> {
+        let _workspace_operation = self.acquire_workspace_operation().await?;
+        let Some(recorded) = run.evidence_dir.as_deref() else {
+            return Ok(None);
+        };
+        let expected = run_output_relative(run.id);
+        if Path::new(recorded) != expected {
+            return Err(ClassifiedError::Validation(format!(
+                "run {} has invalid evidence directory '{}'",
+                run.id, recorded
+            )));
+        }
+        let harness_id = run
+            .config
+            .as_ref()
+            .map(|config| config.harness_id)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!(
+                    "run {} has evidence but no harness attribution",
+                    run.id
+                ))
+            })?;
+        let harness = store.get_harness(harness_id).await?.ok_or_else(|| {
+            ClassifiedError::Validation(format!("run {} evidence has no harness record", run.id))
+        })?;
+        let target = store
+            .list_all_targets()
+            .await?
+            .into_iter()
+            .find(|target| target.id == harness.target_id)
+            .ok_or_else(|| {
+                ClassifiedError::Validation(format!("run {} evidence has no target record", run.id))
+            })?;
+        let workspace = workspace_dir(Path::new(&run.project_root), &target.symbol);
+        let relative_root = PathBuf::from("runs").join(run.id.to_string());
+        let candidate = workspace.join(&relative_root);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                resolve_workspace_directory(&workspace, &relative_root).map(Some)
+            }
+            Ok(_) => Err(ClassifiedError::Validation(format!(
+                "run {} evidence root is not a regular directory: {}",
+                run.id,
+                candidate.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ClassifiedError::Validation(format!(
+                "inspect run {} evidence root: {error}",
+                run.id
+            ))),
+        }
+    }
+
     /// Run history for a project (or all projects when `None`), newest first,
     /// enriched with the crash count per run. Powers the Runs history view.
     pub async fn run_history(

@@ -77,8 +77,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use workspace::{
     clear_managed_workspace_root, prepare_configured_workspace_root,
-    prepare_managed_workspace_root_with_adoption, resolve_workspace_directory, run_output_relative,
-    workspace_lock_error, workspace_lock_file, workspace_operation_gate,
+    prepare_managed_workspace_root_with_adoption, workspace_lock_error, workspace_lock_file,
+    workspace_operation_gate,
 };
 
 const SMOKE_FUZZ_SECS: u64 = 60;
@@ -678,84 +678,6 @@ impl ServiceContainer {
         self.checkpoint_manager.as_ref().ok_or_else(|| {
             ClassifiedError::Validation("chat checkpoints are not configured".to_owned())
         })
-    }
-
-    async fn ensure_run_is_not_qualification(
-        &self,
-        store: &Store,
-        run_id: Uuid,
-    ) -> Result<(), ClassifiedError> {
-        let referenced = store
-            .list_all_harnesses()
-            .await
-            .map_err(|error| ClassifiedError::Storage(error.to_string()))?
-            .into_iter()
-            .any(|harness| {
-                harness.smoke_run.as_ref().and_then(|smoke| smoke.run_id) == Some(run_id)
-            });
-        if referenced {
-            return Err(ClassifiedError::Validation(format!(
-                "run {run_id} is retained harness qualification evidence"
-            )));
-        }
-        Ok(())
-    }
-
-    async fn run_evidence_root(
-        &self,
-        store: &Store,
-        run: &RunRecord,
-    ) -> Result<Option<PathBuf>, ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
-        let Some(recorded) = run.evidence_dir.as_deref() else {
-            return Ok(None);
-        };
-        let expected = run_output_relative(run.id);
-        if Path::new(recorded) != expected {
-            return Err(ClassifiedError::Validation(format!(
-                "run {} has invalid evidence directory '{}'",
-                run.id, recorded
-            )));
-        }
-        let harness_id = run
-            .config
-            .as_ref()
-            .map(|config| config.harness_id)
-            .ok_or_else(|| {
-                ClassifiedError::Validation(format!(
-                    "run {} has evidence but no harness attribution",
-                    run.id
-                ))
-            })?;
-        let harness = store.get_harness(harness_id).await?.ok_or_else(|| {
-            ClassifiedError::Validation(format!("run {} evidence has no harness record", run.id))
-        })?;
-        let target = store
-            .list_all_targets()
-            .await?
-            .into_iter()
-            .find(|target| target.id == harness.target_id)
-            .ok_or_else(|| {
-                ClassifiedError::Validation(format!("run {} evidence has no target record", run.id))
-            })?;
-        let workspace = workspace_dir(Path::new(&run.project_root), &target.symbol);
-        let relative_root = PathBuf::from("runs").join(run.id.to_string());
-        let candidate = workspace.join(&relative_root);
-        match std::fs::symlink_metadata(&candidate) {
-            Ok(metadata) if metadata.file_type().is_dir() => {
-                resolve_workspace_directory(&workspace, &relative_root).map(Some)
-            }
-            Ok(_) => Err(ClassifiedError::Validation(format!(
-                "run {} evidence root is not a regular directory: {}",
-                run.id,
-                candidate.display()
-            ))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(ClassifiedError::Validation(format!(
-                "inspect run {} evidence root: {error}",
-                run.id
-            ))),
-        }
     }
 
     /// The target a persisted run exercised, resolved through its harness
