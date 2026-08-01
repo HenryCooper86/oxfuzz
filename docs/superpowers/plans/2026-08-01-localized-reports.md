@@ -697,6 +697,7 @@ impl Labels {
             narrative_open_paren: "（",
             narrative_close_paren: "）",
             narrative_full_stop: "。",
+            bullet_colon: "：",
             inline_engine: "引擎",
             inline_status: "状态",
             corpus_input_unit: "个输入",
