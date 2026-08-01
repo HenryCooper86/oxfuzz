@@ -358,11 +358,18 @@ impl ServiceContainer {
     /// Write already-composed report `markdown` (e.g. a saved draft) to
     /// `out_path` in `format`, without recomposing it.
     ///
-    /// The exported document declares English. This path is handed content that
-    /// was composed elsewhere and carries no language marker -- drafts do not
-    /// record the language they were written in, and the UI locale of whoever
-    /// exports it is not the language of what was stored. Guessing would be
-    /// wrong whenever the two disagree, so it uses the documented default.
+    /// `language` is what the exported document declares -- the `lang`
+    /// attribute assistive technology reads and browsers pick fonts from. It is
+    /// the caller's to decide because only the caller knows what the content
+    /// is: a caller that just composed the document knows its language and
+    /// passes it, while a caller exporting a stored draft does not -- drafts
+    /// record no language, and the UI locale of whoever exports one is not the
+    /// language of what was stored. That caller passes
+    /// [`crate::report::ReportLanguage::default()`], which is the documented
+    /// English default this method used to apply globally.
+    ///
+    /// Markdown carries no language marker, so this argument is inert for
+    /// [`crate::report_export::ReportFormat::Md`].
     ///
     /// # Errors
     /// Returns `ClassifiedError` on unknown format or export failure.
@@ -372,17 +379,12 @@ impl ServiceContainer {
         title: &str,
         format: &str,
         out_path: &Path,
+        language: crate::report::ReportLanguage,
     ) -> Result<(), ClassifiedError> {
         let fmt = crate::report_export::ReportFormat::parse(format).ok_or_else(|| {
             ClassifiedError::Validation(format!("unknown report format: {format}"))
         })?;
-        crate::report_export::write_report(
-            markdown,
-            title,
-            fmt,
-            out_path,
-            crate::report::ReportLanguage::En,
-        )
+        crate::report_export::write_report(markdown, title, fmt, out_path, language)
     }
 
     /// Saved editable report drafts for the internal workbench.

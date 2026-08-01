@@ -1624,6 +1624,73 @@ async fn export_report_titles_and_tags_the_document_in_the_requested_language() 
 }
 
 #[tokio::test]
+async fn export_markdown_declares_the_language_it_is_given() {
+    // `export_markdown` writes content composed elsewhere. For a saved draft
+    // that is genuinely English -- a draft records no language, and the
+    // exporter's UI locale is not the stored document's. But the automotive
+    // report exports through here with a document it just composed and a
+    // language it holds, and a global English default made that document
+    // `<html lang="en">` with Chinese prose inside it.
+    let dir = tempfile::tempdir().unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    let chinese = dir.path().join("zh.html");
+    container
+        .export_markdown(
+            "# 报告\n",
+            "报告",
+            "html",
+            &chinese,
+            hf_service::ReportLanguage::Zh,
+        )
+        .unwrap();
+    let html = std::fs::read_to_string(&chinese).unwrap();
+    assert!(
+        html.contains("<html lang=\"zh-CN\">"),
+        "a Chinese document must not be served as English: {html}"
+    );
+
+    // The documented default, which is what a draft export still gets.
+    let english = dir.path().join("en.html");
+    container
+        .export_markdown(
+            "# Report\n",
+            "Report",
+            "html",
+            &english,
+            hf_service::ReportLanguage::default(),
+        )
+        .unwrap();
+    assert!(std::fs::read_to_string(&english)
+        .unwrap()
+        .contains("<html lang=\"en\">"));
+}
+
+#[tokio::test]
+async fn export_markdown_leaves_markdown_byte_identical_in_either_language() {
+    // Markdown carries no language marker, so the parameter must be inert on
+    // that path. This is what proves the fix cannot move an exported document
+    // that was already correct.
+    let dir = tempfile::tempdir().unwrap();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    let markdown = "# Report\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+
+    let mut written = Vec::new();
+    for (name, language) in [
+        ("en.md", hf_service::ReportLanguage::En),
+        ("zh.md", hf_service::ReportLanguage::Zh),
+    ] {
+        let path = dir.path().join(name);
+        container
+            .export_markdown(markdown, "title", "md", &path, language)
+            .unwrap();
+        written.push(std::fs::read_to_string(&path).unwrap());
+    }
+    assert_eq!(written[0], markdown);
+    assert_eq!(written[0], written[1]);
+}
+
+#[tokio::test]
 async fn target_scoped_exports_include_cancelled_run_and_ignore_newer_other_target() {
     isolate_workspace();
     let dir = tempfile::tempdir().unwrap();
