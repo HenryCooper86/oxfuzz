@@ -2228,11 +2228,13 @@ pub async fn export_report(
         "docx" | "doc" => "docx",
         other => return Err(format!("unknown report format: {other}")),
     };
+    // The filename stays the ASCII technical artifact name; the dialog title is
+    // prose the user reads, so it follows the report's language.
     let default_name = format!("oxfuzz_report_{}.{ext}", sanitize_filename(&target));
     let Some(path) = app
         .dialog()
         .file()
-        .set_title("Export fuzzing report")
+        .set_title(hf_service::report::export_dialog_title(language))
         .set_file_name(&default_name)
         .add_filter(ext.to_uppercase(), &[ext])
         .blocking_save_file()
@@ -3063,6 +3065,50 @@ pub fn config_toml_to_value(content: String) -> Result<serde_json::Value, String
 #[tauri::command]
 pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> {
     hf_service::config::json_to_toml(&value)
+}
+
+#[cfg(test)]
+mod export_dialog_tests {
+    /// This file's own source. A native save dialog cannot be opened from a
+    /// unit test, so the wiring is asserted against the command's text -- the
+    /// same source-assertion convention the desktop view tests use.
+    const COMMANDS_SOURCE: &str = include_str!("commands.rs");
+
+    /// Just the `export_report` command, so an assertion here cannot be
+    /// satisfied by one of the other nine `set_title` call sites in this file.
+    fn export_report_command() -> &'static str {
+        let start = COMMANDS_SOURCE
+            .find("pub async fn export_report(")
+            .expect("export_report command");
+        let rest = &COMMANDS_SOURCE[start..];
+        let end = rest
+            .find("#[tauri::command]")
+            .expect("a following command delimits export_report");
+        &rest[..end]
+    }
+
+    #[test]
+    fn export_report_dialog_title_follows_the_report_language() {
+        let src = export_report_command();
+        assert!(
+            src.contains(".set_title(hf_service::report::export_dialog_title(language))"),
+            "the save dialog title must be derived from the request's language:\n{src}"
+        );
+        assert!(
+            !src.contains("\"Export fuzzing report\""),
+            "the save dialog title is hardcoded English again:\n{src}"
+        );
+    }
+
+    #[test]
+    fn export_report_keeps_the_ascii_default_filename() {
+        // The dialog title is prose; the filename is a technical artifact name
+        // and must stay ASCII in both languages.
+        assert!(
+            export_report_command().contains("format!(\"oxfuzz_report_{}.{ext}\""),
+            "the default export filename must stay the ASCII artifact name"
+        );
+    }
 }
 
 #[cfg(test)]

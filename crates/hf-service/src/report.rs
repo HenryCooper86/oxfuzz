@@ -49,6 +49,24 @@ impl std::str::FromStr for ReportLanguage {
     }
 }
 
+/// The title of the native save dialog a desktop shell opens when exporting a
+/// composed report.
+///
+/// Lives here rather than in the shell because the shell is a thin presentation
+/// layer with no localization table of its own, and this string names the same
+/// artifact `Labels::report_noun` does. It is chrome, not report body content,
+/// so it is not part of [`Labels`] -- the renderer never writes it.
+///
+/// The default export filename stays the ASCII `oxfuzz_report_{target}.{ext}`:
+/// that is a technical artifact name, not prose.
+#[must_use]
+pub const fn export_dialog_title(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Export fuzzing report",
+        ReportLanguage::Zh => "导出模糊测试报告",
+    }
+}
+
 /// Corpus composition for the report.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CorpusStats {

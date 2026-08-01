@@ -127,7 +127,10 @@ export function TriageView({ embedded = false }: { embedded?: boolean }) {
       }
       setReportMd(md);
       await getTransport().invoke("save_report_draft", {
-        title: `Triage report — ${lastTarget || "target"}`,
+        // Persisted with the draft and shown in the Reports list, so it follows
+        // the interface language the body was just composed in. The target
+        // symbol is a technical token and is interpolated verbatim.
+        title: t("reports.triageDraftTitle", { target: lastTarget || t("reports.unknownTarget") }),
         project: activeProject || ".",
         target: lastTarget || undefined,
         status: "Draft",
