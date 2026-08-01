@@ -685,10 +685,46 @@ impl Labels {
             casr_not_exploitable: "不可利用 (Not exploitable)",
             casr_undefined: "未确定 (Undefined)",
             generated_by: "由 oxfuzz 生成",
+            status_unknown: "无运行记录",
+            engine_unknown: "不适用",
+            coverage_unknown: "不可用",
+            no_crashes_summary: "最近一次测试未发现崩溃",
+            crashes_summary_lead: "本次测试发现",
+            crashes_summary_unit: "个去重崩溃，",
+            crashes_summary_of_which: "其中",
+            crashes_summary_rank: "个被判定为可利用或可能可利用",
+            inline_engine: "引擎",
+            inline_status: "状态",
+            corpus_input_unit: "个输入",
+            line_coverage_unit: "行",
+            row_reachable_functions: "可达函数",
+            no_coverage_data: "覆盖率不可用（未构建测试桩，或缺少覆盖率工具）。",
+            functions_exercised: "个项目函数被语料库覆盖。",
+            bool_yes: "是",
+            bool_no: "否",
+            severity_guess_label: "严重程度推测：",
+            footer_on: "于",
+            composed_by: "由 oxfuzz 撰写",
         }
     }
 }
 ```
+
+
+**A translation risk specific to this set.** Four fields are sentence fragments
+the renderer concatenates: `crashes_summary_lead`, `crashes_summary_unit`,
+`crashes_summary_of_which`, and `crashes_summary_rank`. English assembles them
+as `lead {n} unit of_which {m} rank`. The Chinese above is written so the same
+slot order produces a natural sentence:
+
+    本次测试发现 5 个去重崩溃，其中 2 个被判定为可利用或可能可利用
+
+That is a coincidence of these two languages, not a guarantee. **Render the
+assembled sentence and read it** before considering this done -- fragment
+concatenation is where localization normally breaks, because a translator sees
+each fragment in isolation and never sees the sentence. If it reads wrongly,
+report it rather than reordering the renderer; the fix would be a structural
+change and belongs to the controller.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -918,6 +954,33 @@ In `crates/hf-cli/src/main.rs`, add to the `report` subcommand's argument struct
 ```
 
 Parse it with `lang.parse::<hf_service::ReportLanguage>()?` and pass the result to `generate_report` at line 1762. The `?` propagates the `ClassifiedError::Validation` from Task 1, so an unknown value is rejected with a message naming `en` and `zh`.
+
+- [ ] **Step 2b: Localize the exported document's title and language attribute**
+
+Two English strings live on the export path and are not covered by `Labels`,
+because they are not report body content:
+
+- `crates/hf-service/src/container/export.rs:338` builds the exported document's
+  title as `format!("oxfuzz report -- {target}")`. The word "report" is English
+  regardless of the report's language.
+- `crates/hf-service/src/report_export.rs:181` emits `<html lang="en">` in the
+  HTML template unconditionally. That attribute is not cosmetic: screen readers
+  use it to choose a voice, and browsers use it for font and line-breaking
+  decisions. A Chinese document declaring `lang="en"` is wrong for assistive
+  technology.
+
+Fix both:
+
+- Add a `report_noun` field to `Labels` (English `"report"`, Chinese `"报告"`),
+  and build the title from it. Keep the em dash and the target interpolation.
+- Give `report_export::write_report` a language, and emit `lang="zh-CN"` for
+  Chinese and `lang="en"` for English. Use `zh-CN` rather than `zh`: it is the
+  BCP 47 tag for Simplified Chinese, and it matches what the desktop app already
+  sets on `document.documentElement.lang` (`crates/hf-gui/src/i18n.tsx:397`).
+
+The existing test at `crates/hf-service/src/report_export.rs:360` asserts on the
+`<title>`; extend it rather than replacing it, and add one asserting the `lang`
+attribute changes with the language.
 
 - [ ] **Step 3: Update the REST API**
 
