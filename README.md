@@ -246,9 +246,11 @@ binaries and optional integrations do not determine core readiness.
 ## Release Readiness
 
 A release candidate is ready only when its source gates, sandbox health, CLI
-artifact, and platform bundle have all been verified from the same commit. The
-repository provides a local gate runner, GitLab CI jobs for locked all-feature
-coverage, and release build scripts:
+artifact, and platform bundle have all been verified from the same commit.
+The repository provides a local gate runner, CI pipelines that run the same
+nine gates on every push and split them into jobs so a red pipeline
+identifies the broken category without opening a log, and release build
+scripts:
 
 ```bash
 ./scripts/tests/gates.sh
@@ -771,7 +773,7 @@ oxfuzz 采用一个本地 DefectDojo，而非内置一个。`scripts/setup-defec
 
 ## 发布就绪度
 
-只有当发布候选的源码门禁、沙箱健康、CLI 制品与平台安装包都从同一个提交被验证过时，它才算就绪。仓库提供了一个本地门禁运行器、用于锁定全特性覆盖的 GitLab CI 作业，以及发布构建脚本：
+只有当发布候选的源码门禁、沙箱健康、CLI 制品与平台安装包都从同一个提交被验证过时，它才算就绪。仓库提供了一个本地门禁运行器、在每次推送时运行同一组九项门禁并按类别拆分为多个作业（因此流水线失败时无需查看日志即可定位问题所在类别）的 CI 流水线，以及发布构建脚本：
 
 ```bash
 ./scripts/tests/gates.sh

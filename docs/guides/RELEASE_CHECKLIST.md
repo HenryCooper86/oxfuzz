@@ -42,10 +42,13 @@ Then run the wider local gate set:
 ./scripts/tests/gates.sh
 ```
 
-Do not substitute the local runner for GitLab CI. The pipeline additionally
-checks locked, all-target, and all-feature Rust builds; the focused
-`hf-service` release-readiness test; frontend tests/build/lint; the automotive
-sidecar tests/lint; and the release CLI artifact.
+Do not treat a green local run as a substitute for a green pipeline. Both
+`.gitlab-ci.yml` and `.github/workflows/ci.yml` run the same nine gates
+`./scripts/tests/gates.sh` runs above -- fmt, clippy, check, test, doc, deny,
+script-tests, frontend-test, and frontend-lint. CI's value here is not
+additional checks; it is running those same gates on a clean machine, on
+every push, independent of local state. Confirm the pipeline for this commit
+is green before continuing.
 
 ## 3. Verify the mandatory sandbox
 
