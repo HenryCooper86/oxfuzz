@@ -902,7 +902,7 @@ In `report_user_prompt`, add the parameter and insert the language block immedia
 
 Interpolate `{language_rules}` into the existing `format!` at that position. Leave every other instruction unchanged.
 
-Update the call site in `crates/hf-service/src/container/export.rs:50-51`: `compose_ai_report` gains a `language: ReportLanguage` parameter and passes it to both builders. Its single caller at line 301 passes `ReportLanguage::En` for now; Task 5 replaces that.
+Update the call site in `crates/hf-service/src/container/export.rs:50-51`: `compose_ai_report` gains a `language: ReportLanguage` parameter and passes it to both builders. Its single caller inside `generate_report` passes `ReportLanguage::En` for now; Task 5 replaces that. (Do not trust a line number here -- this file shifted during Task 2's fix rounds. Find the call by name.)
 
 Two existing tests call these builders and will not compile until updated:
 
