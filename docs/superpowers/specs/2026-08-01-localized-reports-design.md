@@ -37,6 +37,13 @@ localization of any surface other than reports.
 4. The deterministic scaffolding is translated in Rust, not by the model. This
    also makes the no-provider fallback report Chinese, since that path emits the
    fact sheet directly.
+   Note added during implementation: routing CASR severities through their
+   labels changes the *English* render for two of four variants, because
+   `Debug` emits `ProbablyExploitable` where the label reads `Probably
+   exploitable`. That is an improvement and it stands. English output being
+   byte-identical is the goal for pure relocations, not an absolute -- where a
+   label replaces a raw enum identifier, the label is what should have been
+   rendered all along.
 5. CASR exploitability classifications render translated with the original in
    parentheses, for example `可利用 (Exploitable)`. They are classifications
    rather than identifiers, so a reader benefits from the translation, while the
@@ -207,6 +214,35 @@ English document. Stated as a known limitation rather than papered over.
 
 Reports already persisted as drafts keep the language they were composed in.
 Nothing re-translates stored content.
+
+### 9.1 Known limitation: enum values render in English
+
+Several report values come from Rust enums rendered with `Debug`. Some of those
+are technical tokens this design already pins as verbatim, and they are correct
+as they stand:
+
+- `EngineKind` and `Sanitizer` -- a translated engine name no longer matches what
+  the operator configured.
+- `TargetLanguage` -- `C`, `Rust`, `Go` are the languages' own names.
+- `CrashKind` -- `Asan`, `Ubsan`, `Segv` are sanitizer and signal names.
+
+Three are not technical tokens and remain untranslated anyway:
+
+- `RunStatus`, in the executive summary and the Run table (`Done`, `Failed`).
+- `TargetKind` and `InputSurface`, in the Target table.
+
+So a Chinese report shows a Chinese label beside an English value in those rows:
+`| 状态 | Done |`. This was found during implementation, weighed, and
+deliberately left: translating them is the same mechanical mapping the CASR
+severities now use, but it widens a feature already larger than planned, and
+these values sit in summary tables rather than in the findings a reader acts on.
+
+Recorded here rather than left to be rediscovered. Closing it is a bounded
+follow-up: one mapping helper per enum, following
+`report::casr_severity_label`.
+
+CASR exploitability severities are **not** in this list -- they are translated
+everywhere they render, per decision 2.5.
 
 ## 10. Testing Strategy
 
