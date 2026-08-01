@@ -110,11 +110,24 @@ pub struct Labels {
     pub corpus_section: &'static str,
     pub findings_section: &'static str,
     pub finding_prefix: &'static str,
+    // Executive summary narrative
+    pub status_unknown: &'static str,
+    pub engine_unknown: &'static str,
+    pub coverage_unknown: &'static str,
+    pub no_crashes_summary: &'static str,
+    pub crashes_summary_lead: &'static str,
+    pub crashes_summary_unit: &'static str,
+    pub crashes_summary_of_which: &'static str,
+    pub crashes_summary_rank: &'static str,
+    pub inline_engine: &'static str,
+    pub inline_status: &'static str,
     // Executive summary bullets
     pub unique_crashes: &'static str,
     pub exploitable_line: &'static str,
     pub corpus_line: &'static str,
+    pub corpus_input_unit: &'static str,
     pub line_coverage: &'static str,
+    pub line_coverage_unit: &'static str,
     // Visual summary
     pub coverage_bold: &'static str,
     pub bar_lines: &'static str,
@@ -137,6 +150,7 @@ pub struct Labels {
     pub row_input_surface: &'static str,
     pub row_complexity: &'static str,
     pub row_accumulated_complexity: &'static str,
+    pub row_reachable_functions: &'static str,
     pub row_fit_score: &'static str,
     // Run table
     pub no_run_recorded: &'static str,
@@ -148,10 +162,12 @@ pub struct Labels {
     pub row_sanitizer: &'static str,
     pub row_budget: &'static str,
     // Coverage table
+    pub no_coverage_data: &'static str,
     pub col_metric: &'static str,
     pub col_covered: &'static str,
     pub col_total: &'static str,
     pub col_percent: &'static str,
+    pub functions_exercised: &'static str,
     // Corpus table
     pub row_entries: &'static str,
     pub row_total_size: &'static str,
@@ -171,8 +187,11 @@ pub struct Labels {
     pub bullet_crash_line: &'static str,
     pub bullet_cluster: &'static str,
     pub bullet_minimized: &'static str,
+    pub bool_yes: &'static str,
+    pub bool_no: &'static str,
     pub stack_trace: &'static str,
     pub bug_report_heading: &'static str,
+    pub severity_guess_label: &'static str,
     pub reproduction: &'static str,
     pub root_cause: &'static str,
     pub suggested_fix: &'static str,
@@ -184,6 +203,7 @@ pub struct Labels {
     pub casr_undefined: &'static str,
     // Footer
     pub generated_by: &'static str,
+    pub footer_on: &'static str,
 }
 
 impl Labels {
@@ -205,10 +225,22 @@ impl Labels {
             corpus_section: "Corpus",
             findings_section: "Findings",
             finding_prefix: "Finding",
+            status_unknown: "no run recorded",
+            engine_unknown: "n/a",
+            coverage_unknown: "not available",
+            no_crashes_summary: "No crashes were found in the most recent campaign",
+            crashes_summary_lead: "The campaign surfaced",
+            crashes_summary_unit: "unique crash(es)",
+            crashes_summary_of_which: "of which",
+            crashes_summary_rank: "rank as exploitable or probably exploitable",
+            inline_engine: "engine",
+            inline_status: "status",
             unique_crashes: "Unique crashes",
             exploitable_line: "Exploitable / probably exploitable",
             corpus_line: "Corpus",
+            corpus_input_unit: "input(s)",
             line_coverage: "Line coverage",
+            line_coverage_unit: "lines",
             coverage_bold: "Coverage",
             bar_lines: "Lines",
             bar_functions: "Functions",
@@ -228,6 +260,7 @@ impl Labels {
             row_input_surface: "Input surface",
             row_complexity: "Complexity",
             row_accumulated_complexity: "Accumulated complexity",
+            row_reachable_functions: "Reachable functions",
             row_fit_score: "Fit score",
             no_run_recorded: "No run has been recorded for this project.",
             row_engine: "Engine",
@@ -237,10 +270,13 @@ impl Labels {
             row_duration: "Duration",
             row_sanitizer: "Sanitizer",
             row_budget: "Budget",
+            no_coverage_data:
+                "Coverage was not available (no harness built, or coverage tooling absent).",
             col_metric: "Metric",
             col_covered: "Covered",
             col_total: "Total",
             col_percent: "Percent",
+            functions_exercised: "project function(s) are exercised by the corpus.",
             row_entries: "Entries",
             row_total_size: "Total size",
             row_seeds: "Seeds",
@@ -257,8 +293,11 @@ impl Labels {
             bullet_crash_line: "Crash line",
             bullet_cluster: "Cluster",
             bullet_minimized: "Minimized",
+            bool_yes: "yes",
+            bool_no: "no",
             stack_trace: "Stack trace:",
             bug_report_heading: "Bug report",
+            severity_guess_label: "severity guess:",
             reproduction: "Reproduction:",
             root_cause: "Root cause:",
             suggested_fix: "Suggested fix:",
@@ -267,6 +306,7 @@ impl Labels {
             casr_not_exploitable: "Not exploitable",
             casr_undefined: "Undefined",
             generated_by: "Generated by oxfuzz",
+            footer_on: "on",
         }
     }
 
@@ -316,8 +356,8 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
     let _ = writeln!(md);
     let _ = writeln!(
         md,
-        "_{} {} on {}._",
-        labels.generated_by, data.tool_version, data.generated_at
+        "_{} {} {} {}._",
+        labels.generated_by, data.tool_version, labels.footer_on, data.generated_at
     );
     md
 }
@@ -338,28 +378,37 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
         })
         .count();
     let status = data.run.as_ref().map_or_else(
-        || "no run recorded".to_owned(),
+        || labels.status_unknown.to_owned(),
         |r| format!("{:?}", r.status),
     );
-    let engine = data
-        .run
-        .as_ref()
-        .map_or_else(|| "n/a".to_owned(), |r| format!("{:?}", r.engine));
+    let engine = data.run.as_ref().map_or_else(
+        || labels.engine_unknown.to_owned(),
+        |r| format!("{:?}", r.engine),
+    );
     let cov = data.coverage.map_or_else(
-        || "not available".to_owned(),
-        |c| format!("{:.1}% lines", c.line_percent()),
+        || labels.coverage_unknown.to_owned(),
+        |c| format!("{:.1}% {}", c.line_percent(), labels.line_coverage_unit),
     );
 
     if total == 0 {
         let _ = writeln!(
             md,
-            "No crashes were found in the most recent campaign (engine {engine}, status {status})."
+            "{summary} ({engine_word} {engine}, {status_word} {status}).",
+            summary = labels.no_crashes_summary,
+            engine_word = labels.inline_engine,
+            status_word = labels.inline_status,
         );
     } else {
         let _ = writeln!(
             md,
-            "The campaign surfaced **{total} unique crash(es)**, of which **{exploitable}** \
-             rank as exploitable or probably exploitable (engine {engine}, status {status})."
+            "{lead} **{total} {unit}**, {of_which} **{exploitable}** {rank} \
+             ({engine_word} {engine}, {status_word} {status}).",
+            lead = labels.crashes_summary_lead,
+            unit = labels.crashes_summary_unit,
+            of_which = labels.crashes_summary_of_which,
+            rank = labels.crashes_summary_rank,
+            engine_word = labels.inline_engine,
+            status_word = labels.inline_status,
         );
     }
     let _ = writeln!(md);
@@ -368,9 +417,10 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
     let _ = writeln!(md, "- {}: **{cov}**", labels.line_coverage);
     let _ = writeln!(
         md,
-        "- {}: **{} input(s)**, {}",
+        "- {}: **{} {}**, {}",
         labels.corpus_line,
         data.corpus.count,
+        labels.corpus_input_unit,
         human_bytes(data.corpus.total_bytes)
     );
     let _ = writeln!(md);
@@ -542,7 +592,8 @@ fn render_target(md: &mut String, data: &ReportData, labels: &Labels) {
     );
     let _ = writeln!(
         md,
-        "| Reachable functions | {} |",
+        "| {} | {} |",
+        labels.row_reachable_functions,
         c.reachable_functions.len()
     );
     let _ = writeln!(md, "| {} | {:.2} |", labels.row_fit_score, c.fit_score);
@@ -590,10 +641,7 @@ fn render_coverage(md: &mut String, data: &ReportData, labels: &Labels) {
     let _ = writeln!(md, "## {}", labels.coverage_section);
     let _ = writeln!(md);
     let Some(c) = data.coverage else {
-        let _ = writeln!(
-            md,
-            "_Coverage was not available (no harness built, or coverage tooling absent)._"
-        );
+        let _ = writeln!(md, "_{}_", labels.no_coverage_data);
         let _ = writeln!(md);
         return;
     };
@@ -630,8 +678,8 @@ fn render_coverage(md: &mut String, data: &ReportData, labels: &Labels) {
     let _ = writeln!(md);
     let _ = writeln!(
         md,
-        "{} project function(s) are exercised by the corpus.",
-        data.covered_functions
+        "{} {}",
+        data.covered_functions, labels.functions_exercised
     );
     let _ = writeln!(md);
 }
@@ -747,7 +795,11 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         md,
         "- {}: {}",
         labels.bullet_minimized,
-        if c.minimized { "yes" } else { "no" }
+        if c.minimized {
+            labels.bool_yes
+        } else {
+            labels.bool_no
+        }
     );
 
     if let Some(casr) = &c.casr {
@@ -778,8 +830,8 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         let _ = writeln!(md);
         let _ = writeln!(
             md,
-            "**{}** (severity guess: {})",
-            labels.bug_report_heading, report.severity_guess
+            "**{}** ({} {})",
+            labels.bug_report_heading, labels.severity_guess_label, report.severity_guess
         );
         let _ = writeln!(md);
         if !report.summary.trim().is_empty() {
