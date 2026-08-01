@@ -536,7 +536,7 @@ fn chinese_labels_translate_the_scaffolding_in_both_directions() {
     let md = render_markdown(&populated(), &Labels::chinese());
 
     // Present: the Chinese headings.
-    for heading in ["## 摘要", "## 图表概览", "## 目标", "## 运行", "## 覆盖率", "## 语料库", "## 发现"] {
+    for heading in ["## 摘要", "## 图表概览", "## 目标", "## 运行", "## 覆盖率", "## 语料库", "## 发现项"] {
         assert!(md.contains(heading), "missing Chinese heading {heading}");
     }
 
@@ -621,8 +621,8 @@ impl Labels {
             run_section: "运行",
             coverage_section: "覆盖率",
             corpus_section: "语料库",
-            findings_section: "发现",
-            finding_prefix: "发现",
+            findings_section: "发现项",
+            finding_prefix: "发现项",
             unique_crashes: "去重后的崩溃数",
             exploitable_line: "可利用 / 可能可利用",
             corpus_line: "语料库",
@@ -690,9 +690,13 @@ impl Labels {
             coverage_unknown: "不可用",
             no_crashes_summary: "最近一次测试未发现崩溃",
             crashes_summary_lead: "本次测试发现",
-            crashes_summary_unit: "个去重崩溃，",
+            crashes_summary_unit: "个去重崩溃",
             crashes_summary_of_which: "其中",
             crashes_summary_rank: "个被判定为可利用或可能可利用",
+            narrative_comma: "，",
+            narrative_open_paren: "（",
+            narrative_close_paren: "）",
+            narrative_full_stop: "。",
             inline_engine: "引擎",
             inline_status: "状态",
             corpus_input_unit: "个输入",
@@ -717,14 +721,37 @@ the renderer concatenates: `crashes_summary_lead`, `crashes_summary_unit`,
 as `lead {n} unit of_which {m} rank`. The Chinese above is written so the same
 slot order produces a natural sentence:
 
-    本次测试发现 5 个去重崩溃，其中 2 个被判定为可利用或可能可利用
+    本次测试发现 **5 个去重崩溃**，其中 **2** 个被判定为可利用或可能可利用（引擎 LibFuzzer，状态 Completed）。
 
-That is a coincidence of these two languages, not a guarantee. **Render the
-assembled sentence and read it** before considering this done -- fragment
+Note this example includes the `**` emphasis and the punctuation the renderer
+actually adds. An earlier version of this plan omitted them, and that omission
+hid a real defect: the Chinese `crashes_summary_unit` ended in a full-width
+comma while the template also emitted an ASCII one, producing `崩溃，, 其中`.
+The punctuation now lives in its own fields (`narrative_comma`,
+`narrative_open_paren`, `narrative_close_paren`, `narrative_full_stop`) so each
+language supplies its own, and `crashes_summary_unit` carries no trailing comma.
+
+That the slot order works for both languages is a coincidence of these two, not
+a guarantee. **Render the assembled sentence and read it** before considering
+this done -- fragment
 concatenation is where localization normally breaks, because a translator sees
 each fragment in isolation and never sees the sentence. If it reads wrongly,
 report it rather than reordering the renderer; the fix would be a structural
 change and belongs to the controller.
+
+
+**One terminology decision, made against the desktop app's existing vocabulary.**
+`findings_section` and `finding_prefix` are `发现项`, not `发现`. In this product
+`发现` is already taken: `crates/hf-gui/src/i18n.extra.ts` maps the Discover
+pipeline step to `发现` and its view title to `目标发现`. A report heading of
+`## 发现` would collide with the step that finds fuzz targets, when the report
+section means the crashes the campaign found. `发现项` keeps them distinct.
+
+Every other term here matches the GUI's established vocabulary: `覆盖率`,
+`语料库`, `崩溃`, `目标`, `测试桩`, `严重程度`, `引擎`, `分类定级`. If you find a
+term in this set that contradicts the desktop dictionary, report it rather than
+choosing for yourself -- the two surfaces disagreeing is worse than either
+choice alone.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1049,7 +1076,7 @@ fn language_selects_the_label_set() {
     let zh = render_markdown(&data, &Labels::for_language(ReportLanguage::Zh));
 
     assert!(en.contains("## Findings"));
-    assert!(zh.contains("## 发现"));
+    assert!(zh.contains("## 发现项"));
     assert_ne!(en, zh);
 }
 ```
