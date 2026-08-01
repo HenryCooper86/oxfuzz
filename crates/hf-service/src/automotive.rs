@@ -490,9 +490,15 @@ impl ServiceContainer {
             state_corpus,
         };
         let metrics = data.metrics();
-        // Task 4 of the localized-automotive-report work replaces this with the
-        // caller's requested language via `AutomotiveLabels::for_language`.
-        let facts = render_automotive_report(&data, &AutomotiveLabels::english());
+        // Task 4 of the localized-automotive-report work replaces this constant
+        // with the caller's requested language. Everything downstream of it --
+        // the deterministic render, the two prompts, the validation of what the
+        // model returns and the advisory notice above it -- already resolves
+        // from this one value, so that task changes this line and its signature
+        // rather than the composition below.
+        let language = crate::report::ReportLanguage::En;
+        let labels = AutomotiveLabels::for_language(language);
+        let facts = render_automotive_report(&data, &labels);
         let mut markdown = facts.clone();
         let mut ai_model = None;
         let ai_status = if !include_ai {
@@ -501,11 +507,11 @@ impl ServiceContainer {
             AutomotiveReportAiStatus::NotApplicable
         } else if let Some(pool) = self.provider_pool() {
             match self
-                .compose_automotive_report_interpretation(&pool, &facts, &data)
+                .compose_automotive_report_interpretation(&pool, &facts, &data, language)
                 .await
             {
                 Ok((interpretation, model)) => {
-                    markdown = append_ai_interpretation(&facts, &interpretation, &model);
+                    markdown = append_ai_interpretation(&facts, &interpretation, &model, &labels);
                     ai_model = Some(model);
                     AutomotiveReportAiStatus::Applied
                 }
@@ -538,14 +544,21 @@ impl ServiceContainer {
         pool: &std::sync::Arc<dyn hf_core::provider::ProviderPool>,
         facts: &str,
         data: &crate::automotive_report::AutomotiveReportData,
+        language: crate::report::ReportLanguage,
     ) -> Result<(String, String), ClassifiedError> {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
 
+        // One language value reaches the prompts and the validation of what
+        // comes back. Asking for one language's headings while requiring
+        // another's rejects every interpretation the model returns and falls
+        // back to the deterministic report without saying why.
         let messages = vec![
-            Message::system(crate::automotive_report::automotive_report_system_prompt()),
+            Message::system(crate::automotive_report::automotive_report_system_prompt(
+                language,
+            )),
             Message::user(crate::automotive_report::automotive_report_user_prompt(
-                facts, data,
+                facts, data, language,
             )),
         ];
         let response = pool
@@ -558,7 +571,7 @@ impl ServiceContainer {
             .record("automotive_report", &response.model, &response.usage)
             .await;
         let interpretation = response.text().trim();
-        crate::automotive_report::validate_ai_interpretation(interpretation, data)
+        crate::automotive_report::validate_ai_interpretation(interpretation, data, language)
             .map_err(ClassifiedError::Provider)?;
         Ok((interpretation.to_owned(), response.model))
     }

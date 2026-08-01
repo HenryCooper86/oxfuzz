@@ -579,7 +579,7 @@ fn chinese_punctuation_carries_its_own_spacing() {
     for fixture in fixtures() {
         let zh = render_automotive_report(&fixture.data, &AutomotiveLabels::chinese());
         for line in zh.lines() {
-            for stray in ["， ", "、 ", "： ", "； ", "。 ", "（ ", " ）"] {
+            for stray in ["， ", "、 ", "： ", "； ", "。 ", "（ ", " ）", "） "] {
                 assert!(
                     !line.contains(stray),
                     "{}: a full-width mark carries a trailing ASCII space:\n{line}",
@@ -729,9 +729,9 @@ fn report_does_not_overstate_protocol_state_evidence() {
 fn ai_prompt_is_grounded_and_only_known_evidence_citations_are_accepted() {
     let data = report_data();
     let facts = render_automotive_report(&data, &AutomotiveLabels::english());
-    let prompt = automotive_report_user_prompt(&facts, &data);
+    let prompt = automotive_report_user_prompt(&facts, &data, ReportLanguage::En);
 
-    assert!(automotive_report_system_prompt().contains("NEVER invent"));
+    assert!(automotive_report_system_prompt(ReportLanguage::En).contains("NEVER invent"));
     assert!(prompt.contains(&facts));
     assert!(prompt.contains("[OP:<uuid>]"));
     assert!(prompt.contains("Hypotheses"));
@@ -743,21 +743,25 @@ fn ai_prompt_is_grounded_and_only_known_evidence_citations_are_accepted() {
          No successful virtual replay is retained.\n\n### Recommended next actions\nReview the \
          retained failure before another supervised virtual run [OP:{FAILED_OPERATION_ID}]."
     );
-    assert!(validate_ai_interpretation(&valid, &data).is_ok());
+    assert!(validate_ai_interpretation(&valid, &data, ReportLanguage::En).is_ok());
 
     let unknown = valid.replace(
         &FAILED_OPERATION_ID.to_string(),
         "00000000-0000-0000-0000-000000000001",
     );
-    assert!(validate_ai_interpretation(&unknown, &data)
-        .unwrap_err()
-        .contains("unknown operation"));
+    assert!(
+        validate_ai_interpretation(&unknown, &data, ReportLanguage::En)
+            .unwrap_err()
+            .contains("unknown operation")
+    );
 
     let uncited = "### Evidence-backed interpretation\nLooks good.\n\n### Hypotheses\nNone.\n\n\
         ### Missing evidence\nNone.\n\n### Recommended next actions\nContinue.";
-    assert!(validate_ai_interpretation(uncited, &data)
-        .unwrap_err()
-        .contains("citation"));
+    assert!(
+        validate_ai_interpretation(uncited, &data, ReportLanguage::En)
+            .unwrap_err()
+            .contains("citation")
+    );
 }
 
 #[test]
@@ -769,10 +773,262 @@ fn ai_interpretation_is_advisory_and_cannot_replace_the_fact_sheet() {
          ### Hypotheses\nNone.\n\n### Missing evidence\nA completed virtual replay.\n\n\
          ### Recommended next actions\nRepeat only after operator review [OP:{FAILED_OPERATION_ID}]."
     );
-    let composed = append_ai_interpretation(&facts, &interpretation, "test-model");
+    let composed = append_ai_interpretation(
+        &facts,
+        &interpretation,
+        "test-model",
+        &AutomotiveLabels::english(),
+    );
 
     assert!(composed.starts_with(&facts));
     assert!(composed.contains("## AI-Assisted Interpretation"));
     assert!(composed.contains("advisory"));
     assert!(composed.contains("test-model"));
+}
+
+/// An interpretation shaped the way the Chinese arm requires, with `citation`
+/// dropped into both cited positions.
+///
+/// The four headings are written out here rather than read from
+/// [`AutomotiveLabels`]: a test that took them from the label set would assert
+/// only that the labels agree with themselves, and would stay green if both the
+/// prompt and the validator moved to a heading no model was ever asked for.
+fn chinese_interpretation_citing(citation: &str) -> String {
+    format!(
+        "### 基于证据的解读\n失败的虚拟重放需要复核 {citation}。\n\n\
+         ### 假设\n无。\n\n\
+         ### 缺失的证据\n没有保留成功的虚拟重放。\n\n\
+         ### 建议的后续行动\n在再次进行受监督的虚拟运行之前，先复核保留的失败 {citation}。"
+    )
+}
+
+/// The English counterpart of [`chinese_interpretation_citing`], written out
+/// for the same reason.
+fn english_interpretation_citing(citation: &str) -> String {
+    format!(
+        "### Evidence-backed interpretation\nThe failed virtual replay needs review \
+         {citation}.\n\n\
+         ### Hypotheses\nNone.\n\n\
+         ### Missing evidence\nNo successful virtual replay is retained.\n\n\
+         ### Recommended next actions\nReview the retained failure before another supervised \
+         virtual run {citation}."
+    )
+}
+
+#[test]
+fn a_chinese_interpretation_validates_under_zh_and_not_under_en() {
+    // The defect this task exists for. Asking the model for Chinese makes it
+    // emit Chinese headings; before this change validation rejected them and
+    // the report silently fell back to the deterministic document.
+    let data = report_data();
+    let zh = chinese_interpretation_citing(&format!("[OP:{FAILED_OPERATION_ID}]"));
+
+    assert!(
+        validate_ai_interpretation(&zh, &data, ReportLanguage::Zh).is_ok(),
+        "a Chinese interpretation with Chinese headings must validate under Zh"
+    );
+    let rejected = validate_ai_interpretation(&zh, &data, ReportLanguage::En)
+        .expect_err("the English arm must still require English headings");
+    assert!(
+        rejected.contains("missing heading '### Evidence-backed interpretation'"),
+        "{rejected}"
+    );
+}
+
+#[test]
+fn english_validation_is_unchanged() {
+    let data = report_data();
+    let en = english_interpretation_citing(&format!("[OP:{FAILED_OPERATION_ID}]"));
+    assert!(validate_ai_interpretation(&en, &data, ReportLanguage::En).is_ok());
+
+    // The mirror image, and the design's stated failure semantics: a model that
+    // answers in English when Chinese was requested has its interpretation
+    // rejected, exactly like any other validation failure.
+    let rejected = validate_ai_interpretation(&en, &data, ReportLanguage::Zh)
+        .expect_err("English headings must not satisfy the Chinese arm");
+    assert!(
+        rejected.contains("missing heading '### 基于证据的解读'"),
+        "{rejected}"
+    );
+}
+
+#[test]
+fn citation_checks_survive_in_chinese() {
+    // Language awareness must not weaken evidence checking. Each rejection is
+    // asserted by its own message, so a document thrown out for the wrong
+    // reason -- a heading mismatch, say -- cannot pass for a citation check.
+    let data = report_data();
+
+    let bogus = chinese_interpretation_citing("[OP:does-not-exist]");
+    let rejected = validate_ai_interpretation(&bogus, &data, ReportLanguage::Zh)
+        .expect_err("an unknown operation must be rejected in any language");
+    assert!(
+        rejected.contains("cites unknown operation does-not-exist"),
+        "the rejection must be for the citation, not for the headings: {rejected}"
+    );
+
+    let unknown_state = chinese_interpretation_citing(&format!("[STATE:{}]", "0".repeat(64)));
+    assert!(
+        validate_ai_interpretation(&unknown_state, &data, ReportLanguage::Zh)
+            .expect_err("an unknown state digest must be rejected in any language")
+            .contains("cites unknown state"),
+    );
+
+    let unknown_transcript =
+        chinese_interpretation_citing(&format!("[TRANSCRIPT:{}]", "1".repeat(64)));
+    assert!(
+        validate_ai_interpretation(&unknown_transcript, &data, ReportLanguage::Zh)
+            .expect_err("an unknown transcript digest must be rejected in any language")
+            .contains("cites unknown transcript"),
+    );
+
+    // And the requirement that a Chinese interpretation cite retained evidence
+    // at all, when operations exist.
+    let uncited = chinese_interpretation_citing("（无引用）");
+    assert!(
+        validate_ai_interpretation(&uncited, &data, ReportLanguage::Zh)
+            .expect_err("an uncited interpretation must be rejected in any language")
+            .contains("at least one retained evidence citation"),
+    );
+}
+
+#[test]
+fn the_prompt_asks_for_exactly_the_headings_validation_requires() {
+    // Prompt and validator speak one vocabulary or the feature does not work:
+    // a prompt asking for English headings under Zh yields an interpretation
+    // the validator discards. Rather than compare the two against a literal,
+    // this lifts the headings the prompt actually requests and feeds a document
+    // built from them straight into the validator.
+    let data = report_data();
+    for (language, other) in [
+        (ReportLanguage::En, ReportLanguage::Zh),
+        (ReportLanguage::Zh, ReportLanguage::En),
+    ] {
+        let facts = render_automotive_report(&data, &AutomotiveLabels::for_language(language));
+        let prompt = automotive_report_user_prompt(&facts, &data, language);
+        let requested = prompt
+            .lines()
+            // Stop before the fact sheet, whose findings also use `###`.
+            .take_while(|line| !line.starts_with("Project: "))
+            .filter(|line| line.starts_with("### "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requested.len(),
+            4,
+            "the prompt must request four headings:\n{prompt}"
+        );
+
+        let answered = format!(
+            "{}\n\nEvidence: [OP:{FAILED_OPERATION_ID}]\n",
+            requested.join("\n\n")
+        );
+        assert!(
+            validate_ai_interpretation(&answered, &data, language).is_ok(),
+            "a model answering the prompt exactly is rejected by the validator:\n{answered}"
+        );
+        assert!(
+            validate_ai_interpretation(&answered, &data, other).is_err(),
+            "the other language accepted headings it never asked for:\n{answered}"
+        );
+    }
+}
+
+#[test]
+fn the_chinese_prompts_ask_for_chinese_and_pin_the_citation_formats() {
+    let data = report_data();
+    let zh_facts = render_automotive_report(&data, &AutomotiveLabels::chinese());
+    let zh_system = automotive_report_system_prompt(ReportLanguage::Zh);
+    let zh_prompt = automotive_report_user_prompt(&zh_facts, &data, ReportLanguage::Zh);
+
+    assert!(zh_system.contains("Simplified Chinese"), "{zh_system}");
+    assert!(zh_prompt.contains("Simplified Chinese"), "{zh_prompt}");
+    // A translated citation now fails validation outright, so the Chinese
+    // prompt has to name the three forms rather than gesture at "identifiers".
+    assert!(zh_prompt.contains("never translated"), "{zh_prompt}");
+    for form in ["[OP:<uuid>]", "[STATE:<sha256>]", "[TRANSCRIPT:<sha256>]"] {
+        assert!(
+            zh_prompt.matches(form).count() >= 2,
+            "{form} is not named by the Chinese token rule:\n{zh_prompt}"
+        );
+    }
+
+    // Every grounding instruction survives translation of the output language.
+    // These are what stop the model inventing evidence.
+    for rule in [
+        "Use only its retained facts.",
+        "Do not create a \
+         citation, path, number, protocol, vehicle effect, vulnerability, or result.",
+        "cannot authorize \
+         execution or physical traffic.",
+    ] {
+        assert!(zh_prompt.contains(rule), "grounding rule dropped: {rule}");
+    }
+    assert!(zh_system.contains("NEVER invent"), "{zh_system}");
+    assert!(zh_system.contains("advisory"), "{zh_system}");
+
+    // The English prompts carry no translation instruction at all.
+    let en_facts = render_automotive_report(&data, &AutomotiveLabels::english());
+    let en_system = automotive_report_system_prompt(ReportLanguage::En);
+    let en_prompt = automotive_report_user_prompt(&en_facts, &data, ReportLanguage::En);
+    for text in [&en_system, &en_prompt] {
+        assert!(
+            !text.contains("Simplified Chinese"),
+            "the English prompt carries a translation instruction:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn the_advisory_notice_keeps_its_force_in_both_languages() {
+    // The one guardrail a Chinese reader used to meet in English. It is what
+    // tells the reader the section below it is not evidence, so it is asserted
+    // as exact assembled text in both languages.
+    let data = report_data();
+    let citation = format!("[OP:{FAILED_OPERATION_ID}]");
+
+    let en_facts = render_automotive_report(&data, &AutomotiveLabels::english());
+    let en = append_ai_interpretation(
+        &en_facts,
+        &english_interpretation_citing(&citation),
+        "test-model",
+        &AutomotiveLabels::english(),
+    );
+    assert!(
+        en.contains(
+            "## AI-Assisted Interpretation\n\n\
+             > This provider-generated interpretation is advisory. Retained evidence and service \
+             validation remain authoritative. Model: `test-model`.\n"
+        ),
+        "{en}"
+    );
+
+    let zh_facts = render_automotive_report(&data, &AutomotiveLabels::chinese());
+    let zh = append_ai_interpretation(
+        &zh_facts,
+        &chinese_interpretation_citing(&citation),
+        "test-model",
+        &AutomotiveLabels::chinese(),
+    );
+    assert!(
+        zh.contains(
+            "## AI 辅助解读\n\n\
+             > 本解读由模型提供方生成，仅供参考。任何情况下均以保留的证据和服务校验为准。\
+             模型：`test-model`。\n"
+        ),
+        "{zh}"
+    );
+    for english in [
+        "## AI-Assisted Interpretation",
+        "advisory",
+        "authoritative",
+        "Model:",
+    ] {
+        assert!(
+            !zh.contains(english),
+            "the English notice '{english}' survived into the Chinese composition:\n{zh}"
+        );
+    }
+    // The model identifier is a technical token: verbatim in both languages.
+    assert!(zh.contains("`test-model`"), "{zh}");
+    assert!(zh.starts_with(&zh_facts), "{zh}");
 }
