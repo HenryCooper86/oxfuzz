@@ -1066,13 +1066,20 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
 
 /// System prompt for the LLM that composes the professional narrative report.
 #[must_use]
-pub fn report_system_prompt() -> &'static str {
-    "You are a senior security engineer writing a professional fuzzing campaign \
-     report for an engineering and security audience. You write clearly and \
-     authoritatively, with concrete, actionable analysis. You NEVER invent facts: \
-     every number, severity, file path, and stack frame must come verbatim from \
-     the data you are given. If a figure is absent, say it was not measured \
-     rather than guessing."
+pub fn report_system_prompt(language: ReportLanguage) -> String {
+    let base = "You are a senior security engineer writing a professional fuzzing campaign \
+                report for an engineering and security audience. You write clearly and \
+                authoritatively, with concrete, actionable analysis. You NEVER invent facts: \
+                every number, severity, file path, and stack frame must come verbatim from \
+                the data you are given. If a figure is absent, say it was not measured \
+                rather than guessing.";
+    match language {
+        ReportLanguage::En => base.to_owned(),
+        ReportLanguage::Zh => format!(
+            "{base} You write the report in Simplified Chinese for a Chinese-reading \
+             engineering audience."
+        ),
+    }
 }
 
 /// Build the user prompt: the grounded fact-sheet plus composition rules.
@@ -1081,7 +1088,17 @@ pub fn report_system_prompt() -> &'static str {
 /// every real number and the pre-rendered Mermaid graphs -- so the model has no
 /// reason to fabricate. The rules pin structure and require the graphs be kept.
 #[must_use]
-pub fn report_user_prompt(facts: &str, data: &ReportData) -> String {
+pub fn report_user_prompt(facts: &str, data: &ReportData, language: ReportLanguage) -> String {
+    let language_rules = match language {
+        ReportLanguage::En => String::new(),
+        ReportLanguage::Zh => "Write the entire report in Simplified Chinese, including \
+             all section headings and prose.\n\n\
+             Keep the following verbatim in their original form, never translated or \
+             transliterated: file paths, stack frames, symbol and function names, crash \
+             signatures, engine names, sanitizer names, CWE identifiers, and all figures. \
+             A translated stack frame no longer matches the crash it came from.\n\n"
+            .to_owned(),
+    };
     format!(
         "Compose a comprehensive, professional fuzzing report in GitHub-flavored \
          Markdown for target `{target}` in project `{project}`.\n\n\
@@ -1106,7 +1123,7 @@ pub fn report_user_prompt(facts: &str, data: &ReportData) -> String {
          to drive deeper.\n\n\
          Output ONLY the Markdown report, starting with a single `#` title. Do not \
          wrap the whole thing in a code fence.\n\n\
-         ---\n\
+         {language_rules}---\n\
          # DATA SHEET (ground truth)\n\n\
          {facts}",
         target = data.target,
