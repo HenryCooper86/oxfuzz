@@ -13,7 +13,10 @@ describe("PolicyDecisionList", () => {
             action: "run_fuzzer",
             risk_tier: "high",
             decision: "approved",
-            origin: "run_fuzzer",
+            // Distinct from `action` so the assertions below can show each
+            // field renders independently, rather than one string matching
+            // both.
+            origin: "chat_agent",
             project: "/projects/libjson",
             detail: "operator approved a 60m campaign",
           },
@@ -23,6 +26,7 @@ describe("PolicyDecisionList", () => {
     );
 
     expect(html).toContain("run_fuzzer");
+    expect(html).toContain("chat_agent");
     expect(html).toContain("high");
     expect(html).toContain("approved");
     expect(html).toContain("libjson");
@@ -57,7 +61,15 @@ describe("PolicyDecisionList", () => {
     );
 
     expect(html).toContain("discover");
-    expect(html).not.toContain("null");
-    expect(html).not.toContain("undefined");
+    // PolicyDecisionList.tsx:75 emits the " -- " separator only ahead of a
+    // present `detail`; with `detail: null` it must not appear. (Asserting
+    // `.not.toContain("null")`/`"undefined"` would pass even with no guard
+    // at all, since renderToStaticMarkup never emits those literal strings
+    // for null/undefined children -- this checks the guard's actual output
+    // instead.)
+    expect(html).not.toContain(" -- ");
+    // PolicyDecisionList.tsx:69-71 wraps a present `project` in exactly this
+    // span; with `project: null` it must not appear.
+    expect(html).not.toContain('class="text-xs text-text-muted truncate"');
   });
 });
