@@ -30,6 +30,12 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v5
 
+      # crates/hf-gui/src-tauri is a workspace member with no default-members
+      # to exclude it, so every --workspace cargo command below builds it. On
+      # Linux that needs WebKitGTK and friends, which the runner image lacks.
+      - name: Install Linux build dependencies
+        run: scripts/ci/install-linux-deps.sh
+
       # The Python script tests need no toolchain and finish in under a second.
       # Running them first fails fast, and a fourth job would not earn a runner.
       - name: Script tests

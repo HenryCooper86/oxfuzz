@@ -30,6 +30,12 @@ rust:
     paths:
       - .cargo/registry
       - target/
+  before_script:
+    # crates/hf-gui/src-tauri is a workspace member with no default-members to
+    # exclude it, so every --workspace cargo command below builds it, which on
+    # Linux needs WebKitGTK and friends. This image runs as root, so the
+    # script's sudo branch is skipped.
+    - scripts/ci/install-linux-deps.sh
   script:
     - scripts/tests/gates.sh fmt
     - scripts/tests/gates.sh clippy
