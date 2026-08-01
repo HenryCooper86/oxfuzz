@@ -43,9 +43,12 @@ Run in order before declaring a task done:
 10. `npm --prefix crates/hf-gui run lint`
 
 All `cargo test` invocations use the repository error-output filter documented
-in `AGENTS.md`. GitHub Actions and GitLab CI also run an explicit sandbox and
-harness-qualification contract job; it uses mocked adapters and never executes
-a generated harness on the host.
+in `AGENTS.md`. The workspace test suite includes an explicit sandbox and
+harness-qualification contract test
+(`hf-service/tests/harness_qualification.rs`); it uses mocked adapters and
+never executes a generated harness on the host. Both GitHub Actions and
+GitLab CI run it as part of the `test` gate (`cargo test --workspace`), not
+as a separate job.
 
 ## 6. Fuzzing-Specific Test Notes
 
