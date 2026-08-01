@@ -247,8 +247,11 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
         /// Report language: en or zh. Defaults to en.
+        ///
+        /// Named `--report-lang` rather than `--lang` because `--lang` already
+        /// means the target's source language on `discover` and `harness`.
         #[arg(long, default_value = "en")]
-        lang: String,
+        report_lang: String,
     },
     /// Start the web server (REST API).
     Serve {
@@ -2213,8 +2216,8 @@ async fn main() -> anyhow::Result<()> {
             project,
             target,
             out,
-            lang,
-        } => cmd_report(project, &target, out.as_deref(), &lang).await?,
+            report_lang,
+        } => cmd_report(project, &target, out.as_deref(), &report_lang).await?,
         Commands::Serve { host, port } => {
             let security = hf_web::WebSecurityConfig::from_env();
             let addr = std::net::SocketAddr::new(host, port);
@@ -2406,11 +2409,11 @@ mod report_cli_tests {
     fn report_language_defaults_to_english_and_accepts_chinese() {
         let default_cli =
             Cli::try_parse_from(["oxfuzz", "report", "/tmp/project", "--target", "parse"]).unwrap();
-        let Commands::Report { lang, .. } = default_cli.command else {
+        let Commands::Report { report_lang, .. } = default_cli.command else {
             panic!("expected the report command");
         };
         assert_eq!(
-            lang.parse::<hf_service::ReportLanguage>().unwrap(),
+            report_lang.parse::<hf_service::ReportLanguage>().unwrap(),
             hf_service::ReportLanguage::En
         );
 
@@ -2420,15 +2423,15 @@ mod report_cli_tests {
             "/tmp/project",
             "--target",
             "parse",
-            "--lang",
+            "--report-lang",
             "zh",
         ])
         .unwrap();
-        let Commands::Report { lang, .. } = chinese.command else {
+        let Commands::Report { report_lang, .. } = chinese.command else {
             panic!("expected the report command");
         };
         assert_eq!(
-            lang.parse::<hf_service::ReportLanguage>().unwrap(),
+            report_lang.parse::<hf_service::ReportLanguage>().unwrap(),
             hf_service::ReportLanguage::Zh
         );
     }

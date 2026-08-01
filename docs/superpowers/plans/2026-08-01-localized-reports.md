@@ -48,7 +48,7 @@
 | `crates/hf-service/src/container/export.rs` | `generate_report`, `export_report`, and `compose_ai_report` take and forward the language |
 | `crates/hf-service/src/lib.rs` | Re-exports `ReportLanguage` |
 | `crates/hf-service/tests/report.rs` | Existing tests updated for the new signature; new localization tests added |
-| `crates/hf-cli/src/main.rs` | `report` subcommand gains `--lang` |
+| `crates/hf-cli/src/main.rs` | `report` subcommand gains `--report-lang` |
 | `crates/hf-web/src/router.rs` | Report request body gains an optional `language` |
 | `crates/hf-gui/src-tauri/src/commands.rs` | `generate_report` and `export_report` commands take a `language` |
 | `crates/hf-gui/src/views/*` | The report caller passes `useI18n().locale` |
@@ -1155,7 +1155,7 @@ grep -rn 'generate_report\b' --include='*.rs' crates/ | grep -v automotive
 
 | Site | What to pass |
 | --- | --- |
-| `crates/hf-cli/src/main.rs` | the new `--lang` flag |
+| `crates/hf-cli/src/main.rs` | the new `--report-lang` flag |
 | `crates/hf-web/src/router.rs` | the request body's `language` field |
 | `crates/hf-gui/src-tauri/src/commands.rs` | the command's resolved `language` |
 | `crates/hf-service/src/container/export.rs` (`export_report` -> `generate_report`) | its own new `language` parameter |
@@ -1328,7 +1328,7 @@ git commit -m "$(cat <<'EOF'
 feat: let callers choose the report language
 
 generate_report and export_report take a ReportLanguage. The desktop app passes
-its current UI locale, the CLI gains --lang, and REST takes an optional language
+its current UI locale, the CLI gains --report-lang, and REST takes an optional language
 field. Omitting it anywhere yields English, unchanged from previous behavior.
 
 Scheduled campaigns pass nothing and so produce English reports. That follows
