@@ -35,6 +35,7 @@ use hf_service::automotive_report::{
     AutomotiveLabels, AutomotivePhysicalBenchPosture, AutomotivePolicyPosture,
     AutomotiveReportData, AutomotiveReportOperation, AutomotiveReportSafetyPosture,
 };
+use hf_service::report::ReportLanguage;
 use hf_storage::AutomotiveOperationStatus;
 use uuid::Uuid;
 
@@ -301,6 +302,7 @@ struct Fixture {
     name: &'static str,
     data: AutomotiveReportData,
     english: &'static str,
+    chinese: &'static str,
 }
 
 fn fixtures() -> [Fixture; 4] {
@@ -309,23 +311,75 @@ fn fixtures() -> [Fixture; 4] {
             name: "populated",
             data: report_data(),
             english: include_str!("fixtures/automotive_report/populated.en.md"),
+            chinese: include_str!("fixtures/automotive_report/populated.zh.md"),
         },
         Fixture {
             name: "empty",
             data: empty_data(),
             english: include_str!("fixtures/automotive_report/empty.en.md"),
+            chinese: include_str!("fixtures/automotive_report/empty.zh.md"),
         },
         Fixture {
             name: "complete",
             data: complete_data(),
             english: include_str!("fixtures/automotive_report/complete.en.md"),
+            chinese: include_str!("fixtures/automotive_report/complete.zh.md"),
         },
         Fixture {
             name: "mixed",
             data: mixed_data(),
             english: include_str!("fixtures/automotive_report/mixed.en.md"),
+            chinese: include_str!("fixtures/automotive_report/mixed.zh.md"),
         },
     ]
+}
+
+/// Every evidence value that must reach the reader unchanged by the language.
+///
+/// Derived from the fixture rather than hardcoded, so the guard follows the
+/// data if a fixture changes. Each is quoted the way the renderer emits it --
+/// a whole citation or a whole backticked token, never a prefix, because a
+/// prefix cannot be translated and so proves nothing about what follows it.
+fn technical_tokens(data: &AutomotiveReportData) -> Vec<String> {
+    let mut tokens = vec![data.generated_at.clone(), data.tool_version.clone()];
+    for operation in &data.operations {
+        tokens.push(format!("[OP:{}]", operation.id));
+        tokens.push(format!("`{}`", operation.operation));
+        tokens.push(format!("`{}`", operation.mode));
+        tokens.push(format!("`{}`", operation.request_sha256));
+        tokens.push(format!("`{}`", operation.artifact_dir));
+        if let Some(digest) = operation.transcript_sha256.as_deref() {
+            tokens.push(format!("[TRANSCRIPT:{digest}]"));
+        }
+        if let Some(protocol) = operation.protocol.as_deref() {
+            tokens.push(format!("`{protocol}`"));
+        }
+        if let Some(summary) = operation.result_summary.as_deref() {
+            // Matched as a whole manifest cell. The `complete` fixture's
+            // summary is the bare word "complete", which occurs inside English
+            // prose ("completed", "campaign-completeness") that has no Chinese
+            // counterpart; the cell delimiters keep the guard on the datum.
+            tokens.push(format!("| {summary} |"));
+        }
+        for signature in &operation.state_signatures {
+            tokens.push(format!("[STATE:{}]", signature.digest.as_str()));
+        }
+    }
+    for entry in &data.state_corpus {
+        tokens.push(format!("[STATE:{}]", entry.state_digest));
+        tokens.push(format!("[OP:{}]", entry.source_operation_id));
+        tokens.push(format!("`{}`", entry.artifact_sha256));
+        tokens.push(format!("`{}`", entry.artifact_path));
+    }
+    for name in data
+        .safety
+        .allowed_protocols
+        .iter()
+        .chain(data.safety.allowed_modes.iter())
+    {
+        tokens.push(format!("`{name}`"));
+    }
+    tokens
 }
 
 #[test]
@@ -338,6 +392,216 @@ fn english_output_is_byte_identical_to_the_pre_localization_baseline() {
             fixture.name
         );
     }
+}
+
+#[test]
+fn chinese_output_is_byte_identical_to_its_committed_rendering() {
+    for fixture in fixtures() {
+        let rendered = render_automotive_report(&fixture.data, &AutomotiveLabels::chinese());
+        assert_eq!(
+            rendered, fixture.chinese,
+            "the Chinese {} report moved",
+            fixture.name
+        );
+    }
+}
+
+#[test]
+fn chinese_labels_translate_the_scaffolding_in_both_directions() {
+    for fixture in fixtures() {
+        let zh = render_automotive_report(&fixture.data, &AutomotiveLabels::chinese());
+        assert!(
+            zh.starts_with("# 汽车协议模糊测试活动报告："),
+            "{}: the document title is not translated:\n{zh}",
+            fixture.name
+        );
+        for heading in [
+            "## 摘要",
+            "## 范围与安全策略",
+            "## 测试活动工作流",
+            "## 协议状态探索",
+            "## 发现项",
+            "## 证据清单",
+            "## 限制",
+            "## 建议",
+            "### 解读边界",
+        ] {
+            assert!(
+                zh.contains(heading),
+                "{}: {heading} is missing:\n{zh}",
+                fixture.name
+            );
+        }
+        for english in [
+            "## Executive Summary",
+            "## Scope and Safety Posture",
+            "## Campaign Workflow",
+            "## Protocol-State Exploration",
+            "## Findings",
+            "## Evidence Manifest",
+            "## Limitations",
+            "## Recommendations",
+            "### Interpretation Boundary",
+            "Evidence window",
+            "Effective posture",
+            "Not recorded",
+            "not retained",
+            "Next,",
+            "This report synthesizes",
+            "The bounded snapshot contains",
+        ] {
+            assert!(
+                !zh.contains(english),
+                "{}: the English label '{english}' survived into the Chinese render:\n{zh}",
+                fixture.name
+            );
+        }
+    }
+}
+
+#[test]
+fn technical_tokens_are_byte_identical_across_languages() {
+    for fixture in fixtures() {
+        let en = render_automotive_report(&fixture.data, &AutomotiveLabels::english());
+        let zh = render_automotive_report(&fixture.data, &AutomotiveLabels::chinese());
+        for token in technical_tokens(&fixture.data) {
+            assert!(
+                zh.contains(token.as_str()),
+                "{}: {token} was translated or dropped from the Chinese render",
+                fixture.name
+            );
+            assert_eq!(
+                en.matches(token.as_str()).count(),
+                zh.matches(token.as_str()).count(),
+                "{}: {token} occurs a different number of times per language",
+                fixture.name
+            );
+        }
+    }
+}
+
+#[test]
+fn a_state_observed_by_two_operations_joins_its_citations_with_the_list_separator() {
+    // The only list site with no other guard: every fixture above has zero or
+    // one citation on an "observed by" line, so the separator never renders
+    // there. Give both operations the same protocol state and it does.
+    let signature = state_signature();
+    let digest = signature.digest.as_str().to_owned();
+    let mut data = report_data();
+    data.operations[1].state_signatures = vec![signature];
+
+    let en = render_automotive_report(&data, &AutomotiveLabels::english());
+    assert!(
+        en.contains(&format!(
+            "`[STATE:{digest}]` (`uds`), observed by [OP:{OPERATION_ID}], \
+             [OP:{FAILED_OPERATION_ID}]."
+        )),
+        "{en}"
+    );
+
+    let zh = render_automotive_report(&data, &AutomotiveLabels::chinese());
+    assert!(
+        zh.contains(&format!(
+            "`[STATE:{digest}]`（`uds`），观察来源 [OP:{OPERATION_ID}]、\
+             [OP:{FAILED_OPERATION_ID}]。"
+        )),
+        "{zh}"
+    );
+}
+
+#[test]
+fn the_guardrail_text_keeps_its_full_force_in_both_languages() {
+    // The Limitations bullets and the three standing notices exist to stop a
+    // reader concluding more than the retained evidence supports. They are
+    // asserted as exact assembled text, in both languages, because a hedge that
+    // reads weaker after translation is a defect here even where it would be
+    // cosmetic elsewhere.
+    let en = render_automotive_report(&report_data(), &AutomotiveLabels::english());
+    assert!(en.contains(
+        "\
+- The report covers only the bounded retained evidence snapshot and cannot infer events that were not persisted.
+- Protocol-state digests are not source-code line, function, region, or edge coverage.
+- A completed operation confirms contract-valid execution, not absence of security defects.
+- Offline and virtual evidence does not validate a physical ECU, vehicle network, timing behavior, or bench wiring.
+- AI-assisted interpretation, when appended, is advisory and cannot authorize execution or establish a finding."
+    ), "{en}");
+    for notice in [
+        "Protocol-state novelty is **not source coverage** and does not by itself prove a \
+         vulnerability.",
+        "All captured, mutation, planning, and replay evidence remains subject to service \
+         validation, sandbox isolation, typed limits, guardrails, and the human-approval boundary.",
+        "Physical-bench validation is intentionally excluded from campaign-completeness scoring. \
+         It remains a separately approved activity after the exact plan and budgets are known.",
+        "Observed states, successful decoding, and completed replay steps are campaign evidence. \
+         They do not by themselves prove exploitability, security impact, or unsafe vehicle \
+         behavior.",
+    ] {
+        assert!(en.contains(notice), "{notice} is missing from:\n{en}");
+    }
+
+    let zh = render_automotive_report(&report_data(), &AutomotiveLabels::chinese());
+    assert!(
+        zh.contains(
+            "\
+- 本报告仅覆盖受限的保留证据快照，无法推断未被持久化的事件。
+- 协议状态摘要不是源代码的行覆盖率、函数覆盖率、区域覆盖率或边覆盖率。
+- 操作完成只能确认执行符合契约，并不代表不存在安全缺陷。
+- 离线证据和虚拟证据不能验证物理 ECU、车辆网络、时序行为或台架接线。
+- 附加的 AI 辅助解读仅供参考，既不能授权执行，也不能确立发现项。"
+        ),
+        "{zh}"
+    );
+    for notice in [
+        "协议状态新颖性**不是源代码覆盖率**，其本身也不能证明存在漏洞。",
+        "所有捕获、变异、计划和重放证据均须接受服务校验、沙箱隔离、类型化限额、安全护栏\
+         以及人工批准边界的约束。",
+        "物理台架验证被有意排除在测试活动完整度评分之外。它仍是一项单独批准的活动，\
+         只有在确切的计划和预算明确之后才能进行。",
+        "观察到的状态、成功的解码和已完成的重放步骤都属于测试活动证据。\
+         它们本身并不能证明可利用性、安全影响或不安全的车辆行为。",
+    ] {
+        assert!(zh.contains(notice), "{notice} is missing from:\n{zh}");
+    }
+}
+
+#[test]
+fn chinese_punctuation_carries_its_own_spacing() {
+    // The enumeration of status counts takes the enumeration mark, the clause
+    // break takes the full-width comma, and neither takes a trailing ASCII
+    // space -- a full-width mark supplies its own.
+    let zh = render_automotive_report(&report_data(), &AutomotiveLabels::chinese());
+    assert!(
+        zh.contains(
+            "**1 个已完成**、**0 个部分完成**、**1 个失败**、**0 个运行中**和**0 个已取消**。"
+        ),
+        "{zh}"
+    );
+    for fixture in fixtures() {
+        let zh = render_automotive_report(&fixture.data, &AutomotiveLabels::chinese());
+        for stray in ["， ", "、 ", "： ", "； "] {
+            assert!(
+                !zh.contains(stray),
+                "{}: a full-width mark carries a trailing ASCII space:\n{zh}",
+                fixture.name
+            );
+        }
+    }
+}
+
+#[test]
+fn for_language_resolves_the_two_label_sets() {
+    assert_eq!(
+        AutomotiveLabels::for_language(ReportLanguage::En),
+        AutomotiveLabels::english()
+    );
+    assert_eq!(
+        AutomotiveLabels::for_language(ReportLanguage::Zh),
+        AutomotiveLabels::chinese()
+    );
+    assert_eq!(
+        AutomotiveLabels::for_language(ReportLanguage::default()),
+        AutomotiveLabels::english()
+    );
 }
 
 #[test]
