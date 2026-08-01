@@ -217,9 +217,359 @@ pub struct AutomotiveCampaignReport {
     pub markdown: String,
 }
 
+/// Every user-facing literal the automotive report renderer emits.
+///
+/// This is the automotive counterpart of [`crate::report::Labels`], and is
+/// deliberately a separate type: the two documents share almost no vocabulary,
+/// so a union struct would make the compiler's completeness check meaningless
+/// for both.
+///
+/// Two rules govern what is here and what stays inline in the renderer:
+///
+/// - **Technical tokens are never fields.** Evidence citations (`[OP:<id>]`,
+///   `[STATE:<digest>]`, `[TRANSCRIPT:<sha256>]`), pipeline stage identifiers
+///   (`capabilities`, `analyze_capture`, and siblings), protocol, bus, ECU and
+///   adapter names, SHA-256 digests, file paths and every figure render
+///   byte-identical in any language. Citations in particular are validated
+///   against known identifiers, so translating one would discard the
+///   interpretation carrying it. Markdown scaffolding (table pipes, alignment
+///   rows, `**` emphasis, list markers) is formatting, not prose, and likewise
+///   stays inline.
+/// - **Terminal punctuation lives in the field** when the field is the last
+///   thing before it, so a whole sentence stays translatable as a sentence.
+///   The `narrative_*` punctuation fields are used only where the renderer
+///   assembles a sentence around a figure or an emphasis marker and the
+///   punctuation therefore cannot sit inside any one field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomotiveLabels {
+    // Document header.
+    pub title_prefix: &'static str,
+    pub row_project: &'static str,
+    pub row_generated: &'static str,
+    pub row_tool: &'static str,
+    pub row_evidence_window: &'static str,
+    pub evidence_window_unit: &'static str,
+    // Punctuation the renderer joins around label and value slots. Each field
+    // carries its own spacing so a language whose full-width marks supply their
+    // own spacing (Chinese ",（）。：；") needs no ASCII space beside them.
+    // `label_colon` is the single ": " joiner used by the document title, the
+    // "### Heading: `value`" finding headings and every "- Label: value"
+    // bullet -- one field, reused wherever the mark serves the same purpose.
+    // `narrative_sentence_break` is distinct from `narrative_full_stop`: it
+    // separates two sentences that share a line, where a language supplies the
+    // separator itself rather than an ASCII space after the stop.
+    pub label_colon: &'static str,
+    pub narrative_comma: &'static str,
+    pub narrative_semicolon: &'static str,
+    pub narrative_open_paren: &'static str,
+    pub narrative_close_paren: &'static str,
+    pub narrative_full_stop: &'static str,
+    pub narrative_sentence_break: &'static str,
+    pub narrative_and: &'static str,
+    // Executive summary.
+    pub executive_summary: &'static str,
+    pub summary_lead: &'static str,
+    pub summary_operation_unit: &'static str,
+    pub summary_completed: &'static str,
+    pub summary_partial: &'static str,
+    pub summary_failed: &'static str,
+    pub summary_running: &'static str,
+    pub summary_cancelled: &'static str,
+    pub summary_bounded_lead: &'static str,
+    pub summary_state_digest_unit: &'static str,
+    pub summary_promoted_artifact_unit: &'static str,
+    pub summary_across: &'static str,
+    pub summary_protocol_unit: &'static str,
+    pub summary_failures_present: &'static str,
+    pub summary_no_failures: &'static str,
+    // A guardrail sentence, not decoration: it carries its own `**` emphasis
+    // because the emphasized span sits mid-sentence, and splitting the sentence
+    // into three fragments to hoist the markers out would fix the emphasis to
+    // English word order.
+    pub summary_novelty_disclaimer: &'static str,
+    // Footer.
+    pub footer_generated_by: &'static str,
+    pub footer_on: &'static str,
+    // Scope and safety posture.
+    pub safety_section: &'static str,
+    pub col_control: &'static str,
+    pub col_effective_posture: &'static str,
+    pub row_runtime_policy: &'static str,
+    // `posture_disabled` is shared by the runtime-policy row and the
+    // physical-bench row: same word, same meaning (the control is off).
+    pub posture_disabled: &'static str,
+    pub posture_enabled: &'static str,
+    pub row_allowed_protocols: &'static str,
+    pub row_allowed_modes: &'static str,
+    pub row_virtual_interfaces: &'static str,
+    pub virtual_interface_unit: &'static str,
+    pub row_physical_bench: &'static str,
+    pub bench_approval_required: &'static str,
+    pub bench_approval_missing: &'static str,
+    pub physical_interface_unit: &'static str,
+    pub row_dangerous_services: &'static str,
+    pub dangerous_denied: &'static str,
+    pub dangerous_exceptionally_allowed: &'static str,
+    pub row_per_operation_bounds: &'static str,
+    pub bounds_event_unit: &'static str,
+    pub bounds_second_unit: &'static str,
+    pub bounds_rate_unit: &'static str,
+    pub safety_validation_notice: &'static str,
+    pub value_none: &'static str,
+    // Campaign workflow. The stage *identifiers* stay inline in the renderer;
+    // only these human stage descriptions are fields.
+    pub workflow_section: &'static str,
+    pub col_stage: &'static str,
+    pub col_status: &'static str,
+    pub col_completed: &'static str,
+    pub col_failed: &'static str,
+    pub stage_capabilities: &'static str,
+    pub stage_analyze_capture: &'static str,
+    pub stage_generate_mutations: &'static str,
+    pub stage_build_replay_plan: &'static str,
+    pub stage_execute_replay: &'static str,
+    pub workflow_complete: &'static str,
+    pub workflow_attention: &'static str,
+    pub workflow_not_recorded: &'static str,
+    pub workflow_physical_bench_notice: &'static str,
+    // Protocol-state exploration.
+    pub state_section: &'static str,
+    pub state_none: &'static str,
+    pub col_protocol: &'static str,
+    pub col_unique_states: &'static str,
+    pub col_promoted_artifacts: &'static str,
+    pub state_evidence_heading: &'static str,
+    pub state_observed_by: &'static str,
+    pub state_promoted: &'static str,
+    pub state_promoted_from: &'static str,
+    pub state_promoted_digest: &'static str,
+    pub state_promoted_at: &'static str,
+    // Findings.
+    pub findings_section: &'static str,
+    pub findings_none: &'static str,
+    pub finding_operational_failure: &'static str,
+    pub bullet_evidence: &'static str,
+    pub bullet_mode: &'static str,
+    pub bullet_protocol: &'static str,
+    pub bullet_retained_error: &'static str,
+    pub value_protocol_not_selected: &'static str,
+    pub value_no_error_detail: &'static str,
+    pub finding_partial_result: &'static str,
+    pub bullet_result: &'static str,
+    pub bullet_required_action: &'static str,
+    pub value_result_incomplete: &'static str,
+    pub partial_required_action: &'static str,
+    pub interpretation_boundary_heading: &'static str,
+    pub interpretation_boundary_body: &'static str,
+    // Evidence manifest. The status words are a separate vocabulary from the
+    // executive summary's count words: the summary distinguishes "completed"
+    // from "partial", while the durable lifecycle has "done" and no partial.
+    pub manifest_section: &'static str,
+    pub manifest_none: &'static str,
+    pub col_operation_evidence: &'static str,
+    pub col_mode_protocol: &'static str,
+    pub col_validated_result: &'static str,
+    pub col_request_digest: &'static str,
+    pub col_transcript_evidence: &'static str,
+    pub col_artifact_directory: &'static str,
+    pub value_not_retained: &'static str,
+    pub value_not_applicable: &'static str,
+    pub status_running: &'static str,
+    pub status_done: &'static str,
+    pub status_failed: &'static str,
+    pub status_cancelled: &'static str,
+    // Limitations. These five bullets exist to stop a reader concluding more
+    // than the retained evidence supports; they are the report's strongest
+    // guardrail and each must keep its full force in every language.
+    pub limitations_section: &'static str,
+    pub limitation_bounded_snapshot: &'static str,
+    pub limitation_not_coverage: &'static str,
+    pub limitation_completed_not_absence: &'static str,
+    pub limitation_virtual_not_physical: &'static str,
+    pub limitation_ai_advisory: &'static str,
+    // Recommendations.
+    pub recommendations_section: &'static str,
+    pub recommendation_triage_lead: &'static str,
+    pub recommendation_triage_tail: &'static str,
+    pub recommendation_preserve: &'static str,
+    pub recommendation_next: &'static str,
+    pub recommendation_capabilities: &'static str,
+    pub recommendation_analyze_capture: &'static str,
+    pub recommendation_generate_mutations: &'static str,
+    pub recommendation_build_replay_plan: &'static str,
+    pub recommendation_promote_lead: &'static str,
+    pub recommendation_promote_tail: &'static str,
+    // `virtual-CAN` is a bus name and must survive translation verbatim inside
+    // this sentence.
+    pub recommendation_virtual_replay: &'static str,
+}
+
+impl AutomotiveLabels {
+    /// The English label set. These strings reproduce the renderer's original
+    /// hardcoded literals exactly.
+    #[must_use]
+    pub const fn english() -> Self {
+        Self {
+            title_prefix: "Automotive Fuzzing Campaign Report",
+            row_project: "Project",
+            row_generated: "Generated",
+            row_tool: "Tool",
+            row_evidence_window: "Evidence window",
+            evidence_window_unit: "retained operation(s)",
+            label_colon: ": ",
+            narrative_comma: ", ",
+            narrative_semicolon: "; ",
+            narrative_open_paren: " (",
+            narrative_close_paren: ")",
+            narrative_full_stop: ".",
+            narrative_sentence_break: ". ",
+            narrative_and: "and",
+            executive_summary: "Executive Summary",
+            summary_lead: "This report synthesizes",
+            summary_operation_unit: "retained automotive operation(s)",
+            summary_completed: "completed",
+            summary_partial: "partial",
+            summary_failed: "failed",
+            summary_running: "running",
+            summary_cancelled: "cancelled",
+            summary_bounded_lead: "The bounded snapshot contains",
+            summary_state_digest_unit: "unique protocol-state digest(s)",
+            summary_promoted_artifact_unit: "promoted state-corpus artifact(s)",
+            summary_across: "across",
+            summary_protocol_unit: "observed protocol(s)",
+            summary_failures_present: "Retained failures are reported as operational evidence and \
+                                       should be resolved before the corresponding workflow stage \
+                                       is repeated.",
+            summary_no_failures: "No terminal operation failure is present in this retained \
+                                  evidence window.",
+            summary_novelty_disclaimer: "Protocol-state novelty is **not source coverage** and \
+                                         does not by itself prove a vulnerability.",
+            footer_generated_by: "Deterministic evidence report generated by oxfuzz",
+            footer_on: "on",
+            safety_section: "Scope and Safety Posture",
+            col_control: "Control",
+            col_effective_posture: "Effective posture",
+            row_runtime_policy: "Runtime automotive policy",
+            posture_disabled: "disabled",
+            posture_enabled: "enabled",
+            row_allowed_protocols: "Allowed protocols",
+            row_allowed_modes: "Allowed modes",
+            row_virtual_interfaces: "Virtual interfaces",
+            virtual_interface_unit: "allowlisted",
+            row_physical_bench: "Physical bench",
+            bench_approval_required: "enabled; fresh approval required",
+            bench_approval_missing: "invalid: enabled without required approval",
+            physical_interface_unit: "allowlisted interface(s)",
+            row_dangerous_services: "Dangerous diagnostic services",
+            dangerous_denied: "denied",
+            dangerous_exceptionally_allowed: "exceptionally allowed by policy",
+            row_per_operation_bounds: "Per-operation bounds",
+            bounds_event_unit: "events",
+            bounds_second_unit: "seconds",
+            bounds_rate_unit: "transmitted events/second",
+            safety_validation_notice: "All captured, mutation, planning, and replay evidence \
+                                       remains subject to service validation, sandbox isolation, \
+                                       typed limits, guardrails, and the human-approval boundary.",
+            value_none: "none",
+            workflow_section: "Campaign Workflow",
+            col_stage: "Stage",
+            col_status: "Status",
+            col_completed: "Completed",
+            col_failed: "Failed",
+            stage_capabilities: "Adapter capability inspection",
+            stage_analyze_capture: "Immutable capture analysis",
+            stage_generate_mutations: "Deterministic mutation generation",
+            stage_build_replay_plan: "Typed replay-plan construction",
+            stage_execute_replay: "Supervised virtual replay",
+            workflow_complete: "Complete",
+            workflow_attention: "Attention",
+            workflow_not_recorded: "Not recorded",
+            workflow_physical_bench_notice: "Physical-bench validation is intentionally excluded \
+                                             from campaign-completeness scoring. It remains a \
+                                             separately approved activity after the exact plan \
+                                             and budgets are known.",
+            state_section: "Protocol-State Exploration",
+            state_none: "No validated protocol-state signature is present in the retained \
+                         evidence window.",
+            col_protocol: "Protocol",
+            col_unique_states: "Unique states",
+            col_promoted_artifacts: "Promoted artifacts",
+            state_evidence_heading: "State Evidence",
+            state_observed_by: "observed by",
+            state_promoted: "Promoted",
+            state_promoted_from: "from",
+            state_promoted_digest: "artifact digest",
+            state_promoted_at: "at",
+            findings_section: "Findings",
+            findings_none: "No retained terminal operation failure requires triage in this \
+                            evidence window.",
+            finding_operational_failure: "Operational failure",
+            bullet_evidence: "Evidence",
+            bullet_mode: "Mode",
+            bullet_protocol: "Protocol",
+            bullet_retained_error: "Retained error",
+            value_protocol_not_selected: "not selected",
+            value_no_error_detail: "no error detail retained",
+            finding_partial_result: "Partial result",
+            bullet_result: "Result",
+            bullet_required_action: "Required action",
+            value_result_incomplete: "typed operation did not complete",
+            partial_required_action: "review the retained transcript and limits before retrying.",
+            interpretation_boundary_heading: "Interpretation Boundary",
+            interpretation_boundary_body: "Observed states, successful decoding, and completed \
+                                           replay steps are campaign evidence. They do not by \
+                                           themselves prove exploitability, security impact, or \
+                                           unsafe vehicle behavior.",
+            manifest_section: "Evidence Manifest",
+            manifest_none: "No automotive operation evidence is retained for this project.",
+            col_operation_evidence: "Operation evidence",
+            col_mode_protocol: "Mode / protocol",
+            col_validated_result: "Validated result",
+            col_request_digest: "Request digest",
+            col_transcript_evidence: "Transcript evidence",
+            col_artifact_directory: "Artifact directory",
+            value_not_retained: "not retained",
+            value_not_applicable: "n/a",
+            status_running: "running",
+            status_done: "done",
+            status_failed: "failed",
+            status_cancelled: "cancelled",
+            limitations_section: "Limitations",
+            limitation_bounded_snapshot: "The report covers only the bounded retained evidence \
+                                          snapshot and cannot infer events that were not \
+                                          persisted.",
+            limitation_not_coverage: "Protocol-state digests are not source-code line, function, \
+                                      region, or edge coverage.",
+            limitation_completed_not_absence: "A completed operation confirms contract-valid \
+                                               execution, not absence of security defects.",
+            limitation_virtual_not_physical: "Offline and virtual evidence does not validate a \
+                                              physical ECU, vehicle network, timing behavior, or \
+                                              bench wiring.",
+            limitation_ai_advisory: "AI-assisted interpretation, when appended, is advisory and \
+                                     cannot authorize execution or establish a finding.",
+            recommendations_section: "Recommendations",
+            recommendation_triage_lead: "Triage the",
+            recommendation_triage_tail: "retained operational failure(s) by operation id before \
+                                         repeating those stages.",
+            recommendation_preserve: "Preserve the current operation evidence and compare future \
+                                      campaign snapshots for regressions.",
+            recommendation_next: "Next",
+            recommendation_capabilities: "inspect the pinned adapter capabilities",
+            recommendation_analyze_capture: "analyze an immutable representative capture",
+            recommendation_generate_mutations: "generate a deterministic, reviewable mutation set",
+            recommendation_build_replay_plan: "build and review a typed replay plan without \
+                                               contacting an interface",
+            recommendation_promote_lead: "Review and promote suitable artifacts for the",
+            recommendation_promote_tail: "observed state(s) without retained corpus evidence.",
+            recommendation_virtual_replay: "If policy and runtime readiness permit, conduct a \
+                                            separately confirmed supervised virtual-CAN replay.",
+        }
+    }
+}
+
 /// Render an auditable, deterministic automotive campaign report.
 #[must_use]
-pub fn render_automotive_report(data: &AutomotiveReportData) -> String {
+pub fn render_automotive_report(data: &AutomotiveReportData, labels: &AutomotiveLabels) -> String {
     let mut report = String::with_capacity(8192);
     let counts = operation_status_counts(&data.operations);
     let unique_states = unique_state_digests(data);
@@ -227,156 +577,206 @@ pub fn render_automotive_report(data: &AutomotiveReportData) -> String {
 
     let _ = writeln!(
         report,
-        "# Automotive Fuzzing Campaign Report: `{}`\n",
+        "# {}{}`{}`\n",
+        labels.title_prefix,
+        labels.label_colon,
         escape_inline(&data.project_name)
     );
     let _ = writeln!(report, "| | |");
     let _ = writeln!(report, "|---|---|");
     let _ = writeln!(
         report,
-        "| Project | `{}` |",
+        "| {} | `{}` |",
+        labels.row_project,
         escape_inline(&data.project_name)
     );
-    let _ = writeln!(report, "| Generated | {} |", data.generated_at);
-    let _ = writeln!(report, "| Tool | oxfuzz {} |", data.tool_version);
     let _ = writeln!(
         report,
-        "| Evidence window | {} retained operation(s) |\n",
-        data.operations.len()
+        "| {} | {} |",
+        labels.row_generated, data.generated_at
+    );
+    let _ = writeln!(
+        report,
+        "| {} | oxfuzz {} |",
+        labels.row_tool, data.tool_version
+    );
+    let _ = writeln!(
+        report,
+        "| {} | {} {} |\n",
+        labels.row_evidence_window,
+        data.operations.len(),
+        labels.evidence_window_unit
     );
 
-    let _ = writeln!(report, "## Executive Summary\n");
+    let _ = writeln!(report, "## {}\n", labels.executive_summary);
     let _ = writeln!(
         report,
-        "This report synthesizes **{} retained automotive operation(s)**: **{} completed**, \
-         **{} partial**, **{} failed**, **{} running**, and **{} cancelled**. The bounded \
-         snapshot contains **{} unique protocol-state digest(s)** and **{} promoted \
-         state-corpus artifact(s)** across **{} observed protocol(s)**.\n",
-        data.operations.len(),
-        counts.done,
-        counts.partial,
-        counts.failed,
-        counts.running,
-        counts.cancelled,
-        unique_states.len(),
-        data.state_corpus.len(),
-        protocols.len(),
+        "{lead} **{total} {operation_unit}**{colon}**{done} {done_word}**{comma}\
+         **{partial} {partial_word}**{comma}**{failed} {failed_word}**{comma}\
+         **{running} {running_word}**{comma}{and} **{cancelled} {cancelled_word}**{sentence_break}\
+         {bounded} **{states} {state_unit}** {and} **{promoted} {promoted_unit}** \
+         {across} **{protocols} {protocol_unit}**{stop}\n",
+        lead = labels.summary_lead,
+        total = data.operations.len(),
+        operation_unit = labels.summary_operation_unit,
+        colon = labels.label_colon,
+        done = counts.done,
+        done_word = labels.summary_completed,
+        comma = labels.narrative_comma,
+        partial = counts.partial,
+        partial_word = labels.summary_partial,
+        failed = counts.failed,
+        failed_word = labels.summary_failed,
+        running = counts.running,
+        running_word = labels.summary_running,
+        and = labels.narrative_and,
+        cancelled = counts.cancelled,
+        cancelled_word = labels.summary_cancelled,
+        sentence_break = labels.narrative_sentence_break,
+        bounded = labels.summary_bounded_lead,
+        states = unique_states.len(),
+        state_unit = labels.summary_state_digest_unit,
+        promoted = data.state_corpus.len(),
+        promoted_unit = labels.summary_promoted_artifact_unit,
+        across = labels.summary_across,
+        protocols = protocols.len(),
+        protocol_unit = labels.summary_protocol_unit,
+        stop = labels.narrative_full_stop,
     );
     if counts.failed > 0 {
-        let _ = writeln!(
-            report,
-            "Retained failures are reported as operational evidence and should be resolved before \
-             the corresponding workflow stage is repeated."
-        );
+        let _ = writeln!(report, "{}", labels.summary_failures_present);
     } else {
-        let _ = writeln!(
-            report,
-            "No terminal operation failure is present in this retained evidence window."
-        );
+        let _ = writeln!(report, "{}", labels.summary_no_failures);
     }
-    let _ = writeln!(
-        report,
-        "\nProtocol-state novelty is **not source coverage** and does not by itself prove a vulnerability."
-    );
+    let _ = writeln!(report, "\n{}", labels.summary_novelty_disclaimer);
 
-    render_safety_posture(&mut report, &data.safety);
-    render_workflow(&mut report, &data.operations);
-    render_state_exploration(&mut report, data, &unique_states);
-    render_findings(&mut report, data, counts.failed);
-    render_evidence_manifest(&mut report, data);
-    render_limitations(&mut report);
-    render_recommendations(&mut report, data);
+    render_safety_posture(&mut report, &data.safety, labels);
+    render_workflow(&mut report, &data.operations, labels);
+    render_state_exploration(&mut report, data, &unique_states, labels);
+    render_findings(&mut report, data, counts.failed, labels);
+    render_evidence_manifest(&mut report, data, labels);
+    render_limitations(&mut report, labels);
+    render_recommendations(&mut report, data, labels);
 
     let _ = writeln!(report, "---\n");
     let _ = writeln!(
         report,
-        "_Deterministic evidence report generated by oxfuzz {} on {}._",
-        data.tool_version, data.generated_at
+        "_{} {} {} {}{}_",
+        labels.footer_generated_by,
+        data.tool_version,
+        labels.footer_on,
+        data.generated_at,
+        labels.narrative_full_stop
     );
     report
 }
 
-fn render_safety_posture(report: &mut String, safety: &AutomotiveReportSafetyPosture) {
-    let _ = writeln!(report, "\n## Scope and Safety Posture\n");
-    let _ = writeln!(report, "| Control | Effective posture |");
+fn render_safety_posture(
+    report: &mut String,
+    safety: &AutomotiveReportSafetyPosture,
+    labels: &AutomotiveLabels,
+) {
+    let _ = writeln!(report, "\n## {}\n", labels.safety_section);
+    let _ = writeln!(
+        report,
+        "| {} | {} |",
+        labels.col_control, labels.col_effective_posture
+    );
     let _ = writeln!(report, "|---|---|");
     let _ = writeln!(
         report,
-        "| Runtime automotive policy | {} |",
+        "| {} | {} |",
+        labels.row_runtime_policy,
         match safety.runtime_policy {
-            AutomotivePolicyPosture::Disabled => "disabled",
-            AutomotivePolicyPosture::Enabled => "enabled",
+            AutomotivePolicyPosture::Disabled => labels.posture_disabled,
+            AutomotivePolicyPosture::Enabled => labels.posture_enabled,
         }
     );
     let _ = writeln!(
         report,
-        "| Allowed protocols | {} |",
-        joined_or_none(&safety.allowed_protocols)
+        "| {} | {} |",
+        labels.row_allowed_protocols,
+        joined_or_none(&safety.allowed_protocols, labels)
     );
     let _ = writeln!(
         report,
-        "| Allowed modes | {} |",
-        joined_or_none(&safety.allowed_modes)
+        "| {} | {} |",
+        labels.row_allowed_modes,
+        joined_or_none(&safety.allowed_modes, labels)
     );
     let _ = writeln!(
         report,
-        "| Virtual interfaces | {} allowlisted |",
-        safety.virtual_interface_count
+        "| {} | {} {} |",
+        labels.row_virtual_interfaces,
+        safety.virtual_interface_count,
+        labels.virtual_interface_unit
     );
     let _ = writeln!(
         report,
-        "| Physical bench | {}; {} allowlisted interface(s) |",
+        "| {} | {}{}{} {} |",
+        labels.row_physical_bench,
         match safety.physical_bench {
-            AutomotivePhysicalBenchPosture::Disabled => "disabled",
+            AutomotivePhysicalBenchPosture::Disabled => labels.posture_disabled,
             AutomotivePhysicalBenchPosture::EnabledApprovalRequired => {
-                "enabled; fresh approval required"
+                labels.bench_approval_required
             }
             AutomotivePhysicalBenchPosture::EnabledApprovalMissing => {
-                "invalid: enabled without required approval"
+                labels.bench_approval_missing
             }
         },
+        labels.narrative_semicolon,
         safety.physical_interface_count,
+        labels.physical_interface_unit,
     );
     let _ = writeln!(
         report,
-        "| Dangerous diagnostic services | {} |",
+        "| {} | {} |",
+        labels.row_dangerous_services,
         match safety.dangerous_services {
-            AutomotiveDangerousServicesPosture::Denied => "denied",
+            AutomotiveDangerousServicesPosture::Denied => labels.dangerous_denied,
             AutomotiveDangerousServicesPosture::ExceptionallyAllowed => {
-                "exceptionally allowed by policy"
+                labels.dangerous_exceptionally_allowed
             }
         }
     );
     let _ = writeln!(
         report,
-        "| Per-operation bounds | {} events; {} seconds; {} transmitted events/second |",
-        safety.max_packets, safety.max_duration_secs, safety.max_rate_per_second
+        "| {row} | {packets} {event_unit}{semicolon}{duration} {second_unit}{semicolon}\
+         {rate} {rate_unit} |",
+        row = labels.row_per_operation_bounds,
+        packets = safety.max_packets,
+        event_unit = labels.bounds_event_unit,
+        semicolon = labels.narrative_semicolon,
+        duration = safety.max_duration_secs,
+        second_unit = labels.bounds_second_unit,
+        rate = safety.max_rate_per_second,
+        rate_unit = labels.bounds_rate_unit,
     );
-    let _ = writeln!(
-        report,
-        "\nAll captured, mutation, planning, and replay evidence remains subject to service validation, \
-         sandbox isolation, typed limits, guardrails, and the human-approval boundary."
-    );
+    let _ = writeln!(report, "\n{}", labels.safety_validation_notice);
 }
 
-fn render_workflow(report: &mut String, operations: &[AutomotiveReportOperation]) {
+fn render_workflow(
+    report: &mut String,
+    operations: &[AutomotiveReportOperation],
+    labels: &AutomotiveLabels,
+) {
     let stages = [
-        ("Adapter capability inspection", "capabilities", None),
-        ("Immutable capture analysis", "analyze_capture", None),
+        (labels.stage_capabilities, "capabilities", None),
+        (labels.stage_analyze_capture, "analyze_capture", None),
+        (labels.stage_generate_mutations, "generate_mutations", None),
+        (labels.stage_build_replay_plan, "build_replay_plan", None),
         (
-            "Deterministic mutation generation",
-            "generate_mutations",
-            None,
-        ),
-        ("Typed replay-plan construction", "build_replay_plan", None),
-        (
-            "Supervised virtual replay",
+            labels.stage_execute_replay,
             "execute_replay",
             Some("virtual_can"),
         ),
     ];
-    let _ = writeln!(report, "\n## Campaign Workflow\n");
-    let _ = writeln!(report, "| Stage | Status | Completed | Failed |");
+    let _ = writeln!(report, "\n## {}\n", labels.workflow_section);
+    let _ = writeln!(
+        report,
+        "| {} | {} | {} | {} |",
+        labels.col_stage, labels.col_status, labels.col_completed, labels.col_failed
+    );
     let _ = writeln!(report, "|---|---|---:|---:|");
     for (label, operation, mode) in stages {
         let matching = operations.iter().filter(|entry| {
@@ -397,25 +797,22 @@ fn render_workflow(report: &mut String, operations: &[AutomotiveReportOperation]
             }
         }
         let status = if completed > 0 {
-            "Complete"
+            labels.workflow_complete
         } else if failed > 0 {
-            "Attention"
+            labels.workflow_attention
         } else {
-            "Not recorded"
+            labels.workflow_not_recorded
         };
         let _ = writeln!(report, "| {label} | {status} | {completed} | {failed} |");
     }
-    let _ = writeln!(
-        report,
-        "\nPhysical-bench validation is intentionally excluded from campaign-completeness scoring. \
-         It remains a separately approved activity after the exact plan and budgets are known."
-    );
+    let _ = writeln!(report, "\n{}", labels.workflow_physical_bench_notice);
 }
 
 fn render_state_exploration(
     report: &mut String,
     data: &AutomotiveReportData,
     unique_states: &BTreeSet<(String, String)>,
+    labels: &AutomotiveLabels,
 ) {
     let mut per_protocol = BTreeMap::<String, (usize, usize)>::new();
     for (protocol, _) in unique_states {
@@ -428,20 +825,21 @@ fn render_state_exploration(
             .1 += 1;
     }
 
-    let _ = writeln!(report, "\n## Protocol-State Exploration\n");
+    let _ = writeln!(report, "\n## {}\n", labels.state_section);
     if per_protocol.is_empty() {
-        let _ = writeln!(
-            report,
-            "No validated protocol-state signature is present in the retained evidence window."
-        );
+        let _ = writeln!(report, "{}", labels.state_none);
         return;
     }
-    let _ = writeln!(report, "| Protocol | Unique states | Promoted artifacts |");
+    let _ = writeln!(
+        report,
+        "| {} | {} | {} |",
+        labels.col_protocol, labels.col_unique_states, labels.col_promoted_artifacts
+    );
     let _ = writeln!(report, "|---|---:|---:|");
     for (protocol, (states, promoted)) in per_protocol {
         let _ = writeln!(report, "| `{protocol}` | {states} | {promoted} |");
     }
-    let _ = writeln!(report, "\n### State Evidence\n");
+    let _ = writeln!(report, "\n### {}\n", labels.state_evidence_heading);
     for (protocol, digest) in unique_states {
         let sources = data
             .operations
@@ -456,29 +854,42 @@ fn render_state_exploration(
             .collect::<Vec<_>>();
         let _ = writeln!(
             report,
-            "- `[STATE:{digest}]` (`{protocol}`), observed by {}.",
-            sources.join(", ")
+            "- `[STATE:{digest}]`{open}`{protocol}`{close}{comma}{observed} {sources}{stop}",
+            open = labels.narrative_open_paren,
+            close = labels.narrative_close_paren,
+            comma = labels.narrative_comma,
+            observed = labels.state_observed_by,
+            sources = sources.join(labels.narrative_comma),
+            stop = labels.narrative_full_stop,
         );
     }
     for entry in &data.state_corpus {
         let _ = writeln!(
             report,
-            "- Promoted `[STATE:{}]` from [OP:{}], artifact digest `{}` at `{}`.",
+            "- {promoted} `[STATE:{}]` {from} [OP:{}]{comma}{digest_word} `{}` {at} `{}`{stop}",
             entry.state_digest,
             entry.source_operation_id,
             entry.artifact_sha256,
-            escape_inline(&entry.artifact_path)
+            escape_inline(&entry.artifact_path),
+            promoted = labels.state_promoted,
+            from = labels.state_promoted_from,
+            comma = labels.narrative_comma,
+            digest_word = labels.state_promoted_digest,
+            at = labels.state_promoted_at,
+            stop = labels.narrative_full_stop,
         );
     }
 }
 
-fn render_findings(report: &mut String, data: &AutomotiveReportData, failed: usize) {
-    let _ = writeln!(report, "\n## Findings\n");
+fn render_findings(
+    report: &mut String,
+    data: &AutomotiveReportData,
+    failed: usize,
+    labels: &AutomotiveLabels,
+) {
+    let _ = writeln!(report, "\n## {}\n", labels.findings_section);
     if failed == 0 {
-        let _ = writeln!(
-            report,
-            "No retained terminal operation failure requires triage in this evidence window."
-        );
+        let _ = writeln!(report, "{}", labels.findings_none);
     } else {
         for operation in data
             .operations
@@ -487,12 +898,27 @@ fn render_findings(report: &mut String, data: &AutomotiveReportData, failed: usi
         {
             let _ = writeln!(
                 report,
-                "### Operational failure: `{}`\n\n- Evidence: [OP:{}]\n- Mode: `{}`\n- Protocol: `{}`\n- Retained error: {}\n",
+                "### {failure}{colon}`{}`\n\n- {evidence}{colon}[OP:{}]\n- {mode}{colon}`{}`\n\
+                 - {protocol}{colon}`{}`\n- {error}{colon}{}\n",
                 operation.operation,
                 operation.id,
                 operation.mode,
-                operation.protocol.as_deref().unwrap_or("not selected"),
-                shareable_error(operation.error.as_deref().unwrap_or("no error detail retained")),
+                operation
+                    .protocol
+                    .as_deref()
+                    .unwrap_or(labels.value_protocol_not_selected),
+                shareable_error(
+                    operation
+                        .error
+                        .as_deref()
+                        .unwrap_or(labels.value_no_error_detail)
+                ),
+                failure = labels.finding_operational_failure,
+                colon = labels.label_colon,
+                evidence = labels.bullet_evidence,
+                mode = labels.bullet_mode,
+                protocol = labels.bullet_protocol,
+                error = labels.bullet_retained_error,
             );
         }
     }
@@ -502,41 +928,57 @@ fn render_findings(report: &mut String, data: &AutomotiveReportData, failed: usi
     }) {
         let _ = writeln!(
             report,
-            "### Partial result: `{}`\n\n- Evidence: [OP:{}]\n- Result: {}\n- Required action: review the retained transcript and limits before retrying.\n",
+            "### {partial}{colon}`{}`\n\n- {evidence}{colon}[OP:{}]\n- {result}{colon}{}\n\
+             - {action}{colon}{required}\n",
             operation.operation,
             operation.id,
             operation
                 .result_summary
                 .as_deref()
-                .unwrap_or("typed operation did not complete"),
+                .unwrap_or(labels.value_result_incomplete),
+            partial = labels.finding_partial_result,
+            colon = labels.label_colon,
+            evidence = labels.bullet_evidence,
+            result = labels.bullet_result,
+            action = labels.bullet_required_action,
+            required = labels.partial_required_action,
         );
     }
     let _ = writeln!(
         report,
-        "### Interpretation Boundary\n\nObserved states, successful decoding, and completed replay steps are campaign \
-         evidence. They do not by themselves prove exploitability, security impact, or unsafe vehicle behavior."
+        "### {}\n\n{}",
+        labels.interpretation_boundary_heading, labels.interpretation_boundary_body
     );
 }
 
-fn render_evidence_manifest(report: &mut String, data: &AutomotiveReportData) {
-    let _ = writeln!(report, "\n## Evidence Manifest\n");
+fn render_evidence_manifest(
+    report: &mut String,
+    data: &AutomotiveReportData,
+    labels: &AutomotiveLabels,
+) {
+    let _ = writeln!(report, "\n## {}\n", labels.manifest_section);
     if data.operations.is_empty() {
-        let _ = writeln!(
-            report,
-            "No automotive operation evidence is retained for this project."
-        );
+        let _ = writeln!(report, "{}", labels.manifest_none);
         return;
     }
     let _ = writeln!(
         report,
-        "| Operation evidence | Stage | Mode / protocol | Status | Validated result | Request digest | Transcript evidence | Artifact directory |"
+        "| {} | {} | {} | {} | {} | {} | {} | {} |",
+        labels.col_operation_evidence,
+        labels.col_stage,
+        labels.col_mode_protocol,
+        labels.col_status,
+        labels.col_validated_result,
+        labels.col_request_digest,
+        labels.col_transcript_evidence,
+        labels.col_artifact_directory
     );
     let _ = writeln!(report, "|---|---|---|---|---|---|---|---|");
     let mut operations = data.operations.iter().collect::<Vec<_>>();
     operations.sort_by_key(|operation| (operation.started_at, operation.id));
     for operation in operations {
         let transcript = operation.transcript_sha256.as_ref().map_or_else(
-            || "not retained".to_owned(),
+            || labels.value_not_retained.to_owned(),
             |digest| format!("[TRANSCRIPT:{digest}]"),
         );
         let _ = writeln!(
@@ -545,13 +987,16 @@ fn render_evidence_manifest(report: &mut String, data: &AutomotiveReportData) {
             operation.id,
             operation.operation,
             operation.mode,
-            operation.protocol.as_deref().unwrap_or("n/a"),
-            status_name(operation.status),
+            operation
+                .protocol
+                .as_deref()
+                .unwrap_or(labels.value_not_applicable),
+            status_name(operation.status, labels),
             escape_inline(
                 operation
                     .result_summary
                     .as_deref()
-                    .unwrap_or("not retained")
+                    .unwrap_or(labels.value_not_retained)
             ),
             operation.request_sha256,
             transcript,
@@ -560,20 +1005,25 @@ fn render_evidence_manifest(report: &mut String, data: &AutomotiveReportData) {
     }
 }
 
-fn render_limitations(report: &mut String) {
-    let _ = writeln!(report, "\n## Limitations\n");
+fn render_limitations(report: &mut String, labels: &AutomotiveLabels) {
+    let _ = writeln!(report, "\n## {}\n", labels.limitations_section);
     let _ = writeln!(
         report,
-        "- The report covers only the bounded retained evidence snapshot and cannot infer events that were not persisted.\n\
-         - Protocol-state digests are not source-code line, function, region, or edge coverage.\n\
-         - A completed operation confirms contract-valid execution, not absence of security defects.\n\
-         - Offline and virtual evidence does not validate a physical ECU, vehicle network, timing behavior, or bench wiring.\n\
-         - AI-assisted interpretation, when appended, is advisory and cannot authorize execution or establish a finding."
+        "- {}\n- {}\n- {}\n- {}\n- {}",
+        labels.limitation_bounded_snapshot,
+        labels.limitation_not_coverage,
+        labels.limitation_completed_not_absence,
+        labels.limitation_virtual_not_physical,
+        labels.limitation_ai_advisory
     );
 }
 
-fn render_recommendations(report: &mut String, data: &AutomotiveReportData) {
-    let _ = writeln!(report, "\n## Recommendations\n");
+fn render_recommendations(
+    report: &mut String,
+    data: &AutomotiveReportData,
+    labels: &AutomotiveLabels,
+) {
+    let _ = writeln!(report, "\n## {}\n", labels.recommendations_section);
     let failed = data
         .operations
         .iter()
@@ -582,35 +1032,34 @@ fn render_recommendations(report: &mut String, data: &AutomotiveReportData) {
     if failed > 0 {
         let _ = writeln!(
             report,
-            "1. Triage the {failed} retained operational failure(s) by operation id before repeating those stages."
+            "1. {lead} {failed} {tail}",
+            lead = labels.recommendation_triage_lead,
+            tail = labels.recommendation_triage_tail
         );
     } else {
-        let _ = writeln!(
-            report,
-            "1. Preserve the current operation evidence and compare future campaign snapshots for regressions."
-        );
+        let _ = writeln!(report, "1. {}", labels.recommendation_preserve);
     }
     let stages = [
-        ("capabilities", "inspect the pinned adapter capabilities"),
-        (
-            "analyze_capture",
-            "analyze an immutable representative capture",
-        ),
+        ("capabilities", labels.recommendation_capabilities),
+        ("analyze_capture", labels.recommendation_analyze_capture),
         (
             "generate_mutations",
-            "generate a deterministic, reviewable mutation set",
+            labels.recommendation_generate_mutations,
         ),
-        (
-            "build_replay_plan",
-            "build and review a typed replay plan without contacting an interface",
-        ),
+        ("build_replay_plan", labels.recommendation_build_replay_plan),
     ];
     let mut number = 2;
     for (operation, recommendation) in stages {
         if !data.operations.iter().any(|entry| {
             entry.operation == operation && entry.status == AutomotiveOperationStatus::Done
         }) {
-            let _ = writeln!(report, "{number}. Next, {recommendation}.");
+            let _ = writeln!(
+                report,
+                "{number}. {next}{comma}{recommendation}{stop}",
+                next = labels.recommendation_next,
+                comma = labels.narrative_comma,
+                stop = labels.narrative_full_stop
+            );
             number += 1;
         }
     }
@@ -625,7 +1074,9 @@ fn render_recommendations(report: &mut String, data: &AutomotiveReportData) {
     if unpromoted > 0 {
         let _ = writeln!(
             report,
-            "{number}. Review and promote suitable artifacts for the {unpromoted} observed state(s) without retained corpus evidence."
+            "{number}. {lead} {unpromoted} {tail}",
+            lead = labels.recommendation_promote_lead,
+            tail = labels.recommendation_promote_tail
         );
         number += 1;
     }
@@ -634,10 +1085,7 @@ fn render_recommendations(report: &mut String, data: &AutomotiveReportData) {
             && entry.mode == "virtual_can"
             && entry.status == AutomotiveOperationStatus::Done
     }) {
-        let _ = writeln!(
-            report,
-            "{number}. If policy and runtime readiness permit, conduct a separately confirmed supervised virtual-CAN replay."
-        );
+        let _ = writeln!(report, "{number}. {}", labels.recommendation_virtual_replay);
     }
 }
 
@@ -853,9 +1301,9 @@ fn protocol_name(protocol: crate::automotive::AutomotiveProtocol) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn joined_or_none(values: &[String]) -> String {
+fn joined_or_none(values: &[String], labels: &AutomotiveLabels) -> String {
     if values.is_empty() {
-        "none".to_owned()
+        labels.value_none.to_owned()
     } else {
         values
             .iter()
@@ -865,12 +1313,17 @@ fn joined_or_none(values: &[String]) -> String {
     }
 }
 
-fn status_name(status: AutomotiveOperationStatus) -> &'static str {
+/// Resolve a durable lifecycle status to its label.
+///
+/// These are a separate vocabulary from the executive summary's count words:
+/// the summary distinguishes "completed" from "partial", while the durable
+/// lifecycle has "done" and no partial state at all.
+const fn status_name(status: AutomotiveOperationStatus, labels: &AutomotiveLabels) -> &'static str {
     match status {
-        AutomotiveOperationStatus::Running => "running",
-        AutomotiveOperationStatus::Done => "done",
-        AutomotiveOperationStatus::Failed => "failed",
-        AutomotiveOperationStatus::Cancelled => "cancelled",
+        AutomotiveOperationStatus::Running => labels.status_running,
+        AutomotiveOperationStatus::Done => labels.status_done,
+        AutomotiveOperationStatus::Failed => labels.status_failed,
+        AutomotiveOperationStatus::Cancelled => labels.status_cancelled,
     }
 }
 

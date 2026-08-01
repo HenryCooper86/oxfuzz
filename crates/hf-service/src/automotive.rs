@@ -451,7 +451,8 @@ impl ServiceContainer {
     ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
         use crate::automotive_report::{
             append_ai_interpretation, render_automotive_report, AutomotiveCampaignReport,
-            AutomotiveReportAiStatus, AutomotiveReportData, AutomotiveReportSafetyPosture,
+            AutomotiveLabels, AutomotiveReportAiStatus, AutomotiveReportData,
+            AutomotiveReportSafetyPosture,
         };
 
         let project_root = canonical_project_root(project_root)?;
@@ -489,7 +490,9 @@ impl ServiceContainer {
             state_corpus,
         };
         let metrics = data.metrics();
-        let facts = render_automotive_report(&data);
+        // Task 4 of the localized-automotive-report work replaces this with the
+        // caller's requested language via `AutomotiveLabels::for_language`.
+        let facts = render_automotive_report(&data, &AutomotiveLabels::english());
         let mut markdown = facts.clone();
         let mut ai_model = None;
         let ai_status = if !include_ai {
