@@ -67,6 +67,27 @@ pub const fn export_dialog_title(language: ReportLanguage) -> &'static str {
     }
 }
 
+/// The title of the same dialog when the document's type is not known.
+///
+/// [`export_dialog_title`] names the fuzzing report, the artifact
+/// [`Labels::report_noun`] names, and is correct only where the caller composed
+/// one. `ServiceContainer::export_markdown` is handed content composed
+/// elsewhere: a fuzzing report, an automotive campaign report rendered from
+/// `AutomotiveLabels`, or a saved draft of either. A draft records no document
+/// type any more than it records a language, so naming one would mean guessing,
+/// and the two label structs exist separately precisely because the documents
+/// share almost no vocabulary.
+///
+/// So this names none. It is document-neutral in both languages, and the
+/// English value is the string that dialog has always shown.
+#[must_use]
+pub const fn document_export_dialog_title(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Export report",
+        ReportLanguage::Zh => "导出报告",
+    }
+}
+
 /// Corpus composition for the report.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CorpusStats {

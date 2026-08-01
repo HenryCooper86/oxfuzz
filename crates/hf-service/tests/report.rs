@@ -583,6 +583,33 @@ fn export_dialog_title_is_translated() {
 }
 
 #[test]
+fn the_document_neutral_dialog_title_names_no_document_type() {
+    // `export_markdown` exports whatever it is handed: a fuzzing report, an
+    // automotive campaign report, or a draft of either whose type was never
+    // recorded. Its dialog cannot name a document type without guessing, and a
+    // draft records no more type than it records language -- so it uses this
+    // one, which names none.
+    assert_eq!(
+        hf_service::report::document_export_dialog_title(ReportLanguage::En),
+        "Export report"
+    );
+    assert_eq!(
+        hf_service::report::document_export_dialog_title(ReportLanguage::Zh),
+        "导出报告"
+    );
+
+    // The two are deliberately distinct. `export_dialog_title` names the
+    // fuzzing report specifically because its caller composed one; collapsing
+    // them would put "Export fuzzing report" over an automotive document again.
+    for language in [ReportLanguage::En, ReportLanguage::Zh] {
+        assert_ne!(
+            hf_service::report::document_export_dialog_title(language),
+            hf_service::report::export_dialog_title(language)
+        );
+    }
+}
+
+#[test]
 fn language_selects_the_label_set() {
     // The wiring test: for_language must route to the matching constructor.
     let data = populated();

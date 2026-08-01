@@ -2476,9 +2476,12 @@ pub async fn export_markdown(
     let Some(path) = app
         .dialog()
         .file()
-        // Prose the user reads, so it follows the document's language, the same
-        // way `export_report`'s dialog title does.
-        .set_title(hf_service::report::export_dialog_title(language))
+        // Prose the user reads, so it follows the document's language -- but a
+        // document-neutral string, not `export_report`'s. This command exports
+        // whatever it is handed, including automotive campaign reports and
+        // drafts whose type was never recorded, so naming a document type here
+        // would mean guessing at one.
+        .set_title(hf_service::report::document_export_dialog_title(language))
         .set_file_name(&default_name)
         .add_filter(ext.to_uppercase(), &[ext])
         .blocking_save_file()
@@ -3174,12 +3177,19 @@ mod export_dialog_tests {
             "the resolved language must reach the service:\n{src}"
         );
         assert!(
-            src.contains(".set_title(hf_service::report::export_dialog_title(language))"),
+            src.contains(".set_title(hf_service::report::document_export_dialog_title(language))"),
             "the save dialog title must follow the document's language:\n{src}"
         );
         assert!(
             !src.contains("\"Export report\""),
             "the save dialog title is hardcoded English again:\n{src}"
+        );
+        // And it must not borrow the fuzzing report's title: this command also
+        // exports automotive reports and untyped drafts.
+        assert!(
+            !src.contains("export_dialog_title(language)")
+                || src.contains("document_export_dialog_title(language)"),
+            "the dialog must not name the fuzzing report specifically:\n{src}"
         );
     }
 
