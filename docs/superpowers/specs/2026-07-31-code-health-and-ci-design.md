@@ -475,6 +475,11 @@ alone goes red while the others still report.
    zero, as does one whose output the filter removes entirely.
 5. `scripts/tests/test_validate_semgrep_smoke.py` runs as part of the gate set.
 6. No file under `crates/hf-service/src/container/` exceeds roughly 1500 lines.
+   Note added 2026-08-01: the original task list enumerated only the 131 public
+   `ServiceContainer` methods, because it was built by matching `pub fn` and
+   `pub async fn`. The 73 private methods in the same `impl` block, roughly 2374
+   lines, were never assigned to a file, so this criterion was unreachable as
+   written. Task 13b was added to distribute them.
 7. `hf-cli`, `hf-web`, and `hf-gui/src-tauri` compile unchanged against the
    decomposed module tree.
 8. Every `#[cfg(test)]` block colocated with extracted code moved with it, and
