@@ -92,11 +92,23 @@ class GateDispatcherTests(unittest.TestCase):
             result = self.run_gates([], stub_dir, timeout=60.0)
             recorded = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
+        # One assertion per gate in ALL_GATES, in order. check-no-default-features
+        # invokes `cargo check --workspace --no-default-features`, which the
+        # cargo stub also records as "cargo check" (it only sees $1), so it
+        # shows up as a second consecutive "cargo check" entry. frontend-test
+        # runs npm three times (ci, test, run build); only the first call is
+        # asserted here since it alone identifies that the gate ran in the
+        # right position, and frontend-lint's single call follows it.
         self.assertEqual(recorded[0], "cargo fmt")
         self.assertEqual(recorded[1], "cargo clippy")
         self.assertEqual(recorded[2], "cargo check")
-        self.assertEqual(recorded[3], "cargo test")
-        self.assertEqual(recorded[4], "cargo doc")
+        self.assertEqual(recorded[3], "cargo check")
+        self.assertEqual(recorded[4], "cargo test")
+        self.assertEqual(recorded[5], "cargo doc")
+        self.assertEqual(recorded[6], "cargo-deny")
+        self.assertEqual(recorded[7], "python3")
+        self.assertEqual(recorded[8], "npm --prefix crates/hf-gui ci")
+        self.assertEqual(recorded[11], "npm --prefix crates/hf-gui run lint")
 
     def test_named_subset_runs_only_those_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
