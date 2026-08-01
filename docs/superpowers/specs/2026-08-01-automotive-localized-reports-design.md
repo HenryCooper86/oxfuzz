@@ -282,12 +282,16 @@ truncation.
 Recorded because the asymmetry only became reachable when Chinese did, and it
 existed nowhere in writing before.
 
-### 9.4 Operation result summaries stay English
+### 9.4 Two data-carried values stay English
+
+Both reach the report as *data*, not as renderer literals, so
+`AutomotiveLabels` does not cover them and they render English inside an
+otherwise Chinese table cell and bullet.
+
+#### 9.4a Operation result summaries
 
 `automotive::automotive_result_summary` builds sentences like
-`42 decoded event(s); 1 protocol-state signature(s)`. They reach the report as
-*data*, not as renderer literals, so `AutomotiveLabels` does not cover them and
-they render English inside an otherwise Chinese table cell and bullet.
+`42 decoded event(s); 1 protocol-state signature(s)`.
 
 **This section previously claimed that function "stores them on the operation
 record, which is also returned over REST", and concluded the fix was a
@@ -316,9 +320,37 @@ this branch**. The point of the correction is that a follow-up must be sized
 honestly against a small, contained change, not deferred behind a wire contract
 that was never there.
 
-**This is an exception to success criterion 1**, recorded here rather than left
-for a reader to discover: the criterion says tables and bullets are Chinese, and
-these two cells are not.
+#### 9.4b Retained failure detail
+
+`render_automotive_report` emits `shareable_error(operation.error)` in the
+Findings section. That text originates as `ClassifiedError::to_string()` --
+English prose composed in Rust, persisted by `complete_automotive_operation`
+(`automotive.rs:2200`) and read back at report time. The committed Chinese
+golden shows it, `populated.zh.md:63`:
+
+```
+- 保留的错误：sidecar response failed validation at [redacted-path] and [redacted-path]
+```
+
+The asymmetry is the part worth noticing. The *absence* case is a label:
+`value_no_error_detail` renders as `未保留错误详情`. So the only path that
+renders English is the one carrying the information -- the sentence saying why
+an operation failed. A Chinese reader gets a translated "nothing went wrong" and
+an English "here is what went wrong".
+
+`[redacted-path]` inside `shareable_error` correctly stays inline and is not a
+label: unlike `automotive_result_summary`, that function genuinely **is** shared
+with the REST redaction path (`automotive.rs:948`, building the public
+`AutomotiveOperationSummary.error`), so a language parameter there would bake
+report presentation into shared data -- the argument 9.4a wrongly borrowed.
+
+Localizing this one is genuinely larger than 9.4a, because the text originates
+in `ClassifiedError` rather than in the automotive crate. Recorded, not
+attempted.
+
+**These are the exceptions to success criterion 1**, recorded here rather than
+left for a reader to discover: the criterion says tables and bullets are
+Chinese, and these cells are not.
 
 ### 9.3 Heading-literal coupling remains
 
@@ -356,9 +388,9 @@ account for all of them, both recorded in that branch's plan.
 
 1. Generating an automotive report from the desktop app with the interface in
    Chinese produces a report whose headings, tables, bullets, limitations and
-   narrative are Chinese, with the single documented exception of operation
-   result summaries (section 9.4), which arrive as data rather than as
-   renderer literals.
+   narrative are Chinese, with the two documented exceptions in section 9.4 --
+   operation result summaries and retained failure detail -- both of which
+   arrive as data rather than as renderer literals.
 2. Evidence citations, stage identifiers, protocol names, digests, paths and
    figures are byte-identical to the English rendering of the same data.
 3. A Chinese AI interpretation passes validation rather than being discarded.
