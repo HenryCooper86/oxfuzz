@@ -415,7 +415,7 @@ impl Labels {
             bullet_crash_line: "崩溃位置",
             bullet_cluster: "簇",
             bullet_minimized: "已最小化",
-            stack_trace: "调用栈：",
+            stack_trace: "堆栈：",
             no_crashes_found: "未发现崩溃，无需分类定级。",
             bug_report_heading: "缺陷报告",
             reproduction: "复现步骤：",
