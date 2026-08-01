@@ -441,6 +441,11 @@ target/debug/oxfuzz automotive analyze /path/to/project \
 target/debug/oxfuzz automotive report /path/to/project \
   --output automotive-campaign.html --format html
 
+# Compose it in Simplified Chinese. Evidence citations, pipeline stage
+# identifiers, protocol/bus/ECU/adapter names, digests, paths and every figure
+# stay verbatim; omitting the flag composes in English.
+target/debug/oxfuzz automotive report /path/to/project --report-lang zh
+
 # Optionally append provider-neutral AI interpretation. Unknown evidence
 # citations are rejected and the deterministic report remains authoritative.
 target/debug/oxfuzz automotive report /path/to/project --ai
@@ -901,6 +906,10 @@ target/debug/oxfuzz automotive analyze /path/to/project \
 # Compose a deterministic report from retained operations and protocol states.
 target/debug/oxfuzz automotive report /path/to/project \
   --output automotive-campaign.html --format html
+
+# 以简体中文撰写。证据引用、流水线阶段标识符、协议/总线/ECU/适配器名称、
+# 摘要、路径以及所有数值均保持原样；省略该参数则以英文撰写。
+target/debug/oxfuzz automotive report /path/to/project --report-lang zh
 
 # Optionally append provider-neutral AI interpretation. Unknown evidence
 # citations are rejected and the deterministic report remains authoritative.

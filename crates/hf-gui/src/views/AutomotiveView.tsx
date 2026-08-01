@@ -77,7 +77,7 @@ function isFeatureUnavailable(reason: string): boolean {
 }
 
 export function AutomotiveView() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { activeProject } = useProject();
   const { toast } = useToast();
   const desktop = isTauriEnvironment();
@@ -288,12 +288,12 @@ export function AutomotiveView() {
     setReporting(includeAi ? "ai" : "deterministic");
     setError(null);
     try {
-      const next = await generateAutomotiveReport(activeProject, includeAi);
+      const next = await generateAutomotiveReport(activeProject, includeAi, locale);
       setReport(next);
       setPreviewOpen(true);
       try {
         await getTransport().invoke("save_report_draft", {
-          title: `Automotive campaign report — ${next.project_name}`,
+          title: t("automotive.report.documentTitle", { project: next.project_name }),
           project: activeProject,
           target: null,
           status: "Draft",
@@ -329,7 +329,7 @@ export function AutomotiveView() {
       if (desktop) {
         const saved = await getTransport().invoke<string | null>("export_markdown", {
           content: report.markdown,
-          title: `Automotive campaign report — ${report.project_name}`,
+          title: t("automotive.report.documentTitle", { project: report.project_name }),
           format,
         });
         if (saved) {
