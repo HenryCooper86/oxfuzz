@@ -1809,16 +1809,24 @@ pub fn cancel_run(state: tauri::State<'_, crate::state::AppState>) -> usize {
 }
 
 /// Compose the Markdown campaign report for a target and return it as a string,
-/// so the GUI can preview or download it.
+/// so the GUI can preview or download it. `language` is the caller's UI locale
+/// (`en` / `zh`); omitting it composes in English.
 #[tauri::command]
 pub async fn generate_report(
     state: tauri::State<'_, crate::state::AppState>,
     project: String,
     target: String,
+    language: Option<String>,
 ) -> Result<String, String> {
+    let language = match language {
+        Some(value) => value
+            .parse::<hf_service::ReportLanguage>()
+            .map_err(|error| error.to_string())?,
+        None => hf_service::ReportLanguage::default(),
+    };
     state
         .container
-        .generate_report(std::path::Path::new(&project), &target)
+        .generate_report(std::path::Path::new(&project), &target, language)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2203,9 +2211,16 @@ pub async fn export_report(
     project: String,
     target: String,
     format: String,
+    language: Option<String>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let language = match language {
+        Some(value) => value
+            .parse::<hf_service::ReportLanguage>()
+            .map_err(|error| error.to_string())?,
+        None => hf_service::ReportLanguage::default(),
+    };
     let ext = match format.trim().to_ascii_lowercase().as_str() {
         "md" | "markdown" => "md",
         "html" | "htm" => "html",
@@ -2213,11 +2228,13 @@ pub async fn export_report(
         "docx" | "doc" => "docx",
         other => return Err(format!("unknown report format: {other}")),
     };
+    // The filename stays the ASCII technical artifact name; the dialog title is
+    // prose the user reads, so it follows the report's language.
     let default_name = format!("oxfuzz_report_{}.{ext}", sanitize_filename(&target));
     let Some(path) = app
         .dialog()
         .file()
-        .set_title("Export fuzzing report")
+        .set_title(hf_service::report::export_dialog_title(language))
         .set_file_name(&default_name)
         .add_filter(ext.to_uppercase(), &[ext])
         .blocking_save_file()
@@ -2229,7 +2246,13 @@ pub async fn export_report(
         .map_err(|e| format!("invalid save path: {e}"))?;
     state
         .container
-        .export_report(std::path::Path::new(&project), &target, ext, &path)
+        .export_report(
+            std::path::Path::new(&project),
+            &target,
+            ext,
+            &path,
+            language,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(Some(path.to_string_lossy().to_string()))
@@ -2436,7 +2459,7 @@ pub async fn export_markdown(
         "docx" | "doc" => "docx",
         other => return Err(format!("unknown report format: {other}")),
     };
-    let default_name = format!("{}.{ext}", sanitize_filename(&title));
+    let default_name = format!("{}.{ext}", filename_stem_or(&title, "oxfuzz_report"));
     let Some(path) = app
         .dialog()
         .file()
@@ -2458,6 +2481,25 @@ pub async fn export_markdown(
 }
 
 /// Reduce a target symbol to a filesystem-safe filename fragment.
+/// Sanitize `s` for use as a filename stem, falling back to `fallback` when
+/// nothing usable survives.
+///
+/// [`sanitize_filename`] replaces every character that is not ASCII
+/// alphanumeric, `_`, or `-`, so a string written entirely in a non-Latin
+/// script collapses to a run of underscores. That only matters where the whole
+/// filename comes from user-facing text: the other callers prefix an
+/// `oxfuzz_*` literal, which stays informative regardless. Report titles are
+/// localized, so an untitled Chinese draft would otherwise propose
+/// `_________.md`.
+fn filename_stem_or(s: &str, fallback: &str) -> String {
+    let stem = sanitize_filename(s);
+    if stem.chars().any(|c| c.is_ascii_alphanumeric()) {
+        stem
+    } else {
+        fallback.to_owned()
+    }
+}
+
 fn sanitize_filename(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -3045,6 +3087,50 @@ pub fn config_value_to_toml(value: serde_json::Value) -> Result<String, String> 
 }
 
 #[cfg(test)]
+mod export_dialog_tests {
+    /// This file's own source. A native save dialog cannot be opened from a
+    /// unit test, so the wiring is asserted against the command's text -- the
+    /// same source-assertion convention the desktop view tests use.
+    const COMMANDS_SOURCE: &str = include_str!("commands.rs");
+
+    /// Just the `export_report` command, so an assertion here cannot be
+    /// satisfied by one of the other nine `set_title` call sites in this file.
+    fn export_report_command() -> &'static str {
+        let start = COMMANDS_SOURCE
+            .find("pub async fn export_report(")
+            .expect("export_report command");
+        let rest = &COMMANDS_SOURCE[start..];
+        let end = rest
+            .find("#[tauri::command]")
+            .expect("a following command delimits export_report");
+        &rest[..end]
+    }
+
+    #[test]
+    fn export_report_dialog_title_follows_the_report_language() {
+        let src = export_report_command();
+        assert!(
+            src.contains(".set_title(hf_service::report::export_dialog_title(language))"),
+            "the save dialog title must be derived from the request's language:\n{src}"
+        );
+        assert!(
+            !src.contains("\"Export fuzzing report\""),
+            "the save dialog title is hardcoded English again:\n{src}"
+        );
+    }
+
+    #[test]
+    fn export_report_keeps_the_ascii_default_filename() {
+        // The dialog title is prose; the filename is a technical artifact name
+        // and must stay ASCII in both languages.
+        assert!(
+            export_report_command().contains("format!(\"oxfuzz_report_{}.{ext}\""),
+            "the default export filename must stay the ASCII artifact name"
+        );
+    }
+}
+
+#[cfg(test)]
 mod recovery_command_tests {
     use hf_service::scheduler::CampaignSchedulerError;
 
@@ -3062,5 +3148,48 @@ mod recovery_command_tests {
         );
         assert!(!public.contains("SQL_PRIVATE_MARKER"));
         assert!(!public.contains("SELECT"));
+    }
+}
+
+#[cfg(test)]
+mod filename_stem_tests {
+    use super::filename_stem_or;
+
+    #[test]
+    fn a_title_with_no_ascii_falls_back_rather_than_degenerating() {
+        // Report titles are localized now, so an untitled Chinese draft reads
+        // "未命名模糊测试报告". `sanitize_filename` maps every character that is
+        // not ASCII alphanumeric to '_', so using it alone would propose
+        // "_________.md" as the save name.
+        assert_eq!(
+            filename_stem_or("未命名模糊测试报告", "oxfuzz_report"),
+            "oxfuzz_report"
+        );
+    }
+
+    #[test]
+    fn a_title_carrying_an_ascii_target_keeps_it() {
+        let stem = filename_stem_or("match_magic 模糊测试报告", "oxfuzz_report");
+        assert!(
+            stem.starts_with("match_magic"),
+            "a target in the title must survive: {stem}"
+        );
+        assert_ne!(
+            stem, "oxfuzz_report",
+            "this title did not need the fallback"
+        );
+    }
+
+    #[test]
+    fn an_empty_title_falls_back() {
+        assert_eq!(filename_stem_or("", "oxfuzz_report"), "oxfuzz_report");
+    }
+
+    #[test]
+    fn an_ascii_title_renders_exactly_as_it_does_today() {
+        assert_eq!(
+            filename_stem_or("Untitled fuzzing report", "oxfuzz_report"),
+            "Untitled_fuzzing_report"
+        );
     }
 }

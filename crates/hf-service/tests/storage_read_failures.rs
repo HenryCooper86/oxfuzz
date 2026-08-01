@@ -61,7 +61,7 @@ async fn persisted_read_views_propagate_a_closed_store() {
     assert_storage_error(&service.schedulable_targets(&project).await.unwrap_err());
     assert_storage_error(
         &service
-            .generate_report(&project, "target")
+            .generate_report(&project, "target", hf_service::ReportLanguage::En)
             .await
             .unwrap_err(),
     );

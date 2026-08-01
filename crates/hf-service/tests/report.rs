@@ -7,8 +7,8 @@ use hf_core::engine::EngineKind;
 use hf_core::target::{InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage};
 use hf_coverage::CoverageSummary;
 use hf_service::report::{
-    ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats,
-    ReportData,
+    ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats, Labels,
+    ReportData, ReportLanguage,
 };
 use hf_storage::{RunRecord, RunStatus};
 use uuid::Uuid;
@@ -116,7 +116,7 @@ fn populated() -> ReportData {
 
 #[test]
 fn report_has_title_and_core_sections() {
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     assert!(md.starts_with("# "), "starts with an H1 title");
     assert!(md.contains("parse_header"), "names the target");
     assert!(md.contains("## Executive Summary"));
@@ -128,7 +128,7 @@ fn report_has_title_and_core_sections() {
 
 #[test]
 fn report_renders_crash_detail_and_severity() {
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     assert!(
         md.contains("Heap overflow in parse_header"),
         "bug report title"
@@ -145,7 +145,7 @@ fn report_renders_crash_detail_and_severity() {
 
 #[test]
 fn report_includes_graphs_for_severity_and_coverage() {
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     assert!(md.contains("## Visual Summary"), "has a visual summary");
     // Mermaid graphs render in any modern Markdown viewer.
     assert!(md.contains("```mermaid"), "embeds a mermaid graph");
@@ -156,10 +156,39 @@ fn report_includes_graphs_for_severity_and_coverage() {
     assert!(md.contains('█'), "unicode coverage bar");
 }
 
+/// The `x-axis` line of the coverage `xychart-beta` block, verbatim.
+fn x_axis_line(labels: &Labels) -> String {
+    let md = render_markdown(&populated(), labels);
+    md.lines()
+        .find(|l| l.trim_start().starts_with("x-axis"))
+        .expect("coverage chart x-axis line")
+        .to_owned()
+}
+
+#[test]
+fn coverage_chart_quotes_its_axis_categories_in_both_languages() {
+    // Mermaid's `xychart-beta` lexer accepts a bare ASCII word but rejects bare
+    // CJK ("Lexical error on line 2. Unrecognized text."), verified against the
+    // parser this app bundles (mermaid 11.16.0,
+    // node_modules/mermaid/dist/chunks/mermaid.core/xychartDiagram-*.mjs).
+    // Unquoted categories therefore make the whole Chinese coverage chart fail
+    // to render: the desktop preview falls back to a <pre> of raw source and
+    // GitHub shows a syntax error. Assert the assembled line byte-for-byte in
+    // both languages -- a `contains("行")` would still pass unquoted.
+    assert_eq!(
+        x_axis_line(&Labels::chinese()),
+        "    x-axis [\"行\", \"函数\", \"区域\"]"
+    );
+    assert_eq!(
+        x_axis_line(&Labels::english()),
+        "    x-axis [\"Lines\", \"Functions\", \"Regions\"]"
+    );
+}
+
 #[test]
 fn coverage_bar_is_proportional() {
     // A full report at 60% line coverage should show ~12/20 filled cells.
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     let line = md
         .lines()
         .find(|l| l.starts_with("Lines "))
@@ -171,8 +200,8 @@ fn coverage_bar_is_proportional() {
 #[test]
 fn ai_prompt_is_grounded_in_the_fact_sheet() {
     let data = populated();
-    let facts = render_markdown(&data);
-    let prompt = report_user_prompt(&facts, &data);
+    let facts = render_markdown(&data, &Labels::english());
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::En);
     // The whole fact-sheet is embedded so the model has the real numbers.
     assert!(prompt.contains(&facts), "embeds the fact-sheet verbatim");
     assert!(prompt.contains("parse_header"), "names the target");
@@ -182,8 +211,66 @@ fn ai_prompt_is_grounded_in_the_fact_sheet() {
     assert!(prompt.contains("Executive Summary"));
     assert!(prompt.contains("Remediation") || prompt.contains("remediation"));
     // The system prompt sets the persona and the no-fabrication rule.
-    assert!(report_system_prompt().contains("security engineer"));
-    assert!(report_system_prompt().contains("NEVER invent"));
+    assert!(report_system_prompt(ReportLanguage::En).contains("security engineer"));
+    assert!(report_system_prompt(ReportLanguage::En).contains("NEVER invent"));
+}
+
+#[test]
+fn chinese_prompt_asks_for_chinese_and_pins_the_untranslatable_tokens() {
+    let data = populated();
+    let facts = render_markdown(&data, &Labels::chinese());
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::Zh);
+
+    assert!(
+        prompt.contains("Simplified Chinese"),
+        "prompt must name the output language"
+    );
+    // Assert the Zh-only verbatim-preservation clause as one contiguous
+    // substring, not per-token `contains()` checks. The base (language-
+    // independent) sentence already reads "Do not invent crash counts,
+    // severities, coverage numbers, file paths, or stack frames," so a
+    // per-token check for "file paths" or "stack frames" alone is satisfied
+    // by that shared sentence regardless of what the Zh-only block says --
+    // it would pass even if the Zh block were deleted entirely. This exact
+    // phrase (from "never translated" through the trailing period) exists
+    // only in the Zh-only block and names all eight token categories the
+    // rule requires survive untranslated in one match, so dropping any one
+    // category, or the clause itself, breaks it.
+    assert!(
+        prompt.contains(
+            "never translated or transliterated: file paths, stack frames, symbol and \
+             function names, crash signatures, engine names, sanitizer names, CWE \
+             identifiers, and all figures."
+        ),
+        "Zh verbatim-preservation rule missing or altered"
+    );
+}
+
+#[test]
+fn english_prompt_carries_no_translation_instruction() {
+    let data = populated();
+    let facts = render_markdown(&data, &Labels::english());
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::En);
+
+    assert!(!prompt.contains("Simplified Chinese"));
+    assert!(!prompt.contains("transliterated"));
+    assert!(!prompt.contains("A translated stack frame no longer matches the crash it came from"));
+}
+
+#[test]
+fn both_prompts_still_ground_the_model_in_the_data_sheet() {
+    let data = populated();
+    for (language, labels) in [
+        (ReportLanguage::En, Labels::english()),
+        (ReportLanguage::Zh, Labels::chinese()),
+    ] {
+        let facts = render_markdown(&data, &labels);
+        let prompt = report_user_prompt(&facts, &data, language);
+        // The anti-fabrication rules must survive localization.
+        assert!(prompt.contains("Do not invent"));
+        assert!(prompt.contains("mermaid"));
+        assert!(prompt.contains(&facts));
+    }
 }
 
 #[test]
@@ -191,13 +278,13 @@ fn ensure_graphs_appends_when_model_drops_them() {
     let data = populated();
     // Model output with no mermaid blocks -> graphs must be re-added.
     let without = "# Report\n\nSome AI prose without any charts.";
-    let fixed = ensure_graphs(without, &data);
+    let fixed = ensure_graphs(without, &data, &Labels::english());
     assert!(fixed.contains("```mermaid"), "graphs guaranteed");
     assert!(fixed.contains("Composed by oxfuzz"), "footer stamped");
 
     // Model output that already has a graph -> not duplicated.
     let with = "# Report\n\n```mermaid\npie showData\n    \"X\" : 1\n```\n";
-    let kept = ensure_graphs(with, &data);
+    let kept = ensure_graphs(with, &data, &Labels::english());
     assert_eq!(kept.matches("```mermaid").count(), 1, "no duplicate graphs");
 }
 
@@ -215,7 +302,7 @@ fn empty_report_is_honest_not_fabricated() {
         covered_functions: 0,
         corpus: CorpusStats::default(),
     };
-    let md = render_markdown(&data);
+    let md = render_markdown(&data, &Labels::english());
     assert!(md.contains("# "), "still has a title");
     assert!(
         md.contains("No crashes") || md.contains("0 crashes"),
@@ -231,4 +318,278 @@ fn empty_report_is_honest_not_fabricated() {
             || md.contains("not discovered"),
         "honest 'not available' states for missing run/coverage/target"
     );
+}
+
+#[test]
+fn report_language_serializes_as_the_desktop_locale_identifiers() {
+    // The desktop app stores "en" / "zh" in localStorage under hf_locale and
+    // passes that value straight through. These identifiers are the contract.
+    assert_eq!(
+        serde_json::to_string(&ReportLanguage::En).unwrap(),
+        "\"en\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ReportLanguage::Zh).unwrap(),
+        "\"zh\""
+    );
+    assert_eq!(
+        serde_json::from_str::<ReportLanguage>("\"zh\"").unwrap(),
+        ReportLanguage::Zh
+    );
+}
+
+#[test]
+fn report_language_defaults_to_english() {
+    assert_eq!(ReportLanguage::default(), ReportLanguage::En);
+}
+
+#[test]
+fn report_language_parses_the_two_accepted_identifiers() {
+    assert_eq!("en".parse::<ReportLanguage>().unwrap(), ReportLanguage::En);
+    assert_eq!("zh".parse::<ReportLanguage>().unwrap(), ReportLanguage::Zh);
+}
+
+#[test]
+fn report_language_rejects_an_unknown_identifier_by_naming_the_accepted_ones() {
+    let err = "fr".parse::<ReportLanguage>().unwrap_err();
+    let message = err.to_string();
+    // The message must tell the caller what IS accepted, not just that "fr"
+    // was wrong -- this reaches a CLI user and a REST client.
+    assert!(message.contains("en"), "message should name en: {message}");
+    assert!(message.contains("zh"), "message should name zh: {message}");
+}
+
+#[test]
+fn english_labels_render_the_same_report_as_before() {
+    // Task 2 is a pure refactor: the English rendering must be byte-identical
+    // to what the hardcoded literals produced. These headings are exactly the
+    // ones the pre-refactor renderer emitted.
+    let md = render_markdown(&populated(), &Labels::english());
+    for heading in [
+        "## Executive Summary",
+        "## Visual Summary",
+        "## Target",
+        "## Run",
+        "## Coverage",
+        "## Corpus",
+        "## Findings",
+    ] {
+        assert!(md.contains(heading), "missing {heading}");
+    }
+    assert!(md.contains("# Fuzzing Report:"));
+    assert!(md.contains("| Property | Value |"));
+    assert!(md.contains("| Metric | Covered | Total | Percent |"));
+    assert!(md.contains("| # | Kind | Severity | Location | Signature |"));
+}
+
+#[test]
+fn nonzero_crash_narrative_sentence_is_assembled_correctly() {
+    // The densest concatenation in the file: prose fragments, data
+    // placeholders, markdown emphasis, and punctuation all interleave in one
+    // sentence. Assert the exact assembled text so a punctuation or spacing
+    // regression (a stray/missing/duplicated comma, a wrong bracket, an extra
+    // space) fails here instead of hiding behind a `contains()` on a
+    // substring.
+    let md = render_markdown(&populated(), &Labels::english());
+    assert!(
+        md.contains(
+            "The campaign surfaced **1 unique crash(es)**, of which **1** rank as exploitable \
+             or probably exploitable (engine LibFuzzer, status Done)."
+        ),
+        "nonzero-crash narrative sentence mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn zero_crash_narrative_sentence_is_assembled_correctly() {
+    let data = ReportData {
+        generated_at: "2026-06-28T00:00:00Z".to_owned(),
+        project: "/proj".to_owned(),
+        target: "lonely".to_owned(),
+        tool_version: "0.1.0".to_owned(),
+        candidate: None,
+        run: None,
+        crashes: vec![],
+        coverage: None,
+        covered_functions: 0,
+        corpus: CorpusStats::default(),
+    };
+    let md = render_markdown(&data, &Labels::english());
+    assert!(
+        md.contains(
+            "No crashes were found in the most recent campaign (engine n/a, status no run recorded)."
+        ),
+        "zero-crash narrative sentence mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn corpus_bullet_is_assembled_correctly() {
+    // Shares `narrative_comma` with the narrative sentences above. Assert the
+    // exact text so a spacing change made for the narrative sentences (e.g.
+    // folding a separator space into the field itself) cannot silently
+    // duplicate or drop a space here, where the template still supplies its
+    // own literal space around the same field.
+    let md = render_markdown(&populated(), &Labels::english());
+    assert!(
+        md.contains("- Corpus: **25 input(s)**, 4.0 KiB"),
+        "corpus bullet mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn bug_report_heading_is_assembled_correctly() {
+    // Shares `narrative_open_paren` / `narrative_close_paren` with the
+    // narrative sentences above, for the same reason as the corpus bullet
+    // test: this call site has its own literal space next to the field and
+    // must be pinned independently.
+    let md = render_markdown(&populated(), &Labels::english());
+    assert!(
+        md.contains("**Bug report** (severity guess: High)"),
+        "bug report heading mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn corpus_bullet_is_assembled_correctly_in_chinese() {
+    // The Chinese counterpart of `corpus_bullet_is_assembled_correctly`. Round
+    // 2 pinned only the English rendering of this line and left the Chinese
+    // rendering checked by a probe test that was then deleted -- exactly the
+    // hole a future change to `narrative_comma` or `bullet_colon` could walk
+    // through with the suite staying green. No ASCII space belongs next to
+    // the full-width colon or comma here.
+    let md = render_markdown(&populated(), &Labels::chinese());
+    assert!(
+        md.contains("- 语料库：**25 个输入**，4.0 KiB"),
+        "Chinese corpus bullet mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn bug_report_heading_is_assembled_correctly_in_chinese() {
+    // The Chinese counterpart of `bug_report_heading_is_assembled_correctly`,
+    // for the same reason as the corpus-bullet Chinese test above.
+    let md = render_markdown(&populated(), &Labels::chinese());
+    assert!(
+        md.contains("**缺陷报告**（严重程度推测：High）"),
+        "Chinese bug report heading mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn chinese_labels_translate_the_scaffolding_in_both_directions() {
+    let md = render_markdown(&populated(), &Labels::chinese());
+
+    // Present: the Chinese headings.
+    for heading in [
+        "## 摘要",
+        "## 图表概览",
+        "## 目标",
+        "## 运行",
+        "## 覆盖率",
+        "## 语料库",
+        "## 发现项",
+    ] {
+        assert!(md.contains(heading), "missing Chinese heading {heading}");
+    }
+
+    // Absent: the English ones. Asserting only presence would pass against a
+    // chinese() that returned the English set, which is exactly the stub Task 2
+    // left behind.
+    for heading in [
+        "## Executive Summary",
+        "## Visual Summary",
+        "## Target",
+        "## Run",
+        "## Coverage",
+        "## Corpus",
+        "## Findings",
+    ] {
+        assert!(!md.contains(heading), "English heading leaked: {heading}");
+    }
+}
+
+#[test]
+fn technical_tokens_are_byte_identical_across_languages() {
+    let data = populated();
+    let en = render_markdown(&data, &Labels::english());
+    let zh = render_markdown(&data, &Labels::chinese());
+
+    // A translated stack frame no longer matches the crash it came from and
+    // cannot be grepped. These must survive untouched.
+    for token in [data.target.as_str(), data.project.as_str()] {
+        assert!(en.contains(token), "English lost {token}");
+        assert!(zh.contains(token), "Chinese lost {token}");
+    }
+    for crash in &data.crashes {
+        let signature = crash.stack_signature.as_str();
+        assert!(zh.contains(signature), "Chinese lost signature {signature}");
+        let input = crash.input_path.display().to_string();
+        assert!(zh.contains(&input), "Chinese lost input path {input}");
+    }
+}
+
+#[test]
+fn casr_terms_keep_the_original_alongside_the_translation() {
+    // Translated for the reader, original preserved so the term stays greppable
+    // and matchable against CASR output.
+    let zh = Labels::chinese();
+    assert!(zh.casr_exploitable.contains("Exploitable"));
+    assert!(zh.casr_exploitable.contains("可利用"));
+    assert!(zh.casr_not_exploitable.contains("Not exploitable"));
+    assert!(zh.casr_undefined.contains("Undefined"));
+}
+
+#[test]
+fn casr_severities_are_translated_wherever_they_render() {
+    let data = populated();
+    let zh = render_markdown(&data, &Labels::chinese());
+
+    // The pie chart already used the labels. These two sites did not.
+    assert!(
+        zh.contains("可利用 (Exploitable)"),
+        "findings table or CASR bullet still renders raw Debug output"
+    );
+    // Raw Debug output must not appear anywhere in a Chinese report.
+    assert!(
+        !zh.contains("| Exploitable |"),
+        "findings table leaked an untranslated severity"
+    );
+    // The bullet bolds the label directly (`**{label}**`), which the table's
+    // pipe-delimited cell never does. Without this, a bullet regression back
+    // to `format!("{:?}", casr.severity)` renders "**Exploitable**" in
+    // otherwise-Chinese prose and trips neither assertion above: the first
+    // is already satisfied by the pie chart alone, and the second only
+    // matches the table's `| ... |` shape.
+    assert!(
+        zh.contains("**可利用 (Exploitable)**"),
+        "CASR bullet still renders raw Debug output"
+    );
+}
+
+#[test]
+fn export_dialog_title_is_translated() {
+    // The desktop save dialog's title is prose the user reads, so it follows
+    // the report's language. Pinned here because the Tauri shell that shows it
+    // cannot assert the rendered string itself.
+    assert_eq!(
+        hf_service::report::export_dialog_title(ReportLanguage::En),
+        "Export fuzzing report"
+    );
+    assert_eq!(
+        hf_service::report::export_dialog_title(ReportLanguage::Zh),
+        "导出模糊测试报告"
+    );
+}
+
+#[test]
+fn language_selects_the_label_set() {
+    // The wiring test: for_language must route to the matching constructor.
+    let data = populated();
+    let en = render_markdown(&data, &Labels::for_language(ReportLanguage::En));
+    let zh = render_markdown(&data, &Labels::for_language(ReportLanguage::Zh));
+
+    assert!(en.contains("## Findings"));
+    assert!(zh.contains("## 发现项"));
+    assert_ne!(en, zh);
 }

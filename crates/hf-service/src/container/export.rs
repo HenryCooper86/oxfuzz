@@ -42,13 +42,14 @@ impl ServiceContainer {
         pool: &Arc<dyn ProviderPool>,
         facts: &str,
         data: &crate::report::ReportData,
+        language: crate::report::ReportLanguage,
     ) -> Result<String, ClassifiedError> {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
 
         let messages = vec![
-            Message::system(crate::report::report_system_prompt()),
-            Message::user(crate::report::report_user_prompt(facts, data)),
+            Message::system(crate::report::report_system_prompt(language)),
+            Message::user(crate::report::report_user_prompt(facts, data, language)),
         ];
         let req = ChatRequest::from_messages(messages);
         let resp = pool
@@ -67,7 +68,13 @@ impl ServiceContainer {
             ));
         }
         // Guarantee the campaign graphs survive even if the model dropped them.
-        Ok(crate::report::ensure_graphs(text, data))
+        // The re-injected graphs and the footer this stamps must match the
+        // language the model was asked to compose in, not a fixed English set.
+        Ok(crate::report::ensure_graphs(
+            text,
+            data,
+            &crate::report::Labels::for_language(language),
+        ))
     }
 
     /// Summarize corpus composition for the report, preferring the persisted
@@ -238,12 +245,18 @@ impl ServiceContainer {
     /// corpus composition into one self-contained document. Missing persistence
     /// or tooling is represented honestly as unavailable data.
     ///
+    /// `language` selects the label set the deterministic scaffolding renders in
+    /// and the language the model is asked to compose the narrative in. Data
+    /// flowing through the report -- paths, stack frames, symbols, signatures,
+    /// engine names, figures -- is never translated.
+    ///
     /// # Errors
     /// Returns `ClassifiedError` only on an unexpected internal failure.
     pub async fn generate_report(
         &self,
         project: &Path,
         target: &str,
+        language: crate::report::ReportLanguage,
     ) -> Result<String, ClassifiedError> {
         use crate::report::{render_markdown, ReportData};
 
@@ -292,13 +305,13 @@ impl ServiceContainer {
 
         // The deterministic fact-sheet is always correct and carries the graphs;
         // it is the no-provider fallback AND the grounded input for the LLM.
-        let facts = render_markdown(&data);
+        let facts = render_markdown(&data, &crate::report::Labels::for_language(language));
 
         // When a provider is configured, have the LLM compose a professional
         // narrative grounded in those facts. On any failure, fall back to the
         // deterministic fact-sheet so a report is always produced.
         if let Some(pool) = self.provider_pool() {
-            match self.compose_ai_report(&pool, &facts, &data).await {
+            match self.compose_ai_report(&pool, &facts, &data, language).await {
                 Ok(report) => return Ok(report),
                 Err(e) => tracing::warn!("AI report composition failed, using fact-sheet: {e}"),
             }
@@ -326,17 +339,30 @@ impl ServiceContainer {
         target: &str,
         format: &str,
         out_path: &Path,
+        language: crate::report::ReportLanguage,
     ) -> Result<(), ClassifiedError> {
         let fmt = crate::report_export::ReportFormat::parse(format).ok_or_else(|| {
             ClassifiedError::Validation(format!("unknown report format: {format}"))
         })?;
-        let markdown = self.generate_report(project, target).await?;
-        let title = format!("oxfuzz report — {target}");
-        crate::report_export::write_report(&markdown, &title, fmt, out_path)
+        let markdown = self.generate_report(project, target, language).await?;
+        // The title is document metadata rather than report body content, so it
+        // is not written by the renderer -- but it is still prose, and follows
+        // the report's language. The target symbol stays verbatim.
+        let title = format!(
+            "oxfuzz {} — {target}",
+            crate::report::Labels::for_language(language).report_noun
+        );
+        crate::report_export::write_report(&markdown, &title, fmt, out_path, language)
     }
 
     /// Write already-composed report `markdown` (e.g. a saved draft) to
     /// `out_path` in `format`, without recomposing it.
+    ///
+    /// The exported document declares English. This path is handed content that
+    /// was composed elsewhere and carries no language marker -- drafts do not
+    /// record the language they were written in, and the UI locale of whoever
+    /// exports it is not the language of what was stored. Guessing would be
+    /// wrong whenever the two disagree, so it uses the documented default.
     ///
     /// # Errors
     /// Returns `ClassifiedError` on unknown format or export failure.
@@ -350,7 +376,13 @@ impl ServiceContainer {
         let fmt = crate::report_export::ReportFormat::parse(format).ok_or_else(|| {
             ClassifiedError::Validation(format!("unknown report format: {format}"))
         })?;
-        crate::report_export::write_report(markdown, title, fmt, out_path)
+        crate::report_export::write_report(
+            markdown,
+            title,
+            fmt,
+            out_path,
+            crate::report::ReportLanguage::En,
+        )
     }
 
     /// Saved editable report drafts for the internal workbench.
