@@ -3,6 +3,7 @@ import { getTransport, onDataChanged } from "../lib";
 import { useI18n } from "../i18nContext";
 import { useProject } from "../providers/project";
 import { ViewHeader, EmptyState, Button } from "../components/ui";
+import { PolicyDecisionList, type PolicyDecision } from "../components/PolicyDecisionList";
 import { RotateCcw, AlertTriangle, ScrollText } from "lucide-react";
 
 interface AutoRevertEvent {
@@ -33,6 +34,7 @@ export function AuditView() {
   const { activeProject } = useProject();
   const [scope, setScope] = useState<"all" | "project">(activeProject ? "project" : "all");
   const [events, setEvents] = useState<AutoRevertEvent[]>([]);
+  const [decisions, setDecisions] = useState<PolicyDecision[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,14 +42,22 @@ export function AuditView() {
     setError(null);
     try {
       const project = scope === "project" ? activeProject || undefined : undefined;
-      const list = await getTransport().invoke<AutoRevertEvent[]>("auto_revert_events", {
-        project,
-        limit: 200,
-      });
+      const [list, records] = await Promise.all([
+        getTransport().invoke<AutoRevertEvent[]>("auto_revert_events", {
+          project,
+          limit: 200,
+        }),
+        // Decisions are not project-scoped in the service: the guardrail trail
+        // records actions that have no project, so scoping would silently drop
+        // them.
+        getTransport().invoke<PolicyDecision[]>("policy_decisions", { limit: 200 }),
+      ]);
       setEvents(list ?? []);
+      setDecisions(records ?? []);
     } catch (e) {
       setError(String(e));
       setEvents([]);
+      setDecisions([]);
     } finally {
       setLoading(false);
     }
@@ -93,6 +103,13 @@ export function AuditView() {
           </Button>
         </div>
       )}
+
+      <div className="flex flex-col gap-2">
+        <h3 className="text-sm font-medium">{t("audit.decisionsTitle")}</h3>
+        <PolicyDecisionList decisions={decisions} emptyLabel={t("audit.decisionsEmpty")} />
+      </div>
+
+      <h3 className="text-sm font-medium">{t("audit.revertsTitle")}</h3>
 
       {events.length > 0 && (
         <div className="flex items-center gap-4 text-xs text-text-muted">

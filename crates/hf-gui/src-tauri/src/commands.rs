@@ -2069,6 +2069,21 @@ pub async fn auto_revert_events(
         .map_err(|error| error.to_string())
 }
 
+/// The persisted guardrail authorization trail (newest first). `limit` caps the
+/// rows; the service prunes older decisions on write. Mirrors the REST
+/// `/policy/decisions` route so both transports show the same records.
+#[tauri::command]
+pub async fn policy_decisions(
+    state: tauri::State<'_, crate::state::AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<hf_service::GuardrailDecisionRecord>, String> {
+    state
+        .container
+        .policy_decisions(limit.unwrap_or(200))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// The active project's effective auto-revert policy (override merged over the
 /// global default) plus whether an override applies, for the Workbench badge.
 #[tauri::command]
