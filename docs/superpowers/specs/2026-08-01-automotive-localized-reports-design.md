@@ -197,6 +197,34 @@ declares English in its `lang` attribute, exactly as main-report drafts do.
 This is the localized-reports design's section 9.3, inherited unchanged.
 Closing it is a schema change and was deliberately deferred.
 
+**This section is narrower than the behavior it describes**, and Task 4 found
+it. The English `lang` attribute is not confined to re-exported drafts: it is
+on *every* non-Markdown export of an automotive report, including a direct one
+where the language is known.
+
+`ServiceContainer::export_markdown` passes `ReportLanguage::En` to
+`write_report` unconditionally (`container/export.rs`). Its doc comment reasons
+correctly about drafts -- content composed elsewhere carries no language marker,
+and the exporter's UI locale is not the stored document's language -- but both
+automotive export paths go through it with a report they *just composed* and a
+language they hold:
+
+- `oxfuzz automotive report --report-lang zh --format html --output x.html`
+- the desktop `exportReport`, via the `export_markdown` Tauri command.
+
+Both now emit a Chinese document under `<html lang="en">`, verified by running
+the CLI. The document title is correct; the attribute is not. A screen reader
+announces Chinese prose with an English voice and the browser picks Latin
+fallback fonts.
+
+**Deliberately not fixed in Task 4.** The task's mandate was to pass a value,
+not to add logic, and the fix is not mechanical: `export_markdown` is shared
+with the Reports view's draft export, where the documented English default is
+the right answer. Closing it means deciding whether the command takes an
+optional language that the automotive caller supplies and the draft caller
+omits -- a design decision this document should make before an implementer
+makes it incidentally.
+
 ### 9.2 Operation statuses are translated, unlike the main report's
 
 This section originally claimed automotive statuses reach the report through
