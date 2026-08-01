@@ -953,9 +953,21 @@ fn chinese_prompt_asks_for_chinese_and_pins_the_untranslatable_tokens() {
     );
     // Without this rule the model transliterates symbol names and paths, which
     // destroys the report's value as evidence.
-    for token in ["file paths", "stack frames", "crash signatures", "CWE"] {
-        assert!(prompt.contains(token), "token rule missing: {token}");
-    }
+    //
+    // Assert the Chinese rule's distinctive phrasing as one contiguous clause,
+    // NOT token-by-token. Several of these tokens also appear in the shared
+    // base sentence ("Do not invent crash counts, severities, coverage numbers,
+    // file paths, or stack frames"), which is present in BOTH languages -- so a
+    // per-token `contains` check passes even when the Chinese block is empty of
+    // them, and would let a dropped stack-frame rule ship silently.
+    assert!(
+        prompt.contains(
+            "never translated or transliterated: file paths, stack frames, \
+             symbol and function names, crash signatures, engine names, \
+             sanitizer names, CWE identifiers, and all figures"
+        ),
+        "the Chinese token-preservation rule must list every category verbatim"
+    );
 }
 
 #[test]
