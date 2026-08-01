@@ -384,7 +384,7 @@ fn bug_report_heading_is_assembled_correctly_in_chinese() {
     // for the same reason as the corpus-bullet Chinese test above.
     let md = render_markdown(&populated(), &Labels::chinese());
     assert!(
-        md.contains("**缺陷报告**（严重程度推测： High）"),
+        md.contains("**缺陷报告**（严重程度推测：High）"),
         "Chinese bug report heading mismatch:\n{md}"
     );
 }
