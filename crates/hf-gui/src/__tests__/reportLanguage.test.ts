@@ -156,13 +156,44 @@ describe("the automotive report follows the interface language", () => {
     );
   });
 
+  it("declares the composed language on the export", () => {
+    // A Chinese title on a document served as `lang="en"` is still wrong: that
+    // attribute is what assistive technology reads and what browsers pick fonts
+    // from. This report was composed in `locale` moments earlier, so the export
+    // knows its language and says so.
+    // Isolate the call first: its argument object contains a nested `{...}` in
+    // the title interpolation, so a `[^}]*` window would stop short of the
+    // field being asserted and pass for the wrong reason.
+    const call = automotiveFile.match(
+      /invoke<string \| null>\("export_markdown",\s*\{[\s\S]*?\n *\}\);/,
+    )?.[0];
+    expect(call).toBeDefined();
+    expect(call).toContain("language: locale");
+  });
+
+  it("does not guess a language for a stored draft", () => {
+    // ReportsView exports content composed elsewhere. A draft records no
+    // language, and the locale of whoever opens the Reports view is not the
+    // language of what was stored, so the field is omitted and the command's
+    // documented English default applies. This assertion exists so a later
+    // cleanup does not "fix" the omission by making the draft path guess.
+    const reports = source("../views/ReportsView.tsx");
+    const calls = reports.match(/invoke<[^>]*>\("export_markdown"[^;]*;/g) ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call).not.toContain("language");
+    }
+  });
+
   it("leaves no English report-title literal in this view", () => {
     // Scope: AutomotiveView.tsx, and nothing else. Both assertions above would
     // still pass if a localized title were computed and then ignored; this one
     // fails the moment either site is reverted to its template literal, and it
     // catches a new English automotive title added to this view.
-    expect(automotiveFile).not.toMatch(/Automotive campaign report/);
-    expect(automotiveFile).not.toMatch(/campaign report —/);
+    // Case-insensitive: a reintroduced "Automotive Campaign Report — ..." is
+    // the same defect in different casing.
+    expect(automotiveFile).not.toMatch(/automotive campaign report/i);
+    expect(automotiveFile).not.toMatch(/campaign report —/i);
   });
 
   it("translates the document title in both dictionaries", () => {
