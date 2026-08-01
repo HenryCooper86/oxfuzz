@@ -1096,7 +1096,18 @@ EOF
 
 In `crates/hf-service/src/container/export.rs`:
 
-- `generate_report` gains `language: ReportLanguage` as its last parameter. Replace the `Labels::english()` placeholder from Task 2 with `Labels::for_language(language)`, and pass `language` to `compose_ai_report`.
+- `generate_report` gains `language: ReportLanguage` as its last parameter, and passes `language` to `compose_ai_report`.
+
+**There are TWO `Labels::english()` placeholders in `container/export.rs`, not one.** Both must become `Labels::for_language(language)`:
+
+| Site | What it feeds |
+| --- | --- |
+| the `render_markdown` call in `generate_report` | the fact sheet, and the whole report on the no-provider path |
+| the `ensure_graphs` call inside `compose_ai_report` | the graphs re-injected when the model drops the Mermaid blocks, and the composed report's footer |
+
+Find them with `grep -n 'Labels::english()' crates/hf-service/src/container/export.rs` rather than by line number -- this file moved during Task 2's fix rounds.
+
+Missing the second one is not cosmetic: a Chinese report whose graphs the model dropped would get English-labelled graphs back, and every AI-composed Chinese report would end with an English footer. That is precisely the defect Task 2 fixed in `ensure_graphs`, reintroduced one layer up.
 - `export_report` gains `language: ReportLanguage` as its last parameter and forwards it to `generate_report`.
 
 - [ ] **Step 2: Update the CLI**
