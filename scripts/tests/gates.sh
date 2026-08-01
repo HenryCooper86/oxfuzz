@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check test doc deny script-tests frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features test doc deny script-tests frontend-test frontend-lint)
 
 # Output noise that hides real results in a workspace this size.
 TEST_NOISE='^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$'
@@ -29,6 +29,13 @@ gate_clippy() {
 
 gate_check() {
   cargo check --workspace
+}
+
+gate_check_no_default_features() {
+  # Two defects on this branch were visible only here: an import left behind
+  # whose sole remaining user was feature-gated, and an import moved without the
+  # gate its use site needed. Both compiled cleanly with default features on.
+  cargo check --workspace --no-default-features
 }
 
 gate_test() {
