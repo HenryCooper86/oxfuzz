@@ -1186,7 +1186,15 @@ impl FuzzCampaignDispatcher {
     }
 
     async fn save_crash_report(&self, project: &Path, target: &str, crashes: usize) -> bool {
-        let markdown = match self.container.generate_report(project, target).await {
+        // Scheduled campaigns have no request-scoped language, and the UI locale
+        // is never persisted to the service, so scheduled reports use the
+        // documented English default. Localizing these needs a stored preference
+        // -- see the known limitation in the design doc.
+        let markdown = match self
+            .container
+            .generate_report(project, target, crate::report::ReportLanguage::En)
+            .await
+        {
             Ok(md) => md,
             Err(e) => {
                 tracing::warn!("scheduled campaign report generation failed: {e}");
