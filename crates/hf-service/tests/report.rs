@@ -537,3 +537,15 @@ fn casr_severities_are_translated_wherever_they_render() {
         "CASR bullet still renders raw Debug output"
     );
 }
+
+#[test]
+fn language_selects_the_label_set() {
+    // The wiring test: for_language must route to the matching constructor.
+    let data = populated();
+    let en = render_markdown(&data, &Labels::for_language(ReportLanguage::En));
+    let zh = render_markdown(&data, &Labels::for_language(ReportLanguage::Zh));
+
+    assert!(en.contains("## Findings"));
+    assert!(zh.contains("## 发现项"));
+    assert_ne!(en, zh);
+}
