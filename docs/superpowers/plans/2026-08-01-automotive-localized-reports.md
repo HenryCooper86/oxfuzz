@@ -132,6 +132,48 @@ git add -A && git commit
 
 ## Task 2: The Chinese label set
 
+### Carried forward from Task 1's review
+
+Task 1 was approved, but left four things that land on this task. The first two
+are load-bearing.
+
+**1. Commit the four fixtures as real tests.** Task 1's entire output-preservation
+proof rests on fixtures that live in a gitignored scratch file,
+`.superpowers/sdd/2026-08-01-automotive-localized-reports/task-1-fixtures.rs.txt`.
+The committed guard, `english_labels_render_todays_exact_text`, asserts only four
+section headings -- it would pass unchanged if roughly 120 of the 130 field values
+were altered. Adopt the saved harness as committed tests with real assertions; do
+not rebuild it from scratch, and do not leave the proof unversioned a second time.
+
+**2. Add a state observed by two operations.** `automotive_report.rs:906` joins
+citations with `list_separator`, but every `observed by` line in all four fixtures
+has zero or one citation, so **that separator never renders in any fixture**. It is
+the one list site with no guard, and it becomes visible the moment this task writes
+a non-ASCII separator. Add the two-citation case and assert on the assembled line.
+
+**3. Decide what separator a citation list takes, and document it.** The three
+`list_separator` sites are not all the same kind of list. Two join prose values --
+status counts, and protocol/mode names. The third (`:906`) joins machine-matched
+citation tokens, `[OP:a], [OP:b]`. `、` is right for prose enumeration; whether a
+list of bracketed identifiers reads better with `、` or with ASCII `", "` is a
+judgement call this task must make deliberately. If you conclude they differ, give
+citations their own field rather than compromising on one value for both. Say which
+you chose and why.
+
+**4. Two comment fixes in the file you are already editing.**
+
+- `automotive_report.rs:273-274` says `narrative_semicolon` is "embedded,
+  deliberately, inside `bench_approval_detail`'s separator slot". It is not
+  embedded inside anything -- it fills the separator slot beside it. In a file
+  whose recent history is about removing embedded marks, a comment asserting a
+  mark is embedded will mislead. Reword it.
+- `automotive_report.rs:496` -- `bench_approval_missing_detail` still carries its
+  own copy of the word "enabled" that `posture_enabled` holds as a field. Keeping
+  it whole is defensible, since splitting a participial phrase would pin word
+  order to English, but that reasoning is undocumented and the same "one posture,
+  two renderings in one table" risk applies. Either split it or write the comment.
+
+
 **Files:**
 - Modify: `crates/hf-service/src/automotive_report.rs`
 - Test: `crates/hf-service/tests/automotive_report.rs`
