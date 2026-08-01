@@ -1974,8 +1974,14 @@ describe("PolicyDecisionList", () => {
     );
 
     expect(html).toContain("discover");
-    expect(html).not.toContain("null");
-    expect(html).not.toContain("undefined");
+    // Assert on the markup the guards control, not on the strings "null" /
+    // "undefined". renderToStaticMarkup never emits those for a null child, so
+    // a component with no conditional at all would pass that check identically.
+    // These two strings appear ONLY inside their guards: the " -- " separator
+    // precedes a present detail, and the three-class span wraps a present
+    // project (the sibling risk_tier span omits `truncate`, so it cannot match).
+    expect(html).not.toContain(" -- ");
+    expect(html).not.toContain('class="text-xs text-text-muted truncate"');
   });
 });
 ```
@@ -2176,7 +2182,12 @@ The load callback becomes:
     setError(null);
     try {
       const project = scope === "project" ? activeProject || undefined : undefined;
-      const [events, records] = await Promise.all([
+      // allSettled, not all: the two sources are independent. Under Promise.all
+      // a rejection from the newly added decisions call would clear the
+      // auto-revert events too, breaking functionality that worked before this
+      // feature existed. Populate whichever succeeded and name the one that did
+      // not in the error banner.
+      const [eventsResult, decisionsResult] = await Promise.allSettled([
         getTransport().invoke<AutoRevertEvent[]>("auto_revert_events", {
           project,
           limit: 200,
@@ -2204,7 +2215,15 @@ the existing `events` state, and render above the existing events block:
 ```tsx
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">{t("audit.decisionsTitle")}</h3>
-        <PolicyDecisionList decisions={decisions} emptyLabel={t("audit.decisionsEmpty")} />
+        {/* Gate on `loading` exactly as the events section below does. Rendering
+            straight from `decisions` (which starts []) shows "No guardrail
+            decisions recorded yet" during the initial fetch, which an operator
+            reads as "there are none" rather than "still loading". */}
+        {loading ? (
+          <div className="text-xs text-text-muted">{t("audit.loading")}</div>
+        ) : (
+          <PolicyDecisionList decisions={decisions} emptyLabel={t("audit.decisionsEmpty")} />
+        )}
       </div>
 
       <h3 className="text-sm font-medium">{t("audit.revertsTitle")}</h3>
