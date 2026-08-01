@@ -276,6 +276,23 @@ Render the Chinese report and read the Limitations section and the advisory noti
 
 ## Task 3: Language-aware validation and prompts
 
+### Carried forward
+
+**The advisory notice is yours, not Task 4's.** Step 5 below owns it. Task 2's
+implementer read the design as assigning it to Task 4 and deferred it on that
+basis -- correctly deferred, wrongly attributed. It is the one guardrail sentence
+a Chinese reader currently still meets in English, so it must not be deferred
+again.
+
+**One test-symmetry gap, in a file you are editing.**
+`crates/hf-service/tests/automotive_report.rs:582` checks space-*before* for all
+seven full-width marks the report emits (`、。（），：；`) but checks space-*after*
+for only six -- `）` is missing, so a `"） "` would pass. It is unreachable today,
+because `narrative_close_paren`'s single render site is followed immediately by
+`narrative_comma`, so a trailing space trips ` ，` first. Add `"） "` to the
+forward list anyway; the test name promises the symmetry.
+
+
 This is the task the design exists for. Without it a Chinese interpretation is rejected and every Chinese AI report silently degrades to the deterministic one.
 
 **Files:**
