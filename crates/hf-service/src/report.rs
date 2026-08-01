@@ -85,41 +85,241 @@ pub struct ReportData {
     pub corpus: CorpusStats,
 }
 
+/// Every piece of report scaffolding the renderer writes itself.
+///
+/// A struct rather than a key-to-string map: a map's failure mode is a missing
+/// or misspelled key rendering silently as the key, which no gate catches. Here
+/// a missing translation does not compile.
+///
+/// Data flowing through the report -- paths, signatures, stack frames, engine
+/// names, figures -- is never routed through this struct and is never
+/// translated.
+pub struct Labels {
+    // Document header
+    pub title_prefix: &'static str,
+    pub project: &'static str,
+    pub target: &'static str,
+    pub generated: &'static str,
+    pub tool: &'static str,
+    // Section headings
+    pub executive_summary: &'static str,
+    pub visual_summary: &'static str,
+    pub target_section: &'static str,
+    pub run_section: &'static str,
+    pub coverage_section: &'static str,
+    pub corpus_section: &'static str,
+    pub findings_section: &'static str,
+    pub finding_prefix: &'static str,
+    // Executive summary bullets
+    pub unique_crashes: &'static str,
+    pub exploitable_line: &'static str,
+    pub corpus_line: &'static str,
+    pub line_coverage: &'static str,
+    // Visual summary
+    pub coverage_bold: &'static str,
+    pub bar_lines: &'static str,
+    pub bar_functions: &'static str,
+    pub bar_regions: &'static str,
+    pub chart_coverage_title: &'static str,
+    pub chart_percent_covered: &'static str,
+    pub chart_crash_severity: &'static str,
+    pub chart_crash_kinds: &'static str,
+    pub no_visual_data: &'static str,
+    // Shared table headers
+    pub col_property: &'static str,
+    pub col_value: &'static str,
+    // Target table
+    pub no_target_metadata: &'static str,
+    pub row_symbol: &'static str,
+    pub row_kind: &'static str,
+    pub row_language: &'static str,
+    pub row_signature: &'static str,
+    pub row_input_surface: &'static str,
+    pub row_complexity: &'static str,
+    pub row_accumulated_complexity: &'static str,
+    pub row_fit_score: &'static str,
+    // Run table
+    pub no_run_recorded: &'static str,
+    pub row_engine: &'static str,
+    pub row_status: &'static str,
+    pub row_started: &'static str,
+    pub row_ended: &'static str,
+    pub row_duration: &'static str,
+    pub row_sanitizer: &'static str,
+    pub row_budget: &'static str,
+    // Coverage table
+    pub col_metric: &'static str,
+    pub col_covered: &'static str,
+    pub col_total: &'static str,
+    pub col_percent: &'static str,
+    // Corpus table
+    pub row_entries: &'static str,
+    pub row_total_size: &'static str,
+    pub row_seeds: &'static str,
+    pub row_from_fuzzer: &'static str,
+    pub row_minimized: &'static str,
+    // Findings table
+    pub col_index: &'static str,
+    pub col_severity: &'static str,
+    pub col_location: &'static str,
+    // Finding detail
+    pub bullet_kind: &'static str,
+    pub bullet_stack_signature: &'static str,
+    pub bullet_input: &'static str,
+    pub bullet_casr_severity: &'static str,
+    pub bullet_crash_line: &'static str,
+    pub bullet_cluster: &'static str,
+    pub bullet_minimized: &'static str,
+    pub bug_report_heading: &'static str,
+    pub reproduction: &'static str,
+    pub root_cause: &'static str,
+    pub suggested_fix: &'static str,
+    // CASR exploitability terms. Scaffolding, not data: these are literals the
+    // renderer writes. See the design's section 6.
+    pub casr_exploitable: &'static str,
+    pub casr_probably_exploitable: &'static str,
+    pub casr_not_exploitable: &'static str,
+    pub casr_undefined: &'static str,
+    // Footer
+    pub generated_by: &'static str,
+}
+
+impl Labels {
+    /// The English label set. These strings reproduce the renderer's original
+    /// hardcoded literals exactly.
+    #[must_use]
+    pub const fn english() -> Self {
+        Self {
+            title_prefix: "Fuzzing Report",
+            project: "Project",
+            target: "Target",
+            generated: "Generated",
+            tool: "Tool",
+            executive_summary: "Executive Summary",
+            visual_summary: "Visual Summary",
+            target_section: "Target",
+            run_section: "Run",
+            coverage_section: "Coverage",
+            corpus_section: "Corpus",
+            findings_section: "Findings",
+            finding_prefix: "Finding",
+            unique_crashes: "Unique crashes",
+            exploitable_line: "Exploitable / probably exploitable",
+            corpus_line: "Corpus",
+            line_coverage: "Line coverage",
+            coverage_bold: "Coverage",
+            bar_lines: "Lines",
+            bar_functions: "Functions",
+            bar_regions: "Regions",
+            chart_coverage_title: "Coverage (%)",
+            chart_percent_covered: "Percent covered",
+            chart_crash_severity: "Crash severity",
+            chart_crash_kinds: "Crash kinds",
+            no_visual_data: "No coverage or crash data yet to visualize.",
+            col_property: "Property",
+            col_value: "Value",
+            no_target_metadata: "Target metadata was not available (not discovered).",
+            row_symbol: "Symbol",
+            row_kind: "Kind",
+            row_language: "Language",
+            row_signature: "Signature",
+            row_input_surface: "Input surface",
+            row_complexity: "Complexity",
+            row_accumulated_complexity: "Accumulated complexity",
+            row_fit_score: "Fit score",
+            no_run_recorded: "No run has been recorded for this project.",
+            row_engine: "Engine",
+            row_status: "Status",
+            row_started: "Started",
+            row_ended: "Ended",
+            row_duration: "Duration",
+            row_sanitizer: "Sanitizer",
+            row_budget: "Budget",
+            col_metric: "Metric",
+            col_covered: "Covered",
+            col_total: "Total",
+            col_percent: "Percent",
+            row_entries: "Entries",
+            row_total_size: "Total size",
+            row_seeds: "Seeds",
+            row_from_fuzzer: "From fuzzer",
+            row_minimized: "Minimized",
+            col_index: "#",
+            col_severity: "Severity",
+            col_location: "Location",
+            bullet_kind: "Kind",
+            bullet_stack_signature: "Stack signature",
+            bullet_input: "Input",
+            bullet_casr_severity: "CASR severity",
+            bullet_crash_line: "Crash line",
+            bullet_cluster: "Cluster",
+            bullet_minimized: "Minimized",
+            bug_report_heading: "Bug report",
+            reproduction: "Reproduction:",
+            root_cause: "Root cause:",
+            suggested_fix: "Suggested fix:",
+            casr_exploitable: "Exploitable",
+            casr_probably_exploitable: "Probably exploitable",
+            casr_not_exploitable: "Not exploitable",
+            casr_undefined: "Undefined",
+            generated_by: "Generated by oxfuzz",
+        }
+    }
+
+    /// Resolve the label set for `language`.
+    #[must_use]
+    pub const fn for_language(language: ReportLanguage) -> Self {
+        match language {
+            ReportLanguage::En => Self::english(),
+            ReportLanguage::Zh => Self::chinese(),
+        }
+    }
+}
+
+impl Labels {
+    /// Filled in by Task 3. Returning the English set keeps this task a pure
+    /// refactor with no behavior change.
+    #[must_use]
+    pub const fn chinese() -> Self {
+        Self::english()
+    }
+}
+
 /// Render a campaign report as GitHub-flavored Markdown.
 #[must_use]
-pub fn render_markdown(data: &ReportData) -> String {
+pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
     let mut md = String::with_capacity(4096);
 
-    let _ = writeln!(md, "# Fuzzing Report: `{}`", data.target);
+    let _ = writeln!(md, "# {}: `{}`", labels.title_prefix, data.target);
     let _ = writeln!(md);
     let _ = writeln!(md, "| | |");
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| Project | `{}` |", data.project);
-    let _ = writeln!(md, "| Target | `{}` |", data.target);
-    let _ = writeln!(md, "| Generated | {} |", data.generated_at);
-    let _ = writeln!(md, "| Tool | oxfuzz {} |", data.tool_version);
+    let _ = writeln!(md, "| {} | `{}` |", labels.project, data.project);
+    let _ = writeln!(md, "| {} | `{}` |", labels.target, data.target);
+    let _ = writeln!(md, "| {} | {} |", labels.generated, data.generated_at);
+    let _ = writeln!(md, "| {} | oxfuzz {} |", labels.tool, data.tool_version);
     let _ = writeln!(md);
 
-    render_executive_summary(&mut md, data);
-    render_visual_summary(&mut md, data);
-    render_target(&mut md, data);
-    render_run(&mut md, data);
-    render_coverage(&mut md, data);
-    render_corpus(&mut md, data);
-    render_findings(&mut md, data);
+    render_executive_summary(&mut md, data, labels);
+    render_visual_summary(&mut md, data, labels);
+    render_target(&mut md, data, labels);
+    render_run(&mut md, data, labels);
+    render_coverage(&mut md, data, labels);
+    render_corpus(&mut md, data, labels);
+    render_findings(&mut md, data, labels);
 
     let _ = writeln!(md, "---");
     let _ = writeln!(md);
     let _ = writeln!(
         md,
-        "_Generated by oxfuzz {} on {}._",
-        data.tool_version, data.generated_at
+        "_{} {} on {}._",
+        labels.generated_by, data.tool_version, data.generated_at
     );
     md
 }
 
-fn render_executive_summary(md: &mut String, data: &ReportData) {
-    let _ = writeln!(md, "## Executive Summary");
+fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels) {
+    let _ = writeln!(md, "## {}", labels.executive_summary);
     let _ = writeln!(md);
 
     let total = data.crashes.len();
@@ -159,15 +359,13 @@ fn render_executive_summary(md: &mut String, data: &ReportData) {
         );
     }
     let _ = writeln!(md);
-    let _ = writeln!(md, "- Unique crashes: **{total}**");
+    let _ = writeln!(md, "- {}: **{total}**", labels.unique_crashes);
+    let _ = writeln!(md, "- {}: **{exploitable}**", labels.exploitable_line);
+    let _ = writeln!(md, "- {}: **{cov}**", labels.line_coverage);
     let _ = writeln!(
         md,
-        "- Exploitable / probably exploitable: **{exploitable}**"
-    );
-    let _ = writeln!(md, "- Line coverage: **{cov}**");
-    let _ = writeln!(
-        md,
-        "- Corpus: **{} input(s)**, {}",
+        "- {}: **{} input(s)**, {}",
+        labels.corpus_line,
         data.corpus.count,
         human_bytes(data.corpus.total_bytes)
     );
@@ -176,34 +374,49 @@ fn render_executive_summary(md: &mut String, data: &ReportData) {
 
 /// Visual summary: graphs that render in any Markdown tool (Mermaid charts for
 /// rich viewers, plus Unicode bars that render literally everywhere).
-fn render_visual_summary(md: &mut String, data: &ReportData) {
-    let _ = writeln!(md, "## Visual Summary");
+fn render_visual_summary(md: &mut String, data: &ReportData, labels: &Labels) {
+    let _ = writeln!(md, "## {}", labels.visual_summary);
     let _ = writeln!(md);
 
     // Coverage bars (universal) first, then Mermaid charts (rich viewers).
     if let Some(c) = data.coverage {
-        let _ = writeln!(md, "**Coverage**");
+        let _ = writeln!(md, "**{}**", labels.coverage_bold);
         let _ = writeln!(md);
         let _ = writeln!(md, "```text");
-        let _ = writeln!(md, "Lines     {}", coverage_bar(c.line_percent()));
-        let _ = writeln!(md, "Functions {}", coverage_bar(c.function_percent()));
-        let _ = writeln!(md, "Regions   {}", coverage_bar(c.region_percent()));
+        let _ = writeln!(
+            md,
+            "{:<9} {}",
+            labels.bar_lines,
+            coverage_bar(c.line_percent())
+        );
+        let _ = writeln!(
+            md,
+            "{:<9} {}",
+            labels.bar_functions,
+            coverage_bar(c.function_percent())
+        );
+        let _ = writeln!(
+            md,
+            "{:<9} {}",
+            labels.bar_regions,
+            coverage_bar(c.region_percent())
+        );
         let _ = writeln!(md, "```");
         let _ = writeln!(md);
-        let _ = writeln!(md, "{}", coverage_mermaid(c));
+        let _ = writeln!(md, "{}", coverage_mermaid(c, labels));
         let _ = writeln!(md);
     }
 
     // Severity distribution pie (only meaningful with crashes).
     if !data.crashes.is_empty() {
-        let _ = writeln!(md, "{}", severity_pie_mermaid(&data.crashes));
+        let _ = writeln!(md, "{}", severity_pie_mermaid(&data.crashes, labels));
         let _ = writeln!(md);
-        let _ = writeln!(md, "{}", kind_pie_mermaid(&data.crashes));
+        let _ = writeln!(md, "{}", kind_pie_mermaid(&data.crashes, labels));
         let _ = writeln!(md);
     }
 
     if data.coverage.is_none() && data.crashes.is_empty() {
-        let _ = writeln!(md, "_No coverage or crash data yet to visualize._");
+        let _ = writeln!(md, "_{}_", labels.no_visual_data);
         let _ = writeln!(md);
     }
 }
@@ -219,15 +432,20 @@ fn coverage_bar(percent: f64) -> String {
 }
 
 /// A Mermaid bar chart of coverage percentages.
-fn coverage_mermaid(c: CoverageSummary) -> String {
+fn coverage_mermaid(c: CoverageSummary, labels: &Labels) -> String {
     format!(
         "```mermaid\n\
          xychart-beta\n\
-         \x20   title \"Coverage (%)\"\n\
-         \x20   x-axis [Lines, Functions, Regions]\n\
-         \x20   y-axis \"Percent covered\" 0 --> 100\n\
+         \x20   title \"{}\"\n\
+         \x20   x-axis [{}, {}, {}]\n\
+         \x20   y-axis \"{}\" 0 --> 100\n\
          \x20   bar [{:.1}, {:.1}, {:.1}]\n\
          ```",
+        labels.chart_coverage_title,
+        labels.bar_lines,
+        labels.bar_functions,
+        labels.bar_regions,
+        labels.chart_percent_covered,
         c.line_percent(),
         c.function_percent(),
         c.region_percent()
@@ -235,7 +453,7 @@ fn coverage_mermaid(c: CoverageSummary) -> String {
 }
 
 /// A Mermaid pie chart of crash exploitability (CASR severity).
-fn severity_pie_mermaid(crashes: &[Crash]) -> String {
+fn severity_pie_mermaid(crashes: &[Crash], labels: &Labels) -> String {
     let mut exploitable = 0;
     let mut probably = 0;
     let mut not_exploitable = 0;
@@ -248,12 +466,15 @@ fn severity_pie_mermaid(crashes: &[Crash]) -> String {
             _ => undefined += 1,
         }
     }
-    let mut out = String::from("```mermaid\npie showData\n    title Crash severity\n");
+    let mut out = format!(
+        "```mermaid\npie showData\n    title {}\n",
+        labels.chart_crash_severity
+    );
     for (label, n) in [
-        ("Exploitable", exploitable),
-        ("Probably exploitable", probably),
-        ("Not exploitable", not_exploitable),
-        ("Undefined", undefined),
+        (labels.casr_exploitable, exploitable),
+        (labels.casr_probably_exploitable, probably),
+        (labels.casr_not_exploitable, not_exploitable),
+        (labels.casr_undefined, undefined),
     ] {
         if n > 0 {
             let _ = writeln!(out, "    \"{label}\" : {n}");
@@ -264,12 +485,15 @@ fn severity_pie_mermaid(crashes: &[Crash]) -> String {
 }
 
 /// A Mermaid pie chart of crash kinds (ASan/UBSan/SEGV/...).
-fn kind_pie_mermaid(crashes: &[Crash]) -> String {
+fn kind_pie_mermaid(crashes: &[Crash], labels: &Labels) -> String {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for c in crashes {
         *counts.entry(format!("{:?}", c.kind)).or_default() += 1;
     }
-    let mut out = String::from("```mermaid\npie showData\n    title Crash kinds\n");
+    let mut out = format!(
+        "```mermaid\npie showData\n    title {}\n",
+        labels.chart_crash_kinds
+    );
     for (label, n) in counts {
         let _ = writeln!(out, "    \"{label}\" : {n}");
     }
@@ -277,42 +501,47 @@ fn kind_pie_mermaid(crashes: &[Crash]) -> String {
     out
 }
 
-fn render_target(md: &mut String, data: &ReportData) {
-    let _ = writeln!(md, "## Target");
+fn render_target(md: &mut String, data: &ReportData, labels: &Labels) {
+    let _ = writeln!(md, "## {}", labels.target_section);
     let _ = writeln!(md);
     let Some(c) = &data.candidate else {
-        let _ = writeln!(md, "_Target metadata was not available (not discovered)._");
+        let _ = writeln!(md, "_{}_", labels.no_target_metadata);
         let _ = writeln!(md);
         return;
     };
-    let _ = writeln!(md, "| Property | Value |");
+    let _ = writeln!(md, "| {} | {} |", labels.col_property, labels.col_value);
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| Symbol | `{}` |", c.symbol);
-    let _ = writeln!(md, "| Kind | {:?} |", c.kind);
-    let _ = writeln!(md, "| Language | {:?} |", c.language);
+    let _ = writeln!(md, "| {} | `{}` |", labels.row_symbol, c.symbol);
+    let _ = writeln!(md, "| {} | {:?} |", labels.row_kind, c.kind);
+    let _ = writeln!(md, "| {} | {:?} |", labels.row_language, c.language);
     let _ = writeln!(
         md,
-        "| Location | `{}:{}:{}` |",
+        "| {} | `{}:{}:{}` |",
+        labels.col_location,
         c.location.file.display(),
         c.location.line,
         c.location.col
     );
     if let Some(sig) = &c.signature {
-        let _ = writeln!(md, "| Signature | `{sig}` |");
+        let _ = writeln!(md, "| {} | `{sig}` |", labels.row_signature);
     }
-    let _ = writeln!(md, "| Input surface | {:?} |", c.input_surface);
-    let _ = writeln!(md, "| Complexity | {} |", c.complexity);
     let _ = writeln!(
         md,
-        "| Accumulated complexity | {} |",
-        c.accumulated_complexity
+        "| {} | {:?} |",
+        labels.row_input_surface, c.input_surface
+    );
+    let _ = writeln!(md, "| {} | {} |", labels.row_complexity, c.complexity);
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_accumulated_complexity, c.accumulated_complexity
     );
     let _ = writeln!(
         md,
         "| Reachable functions | {} |",
         c.reachable_functions.len()
     );
-    let _ = writeln!(md, "| Fit score | {:.2} |", c.fit_score);
+    let _ = writeln!(md, "| {} | {:.2} |", labels.row_fit_score, c.fit_score);
     let _ = writeln!(md);
     if !c.rationale.trim().is_empty() {
         let _ = writeln!(md, "> {}", c.rationale.trim());
@@ -320,36 +549,41 @@ fn render_target(md: &mut String, data: &ReportData) {
     }
 }
 
-fn render_run(md: &mut String, data: &ReportData) {
-    let _ = writeln!(md, "## Run");
+fn render_run(md: &mut String, data: &ReportData, labels: &Labels) {
+    let _ = writeln!(md, "## {}", labels.run_section);
     let _ = writeln!(md);
     let Some(r) = &data.run else {
-        let _ = writeln!(md, "_No run has been recorded for this project._");
+        let _ = writeln!(md, "_{}_", labels.no_run_recorded);
         let _ = writeln!(md);
         return;
     };
-    let _ = writeln!(md, "| Property | Value |");
+    let _ = writeln!(md, "| {} | {} |", labels.col_property, labels.col_value);
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| Engine | {:?} |", r.engine);
-    let _ = writeln!(md, "| Status | {:?} |", r.status);
-    let _ = writeln!(md, "| Started | {} |", r.started_at.to_rfc3339());
+    let _ = writeln!(md, "| {} | {:?} |", labels.row_engine, r.engine);
+    let _ = writeln!(md, "| {} | {:?} |", labels.row_status, r.status);
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_started,
+        r.started_at.to_rfc3339()
+    );
     if let Some(ended) = r.ended_at {
-        let _ = writeln!(md, "| Ended | {} |", ended.to_rfc3339());
+        let _ = writeln!(md, "| {} | {} |", labels.row_ended, ended.to_rfc3339());
         let secs = (ended - r.started_at).num_seconds().max(0);
-        let _ = writeln!(md, "| Duration | {} |", human_duration(secs));
+        let _ = writeln!(md, "| {} | {} |", labels.row_duration, human_duration(secs));
     }
     if let Some(cfg) = &r.config {
-        let _ = writeln!(md, "| Sanitizer | {:?} |", cfg.sanitizer);
+        let _ = writeln!(md, "| {} | {:?} |", labels.row_sanitizer, cfg.sanitizer);
         if let Some(d) = cfg.duration {
             let budget = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
-            let _ = writeln!(md, "| Budget | {} |", human_duration(budget));
+            let _ = writeln!(md, "| {} | {} |", labels.row_budget, human_duration(budget));
         }
     }
     let _ = writeln!(md);
 }
 
-fn render_coverage(md: &mut String, data: &ReportData) {
-    let _ = writeln!(md, "## Coverage");
+fn render_coverage(md: &mut String, data: &ReportData, labels: &Labels) {
+    let _ = writeln!(md, "## {}", labels.coverage_section);
     let _ = writeln!(md);
     let Some(c) = data.coverage else {
         let _ = writeln!(
@@ -359,25 +593,32 @@ fn render_coverage(md: &mut String, data: &ReportData) {
         let _ = writeln!(md);
         return;
     };
-    let _ = writeln!(md, "| Metric | Covered | Total | Percent |");
+    let _ = writeln!(
+        md,
+        "| {} | {} | {} | {} |",
+        labels.col_metric, labels.col_covered, labels.col_total, labels.col_percent
+    );
     let _ = writeln!(md, "|---|---:|---:|---:|");
     let _ = writeln!(
         md,
-        "| Lines | {} | {} | {:.1}% |",
+        "| {} | {} | {} | {:.1}% |",
+        labels.bar_lines,
         c.lines_covered,
         c.lines_total,
         c.line_percent()
     );
     let _ = writeln!(
         md,
-        "| Functions | {} | {} | {:.1}% |",
+        "| {} | {} | {} | {:.1}% |",
+        labels.bar_functions,
         c.functions_covered,
         c.functions_total,
         c.function_percent()
     );
     let _ = writeln!(
         md,
-        "| Regions | {} | {} | {:.1}% |",
+        "| {} | {} | {} | {:.1}% |",
+        labels.bar_regions,
         c.regions_covered,
         c.regions_total,
         c.region_percent()
@@ -391,17 +632,22 @@ fn render_coverage(md: &mut String, data: &ReportData) {
     let _ = writeln!(md);
 }
 
-fn render_corpus(md: &mut String, data: &ReportData) {
+fn render_corpus(md: &mut String, data: &ReportData, labels: &Labels) {
     let s = &data.corpus;
-    let _ = writeln!(md, "## Corpus");
+    let _ = writeln!(md, "## {}", labels.corpus_section);
     let _ = writeln!(md);
-    let _ = writeln!(md, "| Property | Value |");
+    let _ = writeln!(md, "| {} | {} |", labels.col_property, labels.col_value);
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| Entries | {} |", s.count);
-    let _ = writeln!(md, "| Total size | {} |", human_bytes(s.total_bytes));
-    let _ = writeln!(md, "| Seeds | {} |", s.seeds);
-    let _ = writeln!(md, "| From fuzzer | {} |", s.from_fuzzer);
-    let _ = writeln!(md, "| Minimized | {} |", s.minimized);
+    let _ = writeln!(md, "| {} | {} |", labels.row_entries, s.count);
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.row_total_size,
+        human_bytes(s.total_bytes)
+    );
+    let _ = writeln!(md, "| {} | {} |", labels.row_seeds, s.seeds);
+    let _ = writeln!(md, "| {} | {} |", labels.row_from_fuzzer, s.from_fuzzer);
+    let _ = writeln!(md, "| {} | {} |", labels.row_minimized, s.minimized);
     let _ = writeln!(md);
 }
 
@@ -418,8 +664,8 @@ fn escape_inline(value: &str) -> String {
         .replace('|', "\\|")
 }
 
-fn render_findings(md: &mut String, data: &ReportData) {
-    let _ = writeln!(md, "## Findings");
+fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
+    let _ = writeln!(md, "## {}", labels.findings_section);
     let _ = writeln!(md);
     if data.crashes.is_empty() {
         let _ = writeln!(md, "No crashes were found. There is nothing to triage.");
@@ -428,13 +674,21 @@ fn render_findings(md: &mut String, data: &ReportData) {
     }
 
     // Summary table.
-    let _ = writeln!(md, "| # | Kind | Severity | Location | Signature |");
+    let _ = writeln!(
+        md,
+        "| {} | {} | {} | {} | {} |",
+        labels.col_index,
+        labels.bullet_kind,
+        labels.col_severity,
+        labels.col_location,
+        labels.row_signature
+    );
     let _ = writeln!(md, "|---:|---|---|---|---|");
     for (i, c) in data.crashes.iter().enumerate() {
-        let severity = c
-            .casr
-            .as_ref()
-            .map_or_else(|| "Undefined".to_owned(), |r| format!("{:?}", r.severity));
+        let severity = c.casr.as_ref().map_or_else(
+            || labels.casr_undefined.to_owned(),
+            |r| format!("{:?}", r.severity),
+        );
         let location = c
             .casr
             .as_ref()
@@ -455,39 +709,54 @@ fn render_findings(md: &mut String, data: &ReportData) {
 
     // Per-crash detail.
     for (i, c) in data.crashes.iter().enumerate() {
-        render_crash_detail(md, i + 1, c);
+        render_crash_detail(md, i + 1, c, labels);
     }
 }
 
-fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
+fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     let title = c
         .bug_report
         .as_ref()
         .map(|b| b.title.clone())
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| c.summary.clone());
-    let _ = writeln!(md, "### Finding {n}: {}", escape_inline(&title));
-    let _ = writeln!(md);
-    let _ = writeln!(md, "- Kind: `{:?}`", c.kind);
-    let _ = writeln!(md, "- Stack signature: `{}`", c.stack_signature);
-    let _ = writeln!(md, "- Input: `{}`", c.input_path.display());
     let _ = writeln!(
         md,
-        "- Minimized: {}",
+        "### {} {n}: {}",
+        labels.finding_prefix,
+        escape_inline(&title)
+    );
+    let _ = writeln!(md);
+    let _ = writeln!(md, "- {}: `{:?}`", labels.bullet_kind, c.kind);
+    let _ = writeln!(
+        md,
+        "- {}: `{}`",
+        labels.bullet_stack_signature, c.stack_signature
+    );
+    let _ = writeln!(
+        md,
+        "- {}: `{}`",
+        labels.bullet_input,
+        c.input_path.display()
+    );
+    let _ = writeln!(
+        md,
+        "- {}: {}",
+        labels.bullet_minimized,
         if c.minimized { "yes" } else { "no" }
     );
 
     if let Some(casr) = &c.casr {
         let _ = writeln!(
             md,
-            "- CASR severity: **{:?}** ({})",
-            casr.severity, casr.severity_short
+            "- {}: **{:?}** ({})",
+            labels.bullet_casr_severity, casr.severity, casr.severity_short
         );
         if !casr.crashline.is_empty() {
-            let _ = writeln!(md, "- Crash line: `{}`", casr.crashline);
+            let _ = writeln!(md, "- {}: `{}`", labels.bullet_crash_line, casr.crashline);
         }
         if let Some(cluster) = casr.cluster {
-            let _ = writeln!(md, "- Cluster: {cluster}");
+            let _ = writeln!(md, "- {}: {cluster}", labels.bullet_cluster);
         }
         if !casr.stack.is_empty() {
             let _ = writeln!(md);
@@ -505,8 +774,8 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
         let _ = writeln!(md);
         let _ = writeln!(
             md,
-            "**Bug report** (severity guess: {})",
-            report.severity_guess
+            "**{}** (severity guess: {})",
+            labels.bug_report_heading, report.severity_guess
         );
         let _ = writeln!(md);
         if !report.summary.trim().is_empty() {
@@ -514,7 +783,12 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
             let _ = writeln!(md);
         }
         if !report.repro_steps.trim().is_empty() {
-            let _ = writeln!(md, "_Reproduction:_ {}", report.repro_steps.trim());
+            let _ = writeln!(
+                md,
+                "_{}_ {}",
+                labels.reproduction,
+                report.repro_steps.trim()
+            );
             let _ = writeln!(md);
         }
         if let Some(root_cause) = report
@@ -522,7 +796,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
-            let _ = writeln!(md, "_Root cause:_ {}", root_cause.trim());
+            let _ = writeln!(md, "_{}_ {}", labels.root_cause, root_cause.trim());
             let _ = writeln!(md);
         }
         if let Some(fix) = report
@@ -530,7 +804,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash) {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
-            let _ = writeln!(md, "_Suggested fix:_");
+            let _ = writeln!(md, "_{}_", labels.suggested_fix);
             let _ = writeln!(md, "```diff");
             let _ = writeln!(md, "{}", fix.trim());
             let _ = writeln!(md, "```");
@@ -600,7 +874,12 @@ pub fn ensure_graphs(ai_markdown: &str, data: &ReportData) -> String {
     let mut out = ai_markdown.trim_end().to_owned();
     if !out.contains("```mermaid") {
         let mut visual = String::new();
-        render_visual_summary(&mut visual, data);
+        // No language reaches this fallback path yet: report_system_prompt and
+        // report_user_prompt (localized in a later task) are the only narrative
+        // surfaces that take a language today, and ensure_graphs only re-injects
+        // graphs the model dropped, so English keeps this deterministic and
+        // matching the AI composition's current (English-only) footer below.
+        render_visual_summary(&mut visual, data, &Labels::english());
         if visual.contains("```mermaid") || visual.contains('█') {
             out.push_str("\n\n");
             out.push_str(&visual);
