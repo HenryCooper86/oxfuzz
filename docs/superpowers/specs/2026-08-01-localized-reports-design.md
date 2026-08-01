@@ -68,8 +68,9 @@ Report composition has two layers, and both are English today:
 - `hf_service::report::render_markdown` builds a deterministic fact sheet.
   Its structure is hardcoded English: `## Executive Summary`, `## Target`,
   `## Run`, `## Coverage`, `## Corpus`, `## Findings`, `### Finding {n}`, plus
-  Markdown tables and pre-rendered Mermaid graphs. Roughly 81 distinct
-  user-facing literals.
+  Markdown tables and pre-rendered Mermaid graphs. 101 distinct user-facing
+  literals, as shipped -- the estimate while designing was roughly 81, and
+  implementation found the rest.
 - `compose_ai_report` in `crates/hf-service/src/container/export.rs` feeds that
   fact sheet to the provider pool under `report_system_prompt` and
   `report_user_prompt`, which instruct the model to invent nothing and to
@@ -146,9 +147,12 @@ impl Labels {
 }
 ```
 
-The field list above is abbreviated for readability. The implementation plan
-enumerates every field, derived by extracting the literals from the current
-`render_markdown`; the count is roughly 81 and the plan pins the exact set.
+The field list above is abbreviated for readability. The authoritative list is
+`Labels` in `crates/hf-service/src/report.rs` -- 101 fields as shipped. The
+implementation plan enumerates a smaller set, because six fix rounds grew the
+struct after the plan was written and the plan was not kept in step. Read the
+struct, not the plan, for the current field set; the compiler enforces that
+`english()` and `chinese()` both cover it in full.
 
 A struct rather than a key-to-string map is deliberate. A map's failure mode is
 a missing or misspelled key rendering silently as the key itself, which no gate
@@ -204,8 +208,14 @@ setting, and is recorded here rather than discovered later.
 
 No new runtime failure modes.
 
-An unrecognized language identifier is rejected as
-`ClassifiedError::Validation` before any composition work begins.
+An unrecognized language identifier is rejected before any composition work
+begins, but the mechanism differs by surface. The CLI and both desktop commands
+parse the string through `FromStr` and surface
+`ClassifiedError::Validation` naming the accepted values. The REST route types
+the field as `ReportLanguage` directly, so serde rejects it during body
+deserialization and axum answers 422 -- `FromStr` is never reached. Serde's
+message also names the accepted variants, so the user-visible outcome is
+equivalent.
 
 A model that ignores the language instruction cannot be detected cheaply, and
 this design does not attempt to. Because the scaffolding is translated in Rust,
