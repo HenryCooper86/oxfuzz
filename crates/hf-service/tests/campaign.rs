@@ -196,7 +196,7 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
 
     let reporting = ServiceContainer::new(Arc::new(WritingRuntime), None).with_store(store);
     let report = reporting
-        .generate_report(&project, "parse_entry")
+        .generate_report(&project, "parse_entry", hf_service::ReportLanguage::En)
         .await
         .expect("deterministic campaign report");
     assert!(report.starts_with("# Fuzzing Report: `parse_entry`"));
@@ -205,7 +205,13 @@ async fn run_campaign_runs_full_pipeline_and_picks_a_target() {
 
     let report_path = dir.path().join("campaign-report.md");
     reporting
-        .export_report(&project, "parse_entry", "markdown", &report_path)
+        .export_report(
+            &project,
+            "parse_entry",
+            "markdown",
+            &report_path,
+            hf_service::ReportLanguage::En,
+        )
         .await
         .expect("release report export");
     let exported_report = std::fs::read_to_string(report_path).unwrap();

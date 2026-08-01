@@ -1823,14 +1823,24 @@ async fn sarif(State(state): State<AppState>, Json(req): Json<TriageRequest>) ->
     Ok(Json(doc))
 }
 
+/// The report request body: a triage request plus an optional language. Omitting
+/// the field yields English, so existing clients are unaffected.
+#[derive(Debug, Deserialize)]
+struct ReportRequest {
+    project: String,
+    target: String,
+    #[serde(default)]
+    language: hf_service::ReportLanguage,
+}
+
 async fn report(
     State(state): State<AppState>,
-    Json(req): Json<TriageRequest>,
+    Json(req): Json<ReportRequest>,
 ) -> ApiResult<String> {
     let project = approved_project(&state, std::path::Path::new(&req.project))?;
     let markdown = state
         .container
-        .generate_report(&project, &req.target)
+        .generate_report(&project, &req.target, req.language)
         .await
         .map_err(classified_api_error)?;
     Ok(Json(markdown))
@@ -3060,7 +3070,29 @@ fn parse_engine(s: &str) -> Result<EngineKind, String> {
 mod request_tests {
     use axum::http::StatusCode;
 
-    use super::{classified_api_error, parse_role, public_provider_value, SetProvidersRequest};
+    use super::{
+        classified_api_error, parse_role, public_provider_value, ReportRequest, SetProvidersRequest,
+    };
+
+    #[test]
+    fn report_request_language_is_optional_and_defaults_to_english() {
+        let omitted: ReportRequest = serde_json::from_str(r#"{"project":"/p","target":"t"}"#)
+            .expect("language must stay optional for existing clients");
+        assert_eq!(omitted.language, hf_service::ReportLanguage::En);
+
+        let chinese: ReportRequest =
+            serde_json::from_str(r#"{"project":"/p","target":"t","language":"zh"}"#)
+                .expect("the wire value the desktop locale already uses");
+        assert_eq!(chinese.language, hf_service::ReportLanguage::Zh);
+
+        assert!(
+            serde_json::from_str::<ReportRequest>(
+                r#"{"project":"/p","target":"t","language":"fr"}"#
+            )
+            .is_err(),
+            "an unsupported language is rejected, not silently rendered as English"
+        );
+    }
 
     #[test]
     fn transcript_roles_keep_tool_turns_instead_of_downgrading_to_user() {

@@ -1342,7 +1342,7 @@ async fn generate_report_produces_a_titled_markdown_doc() {
     // headings present, missing data rendered as "not available" sections.
     let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
     let md = container
-        .generate_report(&project, "some_target")
+        .generate_report(&project, "some_target", hf_service::ReportLanguage::En)
         .await
         .unwrap();
 
@@ -1353,6 +1353,274 @@ async fn generate_report_produces_a_titled_markdown_doc() {
         md.contains("No crashes were found"),
         "honest empty findings"
     );
+}
+
+#[tokio::test]
+async fn generate_report_renders_the_fact_sheet_in_the_requested_language() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("fact_sheet_language_proj");
+    std::fs::create_dir_all(&project).unwrap();
+
+    // No provider pool, so this is the deterministic fact-sheet path -- the one
+    // a user without an LLM configured always gets.
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+
+    let zh = container
+        .generate_report(&project, "some_target", hf_service::ReportLanguage::Zh)
+        .await
+        .unwrap();
+
+    assert!(
+        zh.starts_with("# 模糊测试报告"),
+        "the no-provider fallback must honor the requested language: {zh}"
+    );
+    assert!(zh.contains("## 发现项"));
+    // The target symbol is a technical token and is never translated.
+    assert!(zh.contains("some_target"));
+}
+
+/// A pool that always composes the same narrative, carrying no Mermaid block --
+/// exactly the "the model dropped the graphs" case `ensure_graphs` repairs.
+struct NarrativePool;
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for NarrativePool {
+    async fn chat_completion(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        Ok(hf_test_utils::fixtures::make_chat_response(
+            "# 模糊测试报告\n\n本次测试活动未发现崩溃。\n",
+        ))
+    }
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "unused".to_owned(),
+        })
+    }
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn ai_composed_report_stamps_the_footer_in_the_requested_language() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("composed_language_proj");
+    std::fs::create_dir_all(&project).unwrap();
+
+    // With a pool configured the narrative comes from the model and the
+    // fact-sheet is not returned, so the only labels in the output are the ones
+    // `ensure_graphs` stamps inside `compose_ai_report`.
+    let container = ServiceContainer::new(
+        Arc::new(hf_runtime::StubRuntime),
+        Some(Arc::new(NarrativePool)),
+    );
+
+    let zh = container
+        .generate_report(&project, "some_target", hf_service::ReportLanguage::Zh)
+        .await
+        .unwrap();
+
+    assert!(
+        !zh.contains("由 oxfuzz 生成"),
+        "this must exercise the composed path, not the fact-sheet fallback: {zh}"
+    );
+    assert!(
+        zh.contains("由 oxfuzz 撰写"),
+        "the composed report's footer must match its language: {zh}"
+    );
+    assert!(
+        !zh.contains("Composed by oxfuzz"),
+        "an English footer means compose_ai_report still hardcodes the label set"
+    );
+}
+
+/// A pool shaped like [`NarrativePool`] that also records the [`ChatRequest`]
+/// it was handed, so a test can assert what the model was actually asked for.
+///
+/// `NarrativePool` cannot cover this: it ignores its request entirely, so a
+/// test built on it pins `ensure_graphs`' labels rather than the prompts, and
+/// stays green with the prompt builders' `language` argument severed.
+struct CapturingPool {
+    captured: std::sync::Mutex<Vec<hf_core::types::Message>>,
+}
+
+impl CapturingPool {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            captured: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The recorded content for one role, or `None` when the pool was never
+    /// called (so a silent no-provider fallback cannot masquerade as a pass).
+    fn message(&self, role: hf_core::types::Role) -> Option<String> {
+        self.captured
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.role == role)
+            .map(|m| m.content.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl hf_core::provider::ProviderPool for CapturingPool {
+    async fn chat_completion(
+        &self,
+        request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatResponse, hf_core::provider::ProviderError> {
+        self.captured.lock().unwrap().clone_from(&request.messages);
+        Ok(hf_test_utils::fixtures::make_chat_response("# Report\n"))
+    }
+    async fn chat_completion_stream(
+        &self,
+        _request: &hf_core::provider::ChatRequest,
+        _route: &hf_core::provider::RouteRequest,
+    ) -> Result<hf_core::provider::ChatStreamResponse, hf_core::provider::ProviderError> {
+        Err(hf_core::provider::ProviderError::Other {
+            message: "unused".to_owned(),
+        })
+    }
+    fn report_error(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+        _error: &hf_core::provider::ProviderError,
+    ) {
+    }
+    async fn provider_statuses(&self) -> Vec<hf_core::provider::ProviderStatus> {
+        Vec::new()
+    }
+    async fn freeze(&self, _provider_id: &hf_core::types::ProviderId, _reason: String) {}
+    async fn thaw(
+        &self,
+        _provider_id: &hf_core::types::ProviderId,
+    ) -> Result<(), hf_core::provider::ProviderError> {
+        Ok(())
+    }
+}
+
+/// Drive `generate_report` in `language` and return the (system, user) prompts
+/// the model was actually handed.
+async fn captured_report_prompts(
+    dir: &std::path::Path,
+    language: hf_service::ReportLanguage,
+) -> (String, String) {
+    let project = dir.join(format!("prompt_language_{language:?}"));
+    std::fs::create_dir_all(&project).unwrap();
+    let pool = CapturingPool::new();
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), Some(pool.clone()));
+    container
+        .generate_report(&project, "parse_header", language)
+        .await
+        .unwrap();
+    (
+        pool.message(hf_core::types::Role::System)
+            .expect("the provider pool must have been asked to compose the report"),
+        pool.message(hf_core::types::Role::User)
+            .expect("the provider pool must have been asked to compose the report"),
+    )
+}
+
+#[tokio::test]
+async fn generate_report_asks_the_model_for_the_requested_language() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+
+    let (zh_system, zh_user) =
+        captured_report_prompts(dir.path(), hf_service::ReportLanguage::Zh).await;
+
+    // The system prompt must set the output language for the persona.
+    assert!(
+        zh_system.contains("You write the report in Simplified Chinese"),
+        "system prompt does not ask for Chinese: {zh_system}"
+    );
+    // The user prompt must both name the language and carry the
+    // token-preservation rule, asserted as one contiguous phrase that exists
+    // only in the Zh block.
+    assert!(
+        zh_user.contains("Write the entire report in Simplified Chinese"),
+        "user prompt does not ask for Chinese: {zh_user}"
+    );
+    assert!(
+        zh_user.contains(
+            "never translated or transliterated: file paths, stack frames, symbol and \
+             function names, crash signatures, engine names, sanitizer names, CWE \
+             identifiers, and all figures."
+        ),
+        "user prompt does not pin the untranslatable tokens: {zh_user}"
+    );
+
+    let (en_system, en_user) =
+        captured_report_prompts(dir.path(), hf_service::ReportLanguage::En).await;
+
+    // And English carries neither -- without this, a container that hardcoded
+    // `Zh` at both call sites would pass the assertions above.
+    assert!(
+        !en_system.contains("Simplified Chinese"),
+        "English system prompt leaked a language instruction: {en_system}"
+    );
+    assert!(
+        !en_user.contains("Simplified Chinese"),
+        "English user prompt leaked a language instruction: {en_user}"
+    );
+    assert!(
+        !en_user.contains("transliterated"),
+        "English user prompt leaked the Zh token-preservation rule: {en_user}"
+    );
+}
+
+#[tokio::test]
+async fn export_report_titles_and_tags_the_document_in_the_requested_language() {
+    isolate_workspace();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("export_language_proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let out = dir.path().join("report.html");
+
+    let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
+    container
+        .export_report(
+            &project,
+            "parse_header",
+            "html",
+            &out,
+            hf_service::ReportLanguage::Zh,
+        )
+        .await
+        .unwrap();
+
+    let html = std::fs::read_to_string(&out).unwrap();
+    // The document title is built outside `Labels`-driven body rendering, so
+    // the body being Chinese does not prove the title is.
+    assert!(
+        html.contains("<title>oxfuzz 报告 — parse_header</title>"),
+        "the exported document title must use the report's language: {html}"
+    );
+    // And the language attribute assistive technology reads.
+    assert!(html.contains("<html lang=\"zh-CN\">"));
 }
 
 #[tokio::test]
@@ -1418,7 +1686,7 @@ async fn target_scoped_exports_include_cancelled_run_and_ignore_newer_other_targ
     store.upsert_crash(&crash_b).await.unwrap();
 
     let report = container
-        .generate_report(&project, "parse_a")
+        .generate_report(&project, "parse_a", hf_service::ReportLanguage::En)
         .await
         .unwrap();
     assert!(report.contains("TARGET_A crash summary"));
