@@ -12,9 +12,39 @@ use super::guards::StagingDirectoryGuard;
 #[cfg(feature = "semgrep-enrichment")]
 use super::project_identity::{project_lookup_identity, stored_project_matches};
 use super::workspace::{document_staging_dir, prepare_configured_workspace_root};
-use super::{MemorySnapshot, ProviderSnapshot, ServiceContainer, SystemSnapshot};
+use super::{
+    AgentInstanceSnapshot, AgentPoolSnapshot, MemorySnapshot, ProviderSnapshot, ServiceContainer,
+    SystemSnapshot,
+};
 
 impl ServiceContainer {
+    /// A snapshot of the agent turns currently executing.
+    fn active_agent_pool(&self) -> AgentPoolSnapshot {
+        let labels = self
+            .active_agents
+            .lock()
+            .map(|a| a.clone())
+            .unwrap_or_default();
+        let instances: Vec<AgentInstanceSnapshot> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| AgentInstanceSnapshot {
+                instance_id: format!("turn-{i}"),
+                agent_name: label.clone(),
+                state: "running".to_owned(),
+                elapsed_ms: 0,
+                iterations: 0,
+                tokens_used: 0,
+            })
+            .collect();
+        AgentPoolSnapshot {
+            active_instances: instances.len(),
+            available_slots: 0,
+            total_instances: instances.len(),
+            instances,
+        }
+    }
+
     /// Aggregated LLM cost/usage recorded this session.
     pub async fn cost_summary(
         &self,
