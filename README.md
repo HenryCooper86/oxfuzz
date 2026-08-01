@@ -376,7 +376,7 @@ Binary Tool integration is outside this release's scope.
 | `agent <project> "<message>"` | Drive the conversational agent from the terminal. |
 | `schedule list\|create\|history\|recovery list\|recovery acknowledge <occurrence-id>\|... ` | Manage scheduled headless fuzzing campaigns and acknowledge an ambiguous one-time occurrence as cancelled. |
 | `session list\|history\|new\|... ` | Manage chat sessions and their checkpoints. |
-| `report <project> --target <sym> --out report.md` | Render a full Markdown campaign report. |
+| `report <project> --target <sym> --out report.md [--lang en\|zh]` | Render a full Markdown campaign report. `--lang zh` writes it in Simplified Chinese; file paths, stack frames, symbol names, crash signatures, engine and sanitizer names and all figures stay verbatim. |
 | `export [project] --output evidence.json` | Export a reproducibility bundle containing scoped targets, runs, harnesses, crashes, corpus, and filesystem evidence. |
 | `serve --host 127.0.0.1 --port 8081` | Start the REST + SSE API (`hf-web`). Non-loopback hosts require `HF_WEB_TOKEN`. |
 | `tui <project>` | Browse the target inventory and copy accurate next-step commands. |
@@ -853,7 +853,7 @@ oxfuzz triage /path/to/project --target parse_value
 | `agent <project> "<message>"` | 从终端驱动对话式代理。 |
 | `schedule list\|create\|history\|recovery list\|recovery acknowledge <occurrence-id>\|... ` | 管理计划化的无头模糊 campaign，并将含糊的一次性 occurrence 确认记录为已取消。 |
 | `session list\|history\|new\|... ` | 管理聊天会话及其检查点。 |
-| `report <project> --target <sym> --out report.md` | 渲染一份完整的 Markdown campaign 报告。 |
+| `report <project> --target <sym> --out report.md [--lang en\|zh]` | 渲染一份完整的 Markdown campaign 报告。`--lang zh` 以简体中文输出；文件路径、堆栈帧、符号名、崩溃签名、引擎与消毒器名称以及所有数值均保持原样。 |
 | `export [project] --output evidence.json` | 导出一个可复现的证据包，包含限定范围的目标、运行、测试桩、崩溃、语料库与文件系统证据。 |
 | `serve --host 127.0.0.1 --port 8081` | 启动 REST + SSE API（`hf-web`）。非回环主机需要 `HF_WEB_TOKEN`。 |
 | `tui <project>` | 浏览目标清单并复制准确的下一步命令。 |
