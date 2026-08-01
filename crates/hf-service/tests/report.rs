@@ -156,6 +156,35 @@ fn report_includes_graphs_for_severity_and_coverage() {
     assert!(md.contains('█'), "unicode coverage bar");
 }
 
+/// The `x-axis` line of the coverage `xychart-beta` block, verbatim.
+fn x_axis_line(labels: &Labels) -> String {
+    let md = render_markdown(&populated(), labels);
+    md.lines()
+        .find(|l| l.trim_start().starts_with("x-axis"))
+        .expect("coverage chart x-axis line")
+        .to_owned()
+}
+
+#[test]
+fn coverage_chart_quotes_its_axis_categories_in_both_languages() {
+    // Mermaid's `xychart-beta` lexer accepts a bare ASCII word but rejects bare
+    // CJK ("Lexical error on line 2. Unrecognized text."), verified against the
+    // parser this app bundles (mermaid 11.16.0,
+    // node_modules/mermaid/dist/chunks/mermaid.core/xychartDiagram-*.mjs).
+    // Unquoted categories therefore make the whole Chinese coverage chart fail
+    // to render: the desktop preview falls back to a <pre> of raw source and
+    // GitHub shows a syntax error. Assert the assembled line byte-for-byte in
+    // both languages -- a `contains("行")` would still pass unquoted.
+    assert_eq!(
+        x_axis_line(&Labels::chinese()),
+        "    x-axis [\"行\", \"函数\", \"区域\"]"
+    );
+    assert_eq!(
+        x_axis_line(&Labels::english()),
+        "    x-axis [\"Lines\", \"Functions\", \"Regions\"]"
+    );
+}
+
 #[test]
 fn coverage_bar_is_proportional() {
     // A full report at 60% line coverage should show ~12/20 filled cells.
