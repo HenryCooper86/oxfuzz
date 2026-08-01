@@ -568,6 +568,21 @@ fn casr_severities_are_translated_wherever_they_render() {
 }
 
 #[test]
+fn export_dialog_title_is_translated() {
+    // The desktop save dialog's title is prose the user reads, so it follows
+    // the report's language. Pinned here because the Tauri shell that shows it
+    // cannot assert the rendered string itself.
+    assert_eq!(
+        hf_service::report::export_dialog_title(ReportLanguage::En),
+        "Export fuzzing report"
+    );
+    assert_eq!(
+        hf_service::report::export_dialog_title(ReportLanguage::Zh),
+        "导出模糊测试报告"
+    );
+}
+
+#[test]
 fn language_selects_the_label_set() {
     // The wiring test: for_language must route to the matching constructor.
     let data = populated();
