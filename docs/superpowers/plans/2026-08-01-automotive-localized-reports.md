@@ -511,12 +511,13 @@ in `automotive.rs`, the CLI, the REST handler and the Tauri command. The route
 registration and the command registration carry no value.
 
 **The English `lang` attribute is not a draft-only problem.** Design section 9.1
-has been corrected in place. Short version: `export_markdown` hardcodes
+has been corrected in place. Short version: `export_markdown` hardcoded
 `ReportLanguage::En`, so a directly exported Chinese automotive report -- CLI
-`--output` or desktop export, neither of which is a draft -- is served as
-`<html lang="en">`. The title is correct; the attribute is not. Fixing it is a
-design decision about a shared service method, not a pass-through, so it was
-left for a follow-up rather than made incidentally.
+`--output` or desktop export, neither of which is a draft -- was served as
+`<html lang="en">`. Review round 1 adjudicated this in scope and it is now
+fixed: the language is a parameter, the two composing callers pass what they
+composed in, and `ReportsView` omits it for a stored draft. Stored drafts still
+record no language; that part remains a schema change and stays deferred.
 
 **Two title sites became three.** The brief named the desktop view's two. The
 CLI built a third, `format!("Automotive Fuzzing Campaign Report: {}", ...)`,
@@ -544,3 +545,31 @@ destructure, the compose argument, both desktop title sites, the Chinese
 dictionary entry and the `language` field in `lib/automotive.ts`. The two
 carried-forward tests were checked the same way, `[STATE:]` and `[TRANSCRIPT:]`
 independently.
+
+
+### Round 1 review additions
+
+**Both interpretation prompts could be hardcoded to English with the suite
+green.** The Task 4 mutation pass reverted
+`compose_automotive_report_interpretation(..., language)` as a single unit, so
+the kill came entirely from `validate_ai_interpretation` and the two prompt
+arguments hid behind it. Live, that mutant is this feature's defining failure
+reached from the other side: the model is asked in English for English headings,
+the answer is validated against Chinese ones, every interpretation is discarded
+and the user sees a silent `Fallback`.
+
+Nothing could observe it because the stub pool dropped its request. `ReportPool`
+now records the messages, following `CapturingPool` in `tests/container.rs`, and
+`the_report_asks_the_model_for_the_requested_language` asserts the Chinese arm
+carries the instruction, headings and citation token rule -- and that the English
+arm carries none of them. Each prompt argument was reverted **separately** and
+turns the test red on its own.
+
+**Lesson for future mutation passes on this branch's shape:** mutate one
+argument, not one call. A call with three uses of the same value needs three
+reversions, because the strictest use masks the others.
+
+**Three paths the CLI refactor made testable and left uncovered** are now
+pinned: the `--format requires --output` rejection, `--ai` reaching the service,
+and the emitted document. The command writes to an injected `io::Write` sink,
+without which neither emission is observable at all.
