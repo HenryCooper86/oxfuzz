@@ -62,9 +62,15 @@ npm --prefix crates/hf-gui run build
 npm --prefix crates/hf-gui run lint
 ```
 
-Use `./scripts/tests/gates.sh` for the wider local gate set. GitLab CI remains
-the merge gate and adds locked all-feature checks, release-readiness tests, the
-automotive sidecar, and release CLI verification.
+Use `./scripts/tests/gates.sh` for the full local gate set, or
+`./scripts/tests/gates.sh <gate>` for one of `fmt`, `clippy`, `check`, `test`,
+`doc`, `deny`, `script-tests`, `frontend-test`, `frontend-lint`.
+
+The same gates run in CI, so a green local run predicts a green pipeline.
+`.gitlab-ci.yml` is the merge gate on this remote; `.github/workflows/ci.yml`
+runs the same gates on the public GitHub repository. Both invoke
+`scripts/tests/gates.sh` by gate name rather than restating commands, so the
+three cannot drift apart.
 
 ## Documentation and screenshots
 
