@@ -52,14 +52,14 @@ use guards::{
 use harness_workspace::{
     build_workspace_dictionary, container_input_path, dict_llm_cache, harness_binary_name,
     read_current_harness_id, read_current_harness_source, read_dictionary_source_excerpt,
-    sanitize_target, write_current_harness_id, write_current_harness_source,
+    sanitize_target,
 };
 use hf_core::engine::{EngineKind, FuzzProgress, FuzzRunConfig};
 use hf_core::error::ClassifiedError;
 use hf_core::harness::{Harness, HarnessDraft, HarnessStatus};
 use hf_core::provider::ProviderPool;
 use hf_core::runtime::RuntimeAdapter;
-use hf_core::target::{Sanitizer, TargetCandidate, TargetLanguage};
+use hf_core::target::{TargetCandidate, TargetLanguage};
 use hf_guardrails::{Action, Decision, Guardrails};
 use hf_runtime::{RuntimeConfig, SANDBOX_IMAGE};
 use hf_storage::{AutoRevertEvent, GuardrailDecisionRecord, RunKind, RunRecord, RunStatus, Store};
@@ -1145,37 +1145,6 @@ impl ServiceContainer {
 
     // -- Harness ----------------------------------------------------------
 
-    /// Resolve a target symbol to its discovered candidate id.
-    ///
-    /// Unknown symbols are rejected rather than being attached to the nil UUID.
-    /// Shared by harness compilation and triage so persisted records key off the
-    /// same canonical project and target identity.
-    async fn resolve_target_id(
-        &self,
-        project: &Path,
-        target: &str,
-        lang: TargetLanguage,
-    ) -> Result<Uuid, ClassifiedError> {
-        let project = canonical_project_root(project)?;
-        if let Some(store) = &self.store {
-            let targets = store.list_all_targets().await?;
-            let project_targets: Vec<TargetCandidate> = targets
-                .into_iter()
-                .filter(|candidate| {
-                    stored_project_matches(&candidate.project_root, &project)
-                        && candidate.language == lang
-                })
-                .collect();
-            if let Some(candidate) = select_target_candidate(&project_targets, target)? {
-                return Ok(candidate.id);
-            }
-        }
-        let inventory = self.discover(&project, lang).await?;
-        select_target_candidate(&inventory.candidates, target)?
-            .map(|c| c.id)
-            .ok_or_else(|| ClassifiedError::Validation(format!("target '{target}' not found")))
-    }
-
     /// Resolve a target without assuming that it is C. Persisted discovery is
     /// authoritative; only missing projects are scanned across supported
     /// languages. This prevents run, triage, and corpus records for Rust/C++
@@ -1374,138 +1343,6 @@ impl ServiceContainer {
             .replace_corpus_entries(target_id, &corpus.entries)
             .await
             .map_err(|error| ClassifiedError::Storage(error.to_string()))
-    }
-
-    /// Draft the harness source for a candidate: LLM-authored when a provider is
-    /// configured, otherwise the heuristic template. Never fails -- an LLM error
-    /// degrades to the heuristic draft so generation can proceed.
-    async fn draft_harness_source(
-        &self,
-        project: &Path,
-        candidate: &TargetCandidate,
-        engine: EngineKind,
-    ) -> String {
-        if let Some(pool) = self.provider_pool() {
-            let provider = LlmProviderBridge::new(pool)
-                .with_diagnostics(Arc::clone(&self.diagnostics), "harness_draft");
-            let related = crate::knowledge::harness_related_context(project, candidate);
-            match hf_harness::draft_with_context(candidate, engine, &related, Box::new(provider))
-                .await
-            {
-                Ok(draft) => return draft.source,
-                Err(e) => tracing::warn!(
-                    "LLM harness draft for '{}' failed ({e}); using heuristic draft",
-                    candidate.symbol
-                ),
-            }
-        }
-        heuristic_draft(candidate, engine).source
-    }
-
-    /// Compile `initial_source` in the sandbox, and on a compile failure feed the
-    /// diagnostics back to the LLM for up to `max_repairs` corrective passes.
-    /// Shared by harness generation and coverage-guided refinement.
-    ///
-    /// # Errors
-    /// Returns `ClassifiedError::Harness` if the harness still fails to build
-    /// after `max_repairs` attempts, or an infrastructure error from the sandbox.
-    async fn compile_source_with_repair(
-        &self,
-        candidate: &TargetCandidate,
-        engine: EngineKind,
-        lang: TargetLanguage,
-        workspace: &Path,
-        initial_source: String,
-        max_repairs: usize,
-    ) -> Result<HarnessGenOutcome, ClassifiedError> {
-        let _workspace_operation = self.acquire_workspace_operation().await?;
-        let target = &candidate.symbol;
-        let mut source = initial_source;
-        let mut repairs_used = 0usize;
-        let mut last_diagnostics = String::new();
-
-        loop {
-            let mut build_cmd =
-                hf_harness::build_command(engine, lang, &harness_binary_name(target));
-            build_cmd.output = PathBuf::from(harness_binary_name(target));
-            let harness = Harness {
-                id: Uuid::new_v4(),
-                target_id: candidate.id,
-                engine,
-                source: source.clone(),
-                language: lang,
-                build_cmd,
-                sanitizer: Sanitizer::Address,
-                status: HarnessStatus::Draft,
-                smoke_run: None,
-            };
-            match hf_harness::try_compile(harness, self.runtime.as_ref(), workspace).await? {
-                hf_harness::CompileResult::Ok(compiled) => {
-                    if let Some(store) = &self.store {
-                        store
-                            .upsert_harness(&compiled)
-                            .await
-                            .map_err(|error| ClassifiedError::Storage(error.to_string()))?;
-                    }
-                    write_current_harness_source(workspace, &compiled.source)?;
-                    // Point `harness.active` at the freshly-compiled harness, as
-                    // `harness_compile` does. Without this, a repair/refine that
-                    // rewrites the source leaves the marker on the previous id, so
-                    // `active_harness` later reads a stale id whose source no
-                    // longer matches and hard-errors ("compile it again") even
-                    // though the refined harness built cleanly.
-                    write_current_harness_id(workspace, compiled.id)?;
-                    let binary_name = compiled
-                        .build_cmd
-                        .output
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(target)
-                        .to_string();
-                    return Ok(HarnessGenOutcome {
-                        status: compiled.status,
-                        binary_name,
-                        workspace: workspace.to_path_buf(),
-                        repairs_used,
-                    });
-                }
-                hf_harness::CompileResult::Failed(failure) => {
-                    last_diagnostics = failure.diagnostics();
-                    if repairs_used >= max_repairs {
-                        break;
-                    }
-                    let Some(pool) = self.provider_pool() else {
-                        // No LLM to repair with; the first failure is terminal.
-                        break;
-                    };
-                    let provider = LlmProviderBridge::new(pool)
-                        .with_diagnostics(Arc::clone(&self.diagnostics), "harness_repair");
-                    match hf_harness::repair(
-                        candidate,
-                        engine,
-                        &source,
-                        &last_diagnostics,
-                        Box::new(provider),
-                    )
-                    .await
-                    {
-                        Ok(draft) => {
-                            source = draft.source;
-                            repairs_used += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!("harness repair for '{target}' failed: {e}");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let diag: String = last_diagnostics.chars().take(600).collect();
-        Err(ClassifiedError::Harness(format!(
-            "harness for '{target}' failed to build after {repairs_used} repair attempt(s): {diag}"
-        )))
     }
 
     /// Draft a targeted refined harness in response to a coverage plateau, as a
