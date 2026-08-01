@@ -2869,25 +2869,33 @@ pub async fn list_automotive_operations(
 }
 
 /// Compose the service-owned automotive campaign report without invoking the
-/// sidecar or contacting an interface.
+/// sidecar or contacting an interface. `language` is the caller's UI locale
+/// (`en` / `zh`); omitting it composes in English.
 #[tauri::command]
 pub async fn generate_automotive_report(
     state: tauri::State<'_, crate::state::AppState>,
     project_root: PathBuf,
     include_ai: bool,
+    language: Option<String>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(feature = "automotive-scapy")]
     {
+        let language = match language {
+            Some(value) => value
+                .parse::<hf_service::ReportLanguage>()
+                .map_err(|error| error.to_string())?,
+            None => hf_service::ReportLanguage::default(),
+        };
         let report = state
             .container
-            .generate_automotive_report(&project_root, include_ai)
+            .generate_automotive_report(&project_root, include_ai, language)
             .await
             .map_err(|error| error.to_string())?;
         serde_json::to_value(report).map_err(|error| error.to_string())
     }
     #[cfg(not(feature = "automotive-scapy"))]
     {
-        let _ = (state, project_root, include_ai);
+        let _ = (state, project_root, include_ai, language);
         Err(automotive_feature_unavailable())
     }
 }

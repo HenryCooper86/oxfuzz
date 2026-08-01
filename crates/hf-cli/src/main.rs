@@ -423,6 +423,13 @@ enum AutomotiveOp {
         /// Write the report to a file instead of printing Markdown to stdout.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Report language: en or zh. Defaults to en.
+        ///
+        /// Named `--report-lang` rather than `--lang` because `--lang` already
+        /// means the target's source language on `discover` and `harness`, and
+        /// to match `oxfuzz report`.
+        #[arg(long, default_value = "en")]
+        report_lang: String,
     },
 }
 
@@ -2063,27 +2070,110 @@ async fn cmd_automotive(op: AutomotiveOp) -> anyhow::Result<()> {
             ai,
             format,
             output,
+            report_lang,
         } => {
-            let container = ServiceContainer::bootstrap().await;
-            let report = container.generate_automotive_report(&project, ai).await?;
-            if let Some(output) = output {
-                container.export_markdown(
-                    &report.markdown,
-                    &format!(
-                        "Automotive Fuzzing Campaign Report: {}",
-                        report.project_name
-                    ),
-                    &format,
-                    &output,
-                )?;
-                println!("{}", output.display());
-            } else {
-                if !matches!(format.as_str(), "md" | "markdown") {
-                    anyhow::bail!("--format requires --output for automotive reports");
-                }
-                println!("{}", report.markdown);
-            }
+            run_automotive_report_command(
+                &project,
+                ai,
+                &format,
+                output.as_deref(),
+                &report_lang,
+                ServiceContainer::bootstrap,
+            )
+            .await?;
         }
+    }
+    Ok(())
+}
+
+/// The two service calls `oxfuzz automotive report` makes. Behind a trait so a
+/// test can observe the language the command hands over and the title it
+/// exports under, without bootstrapping a real container.
+#[cfg(feature = "automotive-scapy")]
+#[async_trait::async_trait]
+trait AutomotiveReportCommandService {
+    async fn compose_automotive_report(
+        &self,
+        project: &std::path::Path,
+        include_ai: bool,
+        language: hf_service::ReportLanguage,
+    ) -> Result<hf_service::automotive_report::AutomotiveCampaignReport, hf_service::ClassifiedError>;
+
+    fn export_automotive_markdown(
+        &self,
+        markdown: &str,
+        title: &str,
+        format: &str,
+        out_path: &std::path::Path,
+    ) -> Result<(), hf_service::ClassifiedError>;
+}
+
+#[cfg(feature = "automotive-scapy")]
+#[async_trait::async_trait]
+impl AutomotiveReportCommandService for ServiceContainer {
+    async fn compose_automotive_report(
+        &self,
+        project: &std::path::Path,
+        include_ai: bool,
+        language: hf_service::ReportLanguage,
+    ) -> Result<hf_service::automotive_report::AutomotiveCampaignReport, hf_service::ClassifiedError>
+    {
+        self.generate_automotive_report(project, include_ai, language)
+            .await
+    }
+
+    fn export_automotive_markdown(
+        &self,
+        markdown: &str,
+        title: &str,
+        format: &str,
+        out_path: &std::path::Path,
+    ) -> Result<(), hf_service::ClassifiedError> {
+        self.export_markdown(markdown, title, format, out_path)
+    }
+}
+
+/// Parse the language, build the service, compose, then emit. `bootstrap` is
+/// injected for the same reason `run_report_command` injects it: the whole path
+/// -- flag string in, `ReportLanguage` at the service boundary, document out --
+/// becomes one testable unit.
+#[cfg(feature = "automotive-scapy")]
+async fn run_automotive_report_command<S, Bootstrap, BootstrapFuture>(
+    project: &std::path::Path,
+    include_ai: bool,
+    format: &str,
+    output: Option<&std::path::Path>,
+    lang: &str,
+    bootstrap: Bootstrap,
+) -> anyhow::Result<()>
+where
+    S: AutomotiveReportCommandService + Sync,
+    Bootstrap: FnOnce() -> BootstrapFuture,
+    BootstrapFuture: std::future::Future<Output = S>,
+{
+    // An unknown identifier is rejected here, before any composition work.
+    let language = lang.parse::<hf_service::ReportLanguage>()?;
+    let service = bootstrap().await;
+    let report = service
+        .compose_automotive_report(project, include_ai, language)
+        .await?;
+    if let Some(output) = output {
+        // The exported document's title is metadata rather than report body
+        // content, so the renderer never writes it -- but it is still prose, and
+        // is assembled from the same label set the body was rendered from
+        // instead of from a second literal that only one language could satisfy.
+        let labels = hf_service::automotive_report::AutomotiveLabels::for_language(language);
+        let title = format!(
+            "{}{}{}",
+            labels.title_prefix, labels.label_colon, report.project_name
+        );
+        service.export_automotive_markdown(&report.markdown, &title, format, output)?;
+        println!("{}", output.display());
+    } else {
+        if !matches!(format, "md" | "markdown") {
+            anyhow::bail!("--format requires --output for automotive reports");
+        }
+        println!("{}", report.markdown);
     }
     Ok(())
 }
@@ -2291,6 +2381,7 @@ mod automotive_tests {
                     ai,
                     format,
                     output,
+                    report_lang,
                 },
         } = cli.command
         else {
@@ -2302,6 +2393,176 @@ mod automotive_tests {
         assert_eq!(
             output,
             Some(std::path::PathBuf::from("/tmp/automotive-report.html"))
+        );
+        // Omitting the flag composes in English, so an existing invocation is
+        // unaffected.
+        assert_eq!(report_lang, "en");
+    }
+
+    #[test]
+    fn the_automotive_report_language_flag_does_not_collide_with_the_source_language() {
+        // `--lang` already means the target's *source* language on `discover`
+        // and `harness`. The report language is a separate axis and takes its
+        // own name, matching `oxfuzz report`.
+        let cli = Cli::try_parse_from([
+            "oxfuzz",
+            "automotive",
+            "report",
+            "/tmp/project",
+            "--report-lang",
+            "zh",
+        ])
+        .unwrap();
+
+        let Commands::Automotive {
+            op: AutomotiveOp::Report { report_lang, .. },
+        } = cli.command
+        else {
+            panic!("expected the automotive report command");
+        };
+        assert_eq!(
+            report_lang.parse::<hf_service::ReportLanguage>().unwrap(),
+            hf_service::ReportLanguage::Zh
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "oxfuzz",
+                "automotive",
+                "report",
+                "/tmp/project",
+                "--lang",
+                "zh"
+            ])
+            .is_err(),
+            "--lang must not silently be accepted as the report language"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "automotive-scapy"))]
+mod automotive_report_cli_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use hf_service::automotive_report::{AutomotiveCampaignReport, AutomotiveReportAiStatus};
+
+    use super::{run_automotive_report_command, AutomotiveReportCommandService};
+
+    /// Records what the command handed to the service.
+    #[derive(Default)]
+    struct RecordingAutomotiveReportService {
+        language: Arc<Mutex<Option<hf_service::ReportLanguage>>>,
+        exported_title: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AutomotiveReportCommandService for RecordingAutomotiveReportService {
+        async fn compose_automotive_report(
+            &self,
+            _project: &std::path::Path,
+            _include_ai: bool,
+            language: hf_service::ReportLanguage,
+        ) -> Result<AutomotiveCampaignReport, hf_service::ClassifiedError> {
+            *self.language.lock().unwrap() = Some(language);
+            Ok(AutomotiveCampaignReport {
+                generated_at: "2026-07-16T09:00:00Z".to_owned(),
+                project_name: "vehicle-gateway".to_owned(),
+                ai_status: AutomotiveReportAiStatus::NotRequested,
+                ai_model: None,
+                operation_count: 0,
+                failed_operation_count: 0,
+                unique_state_count: 0,
+                promoted_state_count: 0,
+                markdown: format!("# composed as {language:?}\n"),
+            })
+        }
+
+        fn export_automotive_markdown(
+            &self,
+            _markdown: &str,
+            title: &str,
+            _format: &str,
+            _out_path: &std::path::Path,
+        ) -> Result<(), hf_service::ClassifiedError> {
+            *self.exported_title.lock().unwrap() = Some(title.to_owned());
+            Ok(())
+        }
+    }
+
+    /// Drive the export path and report the language the service saw together
+    /// with the title the document was exported under.
+    async fn export_under(flag: &str) -> (hf_service::ReportLanguage, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("report.html");
+        let service = RecordingAutomotiveReportService::default();
+        let language = Arc::clone(&service.language);
+        let exported_title = Arc::clone(&service.exported_title);
+
+        run_automotive_report_command(
+            std::path::Path::new("/tmp/project"),
+            false,
+            "html",
+            Some(&out),
+            flag,
+            move || std::future::ready(service),
+        )
+        .await
+        .unwrap();
+
+        let language = language.lock().unwrap().unwrap();
+        let title = exported_title.lock().unwrap().clone().unwrap();
+        (language, title)
+    }
+
+    #[tokio::test]
+    async fn the_report_language_flag_reaches_the_service() {
+        // The hand-off, not the parse: `--report-lang zh` must arrive at
+        // generate_automotive_report rather than being parsed and discarded.
+        assert_eq!(export_under("zh").await.0, hf_service::ReportLanguage::Zh);
+        assert_eq!(export_under("en").await.0, hf_service::ReportLanguage::En);
+    }
+
+    #[tokio::test]
+    async fn the_exported_document_title_follows_the_report_language() {
+        // The title is document metadata the renderer never writes, so it is
+        // the one piece of prose on this path that a second English literal
+        // could leave behind on a Chinese report.
+        assert_eq!(
+            export_under("zh").await.1,
+            "汽车协议模糊测试活动报告：vehicle-gateway"
+        );
+        // Byte-identical to the literal it replaced: the English export does
+        // not move.
+        assert_eq!(
+            export_under("en").await.1,
+            "Automotive Fuzzing Campaign Report: vehicle-gateway"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_report_language_is_rejected_before_any_bootstrap() {
+        let bootstrapped = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&bootstrapped);
+
+        let error = run_automotive_report_command(
+            std::path::Path::new("/tmp/project"),
+            false,
+            "md",
+            None,
+            "fr",
+            move || {
+                called.store(true, Ordering::SeqCst);
+                std::future::ready(RecordingAutomotiveReportService::default())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("'en' and 'zh'"), "{error}");
+        assert!(
+            !bootstrapped.load(Ordering::SeqCst),
+            "a rejected language must not bootstrap the service"
         );
     }
 }

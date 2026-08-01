@@ -14,6 +14,7 @@ function componentSource(file: string, name: string, nextName: string): string {
 }
 
 const dashboardFile = source("../views/DashboardView.tsx");
+const automotiveFile = source("../views/AutomotiveView.tsx");
 const triage = componentSource(source("../views/TriageView.tsx"), "TriageView", "CrashDetail");
 const dashboard = componentSource(dashboardFile, "DashboardView", "workbenchTabs");
 // emptyEditor sits at module scope, above DashboardView, so the isolated
@@ -90,11 +91,9 @@ describe("report draft titles follow the interface language", () => {
     // reverted to its template literal, and it catches a new English title
     // added to either of these two views.
     //
-    // It does NOT catch a title added elsewhere: AutomotiveView.tsx builds
-    // "Automotive campaign report — {...}" and persists it, and is not scanned
-    // here. That report has no language parameter at all, so its body is
-    // English too; localizing it is a separate piece of work, not a gap in
-    // this guard.
+    // Scope: TriageView.tsx and DashboardView.tsx, and nothing else. The
+    // automotive report's own two titles live in AutomotiveView.tsx and are
+    // guarded by the block below, which scans that file and only that file.
     for (const text of [source("../views/TriageView.tsx"), dashboardFile]) {
       expect(text).not.toMatch(/fuzzing report/);
       expect(text).not.toMatch(/Triage report/);
@@ -121,5 +120,65 @@ describe("report draft titles follow the interface language", () => {
     expect(extra).toContain('"reports.triageDraftTitle": "分类定级报告 — {target}"');
     expect(extra).toContain('"reports.unknownTarget": "目标"');
     expect(extra).toContain('"reports.untitledDraftTitle": "未命名模糊测试报告"');
+  });
+});
+
+// The automotive campaign report is composed by a separate service method and a
+// separate desktop view, so none of the assertions above reach it.
+describe("the automotive report follows the interface language", () => {
+  it("takes the locale from the view's own i18n hook", () => {
+    // AutomotiveView declares exactly one useI18n(), so there is no sibling
+    // hook whose `locale` an assertion below could be satisfied by.
+    expect(automotiveFile.match(/useI18n\(\)/g)).toHaveLength(1);
+    expect(automotiveFile).toContain("const { t, locale } = useI18n();");
+  });
+
+  it("passes the locale on the compose call", () => {
+    expect(automotiveFile).toContain(
+      "generateAutomotiveReport(activeProject, includeAi, locale)",
+    );
+  });
+
+  it("titles the retained draft from the dictionary", () => {
+    // The draft is persisted and listed in the Reports view, so an English
+    // title on the Chinese path is not cosmetic: it accumulates.
+    expect(automotiveFile).toContain(
+      'title: t("automotive.report.documentTitle", { project: next.project_name })',
+    );
+  });
+
+  it("titles the exported document from the dictionary", () => {
+    // A second, independent literal: the export builds its own argument object
+    // from `report` rather than reusing the compose path's `next`, so the
+    // assertion above cannot cover it.
+    expect(automotiveFile).toContain(
+      'title: t("automotive.report.documentTitle", { project: report.project_name })',
+    );
+  });
+
+  it("leaves no English report-title literal in this view", () => {
+    // Scope: AutomotiveView.tsx, and nothing else. Both assertions above would
+    // still pass if a localized title were computed and then ignored; this one
+    // fails the moment either site is reverted to its template literal, and it
+    // catches a new English automotive title added to this view.
+    expect(automotiveFile).not.toMatch(/Automotive campaign report/);
+    expect(automotiveFile).not.toMatch(/campaign report —/);
+  });
+
+  it("translates the document title in both dictionaries", () => {
+    const extra = source("../i18n.extra.ts");
+    // Once in the English block, once in the Chinese one -- a key present only
+    // in the English block renders as the raw key string to a Chinese reader.
+    expect(extra.match(/"automotive\.report\.documentTitle":/g)).toHaveLength(2);
+    // The English value is byte-identical to the literal it replaced, so the
+    // English path does not move.
+    expect(extra).toContain(
+      '"automotive.report.documentTitle": "Automotive campaign report — {project}"',
+    );
+    // The Chinese value is the same document name the report's own H1 carries,
+    // so the draft list and the document agree.
+    expect(extra).toContain(
+      '"automotive.report.documentTitle": "汽车协议模糊测试活动报告：{project}"',
+    );
   });
 });

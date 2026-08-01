@@ -424,6 +424,12 @@ impl ServiceContainer {
     /// Compose a project-level automotive campaign report from retained
     /// evidence, optionally appending a grounded provider interpretation.
     ///
+    /// `language` selects the report's prose. Every technical token -- evidence
+    /// citations, pipeline stage identifiers, protocol, bus, ECU and adapter
+    /// names, digests, paths and figures -- is byte-identical in either
+    /// language, so a reader of one rendering can be pointed at a line of the
+    /// other.
+    ///
     /// The deterministic fact sheet is always authoritative and remains
     /// available when no provider is configured or provider validation fails.
     /// This operation never invokes the automotive sidecar or contacts an
@@ -436,10 +442,11 @@ impl ServiceContainer {
         &self,
         project_root: &Path,
         include_ai: bool,
+        language: crate::report::ReportLanguage,
     ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
         let settings =
             crate::config::effective_automotive_settings().map_err(ClassifiedError::Validation)?;
-        self.generate_automotive_report_with_settings(project_root, include_ai, &settings)
+        self.generate_automotive_report_with_settings(project_root, include_ai, &settings, language)
             .await
     }
 
@@ -448,6 +455,7 @@ impl ServiceContainer {
         project_root: &Path,
         include_ai: bool,
         settings: &AutomotiveSettings,
+        language: crate::report::ReportLanguage,
     ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
         use crate::automotive_report::{
             append_ai_interpretation, render_automotive_report, AutomotiveCampaignReport,
@@ -490,13 +498,11 @@ impl ServiceContainer {
             state_corpus,
         };
         let metrics = data.metrics();
-        // Task 4 of the localized-automotive-report work replaces this constant
-        // with the caller's requested language. Everything downstream of it --
-        // the deterministic render, the two prompts, the validation of what the
-        // model returns and the advisory notice above it -- already resolves
-        // from this one value, so that task changes this line and its signature
-        // rather than the composition below.
-        let language = crate::report::ReportLanguage::En;
+        // Everything downstream resolves from this one value: the deterministic
+        // render, the two prompts, the validation of what the model returns and
+        // the advisory notice above it. Splitting it would let the prompts ask
+        // for one language while validation required another, which rejects
+        // every interpretation and falls back without saying why.
         let labels = AutomotiveLabels::for_language(language);
         let facts = render_automotive_report(&data, &labels);
         let mut markdown = facts.clone();
@@ -3072,6 +3078,7 @@ mod tests {
                     enabled: true,
                     ..AutomotiveSettings::default()
                 },
+                crate::report::ReportLanguage::En,
             )
             .await
             .unwrap();
@@ -3111,6 +3118,7 @@ mod tests {
                     enabled: true,
                     ..AutomotiveSettings::default()
                 },
+                crate::report::ReportLanguage::En,
             )
             .await
             .unwrap();
@@ -3142,6 +3150,7 @@ mod tests {
                     enabled: true,
                     ..AutomotiveSettings::default()
                 },
+                crate::report::ReportLanguage::En,
             )
             .await
             .unwrap();
@@ -3150,6 +3159,140 @@ mod tests {
         assert_eq!(report.ai_model, None);
         assert!(!report.markdown.contains("## AI-Assisted Interpretation"));
         assert!(report.markdown.contains("## Evidence Manifest"));
+    }
+
+    #[tokio::test]
+    async fn the_requested_language_reaches_the_deterministic_renderer() {
+        // The whole point of the branch: a caller can now choose. Asserted on
+        // the document's own title rather than on any label, so the assertion
+        // fails if the parameter stops reaching `AutomotiveLabels::for_language`
+        // even though the label set itself is correct.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, operation_id, _) =
+            completed_analysis_with_state(temp.path()).await;
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        let chinese = service
+            .generate_automotive_report_with_settings(
+                &project,
+                false,
+                &settings,
+                crate::report::ReportLanguage::Zh,
+            )
+            .await
+            .unwrap();
+        assert!(
+            chinese.markdown.starts_with("# 汽车协议模糊测试活动报告："),
+            "the requested language must reach the renderer: {}",
+            chinese.markdown
+        );
+        assert!(!chinese
+            .markdown
+            .contains("Automotive Fuzzing Campaign Report"));
+        // The evidence citation is a technical token: byte-identical either way.
+        assert!(chinese.markdown.contains(&format!("[OP:{operation_id}]")));
+
+        let english = service
+            .generate_automotive_report_with_settings(
+                &project,
+                false,
+                &settings,
+                crate::report::ReportLanguage::En,
+            )
+            .await
+            .unwrap();
+        assert!(
+            english
+                .markdown
+                .starts_with("# Automotive Fuzzing Campaign Report: "),
+            "the English rendering must not move: {}",
+            english.markdown
+        );
+        assert!(english.markdown.contains(&format!("[OP:{operation_id}]")));
+    }
+
+    #[tokio::test]
+    async fn a_chinese_campaign_report_accepts_and_frames_a_chinese_interpretation() {
+        // One language value has to reach the prompts, the validation of what
+        // comes back and the advisory notice around it. Asking for Chinese while
+        // validating against English headings would discard this interpretation
+        // and report `Fallback` without saying why, so the status is asserted
+        // alongside the Chinese framing.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, operation_id, _) =
+            completed_analysis_with_state(temp.path()).await;
+        let service = service.with_provider_pool(Arc::new(ReportPool {
+            content: format!(
+                "### 基于证据的解读\n离线分析保留了经过校验的状态证据 [OP:{operation_id}]。\n\n\
+                 ### 假设\n不作任何假设。\n\n\
+                 ### 缺失的证据\n未保留任何虚拟重放。\n\n\
+                 ### 建议的后续行动\n在进行确定性变异之前先复核已捕获的状态 [OP:{operation_id}]。"
+            ),
+        }));
+
+        let report = service
+            .generate_automotive_report_with_settings(
+                &project,
+                true,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+                crate::report::ReportLanguage::Zh,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.ai_status, AutomotiveReportAiStatus::Applied);
+        assert_eq!(report.ai_model.as_deref(), Some("grounded-test-model"));
+        assert!(
+            report.markdown.contains("## AI 辅助解读"),
+            "{}",
+            report.markdown
+        );
+        assert!(
+            report
+                .markdown
+                .contains("任何情况下均以保留的证据和服务校验为准"),
+            "the advisory notice must reach the reader in the report's language: {}",
+            report.markdown
+        );
+        assert!(!report.markdown.contains("## AI-Assisted Interpretation"));
+    }
+
+    #[tokio::test]
+    async fn the_settings_resolving_entry_point_carries_the_language_through() {
+        // `generate_automotive_report` resolves the operator policy and then
+        // delegates. That delegation is its own call site, and every assertion
+        // above is on the method it delegates to, so a hardcoded language there
+        // would go unnoticed.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, _, _) = completed_analysis_with_state(temp.path()).await;
+
+        let chinese = service
+            .generate_automotive_report(&project, false, crate::report::ReportLanguage::Zh)
+            .await
+            .unwrap();
+        assert!(
+            chinese.markdown.starts_with("# 汽车协议模糊测试活动报告："),
+            "{}",
+            chinese.markdown
+        );
+
+        let default = service
+            .generate_automotive_report(&project, false, crate::report::ReportLanguage::default())
+            .await
+            .unwrap();
+        assert!(
+            default
+                .markdown
+                .starts_with("# Automotive Fuzzing Campaign Report: "),
+            "{}",
+            default.markdown
+        );
     }
 
     #[tokio::test]
