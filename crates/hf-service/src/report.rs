@@ -649,12 +649,17 @@ fn coverage_bar(percent: f64) -> String {
 }
 
 /// A Mermaid bar chart of coverage percentages.
+///
+/// Every interpolated label is quoted. `xychart-beta`'s lexer accepts bare
+/// ASCII words but rejects bare CJK ("Lexical error ... Unrecognized text."),
+/// so an unquoted `x-axis` category list turns the whole Chinese chart into a
+/// syntax error. Quoting is also valid for English and renders identically.
 fn coverage_mermaid(c: CoverageSummary, labels: &Labels) -> String {
     format!(
         "```mermaid\n\
          xychart-beta\n\
          \x20   title \"{}\"\n\
-         \x20   x-axis [{}, {}, {}]\n\
+         \x20   x-axis [\"{}\", \"{}\", \"{}\"]\n\
          \x20   y-axis \"{}\" 0 --> 100\n\
          \x20   bar [{:.1}, {:.1}, {:.1}]\n\
          ```",
@@ -684,6 +689,9 @@ const fn casr_severity_label(severity: CrashSeverity, labels: &Labels) -> &'stat
 }
 
 /// A Mermaid pie chart of crash exploitability (CASR severity).
+///
+/// Unlike `xychart-beta`, the `pie` grammar reads the title as the rest of the
+/// line, so a bare CJK title parses; the slice labels are quoted regardless.
 fn severity_pie_mermaid(crashes: &[Crash], labels: &Labels) -> String {
     let mut exploitable = 0;
     let mut probably = 0;
@@ -716,6 +724,9 @@ fn severity_pie_mermaid(crashes: &[Crash], labels: &Labels) -> String {
 }
 
 /// A Mermaid pie chart of crash kinds (ASan/UBSan/SEGV/...).
+///
+/// Same quoting rules as [`severity_pie_mermaid`]: bare CJK title is accepted,
+/// slice labels are quoted.
 fn kind_pie_mermaid(crashes: &[Crash], labels: &Labels) -> String {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for c in crashes {
