@@ -8,8 +8,8 @@ use hf_service::automotive::AutomotiveStateCorpusEntry;
 use hf_service::automotive_report::{
     append_ai_interpretation, automotive_report_system_prompt, automotive_report_user_prompt,
     render_automotive_report, validate_ai_interpretation, AutomotiveDangerousServicesPosture,
-    AutomotivePhysicalBenchPosture, AutomotivePolicyPosture, AutomotiveReportData,
-    AutomotiveReportOperation, AutomotiveReportSafetyPosture,
+    AutomotiveLabels, AutomotivePhysicalBenchPosture, AutomotivePolicyPosture,
+    AutomotiveReportData, AutomotiveReportOperation, AutomotiveReportSafetyPosture,
 };
 use hf_storage::AutomotiveOperationStatus;
 use uuid::Uuid;
@@ -94,8 +94,17 @@ fn report_data() -> AutomotiveReportData {
 }
 
 #[test]
+fn english_labels_render_todays_exact_text() {
+    let report = render_automotive_report(&report_data(), &AutomotiveLabels::english());
+    assert!(report.contains("# Automotive Fuzzing Campaign Report:"));
+    assert!(report.contains("## Executive Summary"));
+    assert!(report.contains("## Limitations"));
+    assert!(report.contains("## Recommendations"));
+}
+
+#[test]
 fn deterministic_report_is_a_complete_traceable_campaign_record() {
-    let report = render_automotive_report(&report_data());
+    let report = render_automotive_report(&report_data(), &AutomotiveLabels::english());
 
     assert!(report.starts_with("# Automotive Fuzzing Campaign Report"));
     for section in [
@@ -132,7 +141,7 @@ fn a_done_but_incomplete_operation_is_reported_as_partial_not_completed() {
     if let Some(op) = data.operations.first_mut() {
         op.result_complete = Some(false);
     }
-    let report = render_automotive_report(&data);
+    let report = render_automotive_report(&data, &AutomotiveLabels::english());
     assert!(
         report.contains("0 completed"),
         "an incomplete Done op must not be counted as completed"
@@ -145,7 +154,8 @@ fn a_done_but_incomplete_operation_is_reported_as_partial_not_completed() {
 
 #[test]
 fn report_does_not_overstate_protocol_state_evidence() {
-    let report = render_automotive_report(&report_data()).to_ascii_lowercase();
+    let report =
+        render_automotive_report(&report_data(), &AutomotiveLabels::english()).to_ascii_lowercase();
 
     assert!(report.contains("protocol-state"));
     assert!(report.contains("not source coverage"));
@@ -156,7 +166,7 @@ fn report_does_not_overstate_protocol_state_evidence() {
 #[test]
 fn ai_prompt_is_grounded_and_only_known_evidence_citations_are_accepted() {
     let data = report_data();
-    let facts = render_automotive_report(&data);
+    let facts = render_automotive_report(&data, &AutomotiveLabels::english());
     let prompt = automotive_report_user_prompt(&facts, &data);
 
     assert!(automotive_report_system_prompt().contains("NEVER invent"));
@@ -191,7 +201,7 @@ fn ai_prompt_is_grounded_and_only_known_evidence_citations_are_accepted() {
 #[test]
 fn ai_interpretation_is_advisory_and_cannot_replace_the_fact_sheet() {
     let data = report_data();
-    let facts = render_automotive_report(&data);
+    let facts = render_automotive_report(&data, &AutomotiveLabels::english());
     let interpretation = format!(
         "### Evidence-backed interpretation\nReview the retained failure [OP:{FAILED_OPERATION_ID}].\n\n\
          ### Hypotheses\nNone.\n\n### Missing evidence\nA completed virtual replay.\n\n\
