@@ -2459,7 +2459,7 @@ pub async fn export_markdown(
         "docx" | "doc" => "docx",
         other => return Err(format!("unknown report format: {other}")),
     };
-    let default_name = format!("{}.{ext}", sanitize_filename(&title));
+    let default_name = format!("{}.{ext}", filename_stem_or(&title, "oxfuzz_report"));
     let Some(path) = app
         .dialog()
         .file()
@@ -2481,6 +2481,25 @@ pub async fn export_markdown(
 }
 
 /// Reduce a target symbol to a filesystem-safe filename fragment.
+/// Sanitize `s` for use as a filename stem, falling back to `fallback` when
+/// nothing usable survives.
+///
+/// [`sanitize_filename`] replaces every character that is not ASCII
+/// alphanumeric, `_`, or `-`, so a string written entirely in a non-Latin
+/// script collapses to a run of underscores. That only matters where the whole
+/// filename comes from user-facing text: the other callers prefix an
+/// `oxfuzz_*` literal, which stays informative regardless. Report titles are
+/// localized, so an untitled Chinese draft would otherwise propose
+/// `_________.md`.
+fn filename_stem_or(s: &str, fallback: &str) -> String {
+    let stem = sanitize_filename(s);
+    if stem.chars().any(|c| c.is_ascii_alphanumeric()) {
+        stem
+    } else {
+        fallback.to_owned()
+    }
+}
+
 fn sanitize_filename(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -3129,5 +3148,48 @@ mod recovery_command_tests {
         );
         assert!(!public.contains("SQL_PRIVATE_MARKER"));
         assert!(!public.contains("SELECT"));
+    }
+}
+
+#[cfg(test)]
+mod filename_stem_tests {
+    use super::filename_stem_or;
+
+    #[test]
+    fn a_title_with_no_ascii_falls_back_rather_than_degenerating() {
+        // Report titles are localized now, so an untitled Chinese draft reads
+        // "未命名模糊测试报告". `sanitize_filename` maps every character that is
+        // not ASCII alphanumeric to '_', so using it alone would propose
+        // "_________.md" as the save name.
+        assert_eq!(
+            filename_stem_or("未命名模糊测试报告", "oxfuzz_report"),
+            "oxfuzz_report"
+        );
+    }
+
+    #[test]
+    fn a_title_carrying_an_ascii_target_keeps_it() {
+        let stem = filename_stem_or("match_magic 模糊测试报告", "oxfuzz_report");
+        assert!(
+            stem.starts_with("match_magic"),
+            "a target in the title must survive: {stem}"
+        );
+        assert_ne!(
+            stem, "oxfuzz_report",
+            "this title did not need the fallback"
+        );
+    }
+
+    #[test]
+    fn an_empty_title_falls_back() {
+        assert_eq!(filename_stem_or("", "oxfuzz_report"), "oxfuzz_report");
+    }
+
+    #[test]
+    fn an_ascii_title_renders_exactly_as_it_does_today() {
+        assert_eq!(
+            filename_stem_or("Untitled fuzzing report", "oxfuzz_report"),
+            "Untitled_fuzzing_report"
+        );
     }
 }
