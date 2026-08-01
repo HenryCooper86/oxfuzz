@@ -8,7 +8,7 @@ use hf_core::target::{InputSurface, SourceLocation, TargetCandidate, TargetKind,
 use hf_coverage::CoverageSummary;
 use hf_service::report::{
     ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats,
-    ReportData,
+    ReportData, ReportLanguage,
 };
 use hf_storage::{RunRecord, RunStatus};
 use uuid::Uuid;
@@ -231,4 +231,43 @@ fn empty_report_is_honest_not_fabricated() {
             || md.contains("not discovered"),
         "honest 'not available' states for missing run/coverage/target"
     );
+}
+
+#[test]
+fn report_language_serializes_as_the_desktop_locale_identifiers() {
+    // The desktop app stores "en" / "zh" in localStorage under hf_locale and
+    // passes that value straight through. These identifiers are the contract.
+    assert_eq!(
+        serde_json::to_string(&ReportLanguage::En).unwrap(),
+        "\"en\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ReportLanguage::Zh).unwrap(),
+        "\"zh\""
+    );
+    assert_eq!(
+        serde_json::from_str::<ReportLanguage>("\"zh\"").unwrap(),
+        ReportLanguage::Zh
+    );
+}
+
+#[test]
+fn report_language_defaults_to_english() {
+    assert_eq!(ReportLanguage::default(), ReportLanguage::En);
+}
+
+#[test]
+fn report_language_parses_the_two_accepted_identifiers() {
+    assert_eq!("en".parse::<ReportLanguage>().unwrap(), ReportLanguage::En);
+    assert_eq!("zh".parse::<ReportLanguage>().unwrap(), ReportLanguage::Zh);
+}
+
+#[test]
+fn report_language_rejects_an_unknown_identifier_by_naming_the_accepted_ones() {
+    let err = "fr".parse::<ReportLanguage>().unwrap_err();
+    let message = err.to_string();
+    // The message must tell the caller what IS accepted, not just that "fr"
+    // was wrong -- this reaches a CLI user and a REST client.
+    assert!(message.contains("en"), "message should name en: {message}");
+    assert!(message.contains("zh"), "message should name zh: {message}");
 }
