@@ -15,10 +15,10 @@ use hf_runtime::SANDBOX_IMAGE;
 use hf_storage::RunRecord;
 use uuid::Uuid;
 
-use super::workspace::{resolve_workspace_directory, run_output_relative, workspace_root};
-use super::{
-    ensure_workspace_directory, harness_binary_name, is_regular_file, EXACT_DOCKER_IMAGE_REV_PREFIX,
+use super::workspace::{
+    ensure_workspace_directory, resolve_workspace_directory, run_output_relative, workspace_root,
 };
+use super::{harness_binary_name, is_regular_file, EXACT_DOCKER_IMAGE_REV_PREFIX};
 
 /// Immutable inputs and writable evidence location prepared for one run.
 pub(super) struct RunArtifacts {
