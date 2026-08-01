@@ -191,13 +191,13 @@ fn ensure_graphs_appends_when_model_drops_them() {
     let data = populated();
     // Model output with no mermaid blocks -> graphs must be re-added.
     let without = "# Report\n\nSome AI prose without any charts.";
-    let fixed = ensure_graphs(without, &data);
+    let fixed = ensure_graphs(without, &data, &Labels::english());
     assert!(fixed.contains("```mermaid"), "graphs guaranteed");
     assert!(fixed.contains("Composed by oxfuzz"), "footer stamped");
 
     // Model output that already has a graph -> not duplicated.
     let with = "# Report\n\n```mermaid\npie showData\n    \"X\" : 1\n```\n";
-    let kept = ensure_graphs(with, &data);
+    let kept = ensure_graphs(with, &data, &Labels::english());
     assert_eq!(kept.matches("```mermaid").count(), 1, "no duplicate graphs");
 }
 

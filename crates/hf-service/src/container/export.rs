@@ -67,7 +67,11 @@ impl ServiceContainer {
             ));
         }
         // Guarantee the campaign graphs survive even if the model dropped them.
-        Ok(crate::report::ensure_graphs(text, data))
+        Ok(crate::report::ensure_graphs(
+            text,
+            data,
+            &crate::report::Labels::english(),
+        ))
     }
 
     /// Summarize corpus composition for the report, preferring the persisted
