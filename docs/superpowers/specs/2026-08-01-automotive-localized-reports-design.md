@@ -197,11 +197,26 @@ declares English in its `lang` attribute, exactly as main-report drafts do.
 This is the localized-reports design's section 9.3, inherited unchanged.
 Closing it is a schema change and was deliberately deferred.
 
-### 9.2 Enum values render English
+### 9.2 Operation statuses are translated, unlike the main report's
 
-Automotive operation statuses and modes reach the report through `Debug`, as the
-main report's `RunStatus` does. They remain English beside Chinese labels. Same
-class as the main design's 9.1, same bounded follow-up.
+This section originally claimed automotive statuses reach the report through
+`Debug`, as the main report's `RunStatus` does, and so would stay English.
+**That premise was wrong**, and Task 1 found it.
+
+The main report really does emit `format!("{:?}", r.status)`. The automotive
+renderer does not: `status_name` is a hand-written `match` from
+`AutomotiveOperationStatus` to display text, and it was a presentation mapping
+before this work began. Section 5's extraction rule therefore applies to it, and
+its four arms are label fields.
+
+**Decision:** they are translated. A hand-written display mapping is a label by
+definition, and the argument that settled CASR severities on the previous branch
+applies unchanged -- a reader benefits from the translation, and nothing depends
+on the English spelling.
+
+What does remain English is any value that genuinely reaches the report through
+`Debug` rather than through a mapping. Task 2 should confirm which those are by
+reading, rather than trusting this document a second time.
 
 ### 9.3 Heading-literal coupling remains
 
