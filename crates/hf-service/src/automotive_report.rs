@@ -456,6 +456,35 @@ pub struct AutomotiveLabels {
     // `virtual-CAN` is a bus name and must survive translation verbatim inside
     // this sentence.
     pub recommendation_virtual_replay: &'static str,
+    // AI-assisted interpretation. This block is not part of the deterministic
+    // document: `render_automotive_report` never emits it. It is the section
+    // `append_ai_interpretation` puts above provider prose, plus the four
+    // headings that provider prose must carry.
+    //
+    // The four heading fields are a single vocabulary shared by
+    // `automotive_report_user_prompt`, which asks the model for them, and
+    // `validate_ai_interpretation`, which rejects an interpretation missing any
+    // of them. They must be resolved from the same label set on both sides: a
+    // prompt asking for one language's headings while validation requires
+    // another's discards every interpretation the model returns, and the report
+    // falls back to the deterministic document with nothing said about why.
+    //
+    // The `###` prefix is Markdown scaffolding and stays in the two call sites,
+    // by the same rule that keeps `##` out of the section fields above.
+    //
+    // `ai_advisory_notice` is a guardrail, not a caption. It is what tells a
+    // reader that the prose below it is not evidence and cannot displace the
+    // fact sheet above it, so it must keep its full force in every language --
+    // the same standard as the Limitations bullets.
+    pub ai_interpretation_section: &'static str,
+    pub ai_advisory_notice: &'static str,
+    // Names the provider model that wrote the interpretation. The identifier
+    // itself is a technical token and is emitted verbatim.
+    pub ai_model: &'static str,
+    pub ai_heading_evidence_backed: &'static str,
+    pub ai_heading_hypotheses: &'static str,
+    pub ai_heading_missing_evidence: &'static str,
+    pub ai_heading_next_actions: &'static str,
 }
 
 impl AutomotiveLabels {
@@ -620,6 +649,17 @@ impl AutomotiveLabels {
             recommendation_promote_tail: "observed state(s) without retained corpus evidence.",
             recommendation_virtual_replay: "If policy and runtime readiness permit, conduct a \
                                             separately confirmed supervised virtual-CAN replay.",
+            ai_interpretation_section: "AI-Assisted Interpretation",
+            // Carries no terminal stop: `narrative_sentence_break` supplies it,
+            // so the mark between this notice and the model line comes from the
+            // same field in both languages.
+            ai_advisory_notice: "This provider-generated interpretation is advisory. Retained \
+                                 evidence and service validation remain authoritative",
+            ai_model: "Model",
+            ai_heading_evidence_backed: "Evidence-backed interpretation",
+            ai_heading_hypotheses: "Hypotheses",
+            ai_heading_missing_evidence: "Missing evidence",
+            ai_heading_next_actions: "Recommended next actions",
         }
     }
 
@@ -816,6 +856,39 @@ impl AutomotiveLabels {
             recommendation_promote_tail: "个尚无保留语料库证据的观察状态审阅并提升合适的产物。",
             recommendation_virtual_replay: "如果策略和运行时就绪状态允许，请执行一次单独确认的\
                                             受监督 virtual-CAN 重放。",
+            // "AI 辅助解读", matching `limitation_ai_advisory`, which names the
+            // same section from inside the Limitations list. The desktop app
+            // ships 解读 for "interpretation" (automotive.report.aiApplied).
+            ai_interpretation_section: "AI 辅助解读",
+            // Assessed claim by claim against the English, which reads "This
+            // provider-generated interpretation is advisory. Retained evidence
+            // and service validation remain authoritative".
+            //
+            // 1. "is advisory" -> 仅供参考, the shipped rendering of the same
+            //    word in automotive.report.description and the word
+            //    `limitation_ai_advisory` already uses, so a reader meets one
+            //    vocabulary. It is stronger than the English: "advisory" only
+            //    withholds authority, while 仅供参考 restricts the text to
+            //    reference and excludes every other use.
+            // 2. "remain authoritative" -> 任何情况下均以...为准. 以...为准 is
+            //    the standard formula for what controls in a conflict, which is
+            //    what "authoritative" means here and is more directive than the
+            //    English adjective. 任何情况下均 renders the persistence in
+            //    "remain" as the absence of exceptions, so the notice cannot be
+            //    read as holding only until the model says otherwise.
+            //
+            // Terminal stop omitted, as in `english()`.
+            ai_advisory_notice: "本解读由模型提供方生成，仅供参考。任何情况下均以保留的证据和\
+                                 服务校验为准",
+            ai_model: "模型",
+            // 基于证据 is the shipped binding (automotive.report.evidenceBacked)
+            // and 后续行动 the shipped rendering of "next actions"
+            // (automotive.report.description). Both are quoted from the
+            // interface a reader of this report already uses.
+            ai_heading_evidence_backed: "基于证据的解读",
+            ai_heading_hypotheses: "假设",
+            ai_heading_missing_evidence: "缺失的证据",
+            ai_heading_next_actions: "建议的后续行动",
         }
     }
 }
@@ -1356,17 +1429,53 @@ fn render_recommendations(
 }
 
 /// System prompt for provider-neutral automotive evidence interpretation.
+///
+/// The grounding rules are identical in both languages. Only the output
+/// language is added, because every clause here exists to stop the model
+/// inventing evidence and none of them is about English.
 #[must_use]
-pub fn automotive_report_system_prompt() -> &'static str {
-    "You are a senior automotive security engineer interpreting a deterministic campaign fact sheet. \
+pub fn automotive_report_system_prompt(language: ReportLanguage) -> String {
+    let base = "You are a senior automotive security engineer interpreting a deterministic campaign fact sheet. \
      You NEVER invent operations, protocol states, digests, vulnerabilities, vehicle effects, or test \
      results. State novelty is not source coverage and is not proof of a vulnerability. Your output is \
-     advisory: it cannot authorize traffic, change a replay plan, relax policy, or replace retained evidence."
+     advisory: it cannot authorize traffic, change a replay plan, relax policy, or replace retained evidence.";
+    match language {
+        ReportLanguage::En => base.to_owned(),
+        ReportLanguage::Zh => format!(
+            "{base} You write the interpretation in Simplified Chinese for a Chinese-reading \
+             engineering audience."
+        ),
+    }
 }
 
 /// Build the grounded provider prompt for an automotive report interpretation.
+///
+/// The four requested headings are resolved from the same label set
+/// [`validate_ai_interpretation`] checks against, so what the model is asked
+/// for and what it is judged by cannot drift apart.
 #[must_use]
-pub fn automotive_report_user_prompt(facts: &str, data: &AutomotiveReportData) -> String {
+pub fn automotive_report_user_prompt(
+    facts: &str,
+    data: &AutomotiveReportData,
+    language: ReportLanguage,
+) -> String {
+    let labels = AutomotiveLabels::for_language(language);
+    // The token rule is load-bearing beyond readability here. A citation is
+    // matched against the known operation ids, state digests and transcript
+    // hashes, so a translated or transliterated one does not merely puzzle a
+    // reader -- it fails validation and discards the whole interpretation.
+    let language_rules = match language {
+        ReportLanguage::En => String::new(),
+        ReportLanguage::Zh => "Write the entire interpretation in Simplified Chinese, including \
+             every heading and all prose.\n\n\
+             Keep the following verbatim in their original form, never translated or \
+             transliterated: the evidence citations `[OP:<uuid>]`, `[STATE:<sha256>]` and \
+             `[TRANSCRIPT:<sha256>]` together with the identifiers inside them, pipeline stage \
+             identifiers, protocol, bus, ECU and adapter names, SHA-256 digests, file paths, and \
+             every figure. A translated citation no longer matches the retained evidence it names, \
+             and an interpretation carrying one is rejected in full.\n\n"
+            .to_owned(),
+    };
     format!(
         "Interpret the automotive campaign fact sheet below for a professional engineering and security \
          audience. Use only its retained facts. Cite claims with the exact evidence forms `[OP:<uuid>]`, \
@@ -1376,24 +1485,38 @@ pub fn automotive_report_user_prompt(facts: &str, data: &AutomotiveReportData) -
          analysis, deterministic mutation, plan review, or supervised virtual validation, but cannot authorize \
          execution or physical traffic. Do not emit code, shell commands, replay payloads, or a top-level title.\n\n\
          Return exactly these Markdown headings:\n\
-         ### Evidence-backed interpretation\n\
-         ### Hypotheses\n\
-         ### Missing evidence\n\
-         ### Recommended next actions\n\n\
-         Project: `{}`\n\n---\n# DETERMINISTIC FACT SHEET (ground truth)\n\n{}",
-        escape_inline(&data.project_name),
-        facts
+         ### {evidence_backed}\n\
+         ### {hypotheses}\n\
+         ### {missing_evidence}\n\
+         ### {next_actions}\n\n\
+         {language_rules}\
+         Project: `{project}`\n\n---\n# DETERMINISTIC FACT SHEET (ground truth)\n\n{facts}",
+        evidence_backed = labels.ai_heading_evidence_backed,
+        hypotheses = labels.ai_heading_hypotheses,
+        missing_evidence = labels.ai_heading_missing_evidence,
+        next_actions = labels.ai_heading_next_actions,
+        project = escape_inline(&data.project_name),
     )
 }
 
 /// Validate the evidence citations and bounded structure of provider output.
 ///
+/// `language` selects which four headings are required, and nothing else. Every
+/// other check -- the size bound, the code-fence rejection, the operation, state
+/// and transcript citation checks, and the requirement that an interpretation
+/// cite at least one piece of retained evidence when operations exist -- is
+/// language-independent and applies identically to every interpretation. A
+/// Chinese interpretation citing an operation that does not exist is rejected
+/// exactly as an English one is.
+///
 /// # Errors
 /// Returns a human-readable validation error for malformed, uncited, or
-/// ungrounded provider output.
+/// ungrounded provider output. The message is diagnostic text for an operator
+/// log, not report body content, and stays English in both languages.
 pub fn validate_ai_interpretation(
     interpretation: &str,
     data: &AutomotiveReportData,
+    language: ReportLanguage,
 ) -> Result<(), String> {
     let trimmed = interpretation.trim();
     if trimmed.is_empty() {
@@ -1405,13 +1528,15 @@ pub fn validate_ai_interpretation(
     if trimmed.contains("```") {
         return Err("AI interpretation must not contain executable code or data fences".to_owned());
     }
+    let labels = AutomotiveLabels::for_language(language);
     for heading in [
-        "### Evidence-backed interpretation",
-        "### Hypotheses",
-        "### Missing evidence",
-        "### Recommended next actions",
+        labels.ai_heading_evidence_backed,
+        labels.ai_heading_hypotheses,
+        labels.ai_heading_missing_evidence,
+        labels.ai_heading_next_actions,
     ] {
-        if !trimmed.contains(heading) {
+        let heading = format!("### {heading}");
+        if !trimmed.contains(&heading) {
             return Err(format!("AI interpretation is missing heading '{heading}'"));
         }
     }
@@ -1466,14 +1591,31 @@ pub fn validate_ai_interpretation(
 }
 
 /// Append validated AI prose after the complete deterministic fact sheet.
+///
+/// The advisory notice above the prose is a guardrail: it is what tells a reader
+/// that the section is not evidence and does not displace the fact sheet it
+/// follows. It is rendered from `labels` so a reader of the Chinese report meets
+/// it in the language the rest of the document is in. The model identifier is a
+/// technical token and is emitted verbatim.
 #[must_use]
-pub fn append_ai_interpretation(facts: &str, interpretation: &str, model: &str) -> String {
+pub fn append_ai_interpretation(
+    facts: &str,
+    interpretation: &str,
+    model: &str,
+    labels: &AutomotiveLabels,
+) -> String {
     format!(
-        "{}\n\n## AI-Assisted Interpretation\n\n> This provider-generated interpretation is advisory. \
-         Retained evidence and service validation remain authoritative. Model: `{}`.\n\n{}\n",
-        facts.trim_end(),
-        escape_inline(model),
-        interpretation.trim()
+        "{facts}\n\n## {section}\n\n> {notice}{sentence_break}{model_label}{colon}`{model}`{stop}\
+         \n\n{interpretation}\n",
+        facts = facts.trim_end(),
+        section = labels.ai_interpretation_section,
+        notice = labels.ai_advisory_notice,
+        sentence_break = labels.narrative_sentence_break,
+        model_label = labels.ai_model,
+        colon = labels.label_colon,
+        model = escape_inline(model),
+        stop = labels.narrative_full_stop,
+        interpretation = interpretation.trim()
     )
 }
 
