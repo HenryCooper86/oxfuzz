@@ -218,6 +218,28 @@ What does remain English is any value that genuinely reaches the report through
 `Debug` rather than through a mapping. Task 2 should confirm which those are by
 reading, rather than trusting this document a second time.
 
+### 9.4 Operation result summaries stay English
+
+`automotive::automotive_result_summary` builds sentences like
+`42 decoded event(s); 1 protocol-state signature(s)` and stores them on the
+operation record. They reach the report as *data*, not as renderer literals, so
+`AutomotiveLabels` does not cover them and they render English inside an
+otherwise Chinese table cell and bullet.
+
+Threading a language into that function would be the wrong fix: it constructs
+the operation record, which is also returned over REST to consumers that have
+nothing to do with reports, so a language parameter there would bake report
+presentation into shared data.
+
+The right fix is to make `result_summary` structured -- the counts and the
+variant, rendered at report time through the label set -- which is a change to
+the data model rather than to the renderer, and is deliberately out of this
+increment.
+
+**This is an exception to success criterion 1**, recorded here rather than left
+for a reader to discover: the criterion says tables and bullets are Chinese, and
+these two cells are not.
+
 ### 9.3 Heading-literal coupling remains
 
 Validation still matches literal headings; it just matches the right ones per
@@ -254,7 +276,9 @@ account for all of them, both recorded in that branch's plan.
 
 1. Generating an automotive report from the desktop app with the interface in
    Chinese produces a report whose headings, tables, bullets, limitations and
-   narrative are Chinese.
+   narrative are Chinese, with the single documented exception of operation
+   result summaries (section 9.4), which arrive as data rather than as
+   renderer literals.
 2. Evidence citations, stage identifiers, protocol names, digests, paths and
    figures are byte-identical to the English rendering of the same data.
 3. A Chinese AI interpretation passes validation rather than being discarded.
