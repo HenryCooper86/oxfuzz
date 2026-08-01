@@ -172,7 +172,7 @@ fn coverage_bar_is_proportional() {
 fn ai_prompt_is_grounded_in_the_fact_sheet() {
     let data = populated();
     let facts = render_markdown(&data, &Labels::english());
-    let prompt = report_user_prompt(&facts, &data);
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::En);
     // The whole fact-sheet is embedded so the model has the real numbers.
     assert!(prompt.contains(&facts), "embeds the fact-sheet verbatim");
     assert!(prompt.contains("parse_header"), "names the target");
@@ -182,8 +182,50 @@ fn ai_prompt_is_grounded_in_the_fact_sheet() {
     assert!(prompt.contains("Executive Summary"));
     assert!(prompt.contains("Remediation") || prompt.contains("remediation"));
     // The system prompt sets the persona and the no-fabrication rule.
-    assert!(report_system_prompt().contains("security engineer"));
-    assert!(report_system_prompt().contains("NEVER invent"));
+    assert!(report_system_prompt(ReportLanguage::En).contains("security engineer"));
+    assert!(report_system_prompt(ReportLanguage::En).contains("NEVER invent"));
+}
+
+#[test]
+fn chinese_prompt_asks_for_chinese_and_pins_the_untranslatable_tokens() {
+    let data = populated();
+    let facts = render_markdown(&data, &Labels::chinese());
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::Zh);
+
+    assert!(
+        prompt.contains("Simplified Chinese"),
+        "prompt must name the output language"
+    );
+    // Without this rule the model transliterates symbol names and paths, which
+    // destroys the report's value as evidence.
+    for token in ["file paths", "stack frames", "crash signatures", "CWE"] {
+        assert!(prompt.contains(token), "token rule missing: {token}");
+    }
+}
+
+#[test]
+fn english_prompt_carries_no_translation_instruction() {
+    let data = populated();
+    let facts = render_markdown(&data, &Labels::english());
+    let prompt = report_user_prompt(&facts, &data, ReportLanguage::En);
+
+    assert!(!prompt.contains("Simplified Chinese"));
+}
+
+#[test]
+fn both_prompts_still_ground_the_model_in_the_data_sheet() {
+    let data = populated();
+    for (language, labels) in [
+        (ReportLanguage::En, Labels::english()),
+        (ReportLanguage::Zh, Labels::chinese()),
+    ] {
+        let facts = render_markdown(&data, &labels);
+        let prompt = report_user_prompt(&facts, &data, language);
+        // The anti-fabrication rules must survive localization.
+        assert!(prompt.contains("Do not invent"));
+        assert!(prompt.contains("mermaid"));
+        assert!(prompt.contains(&facts));
+    }
 }
 
 #[test]

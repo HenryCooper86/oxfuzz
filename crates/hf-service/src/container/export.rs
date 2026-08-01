@@ -42,13 +42,14 @@ impl ServiceContainer {
         pool: &Arc<dyn ProviderPool>,
         facts: &str,
         data: &crate::report::ReportData,
+        language: crate::report::ReportLanguage,
     ) -> Result<String, ClassifiedError> {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
 
         let messages = vec![
-            Message::system(crate::report::report_system_prompt()),
-            Message::user(crate::report::report_user_prompt(facts, data)),
+            Message::system(crate::report::report_system_prompt(language)),
+            Message::user(crate::report::report_user_prompt(facts, data, language)),
         ];
         let req = ChatRequest::from_messages(messages);
         let resp = pool
@@ -302,7 +303,10 @@ impl ServiceContainer {
         // narrative grounded in those facts. On any failure, fall back to the
         // deterministic fact-sheet so a report is always produced.
         if let Some(pool) = self.provider_pool() {
-            match self.compose_ai_report(&pool, &facts, &data).await {
+            match self
+                .compose_ai_report(&pool, &facts, &data, crate::report::ReportLanguage::En)
+                .await
+            {
                 Ok(report) => return Ok(report),
                 Err(e) => tracing::warn!("AI report composition failed, using fact-sheet: {e}"),
             }
