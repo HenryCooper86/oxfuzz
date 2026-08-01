@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::automotive::{AutomotiveStateCorpusEntry, StateSignature};
 use crate::config::AutomotiveSettings;
+use crate::report::ReportLanguage;
 
 /// Shareable safety-policy snapshot used by an automotive campaign report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,8 +271,16 @@ pub struct AutomotiveLabels {
     // two roles whichever mark it held.
     pub narrative_comma: &'static str,
     pub list_separator: &'static str,
-    // Also embedded, deliberately, inside `bench_approval_detail`'s separator
-    // slot -- see the physical-bench fields below.
+    // Closes the executive summary's enumeration: ", and " in English, where
+    // the serial comma and the conjunction are both wanted, and the bare
+    // conjunction in Chinese, which writes "A、B、C和D" and never repeats the
+    // enumeration mark before the last item. It is a field of its own rather
+    // than `list_separator` followed by `narrative_and` because that pairing
+    // renders "、和" -- correct in neither language that uses "、".
+    pub list_final_separator: &'static str,
+    // Also fills the separator slot beside `bench_approval_detail` -- see the
+    // physical-bench fields below. Nothing is embedded inside that field; the
+    // cell is assembled from three separate slots precisely so no mark is.
     pub narrative_semicolon: &'static str,
     pub narrative_open_paren: &'static str,
     pub narrative_close_paren: &'static str,
@@ -331,6 +340,14 @@ pub struct AutomotiveLabels {
     // separator, which is structure rather than prose and stays inline.
     pub bench_approval_detail: &'static str,
     pub bench_invalid: &'static str,
+    // This one still carries its own copy of the word `posture_enabled` holds,
+    // and stays whole on purpose: "enabled without required approval" is one
+    // participial phrase, and splitting it to reuse the field would pin the
+    // word order to English -- Chinese renders the same posture as a clause
+    // whose verb is not in the same place. The duplication is therefore a
+    // translation obligation rather than a structural one: whatever word
+    // `posture_enabled` takes must appear inside this phrase too, so the same
+    // posture is not spelled two ways in one table.
     pub bench_approval_missing_detail: &'static str,
     pub physical_interface_unit: &'static str,
     pub row_dangerous_services: &'static str,
@@ -452,6 +469,7 @@ impl AutomotiveLabels {
             label_colon: ": ",
             narrative_comma: ", ",
             list_separator: ", ",
+            list_final_separator: ", and ",
             narrative_semicolon: "; ",
             narrative_open_paren: " (",
             narrative_close_paren: ")",
@@ -600,6 +618,195 @@ impl AutomotiveLabels {
                                             separately confirmed supervised virtual-CAN replay.",
         }
     }
+
+    /// Resolve the label set for `language`.
+    #[must_use]
+    pub const fn for_language(language: ReportLanguage) -> Self {
+        match language {
+            ReportLanguage::En => Self::english(),
+            ReportLanguage::Zh => Self::chinese(),
+        }
+    }
+}
+
+impl AutomotiveLabels {
+    /// The Simplified Chinese label set.
+    ///
+    /// Terminology follows what the product already ships rather than being
+    /// coined here: the desktop app carries 320 translated `automotive.*` keys
+    /// in `crates/hf-gui/src/i18n.extra.ts`, and the main report's
+    /// [`crate::report::Labels::chinese`] settles the vocabulary the two
+    /// documents share. Bindings taken from there and used throughout:
+    /// campaign 测试活动, findings 发现项, corpus 语料库, artifact 产物,
+    /// digest 摘要, transcript 记录, replay 重放, mutation 变异,
+    /// physical bench 物理台架, allowlist 允许列表, sandbox 沙箱,
+    /// guardrails 安全护栏, triage 分类定级, novelty 新颖性.
+    ///
+    /// Every full-width mark supplies its own spacing, so a field holding
+    /// `", "` in English holds `"，"` here with no ASCII space beside it.
+    /// Technical tokens are absent from this function by construction: they are
+    /// never fields, so there is nothing here to leave untranslated.
+    #[must_use]
+    pub const fn chinese() -> Self {
+        Self {
+            title_prefix: "汽车协议模糊测试活动报告",
+            row_project: "项目",
+            row_generated: "生成时间",
+            row_tool: "工具",
+            row_evidence_window: "证据窗口",
+            evidence_window_unit: "个保留的操作",
+            label_colon: "：",
+            narrative_comma: "，",
+            list_separator: "、",
+            list_final_separator: "和",
+            narrative_semicolon: "；",
+            narrative_open_paren: "（",
+            narrative_close_paren: "）",
+            narrative_full_stop: "。",
+            // The full stop already separates the two sentences that share this
+            // line; an ASCII space after it would be a stray mark.
+            narrative_sentence_break: "。",
+            narrative_and: "和",
+            executive_summary: "摘要",
+            summary_lead: "本报告汇总",
+            summary_operation_unit: "个保留的汽车协议操作",
+            // The measure word belongs to the counted noun, not to the figure
+            // beside it, so each count word carries its own.
+            summary_completed: "个已完成",
+            summary_partial: "个部分完成",
+            summary_failed: "个失败",
+            summary_running: "个运行中",
+            summary_cancelled: "个已取消",
+            summary_bounded_lead: "受限快照包含",
+            summary_state_digest_unit: "个唯一协议状态摘要",
+            summary_promoted_artifact_unit: "个已提升的状态语料库产物",
+            // Reads as one clause with the noun phrase before it, where a bare
+            // "涉及" would leave the sentence looking as though a comma had
+            // been dropped: the template puts no mark in this slot.
+            summary_across: "共涉及",
+            summary_protocol_unit: "个观察到的协议",
+            summary_failures_present: "保留的失败会作为操作证据予以报告，应在重复相应工作流阶段\
+                                       之前解决。",
+            summary_no_failures: "此保留证据窗口中不存在终态操作失败。",
+            summary_novelty_disclaimer: "协议状态新颖性**不是源代码覆盖率**，其本身也不能证明存在\
+                                         漏洞。",
+            footer_generated_by: "确定性证据报告由 oxfuzz 生成，版本",
+            footer_on: "于",
+            safety_section: "范围与安全策略",
+            col_control: "控制项",
+            col_effective_posture: "生效状态",
+            row_runtime_policy: "运行时汽车协议策略",
+            posture_disabled: "已禁用",
+            posture_enabled: "已启用",
+            row_allowed_protocols: "允许的协议",
+            row_allowed_modes: "允许的模式",
+            row_virtual_interfaces: "虚拟接口",
+            virtual_interface_unit: "个在允许列表中",
+            row_physical_bench: "物理台架",
+            bench_approval_detail: "需要新的人工批准",
+            bench_invalid: "无效",
+            // Carries `posture_enabled`'s word, as its comment on the struct
+            // requires, so one posture is not spelled two ways in one table.
+            bench_approval_missing_detail: "已启用但缺少必需的批准",
+            physical_interface_unit: "个允许列表接口",
+            row_dangerous_services: "危险诊断服务",
+            dangerous_denied: "已拒绝",
+            dangerous_exceptionally_allowed: "按策略例外允许",
+            row_per_operation_bounds: "单次操作上限",
+            bounds_event_unit: "个事件",
+            bounds_second_unit: "秒",
+            bounds_rate_unit: "个发送事件/秒",
+            safety_validation_notice: "所有捕获、变异、计划和重放证据均须接受服务校验、沙箱隔离、\
+                                       类型化限额、安全护栏以及人工批准边界的约束。",
+            value_none: "无",
+            workflow_section: "测试活动工作流",
+            col_stage: "阶段",
+            col_status: "状态",
+            // Count columns, unlike `workflow_complete` beside them, which is a
+            // status word.
+            col_completed: "完成数",
+            col_failed: "失败数",
+            stage_capabilities: "适配器能力检查",
+            stage_analyze_capture: "不可变捕获文件分析",
+            stage_generate_mutations: "确定性变异生成",
+            stage_build_replay_plan: "类型化重放计划构建",
+            stage_execute_replay: "受监督的虚拟重放",
+            workflow_complete: "已完成",
+            workflow_attention: "需关注",
+            workflow_not_recorded: "无记录",
+            workflow_physical_bench_notice: "物理台架验证被有意排除在测试活动完整度评分之外。\
+                                             它仍是一项单独批准的活动，只有在确切的计划和预算\
+                                             明确之后才能进行。",
+            state_section: "协议状态探索",
+            state_none: "保留的证据窗口中不存在经过验证的协议状态签名。",
+            col_protocol: "协议",
+            col_unique_states: "唯一状态",
+            col_promoted_artifacts: "已提升产物",
+            state_evidence_heading: "状态证据",
+            state_observed_by: "观察来源",
+            state_promoted: "已提升",
+            state_promoted_from: "来自",
+            state_promoted_digest: "产物摘要",
+            state_promoted_at: "位于",
+            findings_section: "发现项",
+            findings_none: "此证据窗口中没有需要分类定级的保留终态操作失败。",
+            finding_operational_failure: "操作失败",
+            bullet_evidence: "证据",
+            bullet_mode: "模式",
+            bullet_protocol: "协议",
+            bullet_retained_error: "保留的错误",
+            value_protocol_not_selected: "未选择",
+            value_no_error_detail: "未保留错误详情",
+            finding_partial_result: "部分结果",
+            bullet_result: "结果",
+            bullet_required_action: "必要行动",
+            value_result_incomplete: "类型化操作未完成",
+            partial_required_action: "重试前请检查保留的记录和限额。",
+            interpretation_boundary_heading: "解读边界",
+            interpretation_boundary_body: "观察到的状态、成功的解码和已完成的重放步骤都属于测试\
+                                           活动证据。它们本身并不能证明可利用性、安全影响或不\
+                                           安全的车辆行为。",
+            manifest_section: "证据清单",
+            manifest_none: "此项目没有保留任何汽车协议操作证据。",
+            col_operation_evidence: "操作证据",
+            col_mode_protocol: "模式 / 协议",
+            col_validated_result: "已验证结果",
+            col_request_digest: "请求摘要",
+            col_transcript_evidence: "记录证据",
+            col_artifact_directory: "产物目录",
+            value_not_retained: "未保留",
+            value_not_applicable: "不适用",
+            status_running: "运行中",
+            status_done: "已完成",
+            status_failed: "失败",
+            status_cancelled: "已取消",
+            limitations_section: "限制",
+            limitation_bounded_snapshot: "本报告仅覆盖受限的保留证据快照，无法推断未被持久化的\
+                                          事件。",
+            limitation_not_coverage: "协议状态摘要不是源代码的行覆盖率、函数覆盖率、区域覆盖率\
+                                      或边覆盖率。",
+            limitation_completed_not_absence: "操作完成只能确认执行符合契约，并不代表不存在安全\
+                                               缺陷。",
+            limitation_virtual_not_physical: "离线证据和虚拟证据不能验证物理 ECU、车辆网络、\
+                                              时序行为或台架接线。",
+            limitation_ai_advisory: "附加的 AI 辅助解读仅供参考，既不能授权执行，也不能确立发现\
+                                     项。",
+            recommendations_section: "建议",
+            recommendation_triage_lead: "请对",
+            recommendation_triage_tail: "个保留的操作失败按操作 id 进行分类定级，然后再重复相应\
+                                         阶段。",
+            recommendation_preserve: "保留当前操作证据，并与未来的测试活动快照比对以发现回归。",
+            recommendation_next: "下一步",
+            recommendation_capabilities: "检查固定版本适配器声明的能力",
+            recommendation_analyze_capture: "分析一份具有代表性的不可变捕获文件",
+            recommendation_generate_mutations: "生成一组确定性且可审阅的变异",
+            recommendation_build_replay_plan: "在不接触任何接口的前提下构建并审阅类型化重放计划",
+            recommendation_promote_lead: "请为",
+            recommendation_promote_tail: "个尚无保留语料库证据的观察状态审阅并提升合适的产物。",
+            recommendation_virtual_replay: "如果策略和运行时就绪状态允许，请执行一次单独确认的\
+                                            受监督 virtual-CAN 重放。",
+        }
+    }
 }
 
 /// Render an auditable, deterministic automotive campaign report.
@@ -648,7 +855,7 @@ pub fn render_automotive_report(data: &AutomotiveReportData, labels: &Automotive
         report,
         "{lead} **{total} {operation_unit}**{colon}**{done} {done_word}**{item}\
          **{partial} {partial_word}**{item}**{failed} {failed_word}**{item}\
-         **{running} {running_word}**{item}{and} **{cancelled} {cancelled_word}**{sentence_break}\
+         **{running} {running_word}**{last_item}**{cancelled} {cancelled_word}**{sentence_break}\
          {bounded} **{states} {state_unit}** {and} **{promoted} {promoted_unit}** \
          {across} **{protocols} {protocol_unit}**{stop}\n",
         lead = labels.summary_lead,
@@ -665,6 +872,10 @@ pub fn render_automotive_report(data: &AutomotiveReportData, labels: &Automotive
         failed_word = labels.summary_failed,
         running = counts.running,
         running_word = labels.summary_running,
+        // The last item of the enumeration takes the conjunction, not another
+        // separator: ", and " reads as one joint in English, and Chinese drops
+        // the enumeration mark entirely before the final item.
+        last_item = labels.list_final_separator,
         and = labels.narrative_and,
         cancelled = counts.cancelled,
         cancelled_word = labels.summary_cancelled,
