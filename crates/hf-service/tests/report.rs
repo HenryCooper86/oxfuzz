@@ -335,3 +335,67 @@ fn zero_crash_narrative_sentence_is_assembled_correctly() {
         "zero-crash narrative sentence mismatch:\n{md}"
     );
 }
+
+#[test]
+fn chinese_labels_translate_the_scaffolding_in_both_directions() {
+    let md = render_markdown(&populated(), &Labels::chinese());
+
+    // Present: the Chinese headings.
+    for heading in [
+        "## 摘要",
+        "## 图表概览",
+        "## 目标",
+        "## 运行",
+        "## 覆盖率",
+        "## 语料库",
+        "## 发现项",
+    ] {
+        assert!(md.contains(heading), "missing Chinese heading {heading}");
+    }
+
+    // Absent: the English ones. Asserting only presence would pass against a
+    // chinese() that returned the English set, which is exactly the stub Task 2
+    // left behind.
+    for heading in [
+        "## Executive Summary",
+        "## Visual Summary",
+        "## Target",
+        "## Run",
+        "## Coverage",
+        "## Corpus",
+        "## Findings",
+    ] {
+        assert!(!md.contains(heading), "English heading leaked: {heading}");
+    }
+}
+
+#[test]
+fn technical_tokens_are_byte_identical_across_languages() {
+    let data = populated();
+    let en = render_markdown(&data, &Labels::english());
+    let zh = render_markdown(&data, &Labels::chinese());
+
+    // A translated stack frame no longer matches the crash it came from and
+    // cannot be grepped. These must survive untouched.
+    for token in [data.target.as_str(), data.project.as_str()] {
+        assert!(en.contains(token), "English lost {token}");
+        assert!(zh.contains(token), "Chinese lost {token}");
+    }
+    for crash in &data.crashes {
+        let signature = crash.stack_signature.as_str();
+        assert!(zh.contains(signature), "Chinese lost signature {signature}");
+        let input = crash.input_path.display().to_string();
+        assert!(zh.contains(&input), "Chinese lost input path {input}");
+    }
+}
+
+#[test]
+fn casr_terms_keep_the_original_alongside_the_translation() {
+    // Translated for the reader, original preserved so the term stays greppable
+    // and matchable against CASR output.
+    let zh = Labels::chinese();
+    assert!(zh.casr_exploitable.contains("Exploitable"));
+    assert!(zh.casr_exploitable.contains("可利用"));
+    assert!(zh.casr_not_exploitable.contains("Not exploitable"));
+    assert!(zh.casr_undefined.contains("Undefined"));
+}
