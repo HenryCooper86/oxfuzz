@@ -479,7 +479,9 @@ pub struct AutomotiveLabels {
     pub ai_interpretation_section: &'static str,
     pub ai_advisory_notice: &'static str,
     // Names the provider model that wrote the interpretation. The identifier
-    // itself is a technical token and is emitted verbatim.
+    // itself is a technical token, so it is never translated -- but it is
+    // provider-supplied text landing inside a Markdown code span, so a backtick
+    // or pipe in it is neutralized before it is written.
     pub ai_model: &'static str,
     pub ai_heading_evidence_backed: &'static str,
     pub ai_heading_hypotheses: &'static str,
