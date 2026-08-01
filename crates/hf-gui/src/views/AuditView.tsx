@@ -40,28 +40,43 @@ export function AuditView() {
 
   const load = useCallback(async () => {
     setError(null);
-    try {
-      const project = scope === "project" ? activeProject || undefined : undefined;
-      const [list, records] = await Promise.all([
-        getTransport().invoke<AutoRevertEvent[]>("auto_revert_events", {
-          project,
-          limit: 200,
-        }),
-        // Decisions are not project-scoped in the service: the guardrail trail
-        // records actions that have no project, so scoping would silently drop
-        // them.
-        getTransport().invoke<PolicyDecision[]>("policy_decisions", { limit: 200 }),
-      ]);
-      setEvents(list ?? []);
-      setDecisions(records ?? []);
-    } catch (e) {
-      setError(String(e));
+    const project = scope === "project" ? activeProject || undefined : undefined;
+    // allSettled (not all): the two sources are independent, so one rejecting
+    // (e.g. an older backend without /policy/decisions, or a transient error)
+    // must not blank the other's already-working data.
+    const [eventsResult, decisionsResult] = await Promise.allSettled([
+      getTransport().invoke<AutoRevertEvent[]>("auto_revert_events", {
+        project,
+        limit: 200,
+      }),
+      // Decisions are not project-scoped in the service: the guardrail trail
+      // records actions that have no project, so scoping would silently drop
+      // them.
+      getTransport().invoke<PolicyDecision[]>("policy_decisions", { limit: 200 }),
+    ]);
+
+    if (eventsResult.status === "fulfilled") {
+      setEvents(eventsResult.value ?? []);
+    } else {
       setEvents([]);
-      setDecisions([]);
-    } finally {
-      setLoading(false);
     }
-  }, [scope, activeProject]);
+    if (decisionsResult.status === "fulfilled") {
+      setDecisions(decisionsResult.value ?? []);
+    } else {
+      setDecisions([]);
+    }
+
+    const failures: string[] = [];
+    if (eventsResult.status === "rejected") {
+      failures.push(t("audit.loadError", { error: String(eventsResult.reason) }));
+    }
+    if (decisionsResult.status === "rejected") {
+      failures.push(t("audit.loadErrorDecisions", { error: String(decisionsResult.reason) }));
+    }
+    setError(failures.length > 0 ? failures.join(" ") : null);
+
+    setLoading(false);
+  }, [scope, activeProject, t]);
 
   useEffect(() => {
     queueMicrotask(() => void load());
@@ -96,7 +111,7 @@ export function AuditView() {
           style={{ padding: "var(--space-sm) var(--space-md)", borderColor: "var(--error)" }}
         >
           <span className="text-xs min-w-0 truncate" style={{ color: "var(--error)" }}>
-            {t("audit.loadError", { error })}
+            {error}
           </span>
           <Button variant="outline" size="sm" onClick={() => void load()}>
             {t("common.retry")}
@@ -106,7 +121,11 @@ export function AuditView() {
 
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">{t("audit.decisionsTitle")}</h3>
-        <PolicyDecisionList decisions={decisions} emptyLabel={t("audit.decisionsEmpty")} />
+        {loading ? (
+          <div className="text-xs text-text-muted">{t("audit.loading")}</div>
+        ) : (
+          <PolicyDecisionList decisions={decisions} emptyLabel={t("audit.decisionsEmpty")} />
+        )}
       </div>
 
       <h3 className="text-sm font-medium">{t("audit.revertsTitle")}</h3>
