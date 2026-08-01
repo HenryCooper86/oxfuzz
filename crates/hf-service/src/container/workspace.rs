@@ -523,6 +523,85 @@ pub(super) fn resolve_workspace_directory(
     Ok(resolved)
 }
 
+/// Create or resolve a service-owned directory below `workspace` without
+/// following symlinks left by an earlier untrusted sandbox execution.
+pub(crate) fn ensure_workspace_directory(
+    workspace: &Path,
+    relative: &Path,
+) -> Result<PathBuf, ClassifiedError> {
+    let workspace_metadata = std::fs::symlink_metadata(workspace).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "inspect workspace directory {}: {e}",
+            workspace.display()
+        ))
+    })?;
+    if !workspace_metadata.file_type().is_dir() {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace is not a regular directory: {}",
+            workspace.display()
+        )));
+    }
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace directory path is unsafe: {}",
+            relative.display()
+        )));
+    }
+
+    let root = std::fs::canonicalize(workspace).map_err(|e| {
+        ClassifiedError::Validation(format!("resolve workspace {}: {e}", workspace.display()))
+    })?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            unreachable!("relative path was validated above")
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "workspace directory is not a regular directory: {}",
+                    current.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|e| {
+                    ClassifiedError::Internal(format!(
+                        "create workspace directory {}: {e}",
+                        current.display()
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(ClassifiedError::Validation(format!(
+                    "inspect workspace directory {}: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    let resolved = std::fs::canonicalize(&current).map_err(|e| {
+        ClassifiedError::Validation(format!(
+            "resolve workspace directory {}: {e}",
+            current.display()
+        ))
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(ClassifiedError::Validation(format!(
+            "workspace directory escaped {}: {}",
+            root.display(),
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
 #[cfg(test)]
 use super::ServiceContainer;
 

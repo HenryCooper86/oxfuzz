@@ -28,6 +28,7 @@ mod workspace;
 
 pub use guards::AgentTurnGuard;
 pub use harness_workspace::{copy_project_sources, generate_target_seeds};
+pub(crate) use workspace::ensure_workspace_directory;
 pub use workspace::{
     initialize_workspace_root, project_workspace_dir, workspace_dir, workspace_root,
 };
@@ -36,7 +37,7 @@ use std::fmt::Write;
 use std::fs::File;
 #[cfg(feature = "semgrep-enrichment")]
 use std::fs::TryLockError;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -181,85 +182,6 @@ pub(crate) fn acquire_semgrep_project_lease(
 #[cfg(feature = "automotive-scapy")]
 pub(crate) fn initialize_workspace_root_at(root: &Path) -> Result<PathBuf, ClassifiedError> {
     prepare_managed_workspace_root_with_adoption(root, false)
-}
-
-/// Create or resolve a service-owned directory below `workspace` without
-/// following symlinks left by an earlier untrusted sandbox execution.
-pub(crate) fn ensure_workspace_directory(
-    workspace: &Path,
-    relative: &Path,
-) -> Result<PathBuf, ClassifiedError> {
-    let workspace_metadata = std::fs::symlink_metadata(workspace).map_err(|e| {
-        ClassifiedError::Validation(format!(
-            "inspect workspace directory {}: {e}",
-            workspace.display()
-        ))
-    })?;
-    if !workspace_metadata.file_type().is_dir() {
-        return Err(ClassifiedError::Validation(format!(
-            "workspace is not a regular directory: {}",
-            workspace.display()
-        )));
-    }
-    if relative.as_os_str().is_empty()
-        || relative.is_absolute()
-        || !relative
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-    {
-        return Err(ClassifiedError::Validation(format!(
-            "workspace directory path is unsafe: {}",
-            relative.display()
-        )));
-    }
-
-    let root = std::fs::canonicalize(workspace).map_err(|e| {
-        ClassifiedError::Validation(format!("resolve workspace {}: {e}", workspace.display()))
-    })?;
-    let mut current = root.clone();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            unreachable!("relative path was validated above")
-        };
-        current.push(name);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(_) => {
-                return Err(ClassifiedError::Validation(format!(
-                    "workspace directory is not a regular directory: {}",
-                    current.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|e| {
-                    ClassifiedError::Internal(format!(
-                        "create workspace directory {}: {e}",
-                        current.display()
-                    ))
-                })?;
-            }
-            Err(error) => {
-                return Err(ClassifiedError::Validation(format!(
-                    "inspect workspace directory {}: {error}",
-                    current.display()
-                )));
-            }
-        }
-    }
-    let resolved = std::fs::canonicalize(&current).map_err(|e| {
-        ClassifiedError::Validation(format!(
-            "resolve workspace directory {}: {e}",
-            current.display()
-        ))
-    })?;
-    if !resolved.starts_with(&root) {
-        return Err(ClassifiedError::Validation(format!(
-            "workspace directory escaped {}: {}",
-            root.display(),
-            resolved.display()
-        )));
-    }
-    Ok(resolved)
 }
 
 async fn merge_run_discoveries(
