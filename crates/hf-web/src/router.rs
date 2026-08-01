@@ -589,7 +589,7 @@ fn semgrep_routes() -> Router<AppState> {
 
 /// Bearer-token auth + request audit middleware.
 ///
-/// Enforces [`AuthPolicy`]: with a token configured, every request except
+/// Enforces [`crate::security::AuthPolicy`]: with a token configured, every request except
 /// `/health` must carry a matching `Authorization: Bearer <token>` header.
 /// With no token configured the API is fail-closed (rejects everything but
 /// `/health`) unless `HF_WEB_TOKEN_OPTIONAL=1`. Every request is logged
