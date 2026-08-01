@@ -285,20 +285,36 @@ existed nowhere in writing before.
 ### 9.4 Operation result summaries stay English
 
 `automotive::automotive_result_summary` builds sentences like
-`42 decoded event(s); 1 protocol-state signature(s)` and stores them on the
-operation record. They reach the report as *data*, not as renderer literals, so
-`AutomotiveLabels` does not cover them and they render English inside an
-otherwise Chinese table cell and bullet.
+`42 decoded event(s); 1 protocol-state signature(s)`. They reach the report as
+*data*, not as renderer literals, so `AutomotiveLabels` does not cover them and
+they render English inside an otherwise Chinese table cell and bullet.
 
-Threading a language into that function would be the wrong fix: it constructs
-the operation record, which is also returned over REST to consumers that have
-nothing to do with reports, so a language parameter there would bake report
-presentation into shared data.
+**This section previously claimed that function "stores them on the operation
+record, which is also returned over REST", and concluded the fix was a
+data-model change. All three claims were wrong**, and the branch review found
+it. Checked against the code:
 
-The right fix is to make `result_summary` structured -- the counts and the
-variant, rendered at report time through the label set -- which is a change to
-the data model rather than to the renderer, and is deliberately out of this
-increment.
+- It has exactly **one** caller, `report_operation` (`automotive.rs:979`).
+- It fills `AutomotiveReportOperation.result_summary`, and that struct derives
+  only `Debug, Clone, PartialEq, Eq` -- **not `Serialize`**. It never crosses a
+  wire.
+- The record REST returns is `AutomotiveOperationSummary`
+  (`automotive.rs:190`), which is `Serialize` and has **no `result_summary`
+  field** at all.
+- Nothing is stored. It is computed at report time, by
+  `retained_operation_result` deserializing `record.result_json`.
+
+So the barrier this section erected does not exist. `automotive_result_summary`
+is a report-only projection: two private functions inside one crate, on a
+report-only path, with no wire impact and no data-model change required.
+
+That does not make it free. Localizing it needs a label field per
+`AutomotiveResult` variant with the counts interpolated -- roughly the same
+shape of work as one section of the label set, on a struct whose variants the
+label set does not yet cover. That is real work and is **deliberately out of
+this branch**. The point of the correction is that a follow-up must be sized
+honestly against a small, contained change, not deferred behind a wire contract
+that was never there.
 
 **This is an exception to success criterion 1**, recorded here rather than left
 for a reader to discover: the criterion says tables and bullets are Chinese, and
