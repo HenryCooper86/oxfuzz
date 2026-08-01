@@ -22,6 +22,15 @@
 - **Technical tokens are never translated.** File paths, stack frames, symbol and function names, crash signatures, engine names, sanitizer names, CWE identifiers, and all figures render byte-identical in both languages.
 - Commit messages end with:
   `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`
+- **Every assertion must be able to fail.** Before committing a test, name the
+  single-line change to production code that would make it go red. If you cannot
+  name one, the assertion does not guard its behavior -- rewrite it. Two traps
+  have already produced passing-but-vacuous tests on this branch: asserting a
+  substring that some *other*, shared code path also emits (so the assertion is
+  true before the change under test), and asserting the absence of a pattern the
+  renderer never produces in any language. When a test guards a specific call
+  site among several that render similar text, prove it: revert that one site,
+  confirm red, restore.
 - Baseline on `main` at the time of writing: `cargo test -p hf-service` passes; `crates/hf-service/tests/report.rs` holds the existing report tests. Every task must leave that suite green.
 - After each task: `cargo fmt --all`, `cargo clippy --workspace -- -D warnings`, `cargo check -p hf-service --all-targets`, `cargo check -p hf-service --no-default-features`. That last one has caught two real defects in this repository that no other gate could see.
 
