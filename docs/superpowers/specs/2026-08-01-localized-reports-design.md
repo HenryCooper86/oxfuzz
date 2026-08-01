@@ -16,7 +16,7 @@ Scope of this increment:
   compiler-checked label struct;
 - the LLM narrative prompt gains a language instruction and an explicit
   token-preservation rule;
-- the desktop app passes its current UI locale; the CLI gains `--lang`; REST
+- the desktop app passes its current UI locale; the CLI gains `--report-lang`; REST
   takes an optional field.
 
 Out of scope: any language beyond English and Simplified Chinese, a persisted
@@ -197,7 +197,7 @@ graphs come from the already-translated fact sheet.
 | Surface | How the language arrives |
 | --- | --- |
 | Desktop | The `generate_report` and `export_report` Tauri commands take a `language` field; the view passes `useI18n().locale`. |
-| CLI | `oxfuzz report --lang zh`, defaulting to `en`. |
+| CLI | `oxfuzz report --report-lang zh`, defaulting to `en`. Named `--report-lang` rather than `--lang` because `--lang` already means the target's source language on `discover` and `harness`. |
 | REST | An optional `language` field on the report request body, defaulting to `en`. |
 
 Absent means English everywhere. Scheduled campaigns pass nothing and therefore
@@ -258,7 +258,7 @@ everywhere they render, per decision 2.5.
 
 `ServiceContainer::generate_report` takes the language as an explicit parameter,
 so every caller must supply one. All but one have a language to supply: the CLI
-has `--lang`, the REST route has a request field, the desktop commands have the
+has `--report-lang`, the REST route has a request field, the desktop commands have the
 resolved UI locale, `export_report` has its own parameter, and the tests choose
 one.
 
@@ -331,7 +331,7 @@ No test invokes a provider.
    name, sanitizer name, CWE identifier, and figure byte-identical to the
    English rendering of the same data.
 3. With no provider configured, the Chinese fallback report is still Chinese.
-4. `oxfuzz report --lang zh` and a REST request with `"language": "zh"` produce
+4. `oxfuzz report --report-lang zh` and a REST request with `"language": "zh"` produce
    the same structure as the desktop path.
 5. Omitting the language anywhere yields an English report, unchanged from
    today's behavior.
