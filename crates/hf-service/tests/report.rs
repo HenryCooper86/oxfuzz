@@ -196,11 +196,25 @@ fn chinese_prompt_asks_for_chinese_and_pins_the_untranslatable_tokens() {
         prompt.contains("Simplified Chinese"),
         "prompt must name the output language"
     );
-    // Without this rule the model transliterates symbol names and paths, which
-    // destroys the report's value as evidence.
-    for token in ["file paths", "stack frames", "crash signatures", "CWE"] {
-        assert!(prompt.contains(token), "token rule missing: {token}");
-    }
+    // Assert the Zh-only verbatim-preservation clause as one contiguous
+    // substring, not per-token `contains()` checks. The base (language-
+    // independent) sentence already reads "Do not invent crash counts,
+    // severities, coverage numbers, file paths, or stack frames," so a
+    // per-token check for "file paths" or "stack frames" alone is satisfied
+    // by that shared sentence regardless of what the Zh-only block says --
+    // it would pass even if the Zh block were deleted entirely. This exact
+    // phrase (from "never translated" through the trailing period) exists
+    // only in the Zh-only block and names all eight token categories the
+    // rule requires survive untranslated in one match, so dropping any one
+    // category, or the clause itself, breaks it.
+    assert!(
+        prompt.contains(
+            "never translated or transliterated: file paths, stack frames, symbol and \
+             function names, crash signatures, engine names, sanitizer names, CWE \
+             identifiers, and all figures."
+        ),
+        "Zh verbatim-preservation rule missing or altered"
+    );
 }
 
 #[test]
@@ -210,6 +224,8 @@ fn english_prompt_carries_no_translation_instruction() {
     let prompt = report_user_prompt(&facts, &data, ReportLanguage::En);
 
     assert!(!prompt.contains("Simplified Chinese"));
+    assert!(!prompt.contains("transliterated"));
+    assert!(!prompt.contains("A translated stack frame no longer matches the crash it came from"));
 }
 
 #[test]
