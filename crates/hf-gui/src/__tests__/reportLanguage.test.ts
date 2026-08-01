@@ -85,9 +85,16 @@ describe("report draft titles follow the interface language", () => {
   });
 
   it("leaves no English report-title literal in either view", () => {
-    // The assertions above would all still pass if a fourth site were added,
-    // or if a localized title were computed and then ignored. This one fails
-    // the moment any of the three is reverted to its template literal.
+    // The assertions above would all still pass if a localized title were
+    // computed and then ignored. This one fails the moment any of the three is
+    // reverted to its template literal, and it catches a new English title
+    // added to either of these two views.
+    //
+    // It does NOT catch a title added elsewhere: AutomotiveView.tsx builds
+    // "Automotive campaign report — {...}" and persists it, and is not scanned
+    // here. That report has no language parameter at all, so its body is
+    // English too; localizing it is a separate piece of work, not a gap in
+    // this guard.
     for (const text of [source("../views/TriageView.tsx"), dashboardFile]) {
       expect(text).not.toMatch(/fuzzing report/);
       expect(text).not.toMatch(/Triage report/);
@@ -102,9 +109,12 @@ describe("report draft titles follow the interface language", () => {
       "reports.unknownTarget",
       "reports.untitledDraftTitle",
     ]) {
-      // Once in the English block, once in the Chinese one. A key present only
-      // in English silently renders its English fallback in Chinese.
-      expect(extra.match(new RegExp(`"${key}":`, "g"))).toHaveLength(2);
+      // Once in the English block, once in the Chinese one. `t` resolves
+      // DICTS[locale][key] ?? en[key] ?? key, where `en` is the *inline*
+      // dictionary rather than this file, so a key added only to the English
+      // block here renders as the raw key string -- "reports.untitledDraftTitle"
+      // shown to the user -- not as English prose.
+      expect(extra.match(new RegExp(`"${key.replace(/\./g, "\\.")}":`, "g"))).toHaveLength(2);
     }
     // And the Chinese values are actually Chinese, not copied English.
     expect(extra).toContain('"reports.targetDraftTitle": "{target} 模糊测试报告"');
