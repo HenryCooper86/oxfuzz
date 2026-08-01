@@ -527,6 +527,14 @@ pub(super) fn resolve_workspace_directory(
 use super::ServiceContainer;
 
 #[cfg(test)]
+impl ServiceContainer {
+    #[cfg(test)]
+    fn clear_workspace_at(&self, root: &Path) -> Result<(), ClassifiedError> {
+        self.clear_workspace_at_with_adoption(root, false)
+    }
+}
+
+#[cfg(test)]
 mod workspace_tests {
     use super::{
         document_staging_dir, prepare_managed_workspace_root,

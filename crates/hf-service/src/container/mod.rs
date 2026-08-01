@@ -1080,11 +1080,6 @@ impl ServiceContainer {
         Self::try_acquire_workspace_cleanup(root)
     }
 
-    #[cfg(test)]
-    fn clear_workspace_at(&self, root: &Path) -> Result<(), ClassifiedError> {
-        self.clear_workspace_at_with_adoption(root, false)
-    }
-
     fn clear_workspace_at_with_adoption(
         &self,
         root: &Path,
