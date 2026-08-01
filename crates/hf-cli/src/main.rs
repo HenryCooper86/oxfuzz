@@ -246,6 +246,9 @@ enum Commands {
         /// Write the report to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Report language: en or zh. Defaults to en.
+        #[arg(long, default_value = "en")]
+        lang: String,
     },
     /// Start the web server (REST API).
     Serve {
@@ -1757,9 +1760,14 @@ async fn cmd_report(
     project: PathBuf,
     target: &str,
     out: Option<&std::path::Path>,
+    lang: &str,
 ) -> anyhow::Result<()> {
+    // An unknown identifier is rejected here, before any composition work.
+    let language = lang.parse::<hf_service::ReportLanguage>()?;
     let container = ServiceContainer::bootstrap().await;
-    let markdown = container.generate_report(&project, target).await?;
+    let markdown = container
+        .generate_report(&project, target, language)
+        .await?;
     match out {
         Some(path) => {
             std::fs::write(path, &markdown)?;
@@ -2163,7 +2171,8 @@ async fn main() -> anyhow::Result<()> {
             project,
             target,
             out,
-        } => cmd_report(project, &target, out.as_deref()).await?,
+            lang,
+        } => cmd_report(project, &target, out.as_deref(), &lang).await?,
         Commands::Serve { host, port } => {
             let security = hf_web::WebSecurityConfig::from_env();
             let addr = std::net::SocketAddr::new(host, port);
@@ -2248,6 +2257,54 @@ mod automotive_tests {
         assert_eq!(
             output,
             Some(std::path::PathBuf::from("/tmp/automotive-report.html"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_cli_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn report_language_defaults_to_english_and_accepts_chinese() {
+        let default_cli =
+            Cli::try_parse_from(["oxfuzz", "report", "/tmp/project", "--target", "parse"]).unwrap();
+        let Commands::Report { lang, .. } = default_cli.command else {
+            panic!("expected the report command");
+        };
+        assert_eq!(
+            lang.parse::<hf_service::ReportLanguage>().unwrap(),
+            hf_service::ReportLanguage::En
+        );
+
+        let chinese = Cli::try_parse_from([
+            "oxfuzz",
+            "report",
+            "/tmp/project",
+            "--target",
+            "parse",
+            "--lang",
+            "zh",
+        ])
+        .unwrap();
+        let Commands::Report { lang, .. } = chinese.command else {
+            panic!("expected the report command");
+        };
+        assert_eq!(
+            lang.parse::<hf_service::ReportLanguage>().unwrap(),
+            hf_service::ReportLanguage::Zh
+        );
+    }
+
+    #[test]
+    fn an_unknown_report_language_names_the_accepted_values() {
+        let error = "fr".parse::<hf_service::ReportLanguage>().unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("'en'") && message.contains("'zh'"),
+            "{message}"
         );
     }
 }
