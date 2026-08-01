@@ -1,8 +1,32 @@
 #![cfg(feature = "automotive-scapy")]
 
+//! Automotive campaign report rendering, in both label sets.
+//!
+//! The four fixtures below between them exercise every branch of
+//! `render_automotive_report` and its seven helpers, and every field of
+//! `AutomotiveLabels` renders in at least one of them:
+//!
+//! - `populated` -- one done and one failed operation, one promoted state.
+//! - `empty` -- no operations, no state corpus, a disabled runtime policy,
+//!   empty protocol and mode allowlists, every stage not recorded, all four
+//!   `Next,` recommendations, and a project name carrying a backtick and a pipe
+//!   so the escape path runs.
+//! - `complete` -- every stage done including the virtual-CAN replay, no
+//!   failures, every observed state promoted, the bench enabled with a fresh
+//!   approval required, dangerous services exceptionally allowed, and the
+//!   single-recommendation path.
+//! - `mixed` -- the invalid enabled-without-approval bench posture, running,
+//!   cancelled, partial and failed operations, an absent protocol, transcript,
+//!   result summary and error detail, and the unpromoted-state recommendation.
+//!
+//! `tests/fixtures/automotive_report/*.en.md` are the renderings this report
+//! produced before any localization work began. Comparing against them is the
+//! byte-for-byte proof that extracting every literal into `AutomotiveLabels`
+//! and adding a second language did not move the English document.
+
 use std::collections::BTreeMap;
 
-use chrono::{TimeZone as _, Utc};
+use chrono::{DateTime, TimeZone as _, Utc};
 use hf_automotive::{AutomotiveProtocol, StateSignature};
 use hf_service::automotive::AutomotiveStateCorpusEntry;
 use hf_service::automotive_report::{
@@ -20,13 +44,20 @@ const STATE_DIGEST: &str = "abababababababababababababababababababababababababab
 const REQUEST_DIGEST: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 const TRANSCRIPT_DIGEST: &str = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
 
-fn report_data() -> AutomotiveReportData {
-    let state_signature = StateSignature::from_observations(
+fn state_signature() -> StateSignature {
+    StateSignature::from_observations(
         AutomotiveProtocol::Uds,
         BTreeMap::from([("session".to_owned(), "extended".to_owned())]),
     )
-    .unwrap();
-    let started_at = Utc.with_ymd_and_hms(2026, 7, 16, 8, 0, 0).unwrap();
+    .unwrap()
+}
+
+fn started() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 7, 16, 8, 0, 0).unwrap()
+}
+
+fn report_data() -> AutomotiveReportData {
+    let started_at = started();
     AutomotiveReportData {
         generated_at: "2026-07-16T09:00:00Z".to_owned(),
         project_name: "vehicle-gateway".to_owned(),
@@ -56,7 +87,7 @@ fn report_data() -> AutomotiveReportData {
                 transcript_sha256: Some(TRANSCRIPT_DIGEST.to_owned()),
                 artifact_dir: ".service/automotive/operation-one".to_owned(),
                 error: None,
-                state_signatures: vec![state_signature],
+                state_signatures: vec![state_signature()],
                 result_summary: Some("42 decoded events; 1 protocol state".to_owned()),
                 result_complete: Some(true),
             },
@@ -93,13 +124,220 @@ fn report_data() -> AutomotiveReportData {
     }
 }
 
+/// Empty evidence window, disabled policy, empty allowlists.
+fn empty_data() -> AutomotiveReportData {
+    AutomotiveReportData {
+        generated_at: "2026-07-16T09:00:00Z".to_owned(),
+        project_name: "empty|project`name".to_owned(),
+        tool_version: "0.1.0".to_owned(),
+        safety: AutomotiveReportSafetyPosture {
+            runtime_policy: AutomotivePolicyPosture::Disabled,
+            allowed_protocols: Vec::new(),
+            allowed_modes: Vec::new(),
+            virtual_interface_count: 0,
+            physical_bench: AutomotivePhysicalBenchPosture::Disabled,
+            physical_interface_count: 0,
+            dangerous_services: AutomotiveDangerousServicesPosture::Denied,
+            max_packets: 1,
+            max_duration_secs: 2,
+            max_rate_per_second: 3,
+        },
+        operations: Vec::new(),
+        state_corpus: Vec::new(),
+    }
+}
+
+/// Every stage complete, no failures, every observed state promoted, bench
+/// enabled with fresh approval, dangerous services exceptionally allowed.
+fn complete_data() -> AutomotiveReportData {
+    let started_at = started();
+    let signature = state_signature();
+    let digest = signature.digest.as_str().to_owned();
+    let stage = |index: u8, name: &str, mode: &str, signatures: Vec<StateSignature>| {
+        AutomotiveReportOperation {
+            id: Uuid::from_u128(u128::from(index)),
+            operation: name.to_owned(),
+            mode: mode.to_owned(),
+            protocol: Some("uds".to_owned()),
+            status: AutomotiveOperationStatus::Done,
+            started_at: started_at + chrono::Duration::minutes(i64::from(index)),
+            ended_at: Some(started_at + chrono::Duration::minutes(i64::from(index))),
+            request_sha256: REQUEST_DIGEST.to_owned(),
+            transcript_sha256: Some(TRANSCRIPT_DIGEST.to_owned()),
+            artifact_dir: format!(".service/automotive/{name}"),
+            error: None,
+            state_signatures: signatures,
+            result_summary: Some("complete".to_owned()),
+            result_complete: Some(true),
+        }
+    };
+    AutomotiveReportData {
+        generated_at: "2026-07-16T09:00:00Z".to_owned(),
+        project_name: "complete".to_owned(),
+        tool_version: "0.1.0".to_owned(),
+        safety: AutomotiveReportSafetyPosture {
+            runtime_policy: AutomotivePolicyPosture::Enabled,
+            allowed_protocols: vec!["uds".to_owned()],
+            allowed_modes: vec!["virtual_can".to_owned()],
+            virtual_interface_count: 2,
+            physical_bench: AutomotivePhysicalBenchPosture::EnabledApprovalRequired,
+            physical_interface_count: 3,
+            dangerous_services: AutomotiveDangerousServicesPosture::ExceptionallyAllowed,
+            max_packets: 5,
+            max_duration_secs: 6,
+            max_rate_per_second: 7,
+        },
+        operations: vec![
+            stage(1, "capabilities", "offline_pcap", Vec::new()),
+            stage(2, "analyze_capture", "offline_pcap", vec![signature]),
+            stage(3, "generate_mutations", "offline_pcap", Vec::new()),
+            stage(4, "build_replay_plan", "offline_pcap", Vec::new()),
+            stage(5, "execute_replay", "virtual_can", Vec::new()),
+        ],
+        state_corpus: vec![AutomotiveStateCorpusEntry {
+            project_root: "/private/host/path/complete".to_owned(),
+            protocol: AutomotiveProtocol::Uds,
+            state_digest: digest,
+            artifact_sha256: "5656".repeat(16),
+            source_operation_id: Uuid::from_u128(2),
+            artifact_path: "project/.service/automotive/state-corpus/uds/evidence".to_owned(),
+            created_at: started_at,
+        }],
+    }
+}
+
+/// Invalid bench posture, running/cancelled/partial operations, missing
+/// protocol, transcript, result summary and error detail.
+fn mixed_data() -> AutomotiveReportData {
+    let started_at = started();
+    AutomotiveReportData {
+        generated_at: "2026-07-16T09:00:00Z".to_owned(),
+        project_name: "mixed".to_owned(),
+        tool_version: "0.1.0".to_owned(),
+        safety: AutomotiveReportSafetyPosture {
+            runtime_policy: AutomotivePolicyPosture::Enabled,
+            allowed_protocols: vec!["can".to_owned()],
+            allowed_modes: vec!["offline_pcap".to_owned()],
+            virtual_interface_count: 4,
+            physical_bench: AutomotivePhysicalBenchPosture::EnabledApprovalMissing,
+            physical_interface_count: 5,
+            dangerous_services: AutomotiveDangerousServicesPosture::ExceptionallyAllowed,
+            max_packets: 8,
+            max_duration_secs: 9,
+            max_rate_per_second: 10,
+        },
+        operations: vec![
+            AutomotiveReportOperation {
+                id: Uuid::from_u128(11),
+                operation: "analyze_capture".to_owned(),
+                mode: "offline_pcap".to_owned(),
+                protocol: None,
+                status: AutomotiveOperationStatus::Running,
+                started_at,
+                ended_at: None,
+                request_sha256: REQUEST_DIGEST.to_owned(),
+                transcript_sha256: None,
+                artifact_dir: ".service/automotive/running".to_owned(),
+                error: None,
+                state_signatures: vec![state_signature()],
+                result_summary: None,
+                result_complete: None,
+            },
+            AutomotiveReportOperation {
+                id: Uuid::from_u128(12),
+                operation: "generate_mutations".to_owned(),
+                mode: "offline_pcap".to_owned(),
+                protocol: Some("can".to_owned()),
+                status: AutomotiveOperationStatus::Cancelled,
+                started_at: started_at + chrono::Duration::minutes(1),
+                ended_at: Some(started_at + chrono::Duration::minutes(1)),
+                request_sha256: REQUEST_DIGEST.to_owned(),
+                transcript_sha256: Some(TRANSCRIPT_DIGEST.to_owned()),
+                artifact_dir: ".service/automotive/cancelled".to_owned(),
+                error: None,
+                state_signatures: Vec::new(),
+                result_summary: None,
+                result_complete: None,
+            },
+            AutomotiveReportOperation {
+                id: Uuid::from_u128(13),
+                operation: "build_replay_plan".to_owned(),
+                mode: "offline_pcap".to_owned(),
+                protocol: Some("can".to_owned()),
+                status: AutomotiveOperationStatus::Done,
+                started_at: started_at + chrono::Duration::minutes(2),
+                ended_at: Some(started_at + chrono::Duration::minutes(2)),
+                request_sha256: REQUEST_DIGEST.to_owned(),
+                transcript_sha256: Some(TRANSCRIPT_DIGEST.to_owned()),
+                artifact_dir: ".service/automotive/partial".to_owned(),
+                error: None,
+                state_signatures: Vec::new(),
+                result_summary: None,
+                result_complete: Some(false),
+            },
+            AutomotiveReportOperation {
+                id: Uuid::from_u128(14),
+                operation: "execute_replay".to_owned(),
+                mode: "virtual_can".to_owned(),
+                protocol: None,
+                status: AutomotiveOperationStatus::Failed,
+                started_at: started_at + chrono::Duration::minutes(3),
+                ended_at: Some(started_at + chrono::Duration::minutes(3)),
+                request_sha256: REQUEST_DIGEST.to_owned(),
+                transcript_sha256: None,
+                artifact_dir: ".service/automotive/failed".to_owned(),
+                error: None,
+                state_signatures: Vec::new(),
+                result_summary: None,
+                result_complete: None,
+            },
+        ],
+        state_corpus: Vec::new(),
+    }
+}
+
+/// One branch-covering fixture with the two renderings it is pinned to.
+struct Fixture {
+    name: &'static str,
+    data: AutomotiveReportData,
+    english: &'static str,
+}
+
+fn fixtures() -> [Fixture; 4] {
+    [
+        Fixture {
+            name: "populated",
+            data: report_data(),
+            english: include_str!("fixtures/automotive_report/populated.en.md"),
+        },
+        Fixture {
+            name: "empty",
+            data: empty_data(),
+            english: include_str!("fixtures/automotive_report/empty.en.md"),
+        },
+        Fixture {
+            name: "complete",
+            data: complete_data(),
+            english: include_str!("fixtures/automotive_report/complete.en.md"),
+        },
+        Fixture {
+            name: "mixed",
+            data: mixed_data(),
+            english: include_str!("fixtures/automotive_report/mixed.en.md"),
+        },
+    ]
+}
+
 #[test]
-fn english_labels_render_todays_exact_text() {
-    let report = render_automotive_report(&report_data(), &AutomotiveLabels::english());
-    assert!(report.contains("# Automotive Fuzzing Campaign Report:"));
-    assert!(report.contains("## Executive Summary"));
-    assert!(report.contains("## Limitations"));
-    assert!(report.contains("## Recommendations"));
+fn english_output_is_byte_identical_to_the_pre_localization_baseline() {
+    for fixture in fixtures() {
+        let rendered = render_automotive_report(&fixture.data, &AutomotiveLabels::english());
+        assert_eq!(
+            rendered, fixture.english,
+            "the English {} report moved",
+            fixture.name
+        );
+    }
 }
 
 #[test]
