@@ -154,24 +154,46 @@ fn chinese_labels_translate_the_scaffolding_in_both_directions() {
 }
 
 #[test]
-fn technical_tokens_are_identical_across_languages() {
+fn technical_tokens_are_byte_identical_across_languages() {
     let data = report_data();
     let en = render_automotive_report(&data, &AutomotiveLabels::english());
     let zh = render_automotive_report(&data, &AutomotiveLabels::chinese());
-    // Citations are validated against known identifiers, so a translated one
-    // does not merely become unmatchable -- it discards the interpretation
-    // that carries it.
-    for token in ["[OP:", "[STATE:", "[TRANSCRIPT:"] {
+
+    // Assert on whole citations built from the fixture, not on the "[OP:"
+    // prefix. A prefix cannot be translated, so counting prefixes passes
+    // whatever happens to the identifier inside. Citations are validated
+    // against known identifiers, so a translated one does not merely become
+    // unmatchable -- it discards the interpretation that carries it.
+    for operation in &data.operations {
+        let citation = format!("[OP:{}]", operation.id);
+        assert!(
+            zh.contains(citation.as_str()),
+            "{citation} is missing from the Chinese render"
+        );
         assert_eq!(
-            en.matches(token).count(),
-            zh.matches(token).count(),
-            "citation marker {token} count differs between languages"
+            en.matches(citation.as_str()).count(),
+            zh.matches(citation.as_str()).count(),
+            "{citation} occurs a different number of times per language"
+        );
+    }
+
+    // Protocol and mode names are configuration the operator set; translating
+    // one would stop it matching what they configured.
+    for name in data
+        .safety
+        .allowed_protocols
+        .iter()
+        .chain(data.safety.allowed_modes.iter())
+    {
+        assert!(
+            zh.contains(name.as_str()),
+            "{name} was translated or dropped from the Chinese render"
         );
     }
 }
 ```
 
-Use the fixture's real operation id, state digest and transcript hash for the byte-identity assertions rather than the markers alone, so the test guards the values and not just the prefixes.
+Derive every asserted token from the fixture rather than hardcoding it, so the test keeps guarding the real values if the fixture changes. Extend the same treatment to state digests and transcript hashes, which reach the report through their own render paths.
 
 - [ ] **Step 2: Run them to verify they fail**
 
