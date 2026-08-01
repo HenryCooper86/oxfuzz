@@ -17,10 +17,6 @@ use super::staging::{qualification_evidence, run_binary_path, run_source_path, s
 use super::workspace::workspace_dir;
 use super::{CompileOutcome, EffectiveAutoRevert, ServiceContainer};
 
-/// Newest decisions retained in the audit trail; recording prunes beyond this
-/// window on write (mirrors schedule-execution history retention).
-pub(super) const GUARDRAIL_DECISION_RETENTION: usize = 1000;
-
 impl ServiceContainer {
     /// The guardrail decision audit trail (newest first), capped at `limit`
     /// rows. Empty without a store.
