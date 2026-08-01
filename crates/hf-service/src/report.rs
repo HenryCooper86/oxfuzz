@@ -121,6 +121,14 @@ pub struct Labels {
     pub crashes_summary_rank: &'static str,
     pub inline_engine: &'static str,
     pub inline_status: &'static str,
+    // Punctuation the two narrative sentences above assemble around their
+    // slots. Not markdown (`**` stays literal in the template -- it is
+    // formatting, not punctuation); these are the comma/parentheses/full stop
+    // a language's own convention supplies (e.g. Chinese "，（）。").
+    pub narrative_comma: &'static str,
+    pub narrative_open_paren: &'static str,
+    pub narrative_close_paren: &'static str,
+    pub narrative_full_stop: &'static str,
     // Executive summary bullets
     pub unique_crashes: &'static str,
     pub exploitable_line: &'static str,
@@ -236,6 +244,10 @@ impl Labels {
             crashes_summary_rank: "rank as exploitable or probably exploitable",
             inline_engine: "engine",
             inline_status: "status",
+            narrative_comma: ",",
+            narrative_open_paren: "(",
+            narrative_close_paren: ")",
+            narrative_full_stop: ".",
             unique_crashes: "Unique crashes",
             exploitable_line: "Exploitable / probably exploitable",
             corpus_line: "Corpus",
@@ -395,22 +407,29 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
     if total == 0 {
         let _ = writeln!(
             md,
-            "{summary} ({engine_word} {engine}, {status_word} {status}).",
+            "{summary} {op}{engine_word} {engine}{comma} {status_word} {status}{cp}{stop}",
             summary = labels.no_crashes_summary,
+            op = labels.narrative_open_paren,
             engine_word = labels.inline_engine,
+            comma = labels.narrative_comma,
             status_word = labels.inline_status,
+            cp = labels.narrative_close_paren,
+            stop = labels.narrative_full_stop,
         );
     } else {
         let _ = writeln!(
             md,
-            "{lead} **{total} {unit}**, {of_which} **{exploitable}** {rank} \
-             ({engine_word} {engine}, {status_word} {status}).",
+            "{lead} **{total} {unit}**{comma} {of_which} **{exploitable}** {rank} {op}{engine_word} {engine}{comma} {status_word} {status}{cp}{stop}",
             lead = labels.crashes_summary_lead,
             unit = labels.crashes_summary_unit,
+            comma = labels.narrative_comma,
             of_which = labels.crashes_summary_of_which,
             rank = labels.crashes_summary_rank,
+            op = labels.narrative_open_paren,
             engine_word = labels.inline_engine,
             status_word = labels.inline_status,
+            cp = labels.narrative_close_paren,
+            stop = labels.narrative_full_stop,
         );
     }
     let _ = writeln!(md);
@@ -945,8 +964,8 @@ pub fn ensure_graphs(ai_markdown: &str, data: &ReportData, labels: &Labels) -> S
     }
     let _ = write!(
         out,
-        "\n---\n\n_{} {} on {}._\n",
-        labels.composed_by, data.tool_version, data.generated_at
+        "\n---\n\n_{} {} {} {}._\n",
+        labels.composed_by, data.tool_version, labels.footer_on, data.generated_at
     );
     out
 }

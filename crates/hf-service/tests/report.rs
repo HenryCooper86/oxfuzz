@@ -294,3 +294,44 @@ fn english_labels_render_the_same_report_as_before() {
     assert!(md.contains("| Metric | Covered | Total | Percent |"));
     assert!(md.contains("| # | Kind | Severity | Location | Signature |"));
 }
+
+#[test]
+fn nonzero_crash_narrative_sentence_is_assembled_correctly() {
+    // The densest concatenation in the file: prose fragments, data
+    // placeholders, markdown emphasis, and punctuation all interleave in one
+    // sentence. Assert the exact assembled text so a punctuation or spacing
+    // regression (a stray/missing/duplicated comma, a wrong bracket, an extra
+    // space) fails here instead of hiding behind a `contains()` on a
+    // substring.
+    let md = render_markdown(&populated(), &Labels::english());
+    assert!(
+        md.contains(
+            "The campaign surfaced **1 unique crash(es)**, of which **1** rank as exploitable \
+             or probably exploitable (engine LibFuzzer, status Done)."
+        ),
+        "nonzero-crash narrative sentence mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn zero_crash_narrative_sentence_is_assembled_correctly() {
+    let data = ReportData {
+        generated_at: "2026-06-28T00:00:00Z".to_owned(),
+        project: "/proj".to_owned(),
+        target: "lonely".to_owned(),
+        tool_version: "0.1.0".to_owned(),
+        candidate: None,
+        run: None,
+        crashes: vec![],
+        coverage: None,
+        covered_functions: 0,
+        corpus: CorpusStats::default(),
+    };
+    let md = render_markdown(&data, &Labels::english());
+    assert!(
+        md.contains(
+            "No crashes were found in the most recent campaign (engine n/a, status no run recorded)."
+        ),
+        "zero-crash narrative sentence mismatch:\n{md}"
+    );
+}
