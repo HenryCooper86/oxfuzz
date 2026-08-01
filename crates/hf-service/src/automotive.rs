@@ -2792,17 +2792,47 @@ mod tests {
         }
     }
 
+    /// A pool that answers with fixed content and records the request it was
+    /// handed, so a test can assert what the model was actually asked for.
+    ///
+    /// Recording is not optional decoration. Without it nothing observes
+    /// `automotive_report_system_prompt` or `automotive_report_user_prompt`, and
+    /// both can be hardcoded to English with the whole suite green -- which asks
+    /// the model in English while validating against Chinese headings, discards
+    /// every interpretation and reports a silent `Fallback`.
     struct ReportPool {
         content: String,
+        captured: Mutex<Vec<hf_core::types::Message>>,
+    }
+
+    impl ReportPool {
+        fn new(content: impl Into<String>) -> Self {
+            Self {
+                content: content.into(),
+                captured: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The recorded content for one role, or `None` when the pool was never
+        /// called -- so a silent fallback cannot masquerade as a pass.
+        fn message(&self, role: hf_core::types::Role) -> Option<String> {
+            self.captured
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|message| message.role == role)
+                .map(|message| message.content.clone())
+        }
     }
 
     #[async_trait]
     impl ProviderPool for ReportPool {
         async fn chat_completion(
             &self,
-            _request: &ChatRequest,
+            request: &ChatRequest,
             _route: &RouteRequest,
         ) -> Result<ChatResponse, ProviderError> {
+            self.captured.lock().unwrap().clone_from(&request.messages);
             Ok(ChatResponse {
                 id: "automotive-report-test".to_owned(),
                 model: "grounded-test-model".to_owned(),
@@ -3106,9 +3136,7 @@ mod tests {
              evidence\nNo virtual replay is retained.\n\n### Recommended next actions\nReview the \
              captured states before deterministic mutation [OP:{operation_id}]."
         );
-        let service = service.with_provider_pool(Arc::new(ReportPool {
-            content: interpretation,
-        }));
+        let service = service.with_provider_pool(Arc::new(ReportPool::new(interpretation)));
 
         let report = service
             .generate_automotive_report_with_settings(
@@ -3135,12 +3163,11 @@ mod tests {
     async fn campaign_report_falls_back_when_ai_invents_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let (service, _, project, _, _, _) = completed_analysis_with_state(temp.path()).await;
-        let service = service.with_provider_pool(Arc::new(ReportPool {
-            content: "### Evidence-backed interpretation\nInvented evidence \
-                [OP:00000000-0000-0000-0000-000000000001].\n\n### Hypotheses\nNone.\n\n\
-                ### Missing evidence\nNone.\n\n### Recommended next actions\nNone."
-                .to_owned(),
-        }));
+        let service = service.with_provider_pool(Arc::new(ReportPool::new(
+            "### Evidence-backed interpretation\nInvented evidence \
+             [OP:00000000-0000-0000-0000-000000000001].\n\n### Hypotheses\nNone.\n\n\
+             ### Missing evidence\nNone.\n\n### Recommended next actions\nNone.",
+        )));
 
         let report = service
             .generate_automotive_report_with_settings(
@@ -3224,14 +3251,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (service, _, project, _, operation_id, _) =
             completed_analysis_with_state(temp.path()).await;
-        let service = service.with_provider_pool(Arc::new(ReportPool {
-            content: format!(
-                "### 基于证据的解读\n离线分析保留了经过校验的状态证据 [OP:{operation_id}]。\n\n\
-                 ### 假设\n不作任何假设。\n\n\
-                 ### 缺失的证据\n未保留任何虚拟重放。\n\n\
-                 ### 建议的后续行动\n在进行确定性变异之前先复核已捕获的状态 [OP:{operation_id}]。"
-            ),
-        }));
+        let service = service.with_provider_pool(Arc::new(ReportPool::new(format!(
+            "### 基于证据的解读\n离线分析保留了经过校验的状态证据 [OP:{operation_id}]。\n\n\
+             ### 假设\n不作任何假设。\n\n\
+             ### 缺失的证据\n未保留任何虚拟重放。\n\n\
+             ### 建议的后续行动\n在进行确定性变异之前先复核已捕获的状态 [OP:{operation_id}]。"
+        ))));
 
         let report = service
             .generate_automotive_report_with_settings(
@@ -3292,6 +3317,96 @@ mod tests {
                 .starts_with("# Automotive Fuzzing Campaign Report: "),
             "{}",
             default.markdown
+        );
+    }
+
+    /// Drive the report's provider path in `language` and return the (system,
+    /// user) prompts the model was actually handed.
+    async fn captured_automotive_report_prompts(
+        root: &Path,
+        language: crate::report::ReportLanguage,
+    ) -> (String, String) {
+        let (service, _, project, _, _, _) =
+            completed_analysis_with_state(&root.join(format!("prompt_{language:?}"))).await;
+        let pool = Arc::new(ReportPool::new("interpretation content is irrelevant here"));
+        let service = service.with_provider_pool(Arc::clone(&pool) as Arc<dyn ProviderPool>);
+        service
+            .generate_automotive_report_with_settings(
+                &project,
+                true,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+                language,
+            )
+            .await
+            .unwrap();
+        (
+            pool.message(hf_core::types::Role::System)
+                .expect("the provider pool must have been asked to compose the interpretation"),
+            pool.message(hf_core::types::Role::User)
+                .expect("the provider pool must have been asked to compose the interpretation"),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_report_asks_the_model_for_the_requested_language() {
+        // The two prompt builders are the only uses of `language` that produce
+        // no visible difference in a successful report, so nothing else can see
+        // them severed. Asking in English while validating against Chinese
+        // headings discards every interpretation and reports a silent
+        // `Fallback` -- the exact failure this work exists to prevent, reached
+        // from the other side.
+        let temp = tempfile::tempdir().unwrap();
+
+        let (zh_system, zh_user) =
+            captured_automotive_report_prompts(temp.path(), crate::report::ReportLanguage::Zh)
+                .await;
+        assert!(
+            zh_system.contains("You write the interpretation in Simplified Chinese"),
+            "the system prompt does not ask for Chinese: {zh_system}"
+        );
+        assert!(
+            zh_user.contains("Write the entire interpretation in Simplified Chinese"),
+            "the user prompt does not ask for Chinese: {zh_user}"
+        );
+        // The Chinese arm's token rule, as one contiguous phrase that exists
+        // only in that block: a translated citation no longer matches the
+        // retained evidence it names.
+        assert!(
+            zh_user.contains(
+                "never translated or \
+                 transliterated: the evidence citations `[OP:<uuid>]`, `[STATE:<sha256>]` and \
+                 `[TRANSCRIPT:<sha256>]`"
+            ),
+            "the user prompt does not pin the untranslatable citations: {zh_user}"
+        );
+        // And the four headings requested are the Chinese ones the validator
+        // will require.
+        assert!(zh_user.contains("### 基于证据的解读"), "{zh_user}");
+
+        let (en_system, en_user) =
+            captured_automotive_report_prompts(temp.path(), crate::report::ReportLanguage::En)
+                .await;
+
+        // The negative half is not optional: without it a pool that hardcoded
+        // `Zh` at both sites would satisfy everything above.
+        assert!(
+            !en_system.contains("Simplified Chinese"),
+            "the English system prompt leaked a language instruction: {en_system}"
+        );
+        assert!(
+            !en_user.contains("Simplified Chinese"),
+            "the English user prompt leaked a language instruction: {en_user}"
+        );
+        assert!(
+            !en_user.contains("transliterated"),
+            "the English user prompt leaked the Chinese token rule: {en_user}"
+        );
+        assert!(
+            en_user.contains("### Evidence-backed interpretation"),
+            "{en_user}"
         );
     }
 
