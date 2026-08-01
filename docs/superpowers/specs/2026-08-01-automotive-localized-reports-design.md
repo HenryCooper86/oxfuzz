@@ -217,13 +217,33 @@ the CLI. The document title is correct; the attribute is not. A screen reader
 announces Chinese prose with an English voice and the browser picks Latin
 fallback fonts.
 
-**Deliberately not fixed in Task 4.** The task's mandate was to pass a value,
-not to add logic, and the fix is not mechanical: `export_markdown` is shared
-with the Reports view's draft export, where the documented English default is
-the right answer. Closing it means deciding whether the command takes an
-optional language that the automotive caller supplies and the draft caller
-omits -- a design decision this document should make before an implementer
-makes it incidentally.
+**Fixed in Task 4, review round 1.** The design decision this section thought
+was open turned out to be settled already: `ServiceContainer::export_report` and
+its Tauri command both take a language and resolve an `Option<String>` the same
+way. Threading `export_markdown` applies that convention rather than inventing
+one.
+
+`export_markdown` now takes `language`, and the caller decides because only the
+caller knows what the content is:
+
+- the CLI's `automotive report --output` passes the language it composed in;
+- `AutomotiveView` passes the locale it composed in;
+- `ReportsView` **omits it** and gets `ReportLanguage::default()`, which is the
+  right answer for a stored draft and is the part of this section that still
+  stands: a draft records no language, and the exporter's UI locale is not the
+  stored document's.
+
+The Tauri command also titles its save dialog with
+`export_dialog_title(language)`, matching `export_report`.
+
+Markdown output is asserted byte-identical under both languages, so the
+parameter is provably inert on the path that carries no language marker. A
+source assertion pins `ReportsView`'s omission with its reason, so a later
+cleanup does not "fix" the draft path into guessing.
+
+The remaining, genuinely deferred part is unchanged: **stored drafts still
+record no language**, so a re-exported draft still declares English. Closing
+that is a schema change.
 
 ### 9.2 Operation statuses are translated, unlike the main report's
 
