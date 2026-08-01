@@ -786,6 +786,36 @@ fn ai_interpretation_is_advisory_and_cannot_replace_the_fact_sheet() {
     assert!(composed.contains("test-model"));
 }
 
+#[test]
+fn a_provider_model_identifier_cannot_break_out_of_its_code_span() {
+    // The model identifier is provider-supplied and is written verbatim into a
+    // Markdown code span. A backtick in it would close the span early and let
+    // the remainder render as prose next to the advisory notice; a pipe would
+    // split a cell if the notice were ever moved into a table. Both marks are
+    // neutralized before the span is written, and no other test exercises that.
+    let data = report_data();
+    let facts = render_automotive_report(&data, &AutomotiveLabels::english());
+    let composed = append_ai_interpretation(
+        &facts,
+        &english_interpretation_citing(&format!("[OP:{FAILED_OPERATION_ID}]")),
+        "vendor`model|v2",
+        &AutomotiveLabels::english(),
+    );
+
+    assert!(
+        composed.contains("Model: `vendor'model\\|v2`.\n"),
+        "the model identifier must be escaped inside its span: {composed}"
+    );
+    assert!(
+        !composed.contains("vendor`model"),
+        "a raw backtick survived into the composed report: {composed}"
+    );
+    assert!(
+        !composed.contains("model|v2"),
+        "a raw pipe survived into the composed report: {composed}"
+    );
+}
+
 /// An interpretation shaped the way the Chinese arm requires, with `citation`
 /// dropped into both cited positions.
 ///
@@ -890,6 +920,32 @@ fn citation_checks_survive_in_chinese() {
             .expect_err("an uncited interpretation must be rejected in any language")
             .contains("at least one retained evidence citation"),
     );
+}
+
+#[test]
+fn known_state_and_transcript_citations_are_accepted_in_both_languages() {
+    // Only `[OP:]` had its accept path pinned. Every other assertion about
+    // `[STATE:]` and `[TRANSCRIPT:]` is a rejection, so a validator that threw
+    // out every state or transcript citation outright -- discarding a correctly
+    // grounded interpretation -- passed the suite. These are the two forms the
+    // fact sheet itself emits, taken from the fixture's retained evidence.
+    let data = report_data();
+    for citation in [
+        format!("[STATE:{STATE_DIGEST}]"),
+        format!("[TRANSCRIPT:{TRANSCRIPT_DIGEST}]"),
+    ] {
+        for (language, document) in [
+            (ReportLanguage::En, english_interpretation_citing(&citation)),
+            (ReportLanguage::Zh, chinese_interpretation_citing(&citation)),
+        ] {
+            assert!(
+                validate_ai_interpretation(&document, &data, language).is_ok(),
+                "{citation} names retained evidence and must be accepted under \
+                 {language:?}: {:?}",
+                validate_ai_interpretation(&document, &data, language)
+            );
+        }
+    }
 }
 
 #[test]
