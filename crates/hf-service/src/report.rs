@@ -661,9 +661,11 @@ fn coverage_mermaid(c: CoverageSummary, labels: &Labels) -> String {
     )
 }
 
-/// Resolve a CASR severity to its label. `Debug` output is the raw English
-/// variant name, which is correct only by coincidence in an English report
-/// and wrong in every other language.
+/// Resolve a CASR severity to its label. `Debug` output is the raw enum
+/// identifier, not the human-readable phrase; it matches the label for two
+/// of four variants by coincidence (`Exploitable`, `Undefined`) and differs
+/// in spacing and case for the other two (`ProbablyExploitable` /
+/// "Probably exploitable", `NotExploitable` / "Not exploitable").
 const fn casr_severity_label(severity: CrashSeverity, labels: &Labels) -> &'static str {
     match severity {
         CrashSeverity::Exploitable => labels.casr_exploitable,
