@@ -570,7 +570,7 @@ fn render_executive_summary(md: &mut String, data: &ReportData, labels: &Labels)
     );
     let _ = writeln!(
         md,
-        "- {}{} **{} {}**{} {}",
+        "- {}{} **{} {}**{}{}",
         labels.corpus_line,
         labels.bullet_colon,
         data.corpus.count,
@@ -1000,7 +1000,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         let _ = writeln!(md);
         let _ = writeln!(
             md,
-            "**{}** {}{} {}{}",
+            "**{}**{}{} {}{}",
             labels.bug_report_heading,
             labels.narrative_open_paren,
             labels.severity_guess_label,

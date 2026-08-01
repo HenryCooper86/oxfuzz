@@ -337,6 +337,33 @@ fn zero_crash_narrative_sentence_is_assembled_correctly() {
 }
 
 #[test]
+fn corpus_bullet_is_assembled_correctly() {
+    // Shares `narrative_comma` with the narrative sentences above. Assert the
+    // exact text so a spacing change made for the narrative sentences (e.g.
+    // folding a separator space into the field itself) cannot silently
+    // duplicate or drop a space here, where the template still supplies its
+    // own literal space around the same field.
+    let md = render_markdown(&populated(), &Labels::english());
+    assert!(
+        md.contains("- Corpus: **25 input(s)**, 4.0 KiB"),
+        "corpus bullet mismatch:\n{md}"
+    );
+}
+
+#[test]
+fn bug_report_heading_is_assembled_correctly() {
+    // Shares `narrative_open_paren` / `narrative_close_paren` with the
+    // narrative sentences above, for the same reason as the corpus bullet
+    // test: this call site has its own literal space next to the field and
+    // must be pinned independently.
+    let md = render_markdown(&populated(), &Labels::english());
+    assert!(
+        md.contains("**Bug report** (severity guess: High)"),
+        "bug report heading mismatch:\n{md}"
+    );
+}
+
+#[test]
 fn chinese_labels_translate_the_scaffolding_in_both_directions() {
     let md = render_markdown(&populated(), &Labels::chinese());
 
