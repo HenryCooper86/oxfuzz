@@ -1446,7 +1446,12 @@ Add `mod lifecycle;` to `mod.rs`.
 
 - [ ] **Step 2: Verify and commit the lifecycle move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1477,7 +1482,12 @@ different path. Do not merge them.
 
 - [ ] **Step 4: Verify and commit the system move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1505,7 +1515,12 @@ Add `mod chat;` to `mod.rs`.
 
 - [ ] **Step 6: Verify and commit the chat move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass. `chat_send` is the largest single method in
 the file; if the move breaks compilation, the cause is a missing `use`, not a
@@ -1545,7 +1560,12 @@ Create `crates/hf-service/src/container/discovery.rs` with the doc comment
 
 - [ ] **Step 2: Verify and commit the discovery move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1572,7 +1592,12 @@ verbatim: `harness_draft`, `harness_compile`, `harness_generate`,
 
 - [ ] **Step 4: Verify and commit the harness move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1598,7 +1623,12 @@ verbatim: `run_campaign`, `start_fuzzer`, `run_fuzzer`, `replay_run`,
 
 - [ ] **Step 6: Verify and commit the run move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1640,7 +1670,12 @@ Create `crates/hf-service/src/container/triage.rs` with the doc comment
 
 - [ ] **Step 2: Verify and commit the triage move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1667,7 +1702,12 @@ move verbatim: `corpus_list`, `corpus_seed`, `corpus_grow`, `corpus_prune`,
 
 - [ ] **Step 4: Verify and commit the corpus move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1695,7 +1735,12 @@ verbatim: `run_history`, `run_coverage_series`, `run_harness_source`,
 
 - [ ] **Step 6: Verify and commit the history move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass.
 
@@ -1735,7 +1780,12 @@ plain private `const` where it is.
 
 - [ ] **Step 8: Verify and commit the policy move**
 
-Run: `cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
 
 Expected: success, all tests pass, including
 `policy_decisions_are_newest_first_and_bounded`.
@@ -1766,7 +1816,12 @@ verbatim: `export_repro_bundle`, `export_repro_bundle_for_latest`,
 
 - [ ] **Step 10: Verify and commit the export move**
 
-Run: `cargo check --workspace --all-targets && cargo test --workspace 2>&1 | tail -20`
+Run:
+
+```bash
+cargo check --workspace --all-targets && cargo test --workspace 2>&1 | tail -20
+cargo check --workspace --no-default-features
+```
 
 Expected: success, all tests pass. Run the full workspace here: this is the last
 move, and `hf-cli`, `hf-web`, and `hf-gui/src-tauri` must compile untouched.
@@ -2408,13 +2463,17 @@ EOF
 
 Run: `scripts/tests/gates.sh`
 
-Expected: nine `== <name>` headers followed by `All gates passed.`
+Expected: ten `== <name>` headers followed by `All gates passed.`
 
 - [ ] **Step 2: Confirm the size target held**
 
 Run: `wc -l crates/hf-service/src/container/*.rs | sort -rn | head -5`
 
-Expected: largest file under roughly 1500 lines, versus 12438 before.
+Expected: two files still exceed the roughly-1500-line target -- `mod.rs`
+(2338 lines) and `run.rs` (1647 lines) -- versus 12438 before decomposition.
+`mod.rs` retains 15 provably-immovable private methods plus single-consumer
+free functions identified as follow-up work; `run.rs` carries auto-revert
+policy that caller evidence placed there.
 
 - [ ] **Step 3: Confirm no public API moved**
 
@@ -2428,12 +2487,17 @@ Expected: no changes to either crate. The decomposition is internal to
 `hf-service`; the only presentation change in this plan is the desktop Policy
 Audit surface in `hf-gui`.
 
-- [ ] **Step 4: Confirm CI is green on the branch**
+- [ ] **Step 4: Push the branch and confirm both pipelines**
 
-Check the Actions tab for the branch head. All three jobs green.
+Spec criterion 2 explicitly defers live CI verification past this plan: a
+human must push the branch and confirm the GitHub Actions and GitLab
+pipelines both go green on the branch head. That confirmation is a merge
+precondition recorded in the merge request, not something this plan or its
+author can satisfy by running commands locally.
 
 - [ ] **Step 5: Record the evidence**
 
-Note in the merge request description: the gate run output, the before and after
-line counts for `container.rs`, the CI run URL, and the URL of the deliberate
-break from Task 2 Step 5 proving the gate rejects a failure.
+Note in the merge request description: the gate run output and the before and
+after line counts for `container.rs`. Record the two pipelines' green run URLs
+as a merge precondition once Step 4's human confirmation lands; there is no
+deliberate-break step to link to -- that step was removed from Task 2.
