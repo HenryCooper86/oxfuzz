@@ -88,22 +88,10 @@ export function AuditView() {
 
   return (
     <div className="flex flex-col gap-4" style={{ animation: "fadeIn 0.2s ease" }}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <ViewHeader
-          title={t("audit.title")}
-          description={t("audit.description")}
-        />
-        {activeProject && (
-          <div className="flex items-center gap-1 text-xs">
-            <Button variant={scope === "project" ? "primary" : "outline"} size="sm" onClick={() => setScope("project")}>
-              {t("audit.thisProject")}
-            </Button>
-            <Button variant={scope === "all" ? "primary" : "outline"} size="sm" onClick={() => setScope("all")}>
-              {t("audit.allProjects")}
-            </Button>
-          </div>
-        )}
-      </div>
+      <ViewHeader
+        title={t("audit.title")}
+        description={t("audit.description")}
+      />
 
       {error && (
         <div
@@ -121,6 +109,7 @@ export function AuditView() {
 
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">{t("audit.decisionsTitle")}</h3>
+        <div className="text-xs text-text-muted">{t("audit.decisionsAllProjects")}</div>
         {loading ? (
           <div className="text-xs text-text-muted">{t("audit.loading")}</div>
         ) : (
@@ -128,7 +117,19 @@ export function AuditView() {
         )}
       </div>
 
-      <h3 className="text-sm font-medium">{t("audit.revertsTitle")}</h3>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-medium">{t("audit.revertsTitle")}</h3>
+        {activeProject && (
+          <div className="flex items-center gap-1 text-xs">
+            <Button variant={scope === "project" ? "primary" : "outline"} size="sm" onClick={() => setScope("project")}>
+              {t("audit.thisProject")}
+            </Button>
+            <Button variant={scope === "all" ? "primary" : "outline"} size="sm" onClick={() => setScope("all")}>
+              {t("audit.allProjects")}
+            </Button>
+          </div>
+        )}
+      </div>
 
       {events.length > 0 && (
         <div className="flex items-center gap-4 text-xs text-text-muted">
