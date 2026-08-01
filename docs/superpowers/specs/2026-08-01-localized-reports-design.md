@@ -244,6 +244,34 @@ follow-up: one mapping helper per enum, following
 CASR exploitability severities are **not** in this list -- they are translated
 everywhere they render, per decision 2.5.
 
+### 9.2 Known limitation: scheduled reports are always English
+
+`ServiceContainer::generate_report` takes the language as an explicit parameter,
+so every caller must supply one. Eight callers have a language to supply: the
+CLI has `--lang`, the REST route has a request field, the desktop commands have
+the resolved UI locale, and the tests choose one.
+
+The ninth does not. `scheduler::save_crash_report` composes a report when a
+scheduled campaign finishes. There is no request in scope, and the desktop
+locale lives in the frontend i18n layer and is never persisted to the service,
+so the scheduler cannot discover the user's language. It passes
+`ReportLanguage::En`.
+
+The consequence is visible to users: someone running the interface in Chinese
+receives Chinese reports when they ask for one, and English reports when a
+schedule produces one for them.
+
+This is the case the rejected `[report] language` setting in section 12 would
+have solved. That rejection stands for interactive reports -- a persisted
+setting that can disagree with the visible UI selector is worse than an explicit
+parameter. But it is the natural fix here, because a scheduled report has no UI
+session to disagree with. Closing this properly means a stored preference that
+the scheduler reads and the interactive paths ignore, which is a design decision
+beyond this feature's scope.
+
+Recorded so the English scheduled report is a known limitation rather than an
+accident of parameter threading.
+
 ## 10. Testing Strategy
 
 No test invokes a provider.
