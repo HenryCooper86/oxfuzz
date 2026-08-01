@@ -76,7 +76,7 @@
 |---|---|---|---|---|---|---|---|
 | [OP:00000000-0000-0000-0000-00000000000b] | `analyze_capture` | `offline_pcap` / `不适用` | 运行中 | 未保留 | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | 未保留 | `.service/automotive/running` |
 | [OP:00000000-0000-0000-0000-00000000000c] | `generate_mutations` | `offline_pcap` / `can` | 已取消 | 未保留 | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/cancelled` |
-| [OP:00000000-0000-0000-0000-00000000000d] | `build_replay_plan` | `offline_pcap` / `can` | 已完成 | 未保留 | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/partial` |
+| [OP:00000000-0000-0000-0000-00000000000d] | `build_replay_plan` | `offline_pcap` / `can` | 已结束 | 未保留 | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/partial` |
 | [OP:00000000-0000-0000-0000-00000000000e] | `execute_replay` | `virtual_can` / `不适用` | 失败 | 未保留 | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | 未保留 | `.service/automotive/failed` |
 
 ## 限制

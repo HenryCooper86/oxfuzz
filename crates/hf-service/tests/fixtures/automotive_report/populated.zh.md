@@ -70,7 +70,7 @@
 
 | 操作证据 | 阶段 | 模式 / 协议 | 状态 | 已验证结果 | 请求摘要 | 记录证据 | 产物目录 |
 |---|---|---|---|---|---|---|---|
-| [OP:11111111-2222-3333-4444-555555555555] | `analyze_capture` | `offline_pcap` / `uds` | 已完成 | 42 decoded events; 1 protocol state | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/operation-one` |
+| [OP:11111111-2222-3333-4444-555555555555] | `analyze_capture` | `offline_pcap` / `uds` | 已结束 | 42 decoded events; 1 protocol state | `cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd` | [TRANSCRIPT:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef] | `.service/automotive/operation-one` |
 | [OP:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee] | `execute_replay` | `virtual_can` / `uds` | 失败 | 未保留 | `1212121212121212121212121212121212121212121212121212121212121212` | 未保留 | `.service/automotive/operation-two` |
 
 ## 限制

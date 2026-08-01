@@ -578,14 +578,74 @@ fn chinese_punctuation_carries_its_own_spacing() {
     );
     for fixture in fixtures() {
         let zh = render_automotive_report(&fixture.data, &AutomotiveLabels::chinese());
-        for stray in ["， ", "、 ", "： ", "； "] {
+        for line in zh.lines() {
+            for stray in ["， ", "、 ", "： ", "； ", "。 ", "（ ", " ）"] {
+                assert!(
+                    !line.contains(stray),
+                    "{}: a full-width mark carries a trailing ASCII space:\n{line}",
+                    fixture.name
+                );
+            }
+            // The mirror image, which the name of this test also promises.
+            // One shape is exempt: a state promoted into the corpus but
+            // observed by no retained operation renders an empty citation
+            // list, so the template's " {sources}" leaves a space before the
+            // stop. English has the identical stray space ("observed by ."),
+            // it comes from the template rather than from any label, and
+            // closing it would move the English document. The exemption is
+            // pinned to that one line shape so it cannot widen: any other line
+            // growing a space before a full-width mark is a Chinese label
+            // carrying the defect, and fails here.
+            let empty_citation_list = line.contains("观察来源 。");
             assert!(
-                !zh.contains(stray),
-                "{}: a full-width mark carries a trailing ASCII space:\n{zh}",
+                !empty_citation_list || line.starts_with("- `[STATE:"),
+                "{}: the empty-citation exemption escaped its line shape:\n{line}",
+                fixture.name
+            );
+            for stray in [" ，", " 、", " ：", " ；", " （"] {
+                assert!(
+                    !line.contains(stray),
+                    "{}: an ASCII space precedes a full-width mark:\n{line}",
+                    fixture.name
+                );
+            }
+            assert!(
+                empty_citation_list || !line.contains(" 。"),
+                "{}: an ASCII space precedes a full stop:\n{line}",
                 fixture.name
             );
         }
     }
+}
+
+#[test]
+fn the_lifecycle_status_word_does_not_claim_the_summarys_completed() {
+    // A Done operation whose typed result did not complete is counted
+    // "partial" and never "completed". The manifest's status vocabulary is
+    // separate -- English says "done" there -- so the Chinese lifecycle word
+    // must not read as the summary's "completed" either, or one page asserts
+    // both that zero operations completed and that this one did.
+    let data = mixed_data();
+    let partial = data.operations[2].id;
+    let zh = render_automotive_report(&data, &AutomotiveLabels::chinese());
+
+    assert!(zh.contains("**0 个已完成**、**1 个部分完成**"), "{zh}");
+    let row = zh
+        .lines()
+        .find(|line| line.starts_with(&format!("| [OP:{partial}] |")))
+        .unwrap_or_else(|| panic!("no manifest row for the partial operation:\n{zh}"));
+    assert!(
+        row.contains("| 已结束 |"),
+        "the manifest must report the lifecycle status, not a completion claim:\n{row}"
+    );
+    assert!(
+        !row.contains("已完成"),
+        "the manifest calls an operation completed that the summary counts as partial:\n{row}"
+    );
+    assert!(
+        zh.contains(&format!("### 部分结果：`{}`", data.operations[2].operation)),
+        "{zh}"
+    );
 }
 
 #[test]
