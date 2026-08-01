@@ -7,7 +7,7 @@ use hf_core::engine::EngineKind;
 use hf_core::target::{InputSurface, SourceLocation, TargetCandidate, TargetKind, TargetLanguage};
 use hf_coverage::CoverageSummary;
 use hf_service::report::{
-    ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats,
+    ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats, Labels,
     ReportData, ReportLanguage,
 };
 use hf_storage::{RunRecord, RunStatus};
@@ -116,7 +116,7 @@ fn populated() -> ReportData {
 
 #[test]
 fn report_has_title_and_core_sections() {
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     assert!(md.starts_with("# "), "starts with an H1 title");
     assert!(md.contains("parse_header"), "names the target");
     assert!(md.contains("## Executive Summary"));
@@ -128,7 +128,7 @@ fn report_has_title_and_core_sections() {
 
 #[test]
 fn report_renders_crash_detail_and_severity() {
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     assert!(
         md.contains("Heap overflow in parse_header"),
         "bug report title"
@@ -145,7 +145,7 @@ fn report_renders_crash_detail_and_severity() {
 
 #[test]
 fn report_includes_graphs_for_severity_and_coverage() {
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     assert!(md.contains("## Visual Summary"), "has a visual summary");
     // Mermaid graphs render in any modern Markdown viewer.
     assert!(md.contains("```mermaid"), "embeds a mermaid graph");
@@ -159,7 +159,7 @@ fn report_includes_graphs_for_severity_and_coverage() {
 #[test]
 fn coverage_bar_is_proportional() {
     // A full report at 60% line coverage should show ~12/20 filled cells.
-    let md = render_markdown(&populated());
+    let md = render_markdown(&populated(), &Labels::english());
     let line = md
         .lines()
         .find(|l| l.starts_with("Lines "))
@@ -171,7 +171,7 @@ fn coverage_bar_is_proportional() {
 #[test]
 fn ai_prompt_is_grounded_in_the_fact_sheet() {
     let data = populated();
-    let facts = render_markdown(&data);
+    let facts = render_markdown(&data, &Labels::english());
     let prompt = report_user_prompt(&facts, &data);
     // The whole fact-sheet is embedded so the model has the real numbers.
     assert!(prompt.contains(&facts), "embeds the fact-sheet verbatim");
@@ -215,7 +215,7 @@ fn empty_report_is_honest_not_fabricated() {
         covered_functions: 0,
         corpus: CorpusStats::default(),
     };
-    let md = render_markdown(&data);
+    let md = render_markdown(&data, &Labels::english());
     assert!(md.contains("# "), "still has a title");
     assert!(
         md.contains("No crashes") || md.contains("0 crashes"),
@@ -270,4 +270,27 @@ fn report_language_rejects_an_unknown_identifier_by_naming_the_accepted_ones() {
     // was wrong -- this reaches a CLI user and a REST client.
     assert!(message.contains("en"), "message should name en: {message}");
     assert!(message.contains("zh"), "message should name zh: {message}");
+}
+
+#[test]
+fn english_labels_render_the_same_report_as_before() {
+    // Task 2 is a pure refactor: the English rendering must be byte-identical
+    // to what the hardcoded literals produced. These headings are exactly the
+    // ones the pre-refactor renderer emitted.
+    let md = render_markdown(&populated(), &Labels::english());
+    for heading in [
+        "## Executive Summary",
+        "## Visual Summary",
+        "## Target",
+        "## Run",
+        "## Coverage",
+        "## Corpus",
+        "## Findings",
+    ] {
+        assert!(md.contains(heading), "missing {heading}");
+    }
+    assert!(md.contains("# Fuzzing Report:"));
+    assert!(md.contains("| Property | Value |"));
+    assert!(md.contains("| Metric | Covered | Total | Percent |"));
+    assert!(md.contains("| # | Kind | Severity | Location | Signature |"));
 }

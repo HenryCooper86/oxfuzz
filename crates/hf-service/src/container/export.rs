@@ -292,7 +292,7 @@ impl ServiceContainer {
 
         // The deterministic fact-sheet is always correct and carries the graphs;
         // it is the no-provider fallback AND the grounded input for the LLM.
-        let facts = render_markdown(&data);
+        let facts = render_markdown(&data, &crate::report::Labels::english());
 
         // When a provider is configured, have the LLM compose a professional
         // narrative grounded in those facts. On any failure, fall back to the
