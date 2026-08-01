@@ -144,7 +144,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
   const { target } = useTarget();
   const { toast } = useToast();
   const confirm = useConfirm();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { configured: defectDojoOn } = useDefectDojo();
   const [tab, setTab] = useState<WorkbenchTab>("overview");
   const [dashboard, setDashboard] = useState<WorkbenchDashboard>(() => emptyDashboard(activeProject, target));
@@ -291,6 +291,7 @@ export function DashboardView({ onNavigate }: { onNavigate?: (view: ViewType) =>
       const content = await getTransport().invoke<string>("generate_report", {
         project: activeProject,
         target,
+        language: locale,
       });
       setEditor({
         id: null,
