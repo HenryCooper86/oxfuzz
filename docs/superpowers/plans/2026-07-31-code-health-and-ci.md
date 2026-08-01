@@ -1720,8 +1720,18 @@ Create `crates/hf-service/src/container/policy.rs` with the doc comment
 `set_project_auto_revert_override`, `clear_project_auto_revert_override`,
 `revert_harness_from_run`, `approve_agent_tool`. Add `mod policy;` to `mod.rs`.
 
-Move the `GUARDRAIL_DECISION_RETENTION` constant and any `#[cfg(test)]` module
-covering `policy_decisions` into this file with them.
+Move any `#[cfg(test)]` module covering `policy_decisions` into this file with
+them.
+
+**Leave `GUARDRAIL_DECISION_RETENTION` in `mod.rs`.** An earlier revision of this
+plan said to move it, which was wrong. The rule is that a constant moves with its
+sole consumer; this constant's sole consumer is the private method
+`record_guardrail_decision`, which stays in `mod.rs` because it is called from
+`authorize_recorded` — a chokepoint every sibling module reaches through
+`self.authorize_recorded(...)`. Moving the constant therefore inverts the
+dependency: the child module would own a value whose only user is the parent, and
+the constant would need `pub(super)` purely to be imported back up. Leave it a
+plain private `const` where it is.
 
 - [ ] **Step 8: Verify and commit the policy move**
 
@@ -1794,6 +1804,82 @@ Run: `scripts/tests/gates.sh`
 Expected: `All gates passed.`
 
 ---
+
+---
+
+### Task 13b: Distribute the private container methods
+
+Tasks 11 through 13 relocated all 131 **public** `ServiceContainer` methods.
+They did not touch the **73 private** methods in the same `impl` block, because
+this plan's method lists were built by matching `pub fn` and `pub async fn` only.
+Those 73 span roughly 2374 lines and are the reason `mod.rs` sits at 4216 rather
+than near the 1500-line target in Success Criterion 6.
+
+The planning gap is the plan's, not any implementer's. This task closes it.
+
+**Files:**
+- Modify: `crates/hf-service/src/container/mod.rs`
+- Modify: the existing per-concern files under `crates/hf-service/src/container/`
+
+**Interfaces:**
+- Consumes: the eleven method-group files created by Tasks 11 through 13.
+- Produces: no new names and no new files. Only definition sites move.
+
+- [ ] **Step 1: Enumerate and assign**
+
+List every private method in the `impl ServiceContainer` block in `mod.rs`:
+
+```bash
+awk '/^impl ServiceContainer/{f=1} f' crates/hf-service/src/container/mod.rs \
+  | grep -oE '^    (async )?fn [a-z_0-9]+' | sed 's/^ *//'
+```
+
+Assign each to the file holding the public methods that call it. Most pair
+unambiguously: `chat_session_manager` and `validate_chat_session` with
+`chat.rs`; `maybe_auto_revert` and `persist_auto_revert_event` with `policy.rs`;
+`run_evidence_root` and `run_target_id` with `run.rs`.
+
+A helper called from **more than one** sibling module stays in `mod.rs`. Do not
+widen a method to `pub(super)` to make a move possible — if a method would need
+widening, that is proof it belongs in `mod.rs`. `authorize_recorded` and
+`record_guardrail_decision` are known members of this staying set.
+
+Write the assignment table into your report before moving anything.
+
+- [ ] **Step 2: Move one group per commit**
+
+For each destination file, move its assigned private methods into the existing
+`impl ServiceContainer` block in that file. Same rules as Tasks 11 through 13:
+zero content change, every `#[cfg]` travels, nothing deleted beyond the moved
+methods, orphaned comments left in place, and no method changes visibility.
+
+After each commit:
+
+```bash
+cargo check -p hf-service --all-targets && cargo test -p hf-service 2>&1 | tail -20
+cargo check -p hf-service --no-default-features
+```
+
+Expect 609 passing, 0 failing and zero warnings, every time.
+
+- [ ] **Step 3: Report the final size**
+
+```bash
+wc -l crates/hf-service/src/container/*.rs | sort -rn
+```
+
+Report the figures plainly. If `mod.rs` still exceeds roughly 1500 lines, say so
+and state what remains rather than splitting further — that is the controller's
+call, not yours.
+
+- [ ] **Step 4: Full gate run**
+
+```bash
+scripts/tests/gates.sh
+```
+
+Expect `All gates passed.`
+
 
 ## Phase C: Desktop Surface and Documentation
 
