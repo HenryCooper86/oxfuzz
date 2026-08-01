@@ -1046,11 +1046,25 @@ There are three, in two files. Missing any one leaves that path producing Englis
 | `crates/hf-gui/src/views/TriageView.tsx:150` | `invoke<string \| null>("export_report", { ... })` |
 | `crates/hf-gui/src/views/DashboardView.tsx:291` | `invoke<string>("generate_report", { ... })` |
 
-In each file, take `locale` from the existing i18n hook:
+In each file, take `locale` from the existing i18n hook. **Every call site in
+both files currently destructures only `{ t }`**, so you must add `locale`:
 
 ```tsx
 const { t, locale } = useI18n();
 ```
+
+Edit the *enclosing component's* hook, not any other. `DashboardView.tsx`
+contains eighteen separate `useI18n()` calls for different components in one
+file, so picking the wrong one compiles and then fails at runtime with `locale`
+undefined. The three report calls resolve as:
+
+| Report call | Enclosing component | Its hook |
+| --- | --- | --- |
+| `TriageView.tsx:121` | `TriageView`, line 18 | line 19 |
+| `TriageView.tsx:150` | `TriageView`, line 18 | line 19 (same hook) |
+| `DashboardView.tsx:291` | `DashboardView`, line 142 | line 147 |
+
+So two hook edits cover all three calls.
 
 Then add `language: locale` to the argument object. For `TriageView.tsx:121` the arguments come from a `reportArgs()` helper, so add the field inside that helper rather than at the call site, which covers both of that file's calls if they share it — check whether line 150 uses it too, and if not, add the field there as well.
 
