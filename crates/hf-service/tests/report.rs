@@ -10,6 +10,7 @@ use hf_service::report::{
     ensure_graphs, render_markdown, report_system_prompt, report_user_prompt, CorpusStats, Labels,
     ReportData, ReportLanguage,
 };
+use hf_service::report_export::markdown_to_html;
 use hf_storage::{RunRecord, RunStatus};
 use uuid::Uuid;
 
@@ -124,6 +125,98 @@ fn report_has_title_and_core_sections() {
     assert!(md.contains("## Coverage"));
     assert!(md.contains("## Corpus"));
     assert!(md.contains("## Findings"));
+}
+
+#[test]
+fn retained_metadata_cannot_change_report_structure() {
+    let mut data = populated();
+    data.project = "/proj|team`one\n## injected-project".to_owned();
+    data.target = "parse`target|x\n## injected-target".to_owned();
+    let candidate = data.candidate.as_mut().unwrap();
+    candidate.symbol = "parse`symbol|x\n## injected-symbol".to_owned();
+    candidate.location.file = PathBuf::from("src/parse|odd`name.c");
+    candidate.signature = Some("int parse`signature|x(void)".to_owned());
+    candidate.rationale = "# injected-rationale\nReason with `ticks` and | pipes.".to_owned();
+
+    let markdown = render_markdown(&data, &Labels::english());
+    let html = markdown_to_html(&markdown, "Report", ReportLanguage::En);
+
+    for heading in [
+        "injected-project",
+        "injected-target",
+        "injected-symbol",
+        "injected-rationale",
+    ] {
+        assert!(
+            !html.contains(&format!(">{heading}</h")),
+            "retained metadata injected a heading: {heading}\n{markdown}"
+        );
+    }
+    assert!(
+        html.contains("/proj|team`one ## injected-project"),
+        "the project value must remain visible as data: {html}"
+    );
+    assert!(
+        html.contains("parse`target|x ## injected-target"),
+        "the target value must remain visible as data: {html}"
+    );
+    assert!(
+        html.contains("src/parse|odd`name.c:42:1"),
+        "the source location must remain visible as data: {html}"
+    );
+}
+
+#[test]
+fn crash_evidence_cannot_close_report_containers() {
+    let mut data = populated();
+    let crash = data.crashes.first_mut().unwrap();
+    crash.stack_signature = "parse`signature|x\n## injected-signature".to_owned();
+    crash.input_path = PathBuf::from("/work/out/crash|odd`name");
+    let casr = crash.casr.as_mut().unwrap();
+    casr.severity_short = "heap`write|critical".to_owned();
+    casr.crashline = "src/parse|odd`name.c:48:5".to_owned();
+    casr.stack = vec![
+        "parse_header /work/source".to_owned(),
+        "```".to_owned(),
+        "## injected-stack".to_owned(),
+    ];
+    let report = crash.bug_report.as_mut().unwrap();
+    report.title = "Crash `title` | retained\n## injected-title".to_owned();
+    report.severity_guess = "High` | forged".to_owned();
+    report.summary = "# injected-summary\nSummary with `ticks` and | pipes.".to_owned();
+    report.repro_steps = "# injected-repro\nRun /work/out/crash".to_owned();
+    report.root_cause = Some("# injected-cause\nUnchecked length".to_owned());
+    report.suggested_fix =
+        Some("--- a/src/parse.c\n+++ b/src/parse.c\n```\n## injected-fix".to_owned());
+
+    let markdown = render_markdown(&data, &Labels::english());
+    let html = markdown_to_html(&markdown, "Report", ReportLanguage::En);
+
+    for heading in [
+        "injected-signature",
+        "injected-stack",
+        "injected-title",
+        "injected-summary",
+        "injected-repro",
+        "injected-cause",
+        "injected-fix",
+    ] {
+        assert!(
+            !html.contains(&format!(">{heading}</h")),
+            "crash evidence injected a heading: {heading}\n{markdown}"
+        );
+    }
+    for retained in [
+        "parse`signature|x ## injected-signature",
+        "/work/out/crash|odd`name",
+        "## injected-stack",
+        "## injected-fix",
+    ] {
+        assert!(
+            html.contains(retained),
+            "escaped evidence must remain visible: {retained}\n{html}"
+        );
+    }
 }
 
 #[test]
