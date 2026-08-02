@@ -395,6 +395,16 @@ pub struct AutomotiveLabels {
     pub bullet_mode: &'static str,
     pub bullet_protocol: &'static str,
     pub bullet_retained_error: &'static str,
+    /// Marks the retained error as the system's own wording.
+    ///
+    /// The error text is rendered by `ClassifiedError` and persisted when the
+    /// operation fails, long before a report language is chosen, so it cannot
+    /// be translated at composition time. Empty in English, where label and
+    /// value are already the same language; in Chinese it tells the reader the
+    /// English that follows is verbatim system output, not a missing
+    /// translation. Applied to a real error only -- the absent case renders
+    /// `value_no_error_detail`, which is already translated.
+    pub verbatim_system_text: &'static str,
     pub value_protocol_not_selected: &'static str,
     pub value_no_error_detail: &'static str,
     pub finding_partial_result: &'static str,
@@ -596,6 +606,7 @@ impl AutomotiveLabels {
             bullet_mode: "Mode",
             bullet_protocol: "Protocol",
             bullet_retained_error: "Retained error",
+            verbatim_system_text: "",
             value_protocol_not_selected: "not selected",
             value_no_error_detail: "no error detail retained",
             finding_partial_result: "Partial result",
@@ -801,6 +812,7 @@ impl AutomotiveLabels {
             bullet_mode: "模式",
             bullet_protocol: "协议",
             bullet_retained_error: "保留的错误",
+            verbatim_system_text: "（系统原文）",
             value_protocol_not_selected: "未选择",
             value_no_error_detail: "未保留错误详情",
             finding_partial_result: "部分结果",
@@ -1248,11 +1260,11 @@ fn render_findings(
                     .protocol
                     .as_deref()
                     .unwrap_or(labels.value_protocol_not_selected),
-                shareable_error(
-                    operation
-                        .error
-                        .as_deref()
-                        .unwrap_or(labels.value_no_error_detail)
+                operation.error.as_deref().map_or_else(
+                    || labels.value_no_error_detail.to_owned(),
+                    |error| {
+                        format!("{}{}", labels.verbatim_system_text, shareable_error(error))
+                    }
                 ),
                 failure = labels.finding_operational_failure,
                 colon = labels.label_colon,

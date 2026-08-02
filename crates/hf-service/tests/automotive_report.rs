@@ -1088,3 +1088,43 @@ fn the_advisory_notice_keeps_its_force_in_both_languages() {
     assert!(zh.contains("`test-model`"), "{zh}");
     assert!(zh.starts_with(&zh_facts), "{zh}");
 }
+
+#[test]
+fn a_retained_error_is_marked_as_untranslated_system_text_in_chinese() {
+    // The retained error is English prose rendered by ClassifiedError and
+    // persisted at failure time, long before any language is chosen, so it
+    // cannot be translated when the report is composed. Marking it tells a
+    // Chinese reader that the English is the system's own wording rather than
+    // a gap in the translation.
+    let data = report_data();
+    let zh = render_automotive_report(&data, &AutomotiveLabels::chinese());
+    let en = render_automotive_report(&data, &AutomotiveLabels::english());
+
+    assert!(
+        zh.contains("保留的错误：（系统原文）sidecar response failed validation"),
+        "the Chinese retained error must be marked as verbatim system text:\n{zh}"
+    );
+    // English needs no marker: label and value are both English already, and
+    // the branch's invariant is that English output does not move.
+    assert!(
+        en.contains("Retained error: sidecar response failed validation"),
+        "{en}"
+    );
+    assert!(
+        !en.contains("（系统原文）"),
+        "the marker must not reach the English report:\n{en}"
+    );
+}
+
+#[test]
+fn the_absent_error_case_is_not_marked_as_system_text() {
+    // With no error retained the value is a label, already Chinese. Marking it
+    // as untranslated system wording would be false, so the marker must apply
+    // to a real error only.
+    let zh = render_automotive_report(&mixed_data(), &AutomotiveLabels::chinese());
+    assert!(zh.contains("保留的错误：未保留错误详情"), "{zh}");
+    assert!(
+        !zh.contains("（系统原文）未保留错误详情"),
+        "the Chinese fallback must not be marked as system text:\n{zh}"
+    );
+}

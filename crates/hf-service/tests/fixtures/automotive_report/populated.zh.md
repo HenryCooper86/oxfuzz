@@ -60,7 +60,7 @@
 - 证据：[OP:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee]
 - 模式：`virtual_can`
 - 协议：`uds`
-- 保留的错误：sidecar response failed validation at [redacted-path] and [redacted-path]
+- 保留的错误：（系统原文）sidecar response failed validation at [redacted-path] and [redacted-path]
 
 ### 解读边界
 
