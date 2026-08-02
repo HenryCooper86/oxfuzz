@@ -509,14 +509,26 @@ pub fn render_markdown(data: &ReportData, labels: &Labels) -> String {
 
     let _ = writeln!(
         md,
-        "# {}{}`{}`",
-        labels.title_prefix, labels.bullet_colon, data.target
+        "# {}{}{}",
+        labels.title_prefix,
+        labels.bullet_colon,
+        inline_code(&data.target)
     );
     let _ = writeln!(md);
     let _ = writeln!(md, "| | |");
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| {} | `{}` |", labels.project, data.project);
-    let _ = writeln!(md, "| {} | `{}` |", labels.target, data.target);
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.project,
+        table_inline_code(&data.project)
+    );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.target,
+        table_inline_code(&data.target)
+    );
     let _ = writeln!(md, "| {} | {} |", labels.generated, data.generated_at);
     let _ = writeln!(md, "| {} | oxfuzz {} |", labels.tool, data.tool_version);
     let _ = writeln!(md);
@@ -792,19 +804,33 @@ fn render_target(md: &mut String, data: &ReportData, labels: &Labels) {
     };
     let _ = writeln!(md, "| {} | {} |", labels.col_property, labels.col_value);
     let _ = writeln!(md, "|---|---|");
-    let _ = writeln!(md, "| {} | `{}` |", labels.row_symbol, c.symbol);
-    let _ = writeln!(md, "| {} | {:?} |", labels.row_kind, c.kind);
-    let _ = writeln!(md, "| {} | {:?} |", labels.row_language, c.language);
     let _ = writeln!(
         md,
-        "| {} | `{}:{}:{}` |",
-        labels.col_location,
+        "| {} | {} |",
+        labels.row_symbol,
+        table_inline_code(&c.symbol)
+    );
+    let _ = writeln!(md, "| {} | {:?} |", labels.row_kind, c.kind);
+    let _ = writeln!(md, "| {} | {:?} |", labels.row_language, c.language);
+    let location = format!(
+        "{}:{}:{}",
         c.location.file.display(),
         c.location.line,
         c.location.col
     );
+    let _ = writeln!(
+        md,
+        "| {} | {} |",
+        labels.col_location,
+        table_inline_code(&location)
+    );
     if let Some(sig) = &c.signature {
-        let _ = writeln!(md, "| {} | `{sig}` |", labels.row_signature);
+        let _ = writeln!(
+            md,
+            "| {} | {} |",
+            labels.row_signature,
+            table_inline_code(sig)
+        );
     }
     let _ = writeln!(
         md,
@@ -826,7 +852,7 @@ fn render_target(md: &mut String, data: &ReportData, labels: &Labels) {
     let _ = writeln!(md, "| {} | {:.2} |", labels.row_fit_score, c.fit_score);
     let _ = writeln!(md);
     if !c.rationale.trim().is_empty() {
-        let _ = writeln!(md, "> {}", c.rationale.trim());
+        let _ = writeln!(md, "> {}", escape_markdown_text(c.rationale.trim()));
         let _ = writeln!(md);
     }
 }
@@ -930,17 +956,55 @@ fn render_corpus(md: &mut String, data: &ReportData, labels: &Labels) {
     let _ = writeln!(md);
 }
 
-/// Escape a value for safe inclusion in a Markdown table cell or heading.
-///
-/// LLM- and CASR-derived text (summaries, titles, crashlines, signatures) can
-/// contain `|` (which breaks a table's column count), backticks (which break a
-/// code span), or newlines (which split a row/heading). Mirrors the automotive
-/// report's `escape_inline`.
-fn escape_inline(value: &str) -> String {
+fn normalize_inline(value: &str) -> String {
+    value.replace(['\n', '\r'], " ")
+}
+
+fn longest_run(value: &str, needle: char) -> usize {
     value
-        .replace(['\n', '\r'], " ")
-        .replace('`', "'")
-        .replace('|', "\\|")
+        .chars()
+        .fold((0_usize, 0_usize), |(longest, current), character| {
+            let current = if character == needle { current + 1 } else { 0 };
+            (longest.max(current), current)
+        })
+        .0
+}
+
+fn escape_markdown_text(value: &str) -> String {
+    let normalized = normalize_inline(value);
+    let mut escaped = String::with_capacity(normalized.len());
+    for (index, character) in normalized.chars().enumerate() {
+        let structural_at_start = index == 0 && matches!(character, '#' | '>' | '-' | '+' | '!');
+        if structural_at_start
+            || matches!(character, '\\' | '`' | '*' | '[' | ']' | '<' | '>' | '|')
+        {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn inline_code(value: &str) -> String {
+    let normalized = normalize_inline(value);
+    let delimiter = "`".repeat(longest_run(&normalized, '`') + 1);
+    let needs_padding = normalized.starts_with('`') || normalized.ends_with('`');
+    let padding = if needs_padding { " " } else { "" };
+    format!("{delimiter}{padding}{normalized}{padding}{delimiter}")
+}
+
+fn table_inline_code(value: &str) -> String {
+    inline_code(&normalize_inline(value).replace('|', "\\|"))
+}
+
+fn fenced_code_block(info: &str, value: &str) -> String {
+    let delimiter = "`".repeat(longest_run(value, '`').max(2) + 1);
+    let mut block = format!("{delimiter}{info}\n{value}");
+    if !value.ends_with('\n') {
+        block.push('\n');
+    }
+    block.push_str(&delimiter);
+    block
 }
 
 fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
@@ -975,12 +1039,12 @@ fn render_findings(md: &mut String, data: &ReportData, labels: &Labels) {
             .unwrap_or_else(|| "-".to_owned());
         let _ = writeln!(
             md,
-            "| {} | {:?} | {} | `{}` | `{}` |",
+            "| {} | {:?} | {} | {} | {} |",
             i + 1,
             c.kind,
-            escape_inline(severity),
-            escape_inline(&location),
-            escape_inline(&truncate(&c.stack_signature, 60))
+            escape_markdown_text(severity),
+            table_inline_code(&location),
+            table_inline_code(&truncate(&c.stack_signature, 60))
         );
     }
     let _ = writeln!(md);
@@ -1003,7 +1067,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
         "### {} {n}{}{}",
         labels.finding_prefix,
         labels.bullet_colon,
-        escape_inline(&title)
+        escape_markdown_text(&title)
     );
     let _ = writeln!(md);
     let _ = writeln!(
@@ -1013,15 +1077,17 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
     );
     let _ = writeln!(
         md,
-        "- {}{}`{}`",
-        labels.bullet_stack_signature, labels.bullet_colon, c.stack_signature
+        "- {}{}{}",
+        labels.bullet_stack_signature,
+        labels.bullet_colon,
+        inline_code(&c.stack_signature)
     );
     let _ = writeln!(
         md,
-        "- {}{}`{}`",
+        "- {}{}{}",
         labels.bullet_input,
         labels.bullet_colon,
-        c.input_path.display()
+        inline_code(&c.input_path.display().to_string())
     );
     let _ = writeln!(
         md,
@@ -1043,14 +1109,16 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             labels.bullet_colon,
             casr_severity_label(casr.severity, labels),
             labels.narrative_open_paren,
-            casr.severity_short,
+            escape_markdown_text(&casr.severity_short),
             labels.narrative_close_paren
         );
         if !casr.crashline.is_empty() {
             let _ = writeln!(
                 md,
-                "- {}{}`{}`",
-                labels.bullet_crash_line, labels.bullet_colon, casr.crashline
+                "- {}{}{}",
+                labels.bullet_crash_line,
+                labels.bullet_colon,
+                inline_code(&casr.crashline)
             );
         }
         if let Some(cluster) = casr.cluster {
@@ -1064,11 +1132,8 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             let _ = writeln!(md);
             let _ = writeln!(md, "{}", labels.stack_trace);
             let _ = writeln!(md);
-            let _ = writeln!(md, "```");
-            for frame in &casr.stack {
-                let _ = writeln!(md, "{frame}");
-            }
-            let _ = writeln!(md, "```");
+            let stack = casr.stack.join("\n");
+            let _ = writeln!(md, "{}", fenced_code_block("", &stack));
         }
     }
 
@@ -1080,12 +1145,12 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             labels.bug_report_heading,
             labels.narrative_open_paren,
             labels.severity_guess_label,
-            report.severity_guess,
+            escape_markdown_text(&report.severity_guess),
             labels.narrative_close_paren
         );
         let _ = writeln!(md);
         if !report.summary.trim().is_empty() {
-            let _ = writeln!(md, "{}", report.summary.trim());
+            let _ = writeln!(md, "{}", escape_markdown_text(report.summary.trim()));
             let _ = writeln!(md);
         }
         if !report.repro_steps.trim().is_empty() {
@@ -1093,7 +1158,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
                 md,
                 "_{}_ {}",
                 labels.reproduction,
-                report.repro_steps.trim()
+                escape_markdown_text(report.repro_steps.trim())
             );
             let _ = writeln!(md);
         }
@@ -1102,7 +1167,12 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
-            let _ = writeln!(md, "_{}_ {}", labels.root_cause, root_cause.trim());
+            let _ = writeln!(
+                md,
+                "_{}_ {}",
+                labels.root_cause,
+                escape_markdown_text(root_cause.trim())
+            );
             let _ = writeln!(md);
         }
         if let Some(fix) = report
@@ -1111,9 +1181,7 @@ fn render_crash_detail(md: &mut String, n: usize, c: &Crash, labels: &Labels) {
             .filter(|s| !s.trim().is_empty())
         {
             let _ = writeln!(md, "_{}_", labels.suggested_fix);
-            let _ = writeln!(md, "```diff");
-            let _ = writeln!(md, "{}", fix.trim());
-            let _ = writeln!(md, "```");
+            let _ = writeln!(md, "{}", fenced_code_block("diff", fix.trim()));
             let _ = writeln!(md);
         }
     }
