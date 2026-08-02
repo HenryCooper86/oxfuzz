@@ -1,5 +1,10 @@
 # Code Health and Continuous Integration Implementation Plan
 
+Status: **partially superseded**. The runner-automation tasks are historical:
+the repository removed its GitLab and GitHub workflows on 2026-08-02 because
+no CI/CD runners are provisioned. The local gate dispatcher and the plan's
+non-CI implementation tasks remain valid records.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Gate every change with an automated Linux workflow running the repository's nine quality gates, and decompose the 12438-line `hf-service` orchestration file into a module tree with real boundaries.
