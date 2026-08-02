@@ -1,0 +1,15 @@
+# Keep the "blank issue" escape hatch, but route the two paths that must not
+# become public issues to the right place: security reports go through the
+# private process, and open questions go to discussions rather than the tracker.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/HenryCooper86/oxfuzz/security/policy
+    about: >-
+      Do not open a public issue for a vulnerability. Follow SECURITY.md to
+      report it privately.
+  - name: Question or discussion
+    url: https://github.com/HenryCooper86/oxfuzz/discussions
+    about: >-
+      For usage questions and open-ended discussion, prefer Discussions so the
+      issue tracker stays focused on defects and planned work.

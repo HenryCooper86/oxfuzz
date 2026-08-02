@@ -66,9 +66,12 @@ Use `./scripts/tests/gates.sh` for the full local gate set, or
 `./scripts/tests/gates.sh <gate>` for one of `fmt`, `clippy`, `check`, `test`,
 `doc`, `deny`, `script-tests`, `frontend-test`, `frontend-lint`.
 
-No automated runner is provisioned. The local gate script is the authoritative
-verification path: run the complete gate set before opening or updating a
-merge request and include the result in the merge-request evidence.
+The same gates run in CI, so a green local run predicts a green pipeline.
+`.gitlab-ci.yml` is the merge gate on this remote; `.github/workflows/ci.yml`
+runs the same gates on the public GitHub repository. Both invoke
+`scripts/tests/gates.sh` by gate name rather than restating commands, so the
+three cannot drift apart. See `docs/guides/CI.md` for the pipeline layout and
+the one-time OrbStack GitLab runner setup.
 
 ## Documentation and screenshots
 
@@ -84,7 +87,7 @@ results, guardrails, or human approval.
 - Explain user impact, architectural impact, safety impact, verification, and
   known limitations in the merge request.
 - Link the relevant tests and retain evidence for release-sensitive changes.
-- Do not merge with incomplete or failing local gate evidence, unresolved
-  high-risk review findings, or undocumented safety boundary changes.
+- Do not merge with failing pipelines, unresolved high-risk review findings, or
+  undocumented safety boundary changes.
 
 See `docs/guides/RELEASE_CHECKLIST.md` before preparing a release artifact.
