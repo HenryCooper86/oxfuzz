@@ -1,0 +1,25 @@
+# gitleaks configuration for oxfuzz.
+#
+# Extends the built-in ruleset and allowlists two confirmed non-secrets so an
+# independent scan (`gitleaks git .` over history, `gitleaks dir .` over the
+# tree) reports clean. Both were reviewed during the 2026-08-02 pre-publish
+# audit; neither is a real credential.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Confirmed non-secrets reviewed in the pre-publish audit"
+
+# gitignored Rust build artifacts (e.g. target/**/libmuda-*.rmeta) that a
+# working-tree scan walks but that are never committed or published.
+paths = [
+  '''target/''',
+]
+
+# Fake placeholder key used as input to a redaction unit test
+# (test_redact_api_key) in the since-removed hf-diagnostics langfuse module.
+# It survives only in history; it is not in the current tree and never was a
+# real secret.
+regexes = [
+  '''sk-1234567890abcdef''',
+]
