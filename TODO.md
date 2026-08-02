@@ -121,8 +121,17 @@ Status legend: [x] done - [~] partial - [ ] not started.
 ## Cross-cutting
 
 - [~] CI: cargo fmt/clippy gates pass workspace-wide; add cargo-deny + test job.
-- [~] Tests: storage, service, guardrails, agent covered; expand crash/triage
-  and end-to-end coverage.
+- [~] Tests: storage, service, guardrails, agent covered. Crash/triage coverage
+  expanded (`hf-service/tests/crash_triage_paths.rs`, `container.rs`): the
+  CASR-clustered triage E2E (the default strategy, previously untested), the
+  legacy-triage signature-stagnation early break + dedup collapse, the
+  bug-report drafting cap with root-cause persistence, and the
+  `verify_regressions` regressed/fixed branches. Remaining E2E arms: successful
+  minimization through the full loop; UBSan / ClusterFuzzLite / Syzkaller
+  classification edges. Note: the CI `clippy` gate runs `--workspace` (not
+  `--all-targets`), so test-code lints are not enforced -- pre-existing
+  test-only violations in `src/scheduler.rs` and `tests/evidence_manifest.rs`
+  are not caught by CI.
 
 ## Audit backlog (refreshed 2026-07-17)
 
