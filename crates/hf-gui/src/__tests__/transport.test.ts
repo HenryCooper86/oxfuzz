@@ -407,6 +407,7 @@ describe("transport", () => {
       await transport.invoke("generate_automotive_report", {
         projectRoot: "/tmp/project",
         includeAi: true,
+        language: "zh",
       });
 
       expect(calls.map((call) => [call.init.method, call.url])).toEqual([
@@ -429,9 +430,13 @@ describe("transport", () => {
         protocol: "uds",
         capture_path: "/tmp/capture.pcap",
       });
+      // `language` is already the identifier the REST body deserializes, so
+      // the camelCase-to-snake_case mirror leaves it alone: browser mode and
+      // the desktop shell send the same field name.
       expect(JSON.parse(String(calls[5].init.body))).toEqual({
         project_root: "/tmp/project",
         include_ai: true,
+        language: "zh",
       });
     } finally {
       globalThis.fetch = originalFetch;

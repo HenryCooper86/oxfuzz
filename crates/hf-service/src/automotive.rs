@@ -424,6 +424,12 @@ impl ServiceContainer {
     /// Compose a project-level automotive campaign report from retained
     /// evidence, optionally appending a grounded provider interpretation.
     ///
+    /// `language` selects the report's prose. Every technical token -- evidence
+    /// citations, pipeline stage identifiers, protocol, bus, ECU and adapter
+    /// names, digests, paths and figures -- is byte-identical in either
+    /// language, so a reader of one rendering can be pointed at a line of the
+    /// other.
+    ///
     /// The deterministic fact sheet is always authoritative and remains
     /// available when no provider is configured or provider validation fails.
     /// This operation never invokes the automotive sidecar or contacts an
@@ -436,10 +442,11 @@ impl ServiceContainer {
         &self,
         project_root: &Path,
         include_ai: bool,
+        language: crate::report::ReportLanguage,
     ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
         let settings =
             crate::config::effective_automotive_settings().map_err(ClassifiedError::Validation)?;
-        self.generate_automotive_report_with_settings(project_root, include_ai, &settings)
+        self.generate_automotive_report_with_settings(project_root, include_ai, &settings, language)
             .await
     }
 
@@ -448,10 +455,12 @@ impl ServiceContainer {
         project_root: &Path,
         include_ai: bool,
         settings: &AutomotiveSettings,
+        language: crate::report::ReportLanguage,
     ) -> Result<crate::automotive_report::AutomotiveCampaignReport, ClassifiedError> {
         use crate::automotive_report::{
             append_ai_interpretation, render_automotive_report, AutomotiveCampaignReport,
-            AutomotiveReportAiStatus, AutomotiveReportData, AutomotiveReportSafetyPosture,
+            AutomotiveLabels, AutomotiveReportAiStatus, AutomotiveReportData,
+            AutomotiveReportSafetyPosture,
         };
 
         let project_root = canonical_project_root(project_root)?;
@@ -489,7 +498,13 @@ impl ServiceContainer {
             state_corpus,
         };
         let metrics = data.metrics();
-        let facts = render_automotive_report(&data);
+        // Everything downstream resolves from this one value: the deterministic
+        // render, the two prompts, the validation of what the model returns and
+        // the advisory notice above it. Splitting it would let the prompts ask
+        // for one language while validation required another, which rejects
+        // every interpretation and falls back without saying why.
+        let labels = AutomotiveLabels::for_language(language);
+        let facts = render_automotive_report(&data, &labels);
         let mut markdown = facts.clone();
         let mut ai_model = None;
         let ai_status = if !include_ai {
@@ -498,11 +513,11 @@ impl ServiceContainer {
             AutomotiveReportAiStatus::NotApplicable
         } else if let Some(pool) = self.provider_pool() {
             match self
-                .compose_automotive_report_interpretation(&pool, &facts, &data)
+                .compose_automotive_report_interpretation(&pool, &facts, &data, language)
                 .await
             {
                 Ok((interpretation, model)) => {
-                    markdown = append_ai_interpretation(&facts, &interpretation, &model);
+                    markdown = append_ai_interpretation(&facts, &interpretation, &model, &labels);
                     ai_model = Some(model);
                     AutomotiveReportAiStatus::Applied
                 }
@@ -535,14 +550,21 @@ impl ServiceContainer {
         pool: &std::sync::Arc<dyn hf_core::provider::ProviderPool>,
         facts: &str,
         data: &crate::automotive_report::AutomotiveReportData,
+        language: crate::report::ReportLanguage,
     ) -> Result<(String, String), ClassifiedError> {
         use hf_core::provider::{ChatRequest, RouteRequest};
         use hf_core::types::Message;
 
+        // One language value reaches the prompts and the validation of what
+        // comes back. Asking for one language's headings while requiring
+        // another's rejects every interpretation the model returns and falls
+        // back to the deterministic report without saying why.
         let messages = vec![
-            Message::system(crate::automotive_report::automotive_report_system_prompt()),
+            Message::system(crate::automotive_report::automotive_report_system_prompt(
+                language,
+            )),
             Message::user(crate::automotive_report::automotive_report_user_prompt(
-                facts, data,
+                facts, data, language,
             )),
         ];
         let response = pool
@@ -555,7 +577,7 @@ impl ServiceContainer {
             .record("automotive_report", &response.model, &response.usage)
             .await;
         let interpretation = response.text().trim();
-        crate::automotive_report::validate_ai_interpretation(interpretation, data)
+        crate::automotive_report::validate_ai_interpretation(interpretation, data, language)
             .map_err(ClassifiedError::Provider)?;
         Ok((interpretation.to_owned(), response.model))
     }
@@ -2770,17 +2792,47 @@ mod tests {
         }
     }
 
+    /// A pool that answers with fixed content and records the request it was
+    /// handed, so a test can assert what the model was actually asked for.
+    ///
+    /// Recording is not optional decoration. Without it nothing observes
+    /// `automotive_report_system_prompt` or `automotive_report_user_prompt`, and
+    /// both can be hardcoded to English with the whole suite green -- which asks
+    /// the model in English while validating against Chinese headings, discards
+    /// every interpretation and reports a silent `Fallback`.
     struct ReportPool {
         content: String,
+        captured: Mutex<Vec<hf_core::types::Message>>,
+    }
+
+    impl ReportPool {
+        fn new(content: impl Into<String>) -> Self {
+            Self {
+                content: content.into(),
+                captured: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The recorded content for one role, or `None` when the pool was never
+        /// called -- so a silent fallback cannot masquerade as a pass.
+        fn message(&self, role: hf_core::types::Role) -> Option<String> {
+            self.captured
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|message| message.role == role)
+                .map(|message| message.content.clone())
+        }
     }
 
     #[async_trait]
     impl ProviderPool for ReportPool {
         async fn chat_completion(
             &self,
-            _request: &ChatRequest,
+            request: &ChatRequest,
             _route: &RouteRequest,
         ) -> Result<ChatResponse, ProviderError> {
+            self.captured.lock().unwrap().clone_from(&request.messages);
             Ok(ChatResponse {
                 id: "automotive-report-test".to_owned(),
                 model: "grounded-test-model".to_owned(),
@@ -3056,6 +3108,7 @@ mod tests {
                     enabled: true,
                     ..AutomotiveSettings::default()
                 },
+                crate::report::ReportLanguage::En,
             )
             .await
             .unwrap();
@@ -3083,9 +3136,7 @@ mod tests {
              evidence\nNo virtual replay is retained.\n\n### Recommended next actions\nReview the \
              captured states before deterministic mutation [OP:{operation_id}]."
         );
-        let service = service.with_provider_pool(Arc::new(ReportPool {
-            content: interpretation,
-        }));
+        let service = service.with_provider_pool(Arc::new(ReportPool::new(interpretation)));
 
         let report = service
             .generate_automotive_report_with_settings(
@@ -3095,6 +3146,7 @@ mod tests {
                     enabled: true,
                     ..AutomotiveSettings::default()
                 },
+                crate::report::ReportLanguage::En,
             )
             .await
             .unwrap();
@@ -3111,12 +3163,11 @@ mod tests {
     async fn campaign_report_falls_back_when_ai_invents_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let (service, _, project, _, _, _) = completed_analysis_with_state(temp.path()).await;
-        let service = service.with_provider_pool(Arc::new(ReportPool {
-            content: "### Evidence-backed interpretation\nInvented evidence \
-                [OP:00000000-0000-0000-0000-000000000001].\n\n### Hypotheses\nNone.\n\n\
-                ### Missing evidence\nNone.\n\n### Recommended next actions\nNone."
-                .to_owned(),
-        }));
+        let service = service.with_provider_pool(Arc::new(ReportPool::new(
+            "### Evidence-backed interpretation\nInvented evidence \
+             [OP:00000000-0000-0000-0000-000000000001].\n\n### Hypotheses\nNone.\n\n\
+             ### Missing evidence\nNone.\n\n### Recommended next actions\nNone.",
+        )));
 
         let report = service
             .generate_automotive_report_with_settings(
@@ -3126,6 +3177,7 @@ mod tests {
                     enabled: true,
                     ..AutomotiveSettings::default()
                 },
+                crate::report::ReportLanguage::En,
             )
             .await
             .unwrap();
@@ -3134,6 +3186,228 @@ mod tests {
         assert_eq!(report.ai_model, None);
         assert!(!report.markdown.contains("## AI-Assisted Interpretation"));
         assert!(report.markdown.contains("## Evidence Manifest"));
+    }
+
+    #[tokio::test]
+    async fn the_requested_language_reaches_the_deterministic_renderer() {
+        // The whole point of the branch: a caller can now choose. Asserted on
+        // the document's own title rather than on any label, so the assertion
+        // fails if the parameter stops reaching `AutomotiveLabels::for_language`
+        // even though the label set itself is correct.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, operation_id, _) =
+            completed_analysis_with_state(temp.path()).await;
+        let settings = AutomotiveSettings {
+            enabled: true,
+            ..AutomotiveSettings::default()
+        };
+
+        let chinese = service
+            .generate_automotive_report_with_settings(
+                &project,
+                false,
+                &settings,
+                crate::report::ReportLanguage::Zh,
+            )
+            .await
+            .unwrap();
+        assert!(
+            chinese.markdown.starts_with("# 汽车协议模糊测试活动报告："),
+            "the requested language must reach the renderer: {}",
+            chinese.markdown
+        );
+        assert!(!chinese
+            .markdown
+            .contains("Automotive Fuzzing Campaign Report"));
+        // The evidence citation is a technical token: byte-identical either way.
+        assert!(chinese.markdown.contains(&format!("[OP:{operation_id}]")));
+
+        let english = service
+            .generate_automotive_report_with_settings(
+                &project,
+                false,
+                &settings,
+                crate::report::ReportLanguage::En,
+            )
+            .await
+            .unwrap();
+        assert!(
+            english
+                .markdown
+                .starts_with("# Automotive Fuzzing Campaign Report: "),
+            "the English rendering must not move: {}",
+            english.markdown
+        );
+        assert!(english.markdown.contains(&format!("[OP:{operation_id}]")));
+    }
+
+    #[tokio::test]
+    async fn a_chinese_campaign_report_accepts_and_frames_a_chinese_interpretation() {
+        // One language value has to reach the prompts, the validation of what
+        // comes back and the advisory notice around it. Asking for Chinese while
+        // validating against English headings would discard this interpretation
+        // and report `Fallback` without saying why, so the status is asserted
+        // alongside the Chinese framing.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, operation_id, _) =
+            completed_analysis_with_state(temp.path()).await;
+        let service = service.with_provider_pool(Arc::new(ReportPool::new(format!(
+            "### 基于证据的解读\n离线分析保留了经过校验的状态证据 [OP:{operation_id}]。\n\n\
+             ### 假设\n不作任何假设。\n\n\
+             ### 缺失的证据\n未保留任何虚拟重放。\n\n\
+             ### 建议的后续行动\n在进行确定性变异之前先复核已捕获的状态 [OP:{operation_id}]。"
+        ))));
+
+        let report = service
+            .generate_automotive_report_with_settings(
+                &project,
+                true,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+                crate::report::ReportLanguage::Zh,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.ai_status, AutomotiveReportAiStatus::Applied);
+        assert_eq!(report.ai_model.as_deref(), Some("grounded-test-model"));
+        assert!(
+            report.markdown.contains("## AI 辅助解读"),
+            "{}",
+            report.markdown
+        );
+        assert!(
+            report
+                .markdown
+                .contains("任何情况下均以保留的证据和服务校验为准"),
+            "the advisory notice must reach the reader in the report's language: {}",
+            report.markdown
+        );
+        assert!(!report.markdown.contains("## AI-Assisted Interpretation"));
+    }
+
+    #[tokio::test]
+    async fn the_settings_resolving_entry_point_carries_the_language_through() {
+        // `generate_automotive_report` resolves the operator policy and then
+        // delegates. That delegation is its own call site, and every assertion
+        // above is on the method it delegates to, so a hardcoded language there
+        // would go unnoticed.
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _, project, _, _, _) = completed_analysis_with_state(temp.path()).await;
+
+        let chinese = service
+            .generate_automotive_report(&project, false, crate::report::ReportLanguage::Zh)
+            .await
+            .unwrap();
+        assert!(
+            chinese.markdown.starts_with("# 汽车协议模糊测试活动报告："),
+            "{}",
+            chinese.markdown
+        );
+
+        let default = service
+            .generate_automotive_report(&project, false, crate::report::ReportLanguage::default())
+            .await
+            .unwrap();
+        assert!(
+            default
+                .markdown
+                .starts_with("# Automotive Fuzzing Campaign Report: "),
+            "{}",
+            default.markdown
+        );
+    }
+
+    /// Drive the report's provider path in `language` and return the (system,
+    /// user) prompts the model was actually handed.
+    async fn captured_automotive_report_prompts(
+        root: &Path,
+        language: crate::report::ReportLanguage,
+    ) -> (String, String) {
+        let (service, _, project, _, _, _) =
+            completed_analysis_with_state(&root.join(format!("prompt_{language:?}"))).await;
+        let pool = Arc::new(ReportPool::new("interpretation content is irrelevant here"));
+        let service = service.with_provider_pool(Arc::clone(&pool) as Arc<dyn ProviderPool>);
+        service
+            .generate_automotive_report_with_settings(
+                &project,
+                true,
+                &AutomotiveSettings {
+                    enabled: true,
+                    ..AutomotiveSettings::default()
+                },
+                language,
+            )
+            .await
+            .unwrap();
+        (
+            pool.message(hf_core::types::Role::System)
+                .expect("the provider pool must have been asked to compose the interpretation"),
+            pool.message(hf_core::types::Role::User)
+                .expect("the provider pool must have been asked to compose the interpretation"),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_report_asks_the_model_for_the_requested_language() {
+        // The two prompt builders are the only uses of `language` that produce
+        // no visible difference in a successful report, so nothing else can see
+        // them severed. Asking in English while validating against Chinese
+        // headings discards every interpretation and reports a silent
+        // `Fallback` -- the exact failure this work exists to prevent, reached
+        // from the other side.
+        let temp = tempfile::tempdir().unwrap();
+
+        let (zh_system, zh_user) =
+            captured_automotive_report_prompts(temp.path(), crate::report::ReportLanguage::Zh)
+                .await;
+        assert!(
+            zh_system.contains("You write the interpretation in Simplified Chinese"),
+            "the system prompt does not ask for Chinese: {zh_system}"
+        );
+        assert!(
+            zh_user.contains("Write the entire interpretation in Simplified Chinese"),
+            "the user prompt does not ask for Chinese: {zh_user}"
+        );
+        // The Chinese arm's token rule, as one contiguous phrase that exists
+        // only in that block: a translated citation no longer matches the
+        // retained evidence it names.
+        assert!(
+            zh_user.contains(
+                "never translated or \
+                 transliterated: the evidence citations `[OP:<uuid>]`, `[STATE:<sha256>]` and \
+                 `[TRANSCRIPT:<sha256>]`"
+            ),
+            "the user prompt does not pin the untranslatable citations: {zh_user}"
+        );
+        // And the four headings requested are the Chinese ones the validator
+        // will require.
+        assert!(zh_user.contains("### 基于证据的解读"), "{zh_user}");
+
+        let (en_system, en_user) =
+            captured_automotive_report_prompts(temp.path(), crate::report::ReportLanguage::En)
+                .await;
+
+        // The negative half is not optional: without it a pool that hardcoded
+        // `Zh` at both sites would satisfy everything above.
+        assert!(
+            !en_system.contains("Simplified Chinese"),
+            "the English system prompt leaked a language instruction: {en_system}"
+        );
+        assert!(
+            !en_user.contains("Simplified Chinese"),
+            "the English user prompt leaked a language instruction: {en_user}"
+        );
+        assert!(
+            !en_user.contains("transliterated"),
+            "the English user prompt leaked the Chinese token rule: {en_user}"
+        );
+        assert!(
+            en_user.contains("### Evidence-backed interpretation"),
+            "{en_user}"
+        );
     }
 
     #[tokio::test]
