@@ -1,7 +1,13 @@
 # Code Health and Continuous Integration Design
 
-Status: **approved design**. Owner: repository tooling, `hf-service`, and
+Status: **partially superseded**. Owner: repository tooling, `hf-service`, and
 `hf-gui`.
+
+The runner-automation portions of this design were superseded on 2026-08-02.
+The repository has no provisioned CI/CD runners, so `.gitlab-ci.yml` and the
+GitHub workflow files were removed. The local gate dispatcher and all
+non-CI code-health, service-decomposition, and desktop work remain active.
+Runner-specific sections below are retained only as historical design context.
 
 ## 1. Goal
 
