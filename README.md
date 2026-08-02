@@ -164,7 +164,7 @@ enforced guarantees rather than switches.
 | Dependency | Required? | Notes |
 | --- | --- | --- |
 | **Rust 1.94+** | Yes | Pinned in `rust-toolchain.toml` |
-| **Node 20.19+ or 22.12+ / npm** | Desktop app | Vite 7 requirement; GitLab CI uses Node 22 |
+| **Node 20.19+ or 22.12+ / npm** | Desktop app | Vite 7 requirement |
 | **Docker** | Yes | Mandatory boundary for harness builds, fuzz runs, and crash parsing |
 | **SQLite 3.35+** | Embedded | Bundled, no action needed |
 | **Fuzzing engines** | Bundled | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and syzkaller live in the sandbox image |
@@ -197,13 +197,15 @@ These builds are unsigned, so the OS warns on first launch -- see the release
 notes for the per-platform steps. Docker must be installed and running before
 any fuzzing starts.
 
-Maintainers cut a release by pushing a version tag. `.github/workflows/release.yml`
-builds every platform and publishes the release automatically -- but only after
-all four builds have uploaded, so a release is never public while a platform is
-still missing. If any platform fails, the release stays a draft to retry or
-publish by hand:
+Releases are built and published manually. Maintainers run the local quality
+gates, build the required platform artifacts on each target platform, attach
+the verified artifacts to a draft release, and publish it only after every
+required platform is present. Pushing a version tag does not start a build:
 
 ```bash
+./scripts/tests/gates.sh
+./scripts/build-release.sh
+./scripts/build-app.sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -247,10 +249,9 @@ binaries and optional integrations do not determine core readiness.
 
 A release candidate is ready only when its source gates, sandbox health, CLI
 artifact, and platform bundle have all been verified from the same commit.
-The repository provides a local gate runner, CI pipelines that run the same
-nine gates on every push and split them into jobs so a red pipeline
-identifies the broken category without opening a log, and release build
-scripts:
+The repository provides a local gate script and release build scripts. Run the
+complete local gate set and retain its output as release evidence before
+building artifacts:
 
 ```bash
 ./scripts/tests/gates.sh
@@ -717,7 +718,7 @@ open target/release/bundle/macos/oxfuzz.app
 | 依赖 | 是否必需？ | 说明 |
 | --- | --- | --- |
 | **Rust 1.94+** | 是 | 由 `rust-toolchain.toml` 固定 |
-| **Node 20.19+ 或 22.12+ / npm** | 桌面应用 | Vite 7 的要求；GitLab CI 使用 Node 22 |
+| **Node 20.19+ 或 22.12+ / npm** | 桌面应用 | Vite 7 的要求 |
 | **Docker** | 是 | 测试桩构建、模糊运行与崩溃解析的强制边界 |
 | **SQLite 3.35+** | 内置 | 已捆绑，无需操作 |
 | **模糊测试引擎** | 已捆绑 | AFL++、honggfuzz、libFuzzer、ClusterFuzzLite 与 syzkaller 均位于沙箱镜像中 |
@@ -747,9 +748,12 @@ cargo build --release
 
 这些构建均未签名，因此系统在首次启动时会发出警告 —— 各平台的处理步骤见发布说明。开始任何模糊测试前，Docker 必须已安装并正在运行。
 
-维护者通过推送版本标签来发布。`.github/workflows/release.yml` 会构建所有平台并自动发布 release —— 但只有在四个平台全部上传完成后才会公开，因此不会出现缺少某个平台的公开 release。若任一平台构建失败，release 将保持草稿状态，可重试或手动发布：
+发布采用手动构建和发布流程。维护者先运行本地质量门禁，在每个目标平台上构建所需制品，将验证后的制品附加到草稿 release，并且只在所有必需平台的制品齐全后发布。推送版本标签不会自动启动构建：
 
 ```bash
+./scripts/tests/gates.sh
+./scripts/build-release.sh
+./scripts/build-app.sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -778,7 +782,7 @@ oxfuzz 采用一个本地 DefectDojo，而非内置一个。`scripts/setup-defec
 
 ## 发布就绪度
 
-只有当发布候选的源码门禁、沙箱健康、CLI 制品与平台安装包都从同一个提交被验证过时，它才算就绪。仓库提供了一个本地门禁运行器、在每次推送时运行同一组九项门禁并按类别拆分为多个作业（因此流水线失败时无需查看日志即可定位问题所在类别）的 CI 流水线，以及发布构建脚本：
+只有当发布候选的源码门禁、沙箱健康、CLI 制品与平台安装包都从同一个提交被验证过时，它才算就绪。仓库提供了本地门禁运行器与发布构建脚本。构建制品前必须运行完整的本地门禁，并保留输出作为发布证据：
 
 ```bash
 ./scripts/tests/gates.sh

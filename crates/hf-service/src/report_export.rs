@@ -133,25 +133,58 @@ pub fn write_report(
 /// which breaks hyperref bookmarks when inline code appears in a heading).
 /// Fenced code blocks are skipped -- fvextra already wraps those, and a ZWSP
 /// could show as a missing glyph in a monospace verbatim block.
+#[derive(Clone, Copy)]
+struct Fence {
+    marker: char,
+    length: usize,
+}
+
+fn parse_fence(line: &str) -> Option<(Fence, &str)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let length = trimmed
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    (length >= 3).then(|| (Fence { marker, length }, &trimmed[length..]))
+}
+
+fn closes_fence(line: &str, active: Fence) -> bool {
+    parse_fence(line).is_some_and(|(candidate, suffix)| {
+        candidate.marker == active.marker
+            && candidate.length >= active.length
+            && suffix.trim().is_empty()
+    })
+}
+
 fn insert_break_hints(md: &str) -> String {
     const ZWSP: char = '\u{200B}';
     let mut out = String::with_capacity(md.len() + md.len() / 16);
-    let mut in_fence = false;
+    let mut active_fence: Option<Fence> = None;
     for line in md.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
+        if let Some(active) = active_fence {
+            out.push_str(line);
+            out.push('\n');
+            if closes_fence(line, active) {
+                active_fence = None;
+            }
+            continue;
+        }
+
+        if let Some((fence, _)) = parse_fence(line) {
+            active_fence = Some(fence);
             out.push_str(line);
             out.push('\n');
             continue;
         }
-        if in_fence {
-            out.push_str(line);
-        } else {
-            for c in line.chars() {
-                out.push(c);
-                if c == '/' {
-                    out.push(ZWSP);
-                }
+
+        for c in line.chars() {
+            out.push(c);
+            if c == '/' {
+                out.push(ZWSP);
             }
         }
         out.push('\n');
@@ -165,20 +198,32 @@ fn insert_break_hints(md: &str) -> String {
 /// carries the same numbers as ASCII bar charts and tables.
 fn strip_mermaid_blocks(md: &str) -> String {
     let mut out = String::with_capacity(md.len());
-    let mut in_mermaid = false;
+    let mut active_fence: Option<(Fence, bool)> = None;
     for line in md.lines() {
-        let fence = line.trim_start();
-        if in_mermaid {
-            // The closing ``` ends the block (and is itself dropped).
-            if fence.starts_with("```") {
-                in_mermaid = false;
+        if let Some((active, strip)) = active_fence {
+            if !strip {
+                out.push_str(line);
+                out.push('\n');
+            }
+            if closes_fence(line, active) {
+                active_fence = None;
             }
             continue;
         }
-        if fence.starts_with("```mermaid") {
-            in_mermaid = true;
+
+        if let Some((fence, info)) = parse_fence(line) {
+            let strip = info
+                .split_whitespace()
+                .next()
+                .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"));
+            active_fence = Some((fence, strip));
+            if !strip {
+                out.push_str(line);
+                out.push('\n');
+            }
             continue;
         }
+
         out.push_str(line);
         out.push('\n');
     }
@@ -469,6 +514,17 @@ mod tests {
     }
 
     #[test]
+    fn fence_aware_mermaid_stripping_ignores_short_and_nested_markers() {
+        let markdown = "Before\n````mermaid\nchart\n```\nstill chart\n````\nAfter\n\
+                        ~~~text\n```mermaid\nliteral\n```\n~~~\n";
+        let output = strip_mermaid_blocks(markdown);
+
+        assert!(!output.contains("chart\n```\nstill chart"));
+        assert!(output.contains("Before\nAfter"));
+        assert!(output.contains("~~~text\n```mermaid\nliteral\n```\n~~~"));
+    }
+
+    #[test]
     fn insert_break_hints_adds_zwsp_after_slashes_outside_fences() {
         let out = insert_break_hints("path `/a/b/c` here\n```text\n/no/hint/in/code\n```\n");
         // Prose/inline slashes get a zero-width space after them.
@@ -476,6 +532,22 @@ mod tests {
         // Inside a fenced block, slashes are untouched (fvextra wraps those).
         assert!(out.contains("/no/hint/in/code"));
         assert!(!out.contains("/\u{200B}no"));
+    }
+
+    #[test]
+    fn fence_aware_break_hints_skip_long_and_tilde_fences() {
+        let output = insert_break_hints(
+            "````text\n/long/fence\n```\n/still/in/fence\n````\n\
+             ~~~text\n/tilde/fence\n~~~\n/outside/path\n",
+        );
+
+        assert!(output.contains("/long/fence"));
+        assert!(output.contains("/still/in/fence"));
+        assert!(output.contains("/tilde/fence"));
+        assert!(!output.contains("/\u{200B}long"));
+        assert!(!output.contains("/\u{200B}still"));
+        assert!(!output.contains("/\u{200B}tilde"));
+        assert!(output.contains("/\u{200B}outside/\u{200B}path"));
     }
 
     #[test]

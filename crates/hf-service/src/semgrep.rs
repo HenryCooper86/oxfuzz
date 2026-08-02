@@ -4330,17 +4330,16 @@ mod snapshot_tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_special_file_and_identity_replacement_fail_closed() {
+    fn symlink_non_regular_file_and_identity_replacement_fail_closed() {
         use std::os::unix::fs::symlink;
-        use std::os::unix::net::UnixListener;
 
         let project = tempfile::tempdir().unwrap();
         write(project.path(), "real.c", b"real");
         symlink(project.path().join("real.c"), project.path().join("link.c")).unwrap();
-        let listener = UnixListener::bind(project.path().join("socket.c")).unwrap();
+        std::fs::create_dir(project.path().join("directory.c")).unwrap();
         let canonical = std::fs::canonicalize(project.path()).unwrap();
 
-        for relative in ["link.c", "socket.c"] {
+        for relative in ["link.c", "directory.c"] {
             let workspace = tempfile::tempdir().unwrap();
             let canonical_workspace = std::fs::canonicalize(workspace.path()).unwrap();
             assert!(stage_selected_paths_at_with_limits(
@@ -4397,7 +4396,6 @@ mod snapshot_tests {
             tiny_limits(),
         )
         .is_err());
-        drop(listener);
     }
 
     #[test]
@@ -6077,7 +6075,8 @@ mod lifecycle_tests {
         assert!(call.options.workspace_read_only);
         assert_eq!(call.options.max_file_size_bytes, Some(67_108_864));
         assert_eq!(call.options.max_pids, Some(128));
-        assert!(call.cwd.starts_with(crate::workspace_root()));
+        let workspace = crate::initialize_workspace_root().unwrap();
+        assert!(call.cwd.starts_with(&workspace));
         assert!(call
             .options
             .extra_mounts
@@ -6597,9 +6596,10 @@ mod lifecycle_tests {
             .to_string()
             .contains("recovery is degraded"));
         let operation_root = runtime.calls()[0].cwd.clone();
+        let workspace = crate::initialize_workspace_root().unwrap();
         service
             .semgrep
-            .recover_interrupted(&store, &crate::workspace_root())
+            .recover_interrupted(&store, &workspace)
             .await
             .unwrap();
         assert!(!operation_root.exists());
@@ -6653,9 +6653,10 @@ mod lifecycle_tests {
             .await
             .unwrap();
         let operation_root = runtime.calls()[0].cwd.clone();
+        let workspace = crate::initialize_workspace_root().unwrap();
         service
             .semgrep
-            .recover_interrupted(&store, &crate::workspace_root())
+            .recover_interrupted(&store, &workspace)
             .await
             .unwrap();
         assert!(!operation_root.exists());
@@ -6710,8 +6711,9 @@ mod lifecycle_tests {
 
             drop(service);
             let coordinator = Arc::new(super::SemgrepCoordinator::persistent(journal_dir.clone()));
+            let workspace = crate::initialize_workspace_root().unwrap();
             coordinator
-                .recover_interrupted(&store, &crate::workspace_root())
+                .recover_interrupted(&store, &workspace)
                 .await
                 .unwrap();
             let run = store.semgrep_run(id).await.unwrap().unwrap();
