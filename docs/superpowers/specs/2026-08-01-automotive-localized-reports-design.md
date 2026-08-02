@@ -266,6 +266,34 @@ What does remain English is any value that genuinely reaches the report through
 `Debug` rather than through a mapping. Task 2 should confirm which those are by
 reading, rather than trusting this document a second time.
 
+### 9.4a Retained failure detail is marked, not translated
+
+The retained-error line cannot be localized, and the reason is worth stating
+precisely because the obvious fix does not exist.
+
+`ClassifiedError` renders the message and `persist_failure` writes
+`error.to_string()` to storage **when the operation fails** -- long before any
+report language is chosen. At composition time only that English string
+survives. `automotive.rs` alone constructs over 160 `ClassifiedError` values and
+`persist_failure` is reached through a generic `retain_failure<T>` wrapper, so
+errors from `hf-automotive`, `hf-runtime`, storage and providers all land there
+too. The detail text is unbounded English prose from across the workspace.
+Localizing `ClassifiedError`'s `Display` would change log output and REST error
+bodies, which is not this feature's business.
+
+So the Chinese report marks it instead of pretending. A real retained error
+renders with a leading `（系统原文）`, telling the reader the English that
+follows is the system's own wording rather than a gap in the translation. The
+marker is empty in English, where label and value are already the same language.
+
+It applies to a **real error only**. When none was retained the value is
+`value_no_error_detail`, which is already Chinese, and marking that as verbatim
+system text would be false.
+
+Fully localizing this line needs errors to carry structured data instead of
+pre-rendered prose, so any consumer can render them in any language. That is a
+workspace-wide change and is not attempted here.
+
 ### 9.5 The interpretation size bound is bytes, so Chinese gets less of it
 
 `validate_ai_interpretation` rejects an interpretation over 24000 **bytes**. A
