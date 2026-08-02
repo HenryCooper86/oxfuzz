@@ -1,3 +1,4 @@
+import type { Locale } from "../i18nContext";
 import { getTransport } from "./index";
 import type { Transport } from "./transport";
 
@@ -317,14 +318,21 @@ export function listAutomotiveOperations(
   });
 }
 
+/**
+ * Compose the automotive campaign report. `language` is the caller's UI locale;
+ * its two values are exactly the identifiers the service parses, so it is
+ * forwarded unchanged rather than mapped.
+ */
 export function generateAutomotiveReport(
   projectRoot: string,
   includeAi: boolean,
+  language: Locale,
   transport: Transport = getTransport(),
 ): Promise<AutomotiveCampaignReport> {
   return transport.invoke<AutomotiveCampaignReport>("generate_automotive_report", {
     projectRoot,
     includeAi,
+    language,
   });
 }
 
