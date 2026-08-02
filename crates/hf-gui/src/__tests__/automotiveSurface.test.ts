@@ -48,8 +48,15 @@ describe("automotive surface boundaries", () => {
     const commands = source("../../src-tauri/src/commands.rs");
     const app = source("../../src-tauri/src/lib.rs");
     expect(commands).toContain("pub async fn generate_automotive_report");
-    expect(commands).toContain(".generate_automotive_report(&project_root, include_ai)");
+    expect(commands).toContain(
+      ".generate_automotive_report(&project_root, include_ai, language)",
+    );
     expect(app).toContain("generate_automotive_report,");
+    // The command resolves the caller's locale exactly the way the main
+    // report's commands do, and adds no logic of its own.
+    expect(commands).toMatch(
+      /pub async fn generate_automotive_report\([^)]*language: Option<String>,/,
+    );
   });
 
   it("offers report composition, retained draft handoff, preview, and export", () => {

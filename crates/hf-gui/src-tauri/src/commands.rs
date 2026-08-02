@@ -2442,6 +2442,12 @@ fn proof_carrying_feature_unavailable() -> String {
 
 /// Export already-composed report `content` (e.g. a saved draft) in `format`
 /// via a native save dialog. Returns the saved path or `None` if cancelled.
+///
+/// `language` is the language of `content`, which only the caller knows: a view
+/// that just composed the document passes its locale, and a view exporting a
+/// stored draft omits it, because a draft records no language and the exporter's
+/// locale is not the stored document's. Omitting it is the documented English
+/// default this command used to apply to everything.
 #[tauri::command]
 pub async fn export_markdown(
     app: tauri::AppHandle,
@@ -2449,9 +2455,16 @@ pub async fn export_markdown(
     content: String,
     title: String,
     format: String,
+    language: Option<String>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let language = match language {
+        Some(value) => value
+            .parse::<hf_service::ReportLanguage>()
+            .map_err(|error| error.to_string())?,
+        None => hf_service::ReportLanguage::default(),
+    };
     let ext = match format.trim().to_ascii_lowercase().as_str() {
         "md" | "markdown" => "md",
         "html" | "htm" => "html",
@@ -2463,7 +2476,12 @@ pub async fn export_markdown(
     let Some(path) = app
         .dialog()
         .file()
-        .set_title("Export report")
+        // Prose the user reads, so it follows the document's language -- but a
+        // document-neutral string, not `export_report`'s. This command exports
+        // whatever it is handed, including automotive campaign reports and
+        // drafts whose type was never recorded, so naming a document type here
+        // would mean guessing at one.
+        .set_title(hf_service::report::document_export_dialog_title(language))
         .set_file_name(&default_name)
         .add_filter(ext.to_uppercase(), &[ext])
         .blocking_save_file()
@@ -2475,7 +2493,7 @@ pub async fn export_markdown(
         .map_err(|e| format!("invalid save path: {e}"))?;
     state
         .container
-        .export_markdown(&content, &title, ext, &path)
+        .export_markdown(&content, &title, ext, &path, language)
         .map_err(|e| e.to_string())?;
     Ok(Some(path.to_string_lossy().to_string()))
 }
@@ -2869,25 +2887,33 @@ pub async fn list_automotive_operations(
 }
 
 /// Compose the service-owned automotive campaign report without invoking the
-/// sidecar or contacting an interface.
+/// sidecar or contacting an interface. `language` is the caller's UI locale
+/// (`en` / `zh`); omitting it composes in English.
 #[tauri::command]
 pub async fn generate_automotive_report(
     state: tauri::State<'_, crate::state::AppState>,
     project_root: PathBuf,
     include_ai: bool,
+    language: Option<String>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(feature = "automotive-scapy")]
     {
+        let language = match language {
+            Some(value) => value
+                .parse::<hf_service::ReportLanguage>()
+                .map_err(|error| error.to_string())?,
+            None => hf_service::ReportLanguage::default(),
+        };
         let report = state
             .container
-            .generate_automotive_report(&project_root, include_ai)
+            .generate_automotive_report(&project_root, include_ai, language)
             .await
             .map_err(|error| error.to_string())?;
         serde_json::to_value(report).map_err(|error| error.to_string())
     }
     #[cfg(not(feature = "automotive-scapy"))]
     {
-        let _ = (state, project_root, include_ai);
+        let _ = (state, project_root, include_ai, language);
         Err(automotive_feature_unavailable())
     }
 }
@@ -3116,6 +3142,54 @@ mod export_dialog_tests {
         assert!(
             !src.contains("\"Export fuzzing report\""),
             "the save dialog title is hardcoded English again:\n{src}"
+        );
+    }
+
+    /// Just the `export_markdown` command, isolated for the same reason.
+    fn export_markdown_command() -> &'static str {
+        let start = COMMANDS_SOURCE
+            .find("pub async fn export_markdown(")
+            .expect("export_markdown command");
+        let rest = &COMMANDS_SOURCE[start..];
+        let end = rest
+            .find("#[tauri::command]")
+            .expect("a following command delimits export_markdown");
+        &rest[..end]
+    }
+
+    #[test]
+    fn export_markdown_declares_the_language_it_is_told() {
+        // This command writes content composed elsewhere, so the language is
+        // the caller's to supply: the automotive view passes the locale it just
+        // composed in, the Reports view omits it for a stored draft and gets
+        // the documented English default.
+        let src = export_markdown_command();
+        assert!(
+            src.contains("language: Option<String>"),
+            "the command must accept a caller-supplied language:\n{src}"
+        );
+        assert!(
+            src.contains("None => hf_service::ReportLanguage::default()"),
+            "omitting the language must still yield the documented default:\n{src}"
+        );
+        assert!(
+            src.contains(".export_markdown(&content, &title, ext, &path, language)"),
+            "the resolved language must reach the service:\n{src}"
+        );
+        assert!(
+            src.contains(".set_title(hf_service::report::document_export_dialog_title(language))"),
+            "the save dialog title must follow the document's language:\n{src}"
+        );
+        assert!(
+            !src.contains("\"Export report\""),
+            "the save dialog title is hardcoded English again:\n{src}"
+        );
+        // And it must not borrow the fuzzing report's title: this command also
+        // exports automotive reports and untyped drafts.
+        assert!(
+            !src.contains("export_dialog_title(language)")
+                || src.contains("document_export_dialog_title(language)"),
+            "the dialog must not name the fuzzing report specifically:\n{src}"
         );
     }
 
