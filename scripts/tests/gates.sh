@@ -4,9 +4,8 @@
 #   scripts/tests/gates.sh                 # every gate, in AGENTS.md 4.5 order
 #   scripts/tests/gates.sh clippy test     # only the named gates
 #
-# This file is the single definition of what each gate means. Continuous
-# integration invokes named gates one at a time so GitHub annotates each
-# separately; it never restates the commands, so the two cannot drift.
+# This file is the single definition of what each local gate means. Named gates
+# let developers rerun only the relevant checks without duplicating commands.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
