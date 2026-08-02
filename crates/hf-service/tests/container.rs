@@ -1252,6 +1252,135 @@ async fn verify_regressions_replays_stored_crash_inputs() {
     let _ = fs::remove_dir_all(&ws);
 }
 
+/// A runtime whose crash replay is scripted by the input filename: an input
+/// whose name contains `regress` still faults (an `ASan` trace), any other input
+/// replays cleanly. Lets `verify_regressions` exercise both terminal outcomes.
+struct RegressionReplayRuntime;
+
+#[async_trait::async_trait]
+impl hf_core::runtime::RuntimeAdapter for RegressionReplayRuntime {
+    async fn resolve_image_reference(
+        &self,
+        _image: &str,
+    ) -> Result<Option<hf_core::runtime::ImmutableImageReference>, hf_core::error::ClassifiedError>
+    {
+        Ok(Some(hf_test_utils::immutable_test_image()?))
+    }
+
+    async fn run_command(
+        &self,
+        _cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        Ok(hf_core::runtime::CommandResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn run_command_opts(
+        &self,
+        cmd: &[String],
+        cwd: &std::path::Path,
+        _limits: &hf_core::runtime::ResourceLimits,
+        _opts: &hf_core::runtime::SandboxOptions,
+    ) -> Result<hf_core::runtime::CommandResult, hf_core::error::ClassifiedError> {
+        // Crash replay is `[binary, input]`; script it by the input name.
+        let input = cmd.get(1).map(String::as_str).unwrap_or_default();
+        let (exit_code, stderr) = if input.contains("regress") {
+            (
+                1,
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n\
+                 SUMMARY: AddressSanitizer: heap-buffer-overflow in parse\n"
+                    .to_owned(),
+            )
+        } else {
+            (0, "Executed replay in 2 ms\nDone 1 runs\n".to_owned())
+        };
+        Ok(hf_core::runtime::CommandResult {
+            exit_code,
+            stdout: String::new(),
+            stderr,
+            workspace: cwd.to_path_buf(),
+            termination: hf_core::runtime::CommandTermination::Completed,
+        })
+    }
+
+    async fn write_file(
+        &self,
+        _path: &std::path::Path,
+        _content: &str,
+    ) -> Result<(), hf_core::error::ClassifiedError> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<String, hf_core::error::ClassifiedError> {
+        Ok(String::new())
+    }
+}
+
+#[tokio::test]
+async fn verify_regressions_reports_regressed_and_fixed() {
+    use std::fs;
+    isolate_workspace();
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("regress_outcomes_proj");
+    fs::create_dir_all(&project).unwrap();
+    let target = "demo";
+
+    // A workspace with a harness binary and two staged crash inputs: one whose
+    // replay still faults, one whose replay is clean.
+    let ws = hf_service::workspace_dir(&project, target);
+    let out = ws.join("out");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(ws.join(format!("fuzz_{target}")), b"bin").unwrap();
+    fs::write(out.join("crash-regress"), b"still boom").unwrap();
+    fs::write(out.join("crash-fixed"), b"now safe").unwrap();
+
+    let container = ServiceContainer::new(Arc::new(RegressionReplayRuntime), None);
+    let results = container
+        .verify_regressions(&project, target)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2, "both staged crash inputs are replayed");
+
+    // The regressed input: the replay produced a crash trace.
+    let regressed = results
+        .iter()
+        .find(|r| r.input.ends_with("crash-regress"))
+        .expect("regressed result present");
+    assert!(regressed.verified, "the replay completed");
+    assert!(
+        regressed.still_crashes,
+        "an ASan trace means it still crashes"
+    );
+    assert!(
+        regressed.summary.to_ascii_lowercase().contains("error")
+            || regressed.summary.to_ascii_lowercase().contains("summary"),
+        "the summary quotes the crash line: {}",
+        regressed.summary
+    );
+
+    // The fixed input: a clean replay is verified but no longer crashes.
+    let fixed = results
+        .iter()
+        .find(|r| r.input.ends_with("crash-fixed"))
+        .expect("fixed result present");
+    assert!(fixed.verified, "the clean replay completed");
+    assert!(!fixed.still_crashes, "a clean replay does not crash");
+    assert_eq!(fixed.summary, "no crash on replay (fixed)");
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
 #[tokio::test]
 async fn artifact_summary_reports_on_disk_state() {
     use std::fs;
