@@ -11,7 +11,8 @@ TDD: Red -> Green -> Refactor. No production code without a preceding test.
 - **Unit** (majority): pure functions, trait mocks. Fast, in-process.
 - **Integration**: multi-crate flows with mocked LLM + mocked engine.
 - **E2E**: full discover -> harness -> run -> triage loop on a fixture
-  project with a stubbed engine. Run through the local workspace gate only.
+  project with a stubbed engine. Runs in the workspace `test` gate, locally and
+  in CI.
 
 ## 3. Tooling
 
@@ -46,8 +47,9 @@ All `cargo test` invocations use the repository error-output filter documented
 in `AGENTS.md`. The workspace test suite includes an explicit sandbox and
 harness-qualification contract test
 (`hf-service/tests/harness_qualification.rs`); it uses mocked adapters and
-never executes a generated harness on the host. The local `test` gate runs it
-as part of `cargo test --workspace`, not as a separate command.
+never executes a generated harness on the host. Both GitHub Actions and
+GitLab CI run it as part of the `test` gate (`cargo test --workspace`), not
+as a separate job.
 
 ## 6. Fuzzing-Specific Test Notes
 

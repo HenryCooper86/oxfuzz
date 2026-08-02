@@ -2,7 +2,7 @@
 
 Use this checklist for every CLI or desktop release candidate. A release is a
 set of artifacts tied to one Git commit, not merely a passing local build.
-Record the commit, version, local gate results, platform, architecture, signing
+Record the commit, version, CI pipeline, platform, architecture, signing
 identity class, and artifact checksums in the release evidence.
 
 ## 1. Freeze the candidate
@@ -42,10 +42,13 @@ Then run the wider local gate set:
 ./scripts/tests/gates.sh
 ```
 
-No automated runner is provisioned, so the local gate result is the
-authoritative source-quality evidence. Run it from a clean checkout when
-practical, retain the command output, and stop the release if any of the fmt,
-Clippy, check, test, documentation, dependency, script, or frontend gates fail.
+Do not treat a green local run as a substitute for a green pipeline. Both
+`.gitlab-ci.yml` and `.github/workflows/ci.yml` run the same ten gates
+`./scripts/tests/gates.sh` runs above -- fmt, clippy, check,
+check-no-default-features, test, doc, deny, script-tests, frontend-test, and
+frontend-lint. CI's value here is not additional checks; it is running those
+same gates on a clean machine, on every push, independent of local state.
+Confirm the pipeline for this commit is green before continuing.
 
 ## 3. Verify the mandatory sandbox
 
@@ -198,7 +201,7 @@ candidate commit.
 
 ## 7. Approve the release candidate
 
-- Require the complete local gate set to pass on the exact candidate commit.
+- Require every pipeline job to pass on the exact candidate commit.
 - Review the merge-request diff, dependency changes, generated artifacts, and
   unresolved discussions.
 - Record artifact names, sizes, and SHA-256 checksums.
@@ -215,6 +218,6 @@ find target/release/bundle -type f \
   -exec shasum -a 256 {} \;
 ```
 
-Keep the local gate output, commit SHA, checksums, and platform verification
+Keep the CI pipeline URL, commit SHA, checksums, and platform verification
 notes together. That record is the release evidence for later reproduction and
 incident review.

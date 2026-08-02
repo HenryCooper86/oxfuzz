@@ -1,0 +1,91 @@
+# oxfuzz CI.
+#
+# This pipeline and .github/workflows/ci.yml both invoke named gates from
+# scripts/tests/gates.sh, which stays the single definition of what a gate
+# means. GitLab gates merges on the current origin; the GitHub workflow gates
+# the public repository.
+#
+# Jobs are split so a red pipeline identifies which category broke without
+# opening a log.
+#
+# Runner: register an OrbStack Docker-executor runner against this project once
+# with scripts/ci/register-gitlab-runner.sh (see docs/guides/CI.md). Until a
+# runner is registered these jobs sit pending.
+
+stages:
+  - gate
+
+default:
+  interruptible: true
+
+rust:
+  stage: gate
+  # rustup in this image honors rust-toolchain.toml, which pins 1.94.0. Pinning
+  # the image tag as well keeps the base layer stable without overriding it.
+  image: rust:1.94
+  variables:
+    # Keep the cargo registry inside the project so it can be cached; GitLab only
+    # caches paths under the build directory.
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry
+      - target/
+  before_script:
+    # crates/hf-gui/src-tauri is a workspace member with no default-members to
+    # exclude it, so every --workspace cargo command below builds it, which on
+    # Linux needs WebKitGTK and friends. This image runs as root, so the
+    # script's sudo branch is skipped.
+    - scripts/ci/install-linux-deps.sh
+  script:
+    - scripts/tests/gates.sh fmt
+    - scripts/tests/gates.sh clippy
+    - scripts/tests/gates.sh check
+    - scripts/tests/gates.sh check-no-default-features
+    - scripts/tests/gates.sh test
+    - scripts/tests/gates.sh doc
+
+frontend:
+  stage: gate
+  image: node:22
+  variables:
+    # npm ci wipes node_modules every run, so caching it saves nothing. The
+    # download cache is the part that survives and speeds up reinstall.
+    npm_config_cache: $CI_PROJECT_DIR/.npm
+  cache:
+    key:
+      files:
+        - crates/hf-gui/package-lock.json
+    paths:
+      - .npm
+  script:
+    - scripts/tests/gates.sh frontend-test
+    - scripts/tests/gates.sh frontend-lint
+
+script-tests:
+  stage: gate
+  # Its own job rather than riding along with rust: the Rust image has no
+  # python3, and installing one there would cost more than this job does.
+  image: python:3.12-slim
+  script:
+    - scripts/tests/gates.sh script-tests
+
+supply-chain:
+  stage: gate
+  image: rust:1.94
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  cache:
+    key: cargo-deny
+    paths:
+      - .cargo/bin
+  before_script:
+    # cargo install honors CARGO_HOME, but the rust image bakes PATH at build
+    # time, so the installed binary is invisible without this.
+    - export PATH="$CARGO_HOME/bin:$PATH"
+  script:
+    - command -v cargo-deny || cargo install cargo-deny --locked
+    - scripts/tests/gates.sh deny

@@ -111,7 +111,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
 
 ## Cross-cutting
 
-- [~] CI: cargo fmt/clippy gates pass workspace-wide; add cargo-deny + test job.
+- [x] CI: all ten `scripts/tests/gates.sh` gates (fmt, clippy, check,
+  check-no-default-features, test, doc, deny, script-tests, frontend-test,
+  frontend-lint) run on every push/PR via `.github/workflows/ci.yml` (public
+  GitHub) and `.gitlab-ci.yml` (OrbStack origin); `release.yml` builds the four
+  desktop bundles on tag. See `docs/guides/CI.md`.
 - [~] Tests: storage, service, guardrails, agent covered; expand crash/triage
   and end-to-end coverage.
 

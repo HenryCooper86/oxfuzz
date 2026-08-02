@@ -4,8 +4,10 @@
 #   scripts/tests/gates.sh                 # every gate, in AGENTS.md 4.5 order
 #   scripts/tests/gates.sh clippy test     # only the named gates
 #
-# This file is the single definition of what each local gate means. Named gates
-# let developers rerun only the relevant checks without duplicating commands.
+# This file is the single definition of what each gate means. Continuous
+# integration (.github/workflows/ci.yml and .gitlab-ci.yml) invokes named gates
+# rather than restating the commands, so the three cannot drift. Named gates
+# also let developers rerun only the relevant checks without duplicating commands.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
