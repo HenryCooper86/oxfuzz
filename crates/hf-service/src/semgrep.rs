@@ -223,6 +223,7 @@ enum CompletionPausePoint {
     AfterClaim,
     AfterPublicationFailure,
     AfterPublicationBeforeCleanup,
+    AfterFailureWriteBeforeSettle,
     BeforeClose,
     AfterCloseBeforeLeaseRelease,
     AfterStatusParentLoad,
@@ -907,8 +908,21 @@ impl crate::ServiceContainer {
         self.semgrep
             .pause_completion(CompletionPausePoint::AfterStatusParentLoad)
             .await;
+        let active = self.semgrep.is_active(operation_id);
         let mut state = operation_state(run.status);
         let result = if run.status != SemgrepRunStatus::Done {
+            // A failed or cancelled row whose reservation is still held is
+            // mid-settlement (staging cleanup, journal abort): externally it
+            // is still persisting, mirroring how `done` stays internal until
+            // the journal close is verifiable.
+            if active
+                && matches!(
+                    run.status,
+                    SemgrepRunStatus::Failed | SemgrepRunStatus::Cancelled
+                )
+            {
+                state = SemgrepOperationState::Persisting;
+            }
             None
         } else if !matches!(self.semgrep.journal.is_closed(operation_id), Ok(true)) {
             state = SemgrepOperationState::Persisting;
@@ -928,7 +942,7 @@ impl crate::ServiceContainer {
             project_root: run.project_root,
             language: run.language,
             state,
-            active: self.semgrep.is_active(operation_id),
+            active,
             started_at: run.started_at.to_rfc3339(),
             ended_at: run.ended_at.map(|value| value.to_rfc3339()),
             failure_code: run.failure_code,
@@ -1948,6 +1962,10 @@ async fn fail_semgrep_operation(
         );
         return;
     }
+    #[cfg(test)]
+    coordinator
+        .pause_completion(CompletionPausePoint::AfterFailureWriteBeforeSettle)
+        .await;
 
     let owned_operation_root = match operation_root {
         Some(path) => path.to_path_buf(),
@@ -5978,11 +5996,23 @@ mod lifecycle_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(second.state, SemgrepOperationState::Failed);
+        // The compensated failure is durable but the worker still holds its
+        // reservation, so the operation is not yet externally terminal.
+        assert_eq!(second.state, SemgrepOperationState::Persisting);
+        assert!(second.active);
         assert!(second.result.is_none());
 
         close_release.notify_one();
         wait_for_worker_exit(&service).await;
+        status_release.notify_one();
+        let settled = service
+            .semgrep_operation(operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.state, SemgrepOperationState::Failed);
+        assert!(!settled.active);
+        assert!(settled.result.is_none());
     }
 
     #[tokio::test]
@@ -6396,6 +6426,41 @@ mod lifecycle_tests {
                 "failed operations must clean their owned staging directory"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_stays_persisting_until_settlement_completes() {
+        let _test_guard = lifecycle_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = project_fixture(root.path(), "project");
+        let runtime = Arc::new(RecordingRuntime::new(RuntimeBehavior::MissingOutput));
+        let (service, store) = persistent_service(root.path(), runtime.clone()).await;
+        save_inventory(&store, &project, true).await;
+        let (reached, release) = service
+            .semgrep
+            .install_completion_pause(CompletionPausePoint::AfterFailureWriteBeforeSettle);
+
+        let id = service
+            .start_semgrep_enrichment(project, TargetLanguage::C)
+            .await
+            .unwrap();
+        wait_for_pause(&reached).await;
+
+        // The failed row is durable, but settlement (staging cleanup, journal
+        // abort, reservation release) has not run: the operation must not yet
+        // be externally terminal, mirroring how `done` stays internal until
+        // the journal close is verifiable.
+        let run = store.semgrep_run(id).await.unwrap().unwrap();
+        assert_eq!(run.status, SemgrepRunStatus::Failed);
+        let view = service.semgrep_operation(id).await.unwrap().unwrap();
+        assert_eq!(view.state, SemgrepOperationState::Persisting);
+        assert!(view.active);
+
+        release.notify_one();
+        wait_for_state(&service, id, SemgrepOperationState::Failed).await;
+        let view = service.semgrep_operation(id).await.unwrap().unwrap();
+        assert!(!view.active);
+        assert!(!runtime.calls().first().unwrap().cwd.exists());
     }
 
     #[tokio::test(flavor = "current_thread")]
