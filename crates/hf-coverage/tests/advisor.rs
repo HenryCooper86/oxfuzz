@@ -7,6 +7,9 @@ use hf_coverage::campaign_advisor::{
 };
 use uuid::Uuid;
 
+/// Tolerance for comparing computed `f64` economics against exact expected values.
+const EPS: f64 = 1e-9;
+
 fn observation(sequence: u64, engine: EngineKind, new_edges: u64) -> CampaignObservation {
     CampaignObservation {
         run_id: Uuid::from_u128(u128::from(sequence) + 1),
@@ -51,7 +54,7 @@ fn budget_exhaustion_stops_before_optimization() {
     let advice = advise(&input).expect("valid advice");
     assert_eq!(advice.action, CampaignAction::Stop);
     assert!(!advice.requires_human_approval);
-    assert_eq!(advice.total_cost_usd, 1.0);
+    assert!((advice.total_cost_usd - 1.0).abs() < EPS);
 }
 
 #[test]
@@ -97,8 +100,8 @@ fn higher_yield_engine_is_recommended_with_measured_economics() {
             to: EngineKind::AflPlusPlus,
         }
     );
-    assert_eq!(advice.total_cost_usd, 3.0);
-    assert_eq!(advice.marginal_edges_per_dollar, 10.0);
+    assert!((advice.total_cost_usd - 3.0).abs() < EPS);
+    assert!((advice.marginal_edges_per_dollar - 10.0).abs() < EPS);
 }
 
 #[test]

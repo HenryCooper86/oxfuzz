@@ -2988,7 +2988,7 @@ mod semgrep_cli_tests {
     };
 
     enum StatusStep {
-        View(SemgrepOperationView),
+        View(Box<SemgrepOperationView>),
         Pending,
     }
 
@@ -3072,7 +3072,7 @@ mod semgrep_cli_tests {
             self.events.lock().unwrap().push("status".to_owned());
             let step = self.statuses.lock().unwrap().pop_front().unwrap();
             match step {
-                StatusStep::View(view) => Ok(Some(view)),
+                StatusStep::View(view) => Ok(Some(*view)),
                 StatusStep::Pending => {
                     self.pending_status_entered.notify_one();
                     std::future::pending().await
@@ -3228,8 +3228,8 @@ mod semgrep_cli_tests {
         let service = FakeDiscoverService::new(
             TargetLanguage::C,
             vec![
-                StatusStep::View(operation(SemgrepOperationState::Scanning)),
-                StatusStep::View(done),
+                StatusStep::View(Box::new(operation(SemgrepOperationState::Scanning))),
+                StatusStep::View(Box::new(done)),
             ],
         );
         let mut output = RecordingOutput::default();
@@ -3289,7 +3289,8 @@ mod semgrep_cli_tests {
         let mut done = operation(SemgrepOperationState::Done);
         done.active = false;
         done.result = Some(result(Uuid::from_u128(0x1234)));
-        let service = FakeDiscoverService::new(TargetLanguage::Cpp, vec![StatusStep::View(done)]);
+        let service =
+            FakeDiscoverService::new(TargetLanguage::Cpp, vec![StatusStep::View(Box::new(done))]);
         let mut output = RecordingOutput::default();
 
         run_discover_command(
@@ -3315,7 +3316,7 @@ mod semgrep_cli_tests {
         cancelled.failure_message = Some("cancelled by test".to_owned());
         let service = FakeDiscoverService::new(
             TargetLanguage::C,
-            vec![StatusStep::Pending, StatusStep::View(cancelled)],
+            vec![StatusStep::Pending, StatusStep::View(Box::new(cancelled))],
         );
         let pending_status_entered = Arc::clone(&service.pending_status_entered);
         let signal = async move {
@@ -3357,8 +3358,8 @@ mod semgrep_cli_tests {
         let service = FakeDiscoverService::new(
             TargetLanguage::C,
             vec![
-                StatusStep::View(operation(SemgrepOperationState::Scanning)),
-                StatusStep::View(cancelled),
+                StatusStep::View(Box::new(operation(SemgrepOperationState::Scanning))),
+                StatusStep::View(Box::new(cancelled)),
             ],
         );
         let delay_started = Arc::new(tokio::sync::Notify::new());
