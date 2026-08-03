@@ -2541,7 +2541,7 @@ mod tests {
     }
 
     struct SchedulerFixture {
-        _directory: tempfile::TempDir,
+        directory: tempfile::TempDir,
         schedules_path: PathBuf,
         store: Option<Arc<Store>>,
     }
@@ -2549,7 +2549,7 @@ mod tests {
     impl SchedulerFixture {
         fn params(&self) -> CampaignParams {
             CampaignParams {
-                project: self._directory.path().display().to_string(),
+                project: self.directory.path().display().to_string(),
                 target: Some("parser".to_owned()),
                 engine: "libfuzzer".to_owned(),
                 lang: "c".to_owned(),
@@ -2806,16 +2806,16 @@ mod tests {
         SchedulerFixture {
             schedules_path: directory.path().join("schedules.json"),
             store: Some(store),
-            _directory: directory,
+            directory,
         }
     }
 
-    async fn scheduler_fixture_without_store() -> SchedulerFixture {
+    fn scheduler_fixture_without_store() -> SchedulerFixture {
         let directory = tempfile::tempdir().unwrap();
         SchedulerFixture {
             schedules_path: directory.path().join("schedules.json"),
             store: None,
-            _directory: directory,
+            directory,
         }
     }
 
@@ -3022,9 +3022,8 @@ mod tests {
 
         hook.wait_until_paused().await;
         let mutation_result = apply_raced_schedule_mutation(Arc::clone(&scheduler), mutation).await;
-        assert_eq!(
+        assert!(
             mutation_result.unwrap(),
-            true,
             "{mutation:?} must complete before quarantine capture"
         );
         hook.resume().await;
@@ -3359,7 +3358,7 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_journal_blocks_one_time_but_keeps_recurring_scheduler_live() {
-        let fixture = scheduler_fixture_without_store().await;
+        let fixture = scheduler_fixture_without_store();
         fixture.write_due_one_time("once");
         fixture.write_interval("recurring");
         let scheduler = fixture.start().await.unwrap();
@@ -4314,7 +4313,7 @@ mod tests {
     async fn two_service_schedulers_dispatch_one_time_at_most_once() {
         let fixture = scheduler_fixture_with_store().await;
         fixture.write_due_one_time("raced-once");
-        let database_path = fixture._directory.path().join("scheduler.db");
+        let database_path = fixture.directory.path().join("scheduler.db");
         let first_store = Arc::new(Store::connect(&database_path).await.unwrap());
         let second_store = Arc::new(Store::connect(&database_path).await.unwrap());
         let first_container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)

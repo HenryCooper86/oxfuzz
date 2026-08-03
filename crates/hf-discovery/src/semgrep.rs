@@ -535,6 +535,9 @@ mod tests {
         MAX_RULE_ID_BYTES,
     };
 
+    /// Tolerance for comparing computed `f64` scores against exact expected values.
+    const EPS: f64 = 1e-9;
+
     const VALID: &[u8] = include_bytes!("../tests/fixtures/semgrep/valid.json");
     const UNKNOWN_SEVERITY: &[u8] =
         include_bytes!("../tests/fixtures/semgrep/unknown_severity.json");
@@ -903,8 +906,8 @@ mod tests {
             .expect("candidate score should exist");
 
         assert_eq!(score.matched_rule_count, 3);
-        assert_eq!(score.boost, 0.16);
-        assert_eq!(score.effective_score, 0.66);
+        assert!((score.boost - 0.16).abs() < EPS);
+        assert!((score.effective_score - 0.66).abs() < EPS);
     }
 
     // Production break caught: omitting the required zero-overlay row for an unmatched candidate.
@@ -957,10 +960,10 @@ mod tests {
             .expect("unmatched candidate score should exist");
 
         assert_eq!(analysis.scores.len(), 2);
-        assert_eq!(matched.boost, 0.01);
-        assert_eq!(zero.base_score, 0.25);
-        assert_eq!(zero.boost, 0.0);
-        assert_eq!(zero.effective_score, 0.25);
+        assert!((matched.boost - 0.01).abs() < EPS);
+        assert!((zero.base_score - 0.25).abs() < EPS);
+        assert!(zero.boost.abs() < EPS);
+        assert!((zero.effective_score - 0.25).abs() < EPS);
         assert_eq!(zero.matched_rule_count, 0);
     }
 
@@ -1015,8 +1018,8 @@ mod tests {
             .expect("capped candidate score should exist");
 
         assert_eq!(capped.matched_rule_count, 3);
-        assert_eq!(capped.boost, 0.20);
-        assert_eq!(capped.effective_score, 1.0);
+        assert!((capped.boost - 0.20).abs() < EPS);
+        assert!((capped.effective_score - 1.0).abs() < EPS);
     }
 
     // Production break caught: carrying prior overlays into later scoring calls.
@@ -1047,11 +1050,11 @@ mod tests {
         let second =
             map_and_score(&inventory, findings).expect("second scoring call should succeed");
 
-        assert_eq!(inventory.candidates[0].fit_score, 0.50);
-        assert_eq!(first.scores[0].base_score, 0.50);
-        assert_eq!(first.scores[0].effective_score, 0.60);
-        assert_eq!(second.scores[0].base_score, 0.50);
-        assert_eq!(second.scores[0].effective_score, 0.60);
+        assert!((inventory.candidates[0].fit_score - 0.50).abs() < EPS);
+        assert!((first.scores[0].base_score - 0.50).abs() < EPS);
+        assert!((first.scores[0].effective_score - 0.60).abs() < EPS);
+        assert!((second.scores[0].base_score - 0.50).abs() < EPS);
+        assert!((second.scores[0].effective_score - 0.60).abs() < EPS);
     }
 
     // Production break caught: preserving scanner order instead of persistence-stable UUID order.
