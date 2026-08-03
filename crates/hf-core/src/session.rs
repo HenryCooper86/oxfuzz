@@ -317,7 +317,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 /// A checkpoint record linking a chat turn to a File Journal scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatCheckpoint {
     /// Unique checkpoint identifier.
     pub checkpoint_id: String,

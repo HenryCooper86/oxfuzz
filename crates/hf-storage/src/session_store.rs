@@ -32,9 +32,9 @@ impl SessionStore for SqliteSessionStore {
     #[instrument(skip(self), fields(session_type = ?options.session_type))]
     async fn create(&self, options: CreateSessionOptions) -> Result<SessionNode, SessionError> {
         let id = SessionId::new();
-        let now_str = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        // Fixed-width nanosecond RFC 3339: lossless, and created_at stays a
+        // valid lexicographic sort key (list ordering relies on it).
+        let now_str = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
         // Determine root_id, depth, and path based on parent.
         let (root_id, depth, path_json) = if let Some(ref parent_id) = options.parent_id {
