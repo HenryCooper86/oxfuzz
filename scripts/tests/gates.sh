@@ -25,7 +25,9 @@ gate_clippy() {
   # `--fix` is deliberately absent: it mutates the working tree, which is
   # correct locally and wrong as a gate. AGENTS.md 4.5 keeps the fixing pass as
   # a developer step; this is the verifying pass.
-  cargo clippy --workspace -- -D warnings
+  # --all-targets extends linting to test/example/bench code, which a plain
+  # `cargo clippy --workspace` never compiles and therefore never lints.
+  cargo clippy --workspace --all-targets -- -D warnings
 }
 
 gate_check() {
