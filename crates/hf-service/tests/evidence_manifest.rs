@@ -22,6 +22,9 @@ use hf_service::ServiceContainer;
 use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
 
+/// Tolerance for comparing a computed `f64` cost against its exact expected value.
+const EPS: f64 = 1e-9;
+
 fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
 }
@@ -336,7 +339,7 @@ async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
     assert_eq!(manifest.body.target, "parse_header");
     assert_eq!(manifest.body.approval.harness_id, harness_id);
     assert_eq!(manifest.body.findings.len(), 1);
-    assert_eq!(manifest.body.cost.compute_cost_usd, 0.05);
+    assert!((manifest.body.cost.compute_cost_usd - 0.05).abs() < EPS);
     assert_eq!(manifest.body.sandbox_image_sha256, digest('f'));
 
     let bundle = directory.path().join("remediation-bundle");
