@@ -110,7 +110,7 @@ impl RuntimeAdapter for SmokePolicyRuntime {
         limits: &ResourceLimits,
         opts: &hf_core::runtime::SandboxOptions,
     ) -> Result<CommandResult, ClassifiedError> {
-        *self.image.lock().unwrap() = opts.image.clone();
+        self.image.lock().unwrap().clone_from(&opts.image);
         self.run_command(cmd, cwd, limits).await
     }
 
