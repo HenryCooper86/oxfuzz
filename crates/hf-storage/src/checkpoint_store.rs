@@ -79,8 +79,7 @@ impl ChatCheckpointStore for SqliteChatCheckpointStore {
         .bind(
             checkpoint
                 .created_at
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string(),
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         )
         .execute(&self.pool)
         .await
