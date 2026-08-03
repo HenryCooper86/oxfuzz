@@ -130,9 +130,14 @@ Status legend: [x] done - [~] partial - [ ] not started.
   CASR-clustered triage E2E (the default strategy, previously untested), the
   legacy-triage signature-stagnation early break + dedup collapse, the
   bug-report drafting cap with root-cause persistence, and the
-  `verify_regressions` regressed/fixed branches. Remaining E2E arms: successful
-  minimization through the full loop; UBSan / ClusterFuzzLite / Syzkaller
-  classification edges.
+  `verify_regressions` regressed/fixed branches. The Semgrep terminal-settlement
+  race surfaced by the first Linux CI run (the operation view exposed `failed`
+  before staging cleanup, journal abort, and reservation release) is fixed --
+  terminal rows now report `persisting` until settled -- and pinned by a
+  deterministic pause-point test
+  (`terminal_failure_stays_persisting_until_settlement_completes`). Remaining
+  E2E arms: successful minimization through the full loop; UBSan /
+  ClusterFuzzLite / Syzkaller classification edges.
 
 ## Audit backlog (refreshed 2026-07-17)
 
