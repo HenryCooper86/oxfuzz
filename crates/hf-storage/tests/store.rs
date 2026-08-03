@@ -3323,12 +3323,15 @@ async fn chat_checkpoints_survive_a_reconnect() {
         created_at: Utc::now(),
     };
 
+    let first = cp("cp-1", 1);
+    let second = cp("cp-2", 2);
+
     // Persist two checkpoints, then drop the store (simulating app exit).
     {
         let store = Store::connect(&path).await.expect("connect");
         let cps = SqliteChatCheckpointStore::new(store.pool().clone());
-        cps.save(&cp("cp-1", 1)).await.unwrap();
-        cps.save(&cp("cp-2", 2)).await.unwrap();
+        cps.save(&first).await.unwrap();
+        cps.save(&second).await.unwrap();
     }
 
     // Reconnect (simulating a restart) -- the checkpoints must still be there,
@@ -3345,7 +3348,10 @@ async fn chat_checkpoints_survive_a_reconnect() {
     assert_eq!(latest.checkpoint_id, "cp-2");
 
     let loaded = cps.load("cp-1").await.unwrap();
-    assert_eq!(loaded.message_count_before, 2);
+    assert_eq!(
+        loaded, first,
+        "round trip must preserve every field, including created_at precision"
+    );
 
     // Rolling back past turn 1 invalidates every later checkpoint.
     let invalidated = cps.invalidate_after(&session, 1).await.unwrap();
