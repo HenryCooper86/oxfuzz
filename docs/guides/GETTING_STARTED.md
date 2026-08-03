@@ -206,7 +206,7 @@ oxfuzz run /path/to/project --target parse_value \
 oxfuzz triage /path/to/project --target parse_value
 ```
 
-See the [README](../../README.md#quick-start-cli) for the full command reference.
+See the [CLI Reference](CLI_REFERENCE.md) for the full command reference.
 
 #### Recover an ambiguous one-time campaign
 
