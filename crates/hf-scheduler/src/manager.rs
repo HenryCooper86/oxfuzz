@@ -298,9 +298,10 @@ pub struct SchedulerManager {
     runtime: StdMutex<RuntimeState>,
     /// Optional workflow dispatcher injected after construction.
     ///
-    /// When `Some`, fired triggers are dispatched through the real orchestrator
-    /// instead of the placeholder `ScheduleExecutor`. Injected via
-    /// `set_dispatcher()` (same pattern as `AgentRunner` in `ServiceContainer`).
+    /// When `Some`, fired triggers are dispatched through the real workflow
+    /// backend instead of the dispatcher-less `ScheduleExecutor` fallback.
+    /// Injected via `set_dispatcher()` (same pattern as `AgentRunner` in
+    /// `ServiceContainer`); production always installs one.
     dispatcher: Arc<Mutex<Option<Arc<dyn WorkflowDispatcher>>>>,
     /// Optional persistence adapter injected after construction.
     persistence: Arc<Mutex<Option<Arc<dyn SchedulerPersistence>>>>,
@@ -573,7 +574,8 @@ impl SchedulerManager {
     ///
     /// Called once after the service container is fully initialised (same
     /// pattern as `ServiceContainer::init_agent_runner`). Until this is
-    /// called, fired triggers fall back to the placeholder executor.
+    /// called, fired triggers use the dispatcher-less `ScheduleExecutor`
+    /// fallback (instant completion).
     pub async fn set_dispatcher(&self, dispatcher: Arc<dyn WorkflowDispatcher>) {
         let mut guard = self.dispatcher.lock().await;
         *guard = Some(dispatcher);
@@ -1812,7 +1814,7 @@ impl SchedulerManager {
     /// record and spawns an async task to run the real workflow. Updates the
     /// record to `Completed` or `Failed` on completion.
     ///
-    /// Falls back to the placeholder `ScheduleExecutor` (instant `Completed`)
+    /// Falls back to the dispatcher-less `ScheduleExecutor` (instant `Completed`)
     /// when no dispatcher has been injected.
     async fn handle_fired_trigger(
         fired: FiredTrigger,
@@ -2132,7 +2134,7 @@ impl SchedulerManager {
                 handle,
             });
         } else {
-            // Placeholder path: instant completion via ScheduleExecutor.
+            // Dispatcher-less fallback: instant completion via ScheduleExecutor.
             let mut store_guard = store.lock().await;
             let mut exec_guard = executor.lock().await;
             let mut exec_store_guard = execution_store.lock().await;
@@ -2140,7 +2142,7 @@ impl SchedulerManager {
                 exec_guard.trigger_execution(&schedule, &mut store_guard, &mut exec_store_guard);
             let persisted = exec_store_guard.get(&execution_id).cloned();
             let updated_schedule = store_guard.get(&schedule.id).cloned();
-            debug!(execution_id = %execution_id, "Placeholder execution triggered");
+            debug!(execution_id = %execution_id, "Dispatcher-less fallback execution triggered");
             drop(exec_store_guard);
             drop(exec_guard);
             drop(store_guard);

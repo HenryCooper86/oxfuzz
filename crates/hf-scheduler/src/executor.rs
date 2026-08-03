@@ -279,10 +279,12 @@ impl Default for ExecutionStore {
 // ScheduleExecutor
 // ---------------------------------------------------------------------------
 
-/// Schedule executor that manages trigger-to-execution translation.
-///
-/// In Phase S3 this becomes async with `WorkflowDispatcher` trait and
-/// concurrency policy enforcement.
+/// Synchronous, dispatcher-less schedule executor: records an
+/// instant-completion execution when no `WorkflowDispatcher` is installed.
+/// Production installs one via `SchedulerManager` (e.g. the fuzz-campaign
+/// dispatcher), which drives real async work with concurrency-policy
+/// enforcement; this fallback keeps the scheduler machinery testable without a
+/// workflow backend.
 pub struct ScheduleExecutor {
     next_sequence: std::collections::HashMap<String, u64>,
 }
@@ -295,7 +297,8 @@ impl ScheduleExecutor {
         }
     }
 
-    /// Execute a schedule (placeholder -- integrates with Orchestrator in Phase S3/S8).
+    /// Record an instant-completion execution for a fired schedule (the
+    /// dispatcher-less fallback path).
     ///
     /// Records the execution in the provided `ExecutionStore` and returns the
     /// execution ID.
@@ -322,10 +325,10 @@ impl ScheduleExecutor {
             "trigger_time": now.to_rfc3339(),
         });
 
-        // Placeholder response summary (instant completion).
+        // Instant-completion response summary (no workflow backend installed).
         let response_summary = serde_json::json!({
             "status": "completed",
-            "message": "Workflow execution completed (placeholder)",
+            "message": "Workflow execution completed (instant-completion fallback)",
             "workflow_execution_id": format!("workflow-{execution_id}"),
         });
 

@@ -77,10 +77,12 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] Interactive HITL dialog in the GUI (`chat:permission_request` ->
   approve/deny -> `chat_answer_permission`); chat runs under the
   approval-required guardrail policy.
-- [ ] Provider token streaming: implement OpenAI SSE in `hf-provider` +
-  `ProviderPool::stream` + agent Token events. (Deferred: low value through the
-  ReAct JSON tool-protocol loop; would benefit from a native function-calling
-  redesign first.)
+- [~] Provider token streaming: OpenAI SSE, `ProviderPool::chat_completion_stream`,
+  and the shared SSE parser are implemented and tested (`hf-provider/src/sse.rs`,
+  `providers/openai.rs`). Only cosmetic agent `Token` events remain unwired --
+  deferred as genuinely low value: the ReAct JSON tool-protocol loop must parse a
+  whole response before dispatching a tool call, so nothing benefits until a
+  native function-calling redesign.
 - [x] Run cancellation: cooperative cancel of an in-flight `run_fuzzer` via a
   `CancellationToken` threaded through `hf-runtime`/`EngineRunner`;
   `ServiceContainer::cancel_run`/`cancel_all_runs`/`active_run_ids`; CLI Ctrl-C;
@@ -91,14 +93,21 @@ Status legend: [x] done - [~] partial - [ ] not started.
   `LlmProviderBridge` -> `DiagnosticsRecorder`, aggregated by
   `ServiceContainer::cost_summary` and surfaced via the `diagnostics_cost_summary`
   command; the DiagnosticsPanel renders real per-model cost/usage.
-- [~] Agents/Skills/Knowledge GUI views: backed by real data -- skills/agents
+- [x] Agents/Skills/Knowledge GUI views: backed by real data -- skills/agents
   are served from the registries (list/read/save/delete via `hf-service`,
   Tauri commands, and REST twins), and the Knowledge view shows the real
   per-project index status (`knowledge_stats`: size, build time, ingested
-  documents, retrieval config). Remaining: sub-agent pools.
-- [ ] Review and either complete or remove `hf-skills`. `hf-mcp` and `hf-hooks`
-  were removed; `hf-test-utils` is consumed by `hf-harness`, `hf-service`, and
-  `hf-session` and is doing its job.
+  documents, retrieval config). Single-depth specialist delegation (the
+  `delegate` tool + 7 builtin specialists) is wired end-to-end and the GUI
+  shows a live Agent Pool; concurrent sub-agent "pools" (parallel fan-out) is
+  an undefined-scope idea with no design or demand, deliberately not built.
+- [x] `hf-skills` reviewed -- complete, not a stub: a functional registry
+  (builtins + user override + atomic persistence) wired through `hf-service`
+  CRUD, Tauri, and REST, with a live runtime effect (builtin agents inject the
+  builtin skill playbooks into their system prompt every turn), covered by
+  in-crate and cross-crate tests. `hf-mcp` and `hf-hooks` were removed;
+  `hf-test-utils` is consumed by `hf-harness`, `hf-service`, and `hf-session`
+  and is doing its job.
 
 ## Integrations
 
@@ -116,8 +125,14 @@ Status legend: [x] done - [~] partial - [ ] not started.
   frontend-lint) run on every push/PR via `.github/workflows/ci.yml` (public
   GitHub) and `.gitlab-ci.yml` (OrbStack origin); `release.yml` builds the four
   desktop bundles on tag. See `docs/guides/CI.md`.
-- [~] Tests: storage, service, guardrails, agent covered; expand crash/triage
-  and end-to-end coverage.
+- [~] Tests: storage, service, guardrails, agent covered. Crash/triage coverage
+  expanded (`hf-service/tests/crash_triage_paths.rs`, `container.rs`): the
+  CASR-clustered triage E2E (the default strategy, previously untested), the
+  legacy-triage signature-stagnation early break + dedup collapse, the
+  bug-report drafting cap with root-cause persistence, and the
+  `verify_regressions` regressed/fixed branches. Remaining E2E arms: successful
+  minimization through the full loop; UBSan / ClusterFuzzLite / Syzkaller
+  classification edges.
 
 ## Audit backlog (refreshed 2026-07-17)
 
@@ -185,8 +200,16 @@ fixed the following; open design decisions are listed at the end.
   - [x] knowledge-augmented harness/triage prompts via the live retrieval path
     (batch 2) -- the standalone `InjectKnowledge` middleware, ingestion
     pipeline, and vector indexer remain unwired;
-  - [ ] hf-context working-memory/pruning pipeline (agent-loop wiring);
-  - [ ] hf-scheduler parameter resolution + event triggers.
+  - [x] hf-context working-memory/pruning pipeline -- resolved by removal: the
+    provider pipeline, context guard, store-backed pruning, and
+    memory/working-memory subsystems (~7k LOC) were reachable only from the
+    crate's own unit tests and required a store/delegator/session-id that never
+    reached the agent port. Cut; the live loop keeps the wired flat-message
+    trio (simple + IntraTurnPruner + CompactionEngine);
+  - [x] hf-scheduler parameter resolution + event triggers -- both fully
+    implemented, wired, and tested: `params.rs` resolves a fired schedule into a
+    concrete target/engine/duration campaign, and `crash.found`/`run.completed`/
+    `run.failed` flow through `emit_event` end-to-end (`scheduler_events.rs`).
 - [x] Provider `thaw` operator surface (CLI `providers thaw`, web
   `POST /providers/{id}/thaw`) + `health_check_interval_secs` honored by a
   bootstrap health-check task (batch 1).
