@@ -135,7 +135,13 @@ Status legend: [x] done - [~] partial - [ ] not started.
   before staging cleanup, journal abort, and reservation release) is fixed --
   terminal rows now report `persisting` until settled -- and pinned by a
   deterministic pause-point test
-  (`terminal_failure_stays_persisting_until_settlement_completes`). Remaining
+  (`terminal_failure_stays_persisting_until_settlement_completes`). Linux CI
+  also caught a timestamp-precision assumption: the guardrail round-trip
+  fixture is pinned to the column's microsecond contract, the two remaining
+  lossy millisecond serializers (chat checkpoint and session `created_at`)
+  now store fixed-width nanosecond RFC 3339 with the checkpoint round-trip
+  strengthened to full-record equality, and a workspace sweep confirmed no
+  other timestamp path truncates. Remaining
   E2E arms: successful minimization through the full loop; UBSan /
   ClusterFuzzLite / Syzkaller classification edges.
 
