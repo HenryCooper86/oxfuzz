@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, SubsecRound, Utc};
 use hf_core::corpus::{CorpusEntry, CorpusSource};
 use hf_core::crash::{Crash, CrashKind};
 use hf_core::engine::EngineKind;
@@ -3498,7 +3498,9 @@ fn guardrail_decision(id: &str, decided_at: chrono::DateTime<Utc>) -> GuardrailD
 #[tokio::test]
 async fn guardrail_decision_round_trips_newest_first_and_bounded() {
     let (store, _dir) = temp_store().await;
-    let base = Utc::now();
+    // decided_at is stored at microsecond precision; nanosecond clock
+    // resolution (Linux) must not make the round-trip comparison lossy.
+    let base = Utc::now().trunc_subsecs(6);
     let older = guardrail_decision(
         "00000000-0000-0000-0000-000000000001",
         base - chrono::Duration::seconds(10),
