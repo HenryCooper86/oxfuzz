@@ -196,6 +196,22 @@ impl StreamOutput {
     }
 }
 
+/// Whether a mount target inside the container is well formed.
+///
+/// The target always names a path in the Linux container, never on the host,
+/// so it is checked with POSIX rules rather than `std::path`: on Windows a
+/// host-semantics `is_absolute()` rejects every legitimate target like
+/// `/work/output`, which would make the sandbox unusable there. Repeated and
+/// trailing separators and `.` segments are accepted (Docker collapses them,
+/// as `Path::components` does on unix); `..` is rejected so a target cannot
+/// escape upward.
+fn is_valid_container_target(target: &str) -> bool {
+    target.starts_with('/')
+        && !target.contains(',')
+        && !target.contains('\0')
+        && target.split('/').all(|segment| segment != "..")
+}
+
 /// Build the `docker run` argument list for a command.
 ///
 /// This is a pure function with no side effects, making it testable without
@@ -528,14 +544,7 @@ impl DockerRuntime {
         }
         let mut validated = opts.clone();
         for mount in &mut validated.extra_mounts {
-            let container_path = Path::new(&mount.container_path);
-            if mount.container_path.contains(',')
-                || mount.container_path.contains('\0')
-                || !container_path.is_absolute()
-                || !container_path
-                    .components()
-                    .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
-            {
+            if !is_valid_container_target(&mount.container_path) {
                 return Err(ClassifiedError::Sandbox(format!(
                     "invalid container mount target: {}",
                     mount.container_path
