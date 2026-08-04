@@ -157,8 +157,11 @@ fn ingest_finds_afl_nested_instance_crashes() {
     let dir = TempDir::new().unwrap();
     let crashes_dir = dir.path().join("default").join("crashes");
     fs::create_dir_all(&crashes_dir).unwrap();
-    fs::write(crashes_dir.join("id:000000,sig:06,src:000000"), b"boom").unwrap();
-    fs::write(crashes_dir.join("id:000001,sig:11,src:000001"), b"bang").unwrap();
+    // Real AFL names carry ':' (id:000000,sig:06); NTFS rejects it and the
+    // ingester treats crash names as opaque apart from README.txt, so portable
+    // stand-ins keep this fixture writable everywhere.
+    fs::write(crashes_dir.join("id_000000,sig_06,src_000000"), b"boom").unwrap();
+    fs::write(crashes_dir.join("id_000001,sig_11,src_000001"), b"bang").unwrap();
     // AFL drops a README.txt in the crashes dir; it must not count as a crash.
     fs::write(crashes_dir.join("README.txt"), b"these are crashes").unwrap();
 
