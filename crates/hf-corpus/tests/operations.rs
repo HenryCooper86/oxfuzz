@@ -163,8 +163,11 @@ async fn grow_pulls_afl_queue_and_skips_artifacts() {
     // crashes and bookkeeping that must NOT be pulled into the corpus.
     let queue = out.join("default").join("queue");
     fs::create_dir_all(&queue).unwrap();
-    fs::write(queue.join("id:000000,orig:seed"), b"cov-input-a").unwrap();
-    fs::write(queue.join("id:000001,src:000000"), b"cov-input-b").unwrap();
+    // Real AFL++ queue names contain ':' (id:000000,orig:seed), which NTFS
+    // rejects. grow treats queue entries as opaque names, so portable
+    // stand-ins keep this fixture writable on every platform.
+    fs::write(queue.join("id_000000,orig_seed"), b"cov-input-a").unwrap();
+    fs::write(queue.join("id_000001,src_000000"), b"cov-input-b").unwrap();
     fs::create_dir_all(out.join("default").join("crashes")).unwrap();
     fs::write(out.join("default").join("fuzzer_stats"), b"stats...").unwrap();
     // A libFuzzer-style crash artifact at the top level must be skipped.
