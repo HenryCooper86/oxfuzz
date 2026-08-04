@@ -603,7 +603,7 @@ fn validate_skill_definition(
     Ok(())
 }
 
-#[cfg(all(test, feature = "semgrep-enrichment"))]
+#[cfg(all(test, unix, feature = "semgrep-enrichment"))]
 mod semgrep_consumer_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
