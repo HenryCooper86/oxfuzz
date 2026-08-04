@@ -4,9 +4,11 @@ name: CI
 # request. That script stays the single definition of what a gate means; this
 # workflow only decides which gates run where, so the two cannot drift.
 #
-# Linux only. Cross-platform coverage belongs to release.yml, which builds all
-# four platform bundles on tag -- that is the property that actually ships, and
-# the workspace itself is platform-agnostic.
+# The full gate set runs on Linux. macOS and Windows run check + test: going
+# cross-platform surfaced five real bugs on the first run of each new
+# platform, so the compile-and-test truth is gated everywhere the desktop app
+# ships. Style gates (fmt, clippy, doc) stay Linux-only; release.yml builds
+# the shippable bundles on tag.
 
 on:
   push:
@@ -67,6 +69,39 @@ jobs:
 
       - name: Docs
         run: scripts/tests/gates.sh doc
+
+  cross-platform:
+    name: ${{ matrix.label }} tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      # One platform's failure must not hide what the other platform found.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+          - os: windows-latest
+            label: Windows
+    defaults:
+      run:
+        # gates.sh is bash; the Windows runner defaults to pwsh.
+        shell: bash
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Provision the pinned toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: scripts/tests/gates.sh check
+
+      - name: Test
+        run: scripts/tests/gates.sh test
 
   frontend:
     name: Frontend gates
