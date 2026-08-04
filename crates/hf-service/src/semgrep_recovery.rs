@@ -1344,7 +1344,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         append_and_sync, AppendFailurePoint, AppendRacePoint, DurableWrite, SemgrepAbortKind,
