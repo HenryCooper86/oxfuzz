@@ -2655,7 +2655,26 @@ mod tests {
         wait_for_cursor_update(&shutdown_persistence).await;
         shutdown_manager.stop().await;
 
-        let events = capture.events();
+        // Transition events are emitted by the workers, not by the status
+        // reads the scenarios above wait on, so poll for them rather than
+        // assuming they have landed by now: under runner contention they
+        // arrive after the last stop() and the floor below missed them.
+        let events = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let events = capture.events();
+                if events
+                    .iter()
+                    .filter(|fields| fields.contains_key("from") && fields.contains_key("to"))
+                    .count()
+                    >= 2
+                {
+                    return events;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the scheduler must emit its state transitions");
         let reservations: Vec<_> = events
             .iter()
             .filter(|fields| fields.contains_key("reservation_outcome"))
