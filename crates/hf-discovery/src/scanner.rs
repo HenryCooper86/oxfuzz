@@ -245,7 +245,7 @@ fn scan_lexical(
     extract: fn(&str, &Path, &mut Vec<TargetCandidate>),
 ) -> Result<ScanResult, ClassifiedError> {
     let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
-    let mut candidates = Vec::new();
+    let mut files = Vec::new();
     for entry in walker {
         let entry = entry.map_err(|error| ClassifiedError::Internal(error.to_string()))?;
         // A directory whose name looks like a source file (e.g. `pkg.go/`) has a
@@ -261,16 +261,23 @@ fn scan_lexical(
         if !exts.contains(&ext) || skip_file(path) {
             continue;
         }
+        files.push(path.to_path_buf());
+    }
+    // Sorted, not raw walk order: readdir order is filesystem-dependent, and
+    // candidate order must be identical on every machine.
+    files.sort();
+    let mut candidates = Vec::new();
+    for path in files {
         // A single unreadable or non-UTF-8 source file must not lose every
         // candidate found so far -- skip it and continue the pass.
-        let src = match std::fs::read_to_string(path) {
+        let src = match std::fs::read_to_string(&path) {
             Ok(src) => src,
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "skipping unreadable source file");
                 continue;
             }
         };
-        extract(&src, path, &mut candidates);
+        extract(&src, &path, &mut candidates);
     }
     Ok((candidates, std::collections::HashMap::new()))
 }
@@ -898,7 +905,9 @@ fn scan_c(root: &Path, lang: TargetLanguage) -> Result<ScanResult, ClassifiedErr
         std::collections::HashMap::new();
     let mut complexity_map: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
-    for relative in discoverable_source_files_in_walk_order(root, lang)? {
+    // Sorted, not raw walk order: readdir order is filesystem-dependent, and
+    // candidate order must be identical on every machine.
+    for relative in discoverable_source_files(root, lang)? {
         let path = root.join(relative);
         // Non-UTF-8 or unreadable sources are common in the wild (Latin-1
         // comments, permission gaps); skip the file rather than aborting the
@@ -1306,6 +1315,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lexical_walk_orders_candidates_by_sorted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("b.rs"),
+            b"pub fn parse_b(data: &[u8]) -> usize { data.len() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            b"pub fn parse_a(data: &[u8]) -> usize { data.len() }\n",
+        )
+        .unwrap();
+
+        let result = super::discover(dir.path(), TargetLanguage::Rust)
+            .await
+            .unwrap();
+        let symbols: Vec<_> = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.symbol.clone())
+            .collect();
+        assert_eq!(symbols, vec!["parse_a".to_owned(), "parse_b".to_owned()]);
+    }
+
+    #[tokio::test]
     async fn centralized_c_walk_preserves_candidate_ids_and_order() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1354,6 +1388,7 @@ mod tests {
         let mut calls = HashMap::new();
         let mut complexity_map = HashMap::new();
         let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
+        let mut paths = Vec::new();
         for entry in walker {
             let entry = entry.unwrap();
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -1367,6 +1402,12 @@ mod tests {
             {
                 continue;
             }
+            paths.push(path.to_path_buf());
+        }
+        // The production walk sorts for cross-machine determinism; the oracle
+        // mirrors that so the comparison pins fields and IDs, not readdir luck.
+        paths.sort();
+        for path in &paths {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
