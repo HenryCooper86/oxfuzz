@@ -430,34 +430,59 @@ mod tests {
     use hf_core::engine::EngineKind;
     use std::time::{Duration, Instant};
 
+    // `run_bounded` is platform-agnostic, so these tests drive it with the
+    // host's own shell rather than hardcoding /bin paths that do not exist on
+    // Windows. Gating them to unix instead would leave the timeout wrapper
+    // untested on the platform whose process handling differs most.
+    #[cfg(unix)]
+    fn shell_command(script: &str) -> std::process::Command {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[cfg(windows)]
+    fn shell_command(script: &str) -> std::process::Command {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", script]);
+        command
+    }
+
+    /// A command that outlives any timeout under test without needing a
+    /// console (Windows `timeout` fails when stdin is redirected).
+    #[cfg(unix)]
+    fn long_running_command() -> std::process::Command {
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        command
+    }
+
+    #[cfg(windows)]
+    fn long_running_command() -> std::process::Command {
+        let mut command = std::process::Command::new("ping");
+        command.args(["-n", "31", "127.0.0.1"]);
+        command
+    }
+
     #[test]
     fn run_bounded_captures_stdout_and_success() {
-        let out = run_bounded(
-            std::process::Command::new("/bin/sh").args(["-c", "echo ready"]),
-            Duration::from_secs(5),
-        )
-        .expect("fast command completes");
+        let out = run_bounded(&mut shell_command("echo ready"), Duration::from_secs(5))
+            .expect("fast command completes");
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ready");
     }
 
     #[test]
     fn run_bounded_reports_a_failing_exit() {
-        let out = run_bounded(
-            std::process::Command::new("/bin/sh").args(["-c", "exit 1"]),
-            Duration::from_secs(5),
-        )
-        .expect("failed command still returns its output");
+        let out = run_bounded(&mut shell_command("exit 1"), Duration::from_secs(5))
+            .expect("failed command still returns its output");
         assert!(!out.status.success());
     }
 
     #[test]
     fn run_bounded_kills_a_wedged_command_instead_of_hanging() {
         let start = Instant::now();
-        let out = run_bounded(
-            std::process::Command::new("/bin/sleep").arg("30"),
-            Duration::from_millis(200),
-        );
+        let out = run_bounded(&mut long_running_command(), Duration::from_millis(200));
         assert!(out.is_none(), "a wedged command yields no output");
         assert!(
             start.elapsed() < Duration::from_secs(5),
