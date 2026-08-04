@@ -133,6 +133,45 @@ fn sandbox_mounts_are_canonicalized_inside_the_workspace() {
 }
 
 #[test]
+fn sandbox_mount_targets_use_container_not_host_path_rules() {
+    // The target names a path inside the Linux container, so it must validate
+    // on every host: Windows path semantics would reject /work/... outright,
+    // and `..` must stay rejected everywhere.
+    let temp = tempfile::tempdir().expect("temp root");
+    let workspace = temp.path().join("workspace");
+    let source = workspace.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let runtime = DockerRuntime::new(RuntimeConfig::default(), &workspace);
+
+    for target in [
+        "/work/output",
+        "/work/source",
+        "/work//nested/",
+        "/work/./x",
+    ] {
+        let options = SandboxOptions {
+            extra_mounts: vec![SandboxMount::writable(source.clone(), target)],
+            ..SandboxOptions::default()
+        };
+        assert!(
+            runtime.validate_sandbox_options(&options).is_ok(),
+            "container target {target} must validate on any host"
+        );
+    }
+
+    for target in ["/work/../etc", "work/output", "/work,out"] {
+        let options = SandboxOptions {
+            extra_mounts: vec![SandboxMount::writable(source.clone(), target)],
+            ..SandboxOptions::default()
+        };
+        assert!(
+            runtime.validate_sandbox_options(&options).is_err(),
+            "container target {target} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn sandbox_rejects_oversized_stdin_before_launch() {
     let temp = tempfile::tempdir().expect("temp root");
     let workspace = temp.path().join("workspace");
