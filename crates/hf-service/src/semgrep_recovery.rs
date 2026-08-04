@@ -1111,6 +1111,14 @@ fn verify_transaction_lock_path_identity(_directory: &File, _file: &File) -> io:
     ))
 }
 
+/// Widen a `stat` link count to `u64`. `st_nlink` is `u64` on `x86_64` Linux
+/// but `u32` on `aarch64` Linux and `u16` on macOS; the generic boundary
+/// keeps the conversion portable without a per-arch cast.
+#[cfg(unix)]
+fn nlink_to_u64(count: impl Into<u64>) -> u64 {
+    count.into()
+}
+
 #[cfg(unix)]
 fn verify_transaction_lock_path_identity(directory: &File, file: &File) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -1126,7 +1134,7 @@ fn verify_transaction_lock_path_identity(directory: &File, file: &File) -> io::R
         || !path_is_linked_regular
         || descriptor.dev() != path.st_dev as u64
         || descriptor.ino() != path.st_ino as u64
-        || descriptor.nlink() != u64::from(path.st_nlink)
+        || descriptor.nlink() != nlink_to_u64(path.st_nlink)
     {
         return Err(invalid_data(
             "transaction lock pathname no longer names the opened regular file",
@@ -1158,7 +1166,7 @@ fn verify_operation_path_identity(
         || !path_is_linked_regular
         || descriptor.dev() != path.st_dev as u64
         || descriptor.ino() != path.st_ino as u64
-        || descriptor.nlink() != u64::from(path.st_nlink)
+        || descriptor.nlink() != nlink_to_u64(path.st_nlink)
     {
         return Err(invalid_data(
             "journal pathname no longer names the opened regular file",
