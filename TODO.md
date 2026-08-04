@@ -143,11 +143,12 @@ Status legend: [x] done - [~] partial - [ ] not started.
   strengthened to full-record equality, and a workspace sweep confirmed no
   other timestamp path truncates. Remaining
   E2E arms: successful minimization through the full loop; UBSan /
-  ClusterFuzzLite / Syzkaller classification edges. Known load-sensitive test:
-  `hf-scheduler` `lifecycle_and_recovery_events_include_required_structured_fields`
-  (10 ms tick lifecycles) can miss its transition-event floor under heavy host
-  contention (observed once when an emulated build shared the runner VM; 30/30
-  green locally) -- widen its waits if it recurs.
+  ClusterFuzzLite / Syzkaller classification edges. The
+  `lifecycle_and_recovery_events_include_required_structured_fields` race is
+  fixed: it asserted a transition-event floor that the workers emit
+  independently of the status reads it waited on, so runner contention could
+  beat it; it now polls for the transitions with a timeout (0/10 on native
+  Linux, 8/8 locally).
 - [ ] Windows workspace naming: `workspace_dir` embeds the target symbol in a
   directory name, so a C++ target (`ns::Class::method`) would create an
   NTFS-illegal path on a Windows host. Not hit by CI (the test is pure path
