@@ -1129,7 +1129,12 @@ fn public_config_string(value: Option<&str>) -> PublicConfigString {
 }
 
 fn looks_like_absolute_host_path(value: &str) -> bool {
-    Path::new(value).is_absolute()
+    // A POSIX-rooted value must be withheld on every host: `std::path` does
+    // not consider /var/lib absolute on Windows, so relying on it alone would
+    // serve such paths through the public API there. Values that name paths
+    // inside the Linux sandbox are POSIX regardless of the host.
+    value.starts_with('/')
+        || Path::new(value).is_absolute()
         || value.starts_with("\\\\")
         || value
             .as_bytes()

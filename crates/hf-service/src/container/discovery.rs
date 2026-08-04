@@ -150,7 +150,7 @@ impl ServiceContainer {
     }
 }
 
-#[cfg(all(test, feature = "semgrep-enrichment"))]
+#[cfg(all(test, unix, feature = "semgrep-enrichment"))]
 mod semgrep_ranking_consumer_tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
