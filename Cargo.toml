@@ -84,7 +84,7 @@ sqlx = { version = "0.8", features = [
 ] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "socks"] }
+reqwest = { version = "0.13", features = ["json", "stream", "socks"] }
 
 # Web API
 axum = { version = "0.8", features = ["multipart"] }
