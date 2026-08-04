@@ -763,7 +763,10 @@ fn validate_config_string(text: &str, location: &str) -> Result<(), ClassifiedEr
                 "manager.cfg contains an unmanaged path at {location}: {text}"
             )));
         }
-        if path.is_absolute() && !is_managed_container_path(path) {
+        // manager.cfg is consumed inside the Linux container, so absoluteness
+        // is a POSIX question: `std::path` would not call /kernel/build
+        // absolute on Windows and the guard below would never fire there.
+        if token.starts_with('/') && !is_managed_container_path(path) {
             return Err(ClassifiedError::Validation(format!(
                 "manager.cfg contains an unmanaged path at {location}: {text}"
             )));

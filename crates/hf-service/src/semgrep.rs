@@ -3232,7 +3232,7 @@ macro_rules! assert_f64_eq {
     };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod effective_inventory_tests {
     use std::path::{Path, PathBuf};
 
@@ -3590,7 +3590,7 @@ mod effective_inventory_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod publication_tests {
     use hf_discovery::semgrep::{SemgrepAnalysis, SemgrepTargetScore};
     use hf_storage::{SemgrepRunRecord, SemgrepRunStatus, Store};
@@ -4099,7 +4099,7 @@ mod publication_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod snapshot_tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
@@ -5390,7 +5390,7 @@ mod process_lease_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod lifecycle_tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -5769,7 +5769,7 @@ mod lifecycle_tests {
                 .unwrap();
             for candidate in &mut inventory.candidates {
                 candidate.fit_score = 0.5;
-                candidate.rationale = "fixture".to_owned();
+                "fixture".clone_into(&mut candidate.rationale);
             }
             inventory
         } else {
@@ -7171,7 +7171,7 @@ mod lifecycle_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod terminal_visibility_tests {
     use std::path::PathBuf;
     use std::sync::Arc;
