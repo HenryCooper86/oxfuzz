@@ -49,7 +49,9 @@ fn afl_excludes_readme_case_insensitively() {
     let dir = TempDir::new().unwrap();
     let crashes = dir.path().join("default").join("crashes");
     fs::create_dir_all(&crashes).unwrap();
-    fs::write(crashes.join("id:000000,sig:06,src:000000"), b"crash").unwrap();
+    // ':' is illegal on NTFS and the name is opaque to the ingester; the
+    // README exclusion under test is unaffected.
+    fs::write(crashes.join("id_000000,sig_06,src_000000"), b"crash").unwrap();
     fs::write(crashes.join("README.txt"), b"metadata").unwrap();
     fs::write(crashes.join("readme.TXT"), b"metadata").unwrap();
     fs::write(crashes.join("ReadMe.TxT"), b"metadata").unwrap();
@@ -59,7 +61,7 @@ fn afl_excludes_readme_case_insensitively() {
     assert_eq!(result.crashes.len(), 1);
     assert_eq!(
         result.crashes[0].input_path.file_name().unwrap(),
-        "id:000000,sig:06,src:000000"
+        "id_000000,sig_06,src_000000"
     );
 }
 

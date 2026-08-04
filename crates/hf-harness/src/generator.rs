@@ -1520,7 +1520,8 @@ Iterations : 12345
             count_smoke_artifacts(EngineKind::AflPlusPlus, out.path()),
             0
         );
-        std::fs::write(afl_crashes.join("id:000001,sig:06"), b"crash").unwrap();
+        // ':' is illegal on NTFS; the counter only distinguishes README.txt.
+        std::fs::write(afl_crashes.join("id_000001,sig_06"), b"crash").unwrap();
         assert_eq!(
             count_smoke_artifacts(EngineKind::AflPlusPlus, out.path()),
             1
