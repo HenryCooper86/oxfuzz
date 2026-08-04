@@ -1103,6 +1103,14 @@ fn open_and_lock_transaction_file(_directory: &File) -> io::Result<File> {
     ))
 }
 
+#[cfg(not(unix))]
+fn verify_transaction_lock_path_identity(_directory: &File, _file: &File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Semgrep journals require descriptor-relative filesystem identity checks",
+    ))
+}
+
 #[cfg(unix)]
 fn verify_transaction_lock_path_identity(directory: &File, file: &File) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
