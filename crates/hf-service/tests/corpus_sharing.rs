@@ -127,7 +127,9 @@ impl RuntimeAdapter for SharingRuntime {
             std::fs::write(queue.join("afl-queue-unit"), b"QUEUE").unwrap();
             let crashes = out.join("default").join("crashes");
             std::fs::create_dir_all(&crashes).unwrap();
-            std::fs::write(crashes.join("id:000000,sig:06"), b"CRASH").unwrap();
+            // ':' is illegal on NTFS; corpus absorption derives the canonical
+            // name by prefixing this one, so the assertions below track it.
+            std::fs::write(crashes.join("id_000000,sig_06"), b"CRASH").unwrap();
         } else {
             // libFuzzer writes new-coverage units in place into its corpus dir.
             let run = self.libfuzzer_runs.lock().unwrap().to_string();
@@ -336,7 +338,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
         .unwrap();
     assert_eq!(added, 1, "the AFL++ crash survivor must be absorbed");
     assert!(
-        canonical.join("crash_id:000000,sig:06").is_file(),
+        canonical.join("crash_id_000000,sig_06").is_file(),
         "the absorbed crash input must land in the canonical corpus"
     );
     assert_rows_match_survivors(&store, target_id, &canonical, "crash absorb").await;
@@ -353,7 +355,7 @@ async fn engines_share_one_canonical_corpus_and_absorbed_crashes() {
         .join(run_c.run_id.to_string())
         .join("corpus");
     assert!(
-        staged_c.join("crash_id:000000,sig:06").is_file(),
+        staged_c.join("crash_id_000000,sig_06").is_file(),
         "the crash survivor absorbed from the AFL++ run must seed the next libFuzzer run"
     );
     assert!(
