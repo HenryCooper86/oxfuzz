@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
