@@ -148,6 +148,20 @@ Status legend: [x] done - [~] partial - [ ] not started.
   (10 ms tick lifecycles) can miss its transition-event floor under heavy host
   contention (observed once when an emulated build shared the runner VM; 30/30
   green locally) -- widen its waits if it recurs.
+- [ ] Windows workspace naming: `workspace_dir` embeds the target symbol in a
+  directory name, so a C++ target (`ns::Class::method`) would create an
+  NTFS-illegal path on a Windows host. Not hit by CI (the test is pure path
+  arithmetic and fuzzing runs in a Linux sandbox), but it blocks a native
+  Windows host workspace.
+- [ ] Event schedules whose action is a campaign re-trigger themselves: a
+  campaign emits `run.completed` when its run phase ends, so an
+  `event: run.completed` schedule fires again while its own execution is still
+  in triage. Today only the overlap guard bounds this (the re-trigger is
+  recorded `skipped`), and nothing stops a fresh firing once the execution
+  finishes. Surfaced by `run_completed_fires_matching_event_schedule` failing
+  twice on the Linux runner (reproduced 1/10 in a Linux container, 0/12 on
+  macOS under load). Needs a design decision -- suppress self-emitted events
+  for the triggering schedule, or make the cascade explicit and bounded.
 
 ## Audit backlog (refreshed 2026-07-17)
 
