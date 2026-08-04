@@ -143,7 +143,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
   strengthened to full-record equality, and a workspace sweep confirmed no
   other timestamp path truncates. Remaining
   E2E arms: successful minimization through the full loop; UBSan /
-  ClusterFuzzLite / Syzkaller classification edges.
+  ClusterFuzzLite / Syzkaller classification edges. Known load-sensitive test:
+  `hf-scheduler` `lifecycle_and_recovery_events_include_required_structured_fields`
+  (10 ms tick lifecycles) can miss its transition-event floor under heavy host
+  contention (observed once when an emulated build shared the runner VM; 30/30
+  green locally) -- widen its waits if it recurs.
 
 ## Audit backlog (refreshed 2026-07-17)
 
