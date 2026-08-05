@@ -2,45 +2,16 @@
 
 use std::collections::BTreeMap;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use chrono::Utc;
-use hf_core::crash::{Crash, CrashKind};
-use hf_core::engine::{EngineKind, FuzzRunConfig};
-use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
-use hf_core::target::{
-    InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
-};
-use hf_crash::remediation::RemediationStatus;
+use hf_core::engine::EngineKind;
 use hf_service::evidence::{
-    CampaignEvidencePricing, EvidenceApproval, EvidenceCost, EvidenceCoverage, EvidenceError,
-    EvidenceFinding, EvidenceManifest, EvidenceManifestBody, EvidenceRunConfig, EvidenceRunStatus,
+    EvidenceApproval, EvidenceCost, EvidenceCoverage, EvidenceError, EvidenceFinding,
+    EvidenceManifest, EvidenceManifestBody, EvidenceRunConfig, EvidenceRunStatus,
     EVIDENCE_SCHEMA_VERSION,
 };
-use hf_service::ServiceContainer;
-use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
 use uuid::Uuid;
-
-/// Tolerance for comparing a computed `f64` cost against its exact expected value.
-const EPS: f64 = 1e-9;
 
 fn digest(byte: char) -> String {
     std::iter::repeat_n(byte, 64).collect()
-}
-
-fn isolate_workspace() -> &'static Path {
-    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    ROOT.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!(
-            "oxfuzz_evidence_it_{}_{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        std::env::set_var("HF_WORKSPACE_DIR", &root);
-        hf_service::initialize_workspace_root().expect("initialize evidence-test workspace");
-        root
-    })
 }
 
 fn body() -> EvidenceManifestBody {
@@ -158,8 +129,45 @@ fn non_finite_cost_and_nonterminal_runs_fail_closed() {
     );
 }
 
+// Proof-carrying evidence reads walk the run root with descriptor-relative,
+// symlink-refusing opens (rustix openat) and fail closed as Sandbox off unix,
+// so the full-assembly path this test drives is a unix-only capability. Its
+// imports live in the function so non-unix builds see no unused-import noise.
+#[cfg(unix)]
 #[tokio::test]
 async fn service_assembles_a_manifest_from_durable_run_and_approval_evidence() {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use hf_core::crash::{Crash, CrashKind};
+    use hf_core::engine::FuzzRunConfig;
+    use hf_core::harness::{BuildCommand, Harness, HarnessStatus};
+    use hf_core::target::{
+        InputSurface, Sanitizer, SourceLocation, TargetCandidate, TargetKind, TargetLanguage,
+    };
+    use hf_crash::remediation::RemediationStatus;
+    use hf_service::evidence::CampaignEvidencePricing;
+    use hf_service::ServiceContainer;
+    use hf_storage::{HarnessApprovalKind, RunRecord, RunStatus, Store};
+
+    /// Tolerance for comparing a computed `f64` cost against its exact expected value.
+    const EPS: f64 = 1e-9;
+
+    fn isolate_workspace() -> &'static Path {
+        static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let root = std::env::temp_dir().join(format!(
+                "oxfuzz_evidence_it_{}_{}",
+                std::process::id(),
+                Uuid::new_v4()
+            ));
+            std::env::set_var("HF_WORKSPACE_DIR", &root);
+            hf_service::initialize_workspace_root().expect("initialize evidence-test workspace");
+            root
+        })
+    }
+
     let workspace_root = isolate_workspace().to_path_buf();
     let directory = tempfile::tempdir().unwrap();
     let store = Store::connect(directory.path().join("evidence.db"))

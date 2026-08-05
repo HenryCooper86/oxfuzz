@@ -140,7 +140,7 @@ impl GlobTool {
     /// we split it into base dir `/home/user/src` and pattern `**/*.rs`.
     fn parse_absolute_glob(pattern: &str) -> Option<(PathBuf, String)> {
         let path = Path::new(pattern);
-        if !path.is_absolute() {
+        if !is_absolute_pattern(pattern) {
             return None;
         }
 
@@ -281,6 +281,14 @@ fn contains_glob_meta(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[') || s.contains('{')
 }
 
+/// Absolute by POSIX or host rules. Agent-authored patterns are POSIX-rooted
+/// no matter the host, and `std::path` alone does not treat `/home/x` as
+/// absolute on Windows. Containment is unaffected: every branch still passes
+/// the base through `resolve_read_path`.
+fn is_absolute_pattern(pattern: &str) -> bool {
+    pattern.starts_with('/') || Path::new(pattern).is_absolute()
+}
+
 impl Default for GlobTool {
     fn default() -> Self {
         Self::new()
@@ -304,7 +312,7 @@ impl Tool for GlobTool {
         let max_results = Self::parse_max_results(&input.arguments)?;
 
         // Resolve the target directory and effective glob pattern.
-        let (resolved_path, glob_pattern) = if Path::new(pattern).is_absolute() {
+        let (resolved_path, glob_pattern) = if is_absolute_pattern(pattern) {
             // Absolute pattern: split into base dir + relative glob.
             if let Some((base, rel)) = Self::parse_absolute_glob(pattern) {
                 let base = base.to_string_lossy().to_string();

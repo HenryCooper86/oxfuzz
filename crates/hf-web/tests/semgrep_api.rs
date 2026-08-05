@@ -4,7 +4,12 @@
 //! each integration target in its own process, so its `HF_WORKSPACE_DIR`
 //! override cannot race with unrelated `hf-web` tests.
 
-#![cfg(feature = "semgrep-enrichment")]
+// The Semgrep journal is unix-only (descriptor-relative advisory locks) and
+// fails closed as Unsupported elsewhere, so the sandbox is never invoked off
+// unix and this lifecycle's success path cannot happen there. The
+// `/semgrep/available` endpoint reports that honestly; this suite follows the
+// journal tests' `cfg(unix)` precedent.
+#![cfg(all(feature = "semgrep-enrichment", unix))]
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -274,6 +274,7 @@ fn validate_output(path: &Path) -> Result<(), ClassifiedError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_parent(parent: &Path) -> Result<(), ClassifiedError> {
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
@@ -283,4 +284,12 @@ fn sync_parent(parent: &Path) -> Result<(), ClassifiedError> {
                 parent.display()
             ))
         })
+}
+
+// Directory fsync is a POSIX durability idiom: `File::open` on a directory is
+// refused on Windows, and rename durability is filesystem-managed there
+// (mirrors recovery.rs and campaign_state.rs).
+#[cfg(not(unix))]
+fn sync_parent(_parent: &Path) -> Result<(), ClassifiedError> {
+    Ok(())
 }

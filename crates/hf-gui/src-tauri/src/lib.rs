@@ -355,10 +355,10 @@ mod tests {
     use super::{commands, seed_user_provider_config};
 
     #[test]
-    fn semgrep_availability_matches_the_compiled_feature() {
+    fn semgrep_availability_requires_the_feature_and_a_unix_host() {
         assert_eq!(
             commands::semgrep_available(),
-            cfg!(feature = "semgrep-enrichment")
+            cfg!(all(feature = "semgrep-enrichment", unix))
         );
     }
 
