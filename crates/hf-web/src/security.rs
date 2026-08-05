@@ -495,7 +495,14 @@ fn looks_like_absolute_host_path(value: &str) -> bool {
         let bytes = value.as_bytes();
         bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':')
     };
-    Path::new(value).is_absolute() || value.starts_with("\\\\") || drive_prefix
+    // A POSIX-rooted value must be withheld on every host: `std::path` does
+    // not consider `/var/lib` absolute on Windows, so relying on it alone
+    // would serve such paths through the public API there (mirrors the same
+    // rule in hf-service's public config redaction).
+    value.starts_with('/')
+        || Path::new(value).is_absolute()
+        || value.starts_with("\\\\")
+        || drive_prefix
 }
 
 #[cfg(test)]

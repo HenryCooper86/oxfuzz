@@ -386,6 +386,33 @@ async fn semgrep_availability_is_false_without_the_feature() {
     );
 }
 
+// The Semgrep journal is unix-only and every enrichment fails closed as
+// Unsupported elsewhere, so a Windows host must not advertise the capability
+// even with the feature compiled in.
+#[tokio::test]
+#[cfg(all(feature = "semgrep-enrichment", not(unix)))]
+async fn semgrep_availability_is_false_off_unix_despite_the_feature() {
+    allow_open_dev_mode();
+    let response = hf_web::router::build()
+        .oneshot(
+            Request::builder()
+                .uri("/semgrep/available")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        false
+    );
+}
+
 #[tokio::test]
 async fn policy_decisions_returns_a_json_array() {
     allow_open_dev_mode();

@@ -179,11 +179,13 @@ pub async fn discover(
     serde_json::to_value(&inv).map_err(|e| e.to_string())
 }
 
-/// Report whether this application build includes Semgrep enrichment.
+/// Report whether this application can run Semgrep enrichment: the feature
+/// must be compiled in and the platform must support the unix-only Semgrep
+/// journal (elsewhere every enrichment fails closed as Unsupported).
 #[tauri::command]
 #[must_use]
 pub const fn semgrep_available() -> bool {
-    cfg!(feature = "semgrep-enrichment")
+    cfg!(all(feature = "semgrep-enrichment", unix))
 }
 
 /// Start explicit Semgrep enrichment for a persisted C or C++ inventory.
