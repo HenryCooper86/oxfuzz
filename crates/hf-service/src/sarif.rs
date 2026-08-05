@@ -216,14 +216,16 @@ pub(crate) fn parse_location(crashline: &str) -> Option<(String, u32)> {
 /// build path (e.g. `/home/builder/src/parse.c`) both fails to anchor and leaks
 /// the operator's host layout into a shared dashboard. So a path under
 /// `project_root` is made project-relative, and any other absolute path is
-/// redacted. Relative paths (already repo-relative) pass through unchanged.
+/// redacted. Relative paths (already repo-relative) keep their components.
+/// Every emitted uri is `/`-separated: a Windows-host `out\crash-1` is not a
+/// valid SARIF uri and would not anchor.
 fn sarif_uri(raw: &str, project_root: &std::path::Path) -> String {
     let path = std::path::Path::new(raw);
     if !path.is_absolute() {
-        return raw.to_owned();
+        return hf_core::runtime::posix_relative(path);
     }
     match path.strip_prefix(project_root) {
-        Ok(relative) => relative.to_string_lossy().into_owned(),
+        Ok(relative) => hf_core::runtime::posix_relative(relative),
         Err(_) => "<redacted-host-path>".to_owned(),
     }
 }

@@ -168,12 +168,13 @@ impl SandboxCapability {
     }
 }
 
-/// Render a relative host path with `/` separators for use inside the sandbox.
+/// Render a relative host path with `/` separators regardless of the host.
 ///
-/// Container paths are POSIX no matter what the host is; `Path::display` keeps
-/// `\` on Windows, which the Linux container reads as part of a file name
-/// rather than as a separator. Callers compose the result onto a container
-/// mount point (for example `/work`), so `path` must already be relative.
+/// `Path::display` keeps `\` on Windows, which is wrong everywhere the string
+/// leaves the host's path rules: the Linux sandbox reads it as part of a file
+/// name rather than as a separator, and durable records or SARIF URIs built
+/// from it stop meaning the same path on another machine. `path` must already
+/// be relative; callers compose the result onto a POSIX base such as `/work`.
 #[must_use]
 pub fn posix_relative(path: &std::path::Path) -> String {
     path.components()
