@@ -1,2 +1,8 @@
 # Preserve the exact pinned upstream rules snapshot without classifying its whitespace as errors.
 third_party/semgrep-rules/rules/c/** -whitespace
+
+# Golden renderings compared byte for byte: Windows checkouts must not rewrite
+# their line endings, or `include_str!` embeds CRLF while the renderer emits LF.
+crates/hf-service/tests/fixtures/** text eol=lf
+crates/hf-discovery/tests/fixtures/** text eol=lf
+tests/fixtures/** text eol=lf
