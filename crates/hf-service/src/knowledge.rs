@@ -174,11 +174,12 @@ fn index_project_with_config(project: &Path, config: KnowledgeConfig) -> Knowled
             continue;
         }
         files += 1;
-        let rel = path
-            .strip_prefix(project)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
+        // `/`-separated on every host: the label is shown to users, matched
+        // against queries, and stored in chunk metadata.
+        let rel = path.strip_prefix(project).map_or_else(
+            |_| path.to_string_lossy().to_string(),
+            hf_core::runtime::posix_relative,
+        );
         let meta = ChunkMetadata {
             source: rel.clone(),
             title: rel.clone(),
@@ -627,6 +628,26 @@ mod tests {
         assert_eq!(hits[0].file, "chunk.c");
         // The snippet preserves the original source (punctuation intact).
         assert!(hits[0].snippet.contains("copy_chunk(const"));
+    }
+
+    #[test]
+    fn source_labels_are_slash_separated_on_every_host() {
+        // The chunk source label is presented to users and matched against
+        // queries, so a nested file must be labeled `sub/inner.c` even where
+        // the host walker yields `sub\inner.c`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(
+            dir.path().join("sub").join("inner.c"),
+            "int nested_symbol(const unsigned char *data, unsigned long len) { return 0; }",
+        )
+        .unwrap();
+
+        index_project(dir.path()).unwrap();
+
+        let hits = search_project(dir.path(), "nested_symbol", 10);
+        assert!(!hits.is_empty(), "expected a hit for nested_symbol");
+        assert_eq!(hits[0].file, "sub/inner.c");
     }
 
     #[test]

@@ -164,6 +164,21 @@ fn absolute_host_paths_outside_project_are_redacted() {
 }
 
 #[test]
+fn sarif_uris_use_forward_slashes_for_native_input_paths() {
+    // The input path is built with the host's native separator; the SARIF uri
+    // must still come out `/`-separated (on Windows, `out\crash-1` is not a
+    // valid artifactLocation.uri and would not anchor in code scanning).
+    let project = tempfile::tempdir().unwrap();
+    let mut nested = crash(CrashKind::Segv, CrashSeverity::Undefined, "SEGV", "");
+    nested.input_path = project.path().join("out").join("crash-1");
+    let doc = crashes_to_sarif(&[nested], "1.0.0", project.path());
+    assert_eq!(
+        doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "out/crash-1"
+    );
+}
+
+#[test]
 fn empty_crashes_yield_empty_results() {
     let doc = crashes_to_sarif(&[], "0.1.0", std::path::Path::new("/work"));
     assert!(doc["runs"][0]["results"].as_array().unwrap().is_empty());
