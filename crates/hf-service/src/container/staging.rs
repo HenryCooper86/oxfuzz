@@ -730,6 +730,7 @@ mod staging_tests {
         resolve_run_sandbox_image, run_binary_path, run_context_digests, run_output_dir,
         stage_run_artifacts, verify_run_artifacts,
     };
+    use crate::container::workspace::workspace_relative_record;
 
     #[test]
     fn comparison_context_tracks_target_and_corpus_bytes() {
@@ -865,7 +866,7 @@ mod staging_tests {
         );
         run.id = run_id;
         run.binary_rev = Some(artifacts.binary_sha256.clone());
-        run.evidence_dir = Some(artifacts.output_relative.to_string_lossy().into_owned());
+        run.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
 
         assert_eq!(
             run_output_dir(workspace.path(), &run).unwrap(),

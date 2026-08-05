@@ -26,7 +26,9 @@ use super::staging::{
     resolve_run_sandbox_image, retain_run_context, run_context_digests, run_sandbox_options,
     stage_run_artifacts, verify_run_artifacts, verify_staged_qualification, ReplayProvenance,
 };
-use super::workspace::{prepare_configured_workspace_root, workspace_dir};
+use super::workspace::{
+    prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
+};
 use super::{
     auto_revert_baseline_compatible, auto_revert_decision, ensure_workspace_directory,
     merge_run_discoveries, persist_terminal_run_evidence, resolve_fuzzing_run, syz_kvm_usable,
@@ -554,7 +556,7 @@ impl ServiceContainer {
         run_record.status = RunStatus::Running;
         run_record.harness_rev = Some(artifacts.source_sha256.clone());
         run_record.binary_rev = Some(artifacts.binary_sha256.clone());
-        run_record.evidence_dir = Some(artifacts.output_relative.to_string_lossy().into_owned());
+        run_record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
         let run_id = run_record.id;
         if let Err(error) = store.insert_run(&run_record).await {
             if let Some(run_root) = artifacts.output_host.parent() {
