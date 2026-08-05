@@ -75,7 +75,7 @@ chrono-tz = "0.10"
 croner = "3"
 
 # Database
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "sqlite",
     "uuid",
