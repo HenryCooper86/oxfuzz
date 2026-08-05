@@ -40,7 +40,14 @@ impl CronSchedule {
 
     /// Parse the cron expression into a `Cron` instance.
     fn parsed(&self) -> Option<Cron> {
-        Cron::new(&self.expression).parse().ok()
+        // Seconds stay disallowed: croner 2.x rejected 6-field patterns by
+        // default, and this type's contract is standard 5-field expressions.
+        // croner 3.x's `FromStr` default would silently accept a sixth field.
+        croner::parser::CronParser::builder()
+            .seconds(croner::parser::Seconds::Disallowed)
+            .build()
+            .parse(&self.expression)
+            .ok()
     }
 
     /// Validate whether the cron expression is parseable.
@@ -119,6 +126,13 @@ mod tests {
         let cron = CronSchedule::new("invalid cron expr!!");
         assert!(!cron.is_valid());
         assert!(cron.next_fire(Utc::now()).is_none());
+    }
+
+    #[test]
+    fn six_field_patterns_stay_rejected() {
+        // The contract is standard 5-field cron. croner 3's default parser
+        // would silently accept a seconds field; the parser pins Disallowed.
+        assert!(!CronSchedule::new("0 0 9 * * 1").is_valid());
     }
 
     #[test]
