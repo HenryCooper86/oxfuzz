@@ -249,7 +249,10 @@ fn container_path(workspace: &Path, host: &Path) -> Result<String, ClassifiedErr
             host.display()
         )));
     }
-    Ok(format!("/work/{}", relative.display()))
+    Ok(format!(
+        "/work/{}",
+        hf_core::runtime::posix_relative(relative)
+    ))
 }
 
 fn validate_output(path: &Path) -> Result<(), ClassifiedError> {

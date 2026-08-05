@@ -470,10 +470,7 @@ pub(super) fn run_output_relative(run_id: Uuid) -> PathBuf {
 /// plain `to_string_lossy` would store `runs\<id>\out` on Windows and make
 /// the row unreadable elsewhere.
 pub(super) fn workspace_relative_record(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+    hf_core::runtime::posix_relative(path)
 }
 
 /// Resolve an existing regular directory below a workspace without accepting
