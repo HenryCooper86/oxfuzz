@@ -37,10 +37,12 @@ pub fn decode_bytes_as_utf8(
         return Ok((s.to_string(), "UTF-8"));
     }
 
-    // Detect encoding using chardetng.
-    let mut detector = EncodingDetector::new();
+    // Detect encoding using chardetng. Local files are not scriptable web
+    // content, so ISO-2022-JP and UTF-8 both stay allowed as guesses
+    // (chardetng 1.0 made the pre-1.0 defaults explicit).
+    let mut detector = EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
-    let encoding = detector.guess(None, true);
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
 
     Ok(decode_with_encoding(bytes, encoding, source_hint))
 }
