@@ -46,7 +46,10 @@ gate_test() {
   # Wrapping grep in a group that always succeeds covers its exit-1-on-no-match
   # behavior, and there is no `head`, so no SIGPIPE. Under pipefail a failing
   # `cargo test` still fails the pipeline.
-  cargo test --workspace 2>&1 | { grep -v "${TEST_NOISE}" || true; }
+  # --no-fail-fast so one failing test binary cannot hide what the rest of the
+  # suite would have found: the Windows job burned one full CI cycle per hidden
+  # failure until the gate reported them all at once.
+  cargo test --workspace --no-fail-fast 2>&1 | { grep -v "${TEST_NOISE}" || true; }
 }
 
 gate_doc() {
