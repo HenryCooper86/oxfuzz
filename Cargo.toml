@@ -132,7 +132,7 @@ pulldown-cmark = { version = "0.12", default-features = false, features = ["simd
 
 # TUI
 ratatui = "0.28"
-crossterm = "0.28"
+crossterm = "0.29"
 tui-textarea = "0.6"
 unicode-width = "0.2"
 
