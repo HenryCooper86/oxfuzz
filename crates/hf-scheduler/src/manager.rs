@@ -2577,6 +2577,24 @@ mod tests {
         }
     }
 
+    async fn wait_for_transition_events(capture: &EventCapture, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let transition_count = capture
+                    .events()
+                    .iter()
+                    .filter(|fields| fields.contains_key("from") && fields.contains_key("to"))
+                    .count();
+                if transition_count >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the scheduler must emit its state transitions");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn lifecycle_and_recovery_events_include_required_structured_fields() {
         let capture = EventCapture::default();
@@ -2591,6 +2609,10 @@ mod tests {
             .await;
         success_manager.start(Duration::from_millis(10)).await;
         wait_for_state(&success_persistence, OneTimeOccurrenceState::Completed).await;
+        // The fake persistence exposes its committed state before the worker
+        // resumes to emit the matching event. Wait for that observable event
+        // before stop() is allowed to abort any still-running task.
+        wait_for_transition_events(&capture, 2).await;
         success_manager.stop().await;
 
         let statuses = Arc::new(Mutex::new(HashMap::new()));
@@ -2655,26 +2677,7 @@ mod tests {
         wait_for_cursor_update(&shutdown_persistence).await;
         shutdown_manager.stop().await;
 
-        // Transition events are emitted by the workers, not by the status
-        // reads the scenarios above wait on, so poll for them rather than
-        // assuming they have landed by now: under runner contention they
-        // arrive after the last stop() and the floor below missed them.
-        let events = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let events = capture.events();
-                if events
-                    .iter()
-                    .filter(|fields| fields.contains_key("from") && fields.contains_key("to"))
-                    .count()
-                    >= 2
-                {
-                    return events;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the scheduler must emit its state transitions");
+        let events = capture.events();
         let reservations: Vec<_> = events
             .iter()
             .filter(|fields| fields.contains_key("reservation_outcome"))
