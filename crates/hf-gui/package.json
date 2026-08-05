@@ -55,7 +55,7 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.65.0",
     "unocss": "^66.7.5",
-    "vite": "^7.3.6",
+    "vite": "^8.2.0",
     "vitest": "^4.1.10"
   },
   "overrides": {
