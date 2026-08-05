@@ -83,8 +83,18 @@ sqlx = { version = "0.8", features = [
     "json",
 ] }
 
-# HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "socks"] }
+# HTTP client. Feature-pinned rather than default: reqwest 0.13's default-tls
+# is rustls over aws-lc-sys, whose build needs cmake (and NASM on Windows).
+# native-tls keeps 0.12's platform TLS stack with no extra build toolchain.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "socks",
+    "native-tls",
+    "http2",
+    "charset",
+    "system-proxy",
+] }
 
 # Web API
 axum = { version = "0.8", features = ["multipart"] }
