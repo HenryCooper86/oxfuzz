@@ -131,7 +131,7 @@ rustix = { version = "1", features = ["fs"] }
 pulldown-cmark = { version = "0.12", default-features = false, features = ["simd"] }
 
 # TUI
-ratatui = "0.28"
+ratatui = "0.30"
 crossterm = "0.28"
 tui-textarea = "0.6"
 unicode-width = "0.2"
