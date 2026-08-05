@@ -32,7 +32,11 @@ impl MinimizationRun {
     /// Atomically publish a non-empty, bounded regular output file.
     pub(crate) fn publish(mut self) -> Result<PathBuf, ClassifiedError> {
         validate_output(&self.partial_path)?;
-        std::fs::File::open(&self.partial_path)
+        // The sync handle must be writable: Windows FlushFileBuffers rejects a
+        // read-only handle with access denied, while POSIX fsync accepts one.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.partial_path)
             .and_then(|file| file.sync_all())
             .map_err(|error| {
                 ClassifiedError::Storage(format!(
