@@ -328,6 +328,10 @@ pub(super) fn write_current_harness_binary(
 
 /// Map a host path inside the workspace to its container path under `/work`
 /// (the mount point), falling back to `/work/out/<filename>`.
+///
+/// The container is Linux, so the result is `/`-separated regardless of the
+/// host separator; `rel.display()` would embed `\` on Windows and hand the
+/// sandbox a malformed path.
 pub(super) fn container_input_path(workspace: &Path, host_path: &Path) -> String {
     host_path.strip_prefix(workspace).map_or_else(
         |_| {
@@ -336,7 +340,7 @@ pub(super) fn container_input_path(workspace: &Path, host_path: &Path) -> String
                 host_path.file_name().unwrap_or_default().to_string_lossy()
             )
         },
-        |rel| format!("/work/{}", rel.display()),
+        |rel| format!("/work/{}", hf_core::runtime::posix_relative(rel)),
     )
 }
 
@@ -409,6 +413,33 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod container_input_path_tests {
+    use std::path::PathBuf;
+
+    #[test]
+    fn workspace_paths_map_to_posix_container_paths() {
+        // The sandbox is a Linux container, so its paths are `/`-separated no
+        // matter which separator the host used to build the input path.
+        let workspace = PathBuf::from("ws");
+        let input = workspace.join("corpus").join("c");
+        assert_eq!(
+            super::container_input_path(&workspace, &input),
+            "/work/corpus/c"
+        );
+    }
+
+    #[test]
+    fn foreign_paths_fall_back_to_out_by_filename() {
+        let workspace = PathBuf::from("ws");
+        let foreign = PathBuf::from("elsewhere").join("crash-abc");
+        assert_eq!(
+            super::container_input_path(&workspace, &foreign),
+            "/work/out/crash-abc"
+        );
+    }
 }
 
 #[cfg(test)]

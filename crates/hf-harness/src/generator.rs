@@ -605,7 +605,10 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         .map(Path::to_path_buf)
         .or_else(|| harness.build_cmd.output.file_name().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("fuzz_target"));
-    let binary = format!("/work/{}", binary_relative.display());
+    let binary = format!(
+        "/work/{}",
+        hf_core::runtime::posix_relative(&binary_relative)
+    );
 
     // Every engine writes crash artifacts into the canonical `out` directory
     // so the subsequent Triage action can ingest the exact smoke findings.
@@ -616,8 +619,14 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     // AFL++/honggfuzz drive the binary through their own fuzzer process, which
     // also needs an input directory on the mounted workspace. Create it (and
     // an AFL++ seed, which the driver requires) before launching.
-    let corpus_container = format!("/work/{}", corpus_relative.display());
-    let out_container = format!("/work/{}", output_relative.display());
+    let corpus_container = format!(
+        "/work/{}",
+        hf_core::runtime::posix_relative(corpus_relative)
+    );
+    let out_container = format!(
+        "/work/{}",
+        hf_core::runtime::posix_relative(output_relative)
+    );
     let corpus_dir = ensure_regular_directory(workspace, corpus_relative, "corpus")?;
     if matches!(
         harness.engine,

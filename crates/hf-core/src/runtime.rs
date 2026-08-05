@@ -168,6 +168,20 @@ impl SandboxCapability {
     }
 }
 
+/// Render a relative host path with `/` separators for use inside the sandbox.
+///
+/// Container paths are POSIX no matter what the host is; `Path::display` keeps
+/// `\` on Windows, which the Linux container reads as part of a file name
+/// rather than as a separator. Callers compose the result onto a container
+/// mount point (for example `/work`), so `path` must already be relative.
+#[must_use]
+pub fn posix_relative(path: &std::path::Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 impl SandboxMount {
     /// Construct a writable bind mount.
     #[must_use]
@@ -359,7 +373,16 @@ pub trait RuntimeAdapter: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandResult, CommandTermination, ImmutableImageReference};
+    use super::{posix_relative, CommandResult, CommandTermination, ImmutableImageReference};
+
+    #[test]
+    fn posix_relative_joins_components_with_forward_slashes() {
+        // Built with Path::join so the host's native separator is exercised:
+        // on Windows this is `corpus\c` and must still render as `corpus/c`.
+        let path = std::path::PathBuf::from("corpus").join("c");
+        assert_eq!(posix_relative(&path), "corpus/c");
+        assert_eq!(posix_relative(std::path::Path::new("single")), "single");
+    }
 
     #[test]
     fn command_result_requires_an_explicit_terminal_outcome() {
