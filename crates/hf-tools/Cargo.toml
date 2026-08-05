@@ -22,7 +22,7 @@ globset = { workspace = true }
 grep-searcher = { workspace = true }
 grep-regex = { workspace = true }
 grep-matcher = { workspace = true }
-chardetng = "0.1"
+chardetng = "1.0"
 encoding_rs = "0.8"
 
 [dev-dependencies]
