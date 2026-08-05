@@ -1,12 +1,12 @@
 {
   "name": "hf-gui",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Desktop and web frontend for oxfuzz, the Rust-first AI fuzzing agent.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HenryCooper86/oxfuzz.git",
+    "url": "git+https://github.com/HenryCooper86/-oxfuzz.git",
     "directory": "crates/hf-gui"
   },
   "type": "module",

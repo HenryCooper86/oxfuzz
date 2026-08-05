@@ -2,7 +2,7 @@
 
 **English** &middot; [中文](README.zh.md)
 
-[![CI](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryCooper86/oxfuzz/actions/workflows/ci.yml)
+[![CI](https://github.com/HenryCooper86/-oxfuzz/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryCooper86/-oxfuzz/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.94](https://img.shields.io/badge/Rust-1.94-orange.svg)](rust-toolchain.toml)
 
