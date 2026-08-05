@@ -29,7 +29,9 @@ use super::staging::{
     qualification_evidence, resolve_run_sandbox_image, retain_run_context, run_context_digests,
     stage_run_artifacts, verify_run_artifacts,
 };
-use super::workspace::{prepare_configured_workspace_root, workspace_dir};
+use super::workspace::{
+    prepare_configured_workspace_root, workspace_dir, workspace_relative_record,
+};
 use super::{
     heuristic_draft, require_fuzzing_harness_engine, resolve_internal_run, CompileOutcome,
     HarnessGenOutcome, LlmProviderBridge, SeedEntry, ServiceContainer, SMOKE_FUZZ_SECS,
@@ -535,7 +537,7 @@ impl ServiceContainer {
         smoke_record.status = RunStatus::Running;
         smoke_record.harness_rev = Some(artifacts.source_sha256.clone());
         smoke_record.binary_rev = Some(artifacts.binary_sha256.clone());
-        smoke_record.evidence_dir = Some(artifacts.output_relative.to_string_lossy().into_owned());
+        smoke_record.evidence_dir = Some(workspace_relative_record(&artifacts.output_relative));
         if let Err(error) = store.insert_run(&smoke_record).await {
             if let Some(run_root) = artifacts.output_host.parent() {
                 let _ = std::fs::remove_dir_all(run_root);
