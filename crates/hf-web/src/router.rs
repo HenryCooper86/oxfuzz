@@ -653,7 +653,11 @@ async fn health() -> StatusCode {
 }
 
 async fn semgrep_available() -> Json<bool> {
-    Json(cfg!(feature = "semgrep-enrichment"))
+    // The Semgrep journal needs descriptor-relative advisory locks and fails
+    // closed as Unsupported off unix, so the capability is only real where
+    // both the feature and the platform support it. Reporting the feature flag
+    // alone would advertise an operation Windows hosts can never complete.
+    Json(cfg!(all(feature = "semgrep-enrichment", unix)))
 }
 
 #[cfg(feature = "semgrep-enrichment")]

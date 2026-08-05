@@ -221,7 +221,11 @@ pub(crate) fn parse_location(crashline: &str) -> Option<(String, u32)> {
 /// valid SARIF uri and would not anchor.
 fn sarif_uri(raw: &str, project_root: &std::path::Path) -> String {
     let path = std::path::Path::new(raw);
-    if !path.is_absolute() {
+    // Crash input paths and CASR crashlines originate in the Linux sandbox,
+    // so absoluteness is judged by POSIX rules on every host first: std::path
+    // alone would answer for the host and let `/home/builder/...` through the
+    // relative branch on Windows. Host-absolute paths still count as absolute.
+    if !raw.starts_with('/') && !path.is_absolute() {
         return hf_core::runtime::posix_relative(path);
     }
     match path.strip_prefix(project_root) {
