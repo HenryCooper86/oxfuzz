@@ -2517,6 +2517,16 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        fn parallel_safe_dispatch(&self) -> (tracing::Dispatch, tracing::Dispatch) {
+            let dispatch = tracing::Dispatch::new(self.clone());
+            // Tracing callsite interest is process-global. Keeping a second
+            // scoped dispatcher alive makes callsites first reached by another
+            // test thread use the dispatcher registry instead of that thread's
+            // local default, so this capture cannot silently miss the event.
+            let callsite_registration_anchor = tracing::Dispatch::new(Self::default());
+            (dispatch, callsite_registration_anchor)
+        }
     }
 
     #[derive(Default)]
@@ -2598,7 +2608,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn lifecycle_and_recovery_events_include_required_structured_fields() {
         let capture = EventCapture::default();
-        let dispatch = tracing::Dispatch::new(capture.clone());
+        let (dispatch, _callsite_registration_anchor) = capture.parallel_safe_dispatch();
         let _guard = tracing::dispatcher::set_default(&dispatch);
 
         let (success_manager, success_persistence) =
@@ -4014,7 +4024,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn renewal_failure_after_dispatch_leaves_running_receipt_for_recovery() {
         let capture = EventCapture::default();
-        let dispatch = tracing::Dispatch::new(capture.clone());
+        let (dispatch, _callsite_registration_anchor) = capture.parallel_safe_dispatch();
         let _guard = tracing::dispatcher::set_default(&dispatch);
         let (manager, persistence) = manager_and_persistence(OccurrenceFailure::Renew).await;
         let dispatcher = Arc::new(BlockingDispatcher::new());
