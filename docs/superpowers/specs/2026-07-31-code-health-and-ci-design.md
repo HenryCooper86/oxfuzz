@@ -40,13 +40,12 @@ Tauri APIs.
 
 1. Continuous integration runs on Linux only. Cross-platform coverage stays
    with `release.yml`, which already builds all four platform bundles on tag.
-1a. Two pipelines exist, because two hosts matter. `origin` is
-   `git@gitlab-ce.orb.local:hobot/oxfuzz.git`, so `.gitlab-ci.yml` is the gate
-   for merges that happen today; `.github/workflows/ci.yml` is the gate for the
-   public repository the project is being open-sourced to. Both invoke gates by
-   name from `scripts/tests/gates.sh`, so the duplication is a job list, not a
-   command list. This decision replaced a GitHub-only design that would have
-   gated nothing on the only remote that exists.
+1a. Two pipelines exist, because two hosts matter. A private GitLab mirror such
+   as `git@gitlab.example.com:group/oxfuzz.git` uses `.gitlab-ci.yml` as its
+   merge gate; `.github/workflows/ci.yml` gates the public repository. Both
+   invoke gates by name from `scripts/tests/gates.sh`, so the duplication is a
+   job list, not a command list. This decision replaced a GitHub-only design
+   that would not have gated the development mirror.
 2. All gates defined by `scripts/tests/gates.sh` run in continuous integration.
    None are dropped for speed. The existing eight are joined by a ninth,
    `script-tests`, covering the repository's Python script tests.

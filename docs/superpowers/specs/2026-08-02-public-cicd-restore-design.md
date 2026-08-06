@@ -40,8 +40,8 @@ modernizes pinned action versions, resolves the "no runner" blocker for GitLab
 via OrbStack, and adds the open-source hygiene files.
 
 Repository identities (confirmed): public GitHub is `HenryCooper86/oxfuzz`
-(`Cargo.toml` `repository` plus seven code/doc references); the current `origin`
-is the internal `git@gitlab-ce.orb.local:hobot/oxfuzz.git`.
+(`Cargo.toml` `repository` plus seven code/doc references); a private development
+mirror is represented here as `git@gitlab.example.com:group/oxfuzz.git`.
 
 ## 3. Approved product decisions
 
