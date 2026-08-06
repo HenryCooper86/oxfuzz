@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HenryCooper86/-oxfuzz.git",
+    "url": "git+https://github.com/HenryCooper86/oxfuzz.git",
     "directory": "crates/hf-gui"
   },
   "type": "module",

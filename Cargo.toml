@@ -33,7 +33,7 @@ members = [
 version = "0.1.2"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/HenryCooper86/-oxfuzz"
+repository = "https://github.com/HenryCooper86/oxfuzz"
 
 [workspace.dependencies]
 # Async runtime

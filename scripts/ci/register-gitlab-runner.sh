@@ -19,12 +19,12 @@
 #
 # Usage:
 #   GITLAB_RUNNER_TOKEN=glrt-xxxx scripts/ci/register-gitlab-runner.sh
-#   scripts/ci/register-gitlab-runner.sh --token glrt-xxxx --url http://gitlab-ce.orb.local
+#   scripts/ci/register-gitlab-runner.sh --token glrt-xxxx --url https://gitlab.example.com
 #
 # See docs/guides/CI.md for the full walkthrough, including OrbStack DNS notes.
 set -euo pipefail
 
-URL="${GITLAB_URL:-http://gitlab-ce.orb.local}"
+URL="${GITLAB_URL:-https://gitlab.example.com}"
 TOKEN="${GITLAB_RUNNER_TOKEN:-}"
 REGISTRATION_TOKEN=""
 NAME="${RUNNER_NAME:-oxfuzz-gitlab-runner}"

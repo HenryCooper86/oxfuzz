@@ -63,7 +63,8 @@ crates/hf-gui/dist-web/
 .opencode/
 .worktrees/
 .turbo/
-.superdesign/tmp/
+.superdesign/
+docs/superpowers/plans/
 
 ### Fuzzing runtime artifacts
 corpus/

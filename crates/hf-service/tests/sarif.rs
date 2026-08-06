@@ -91,7 +91,7 @@ fn sarif_document_is_well_formed() {
     assert_eq!(doc["runs"][0]["tool"]["driver"]["version"], "9.9.9");
     assert_eq!(
         doc["runs"][0]["tool"]["driver"]["informationUri"],
-        "https://github.com/HenryCooper86/-oxfuzz"
+        "https://github.com/HenryCooper86/oxfuzz"
     );
     let results = doc["runs"][0]["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
