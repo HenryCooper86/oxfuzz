@@ -1,6 +1,6 @@
 //! Integration tests for the `SQLite` [`Store`].
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration as StdDuration};
 
 use chrono::{Duration, SubsecRound, Utc};
 use hf_core::corpus::{CorpusEntry, CorpusSource};
@@ -1343,6 +1343,45 @@ async fn concurrent_appends_get_distinct_seqs() {
         seqs,
         (0..20).collect::<Vec<i64>>(),
         "seqs must be distinct 0..20"
+    );
+}
+
+#[tokio::test]
+async fn append_message_waits_for_transient_write_contention() {
+    let (store, _dir) = temp_store().await;
+    let session = store.create_session(None, Utc::now()).await.unwrap();
+
+    // Keep two physical connections ready so the append immediately contends
+    // with the write transaction instead of waiting for pool setup.
+    let mut blocker = store.pool().acquire().await.unwrap();
+    let ready = store.pool().acquire().await.unwrap();
+    drop(ready);
+
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let append_store = store.clone();
+    let append = tokio::spawn(async move {
+        append_store
+            .append_message(session, "user", "after contention", Utc::now())
+            .await
+    });
+
+    tokio::time::sleep(StdDuration::from_secs(6)).await;
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    append
+        .await
+        .unwrap()
+        .expect("a transient write lock must not lose the message");
+    assert_eq!(
+        store.session_history(session).await.unwrap(),
+        vec![("user".to_owned(), "after contention".to_owned())]
     );
 }
 

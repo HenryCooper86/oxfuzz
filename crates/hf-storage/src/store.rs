@@ -1,6 +1,6 @@
 //! The SQLite-backed [`Store`] and its repository methods.
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -19,6 +19,8 @@ use hf_core::target::{TargetCandidate, TargetInventory};
 
 /// Default database path used when `HF_DB_PATH` is unset.
 const DEFAULT_DB_PATH: &str = "data/oxfuzz.db";
+/// Maximum time a connection waits for another `SQLite` writer to finish.
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors raised by the storage layer.
 #[derive(Debug, Error)]
@@ -476,7 +478,8 @@ impl Store {
         }
         let opts = SqliteConnectOptions::new()
             .filename(path)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .busy_timeout(SQLITE_BUSY_TIMEOUT);
         Self::connect_with(opts).await
     }
 
