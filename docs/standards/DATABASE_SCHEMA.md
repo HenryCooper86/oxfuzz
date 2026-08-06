@@ -7,7 +7,10 @@ Status: **implemented**. Scope: `hf-storage` and `hf-diagnostics`.
 SQLite is embedded through `sqlx`. `Store::connect` uses `HF_DB_PATH` when
 configured and otherwise opens `data/oxfuzz.db`. It creates the parent
 directory and database when needed, then applies the forward-only migrations
-in `crates/hf-storage/migrations/`.
+in `crates/hf-storage/migrations/`. Connections wait up to 30 seconds for a
+transient SQLite writer to finish before returning `SQLITE_BUSY`; the bound
+prevents concurrent storage operations from failing under short-lived write
+contention while still surfacing a persistently locked database.
 
 The migrations are the schema source of truth. Applied migration files are
 immutable because `sqlx` records their checksums. Schema changes therefore use
