@@ -47,11 +47,10 @@ the current major before changing a pin rather than trusting the value in git.
 
 ## GitLab CI on an OrbStack runner
 
-`.gitlab-ci.yml` gates the current origin
-(`git@gitlab-ce.orb.local:hobot/oxfuzz.git`). Its jobs use the Docker executor,
-so they sit pending until a runner is registered. This is the "no runners
-available" gap that caused the pipeline to be removed originally; register a
-runner once to close it.
+`.gitlab-ci.yml` can gate a private GitLab mirror such as
+`git@gitlab.example.com:group/oxfuzz.git`. Its jobs use the Docker executor, so
+they sit pending until a runner is registered. Register a runner once to close
+that gap.
 
 The runner is itself an OrbStack Docker container. Register it with the helper:
 
@@ -70,7 +69,7 @@ are supported with `--registration-token`.
 
 Notes for the OrbStack setup:
 
-- The runner container must resolve and reach `gitlab-ce.orb.local`. If DNS
+- The runner container must resolve and reach `gitlab.example.com`. If DNS
   resolution fails from inside the container, pass the instance's reachable URL
   with `--url`, or attach the runner to the same Docker network as the GitLab
   container.
