@@ -27,7 +27,7 @@ cargo build --release
 ### Download a prebuilt app
 
 Prebuilt installers for each release are attached to the
-**[Releases page](https://github.com/HenryCooper86/-oxfuzz/releases)**:
+**[Releases page](https://github.com/HenryCooper86/oxfuzz/releases)**:
 
 | Platform | File |
 | --- | --- |
