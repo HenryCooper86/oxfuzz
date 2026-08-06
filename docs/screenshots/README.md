@@ -4,7 +4,7 @@ These images are the product evidence rendered by the top-level `README.md`.
 Keep the filenames, content, and descriptions synchronized with the current
 desktop app.
 
-## Status: seven of eight captured 2026-07-23
+## Status: seven of eight captured 2026-07-23, sanitized 2026-08-06
 
 The 2026-07-16 set was removed before the public release: four images leaked an
 absolute path containing a developer username and the retired `hobot_fuzz`
@@ -14,6 +14,11 @@ sidebar-only branding (4de6c9a), and the header typography fix (225e90a).
 The current set was recaptured on 2026-07-23 from the native macOS app at
 1326 x 768, using the retained `honggfuzz_magic` campaign rather than starting a
 new one, per requirement 4 below.
+
+On 2026-08-06, four displayed home-directory paths were replaced with the
+neutral demonstration path `/workspace/oxfuzz-demo`, and an unrelated overlay
+was removed from the top-right corner of `artifacts.png`. The campaign evidence,
+application state, and all other screenshot regions were preserved.
 
 **`automotive.png` is still missing.** The Automotive destination sits below the
 sidebar fold and was not reached in that session. `README.md` therefore renders

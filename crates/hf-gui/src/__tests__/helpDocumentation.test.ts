@@ -46,7 +46,7 @@ describe("in-app documentation", () => {
     // The public repository is the only repository an external user can reach.
     // Pin the host positively rather than denying a specific one: this fails for
     // any non-github.com URL, and avoids naming a private host in a public repo.
-    expect(projectLinks).toContain("https://github.com/HenryCooper86/-oxfuzz");
+    expect(projectLinks).toContain("https://github.com/HenryCooper86/oxfuzz");
     expect(projectLinks).toMatch(
       /PROJECT_REPOSITORY_URL = "https:\/\/github\.com\//,
     );
