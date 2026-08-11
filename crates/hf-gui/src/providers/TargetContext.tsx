@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProject } from "./project";
+import { projectStorageKey } from "../lib/projectState";
 import {
   DEFAULT_TARGET_STATE,
   TargetContext,
@@ -60,7 +61,7 @@ function firstSelectionRepair(selections: PersistedTargetSelections): TargetSele
 
 export function TargetProvider({ children }: { children: React.ReactNode }) {
   const { activeProject, recentProjects } = useProject();
-  const key = activeProject || "__none__";
+  const key = projectStorageKey(activeProject);
   const [loaded] = useState<LoadedSelection>(loadSelection);
   const [selections, setSelections] = useState<PersistedTargetSelections>(loaded.selections);
   const [storageError, setStorageError] = useState<TargetStorageError | null>(loaded.storageError);
@@ -162,14 +163,23 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
   const setCompiled = useCallback((compiled: boolean) => patch({ compiled }), [patch]);
   const reset = useCallback(() => {
     const previous = prunePersistedTargetSelections(selectionsRef.current, recentProjects);
-    if (!previous.globalRepair) return;
-    commit(emptySelection(), previous);
-  }, [commit, recentProjects]);
+    const result = persist(emptySelection());
+    if (result === "saved") replaceState(emptySelection(), null);
+    else replaceState(previous, { operation: "write" });
+  }, [persist, recentProjects, replaceState]);
   const retryStorage = useCallback(() => {
-    if (storageErrorRef.current?.operation !== "read") return;
-    const reloaded = loadSelection();
-    replaceState(reloaded.selections, reloaded.storageError);
-  }, [replaceState]);
+    const operation = storageErrorRef.current?.operation;
+    if (operation === "read") {
+      const reloaded = loadSelection();
+      replaceState(reloaded.selections, reloaded.storageError);
+      return;
+    }
+    if (operation !== "write") return;
+    const currentSelections = prunePersistedTargetSelections(selectionsRef.current, recentProjects);
+    const result = persist(currentSelections);
+    if (result === "saved") replaceState(currentSelections, null);
+    else replaceState(currentSelections, { operation: "write" });
+  }, [persist, recentProjects, replaceState]);
   const value = useMemo(
     () => ({ ...current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled, reset, retryStorage }),
     [current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled, reset, retryStorage],
