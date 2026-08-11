@@ -51,7 +51,11 @@ function AppProviders({
 }) {
   const [activeProject, setActiveProject] = useState(initialProject);
   return (
-    <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
+    <I18nContext.Provider value={{
+      locale: "en",
+      setLocale: () => undefined,
+      t: (key, params) => params?.project ? `${key}:${params.project}` : key,
+    }}>
       <ProjectContext.Provider value={{
         activeProject,
         recentProjects,
@@ -83,14 +87,17 @@ function TargetProbe({ switchProject }: { switchProject?: string }) {
   const blocked = Boolean(target.selectionRepair || target.storageError);
   return (
     <div>
-      <output data-repair>{target.selectionRepair?.kind ?? "none"}</output>
+      <output data-repair>{target.selectionRepair?.issue.kind ?? "none"}</output>
+      <output data-repair-project>{target.selectionRepair?.projectKey ?? "none"}</output>
       <output data-storage>{target.storageError?.operation ?? "none"}</output>
       <output data-blocked>{String(blocked)}</output>
+      <output data-engine>{target.engine}</output>
       <button type="button" onClick={() => target.setEngine("afl++")}>replace engine</button>
       <button type="button" onClick={() => target.setLang("rust")}>change language</button>
       {switchProject && (
         <button type="button" onClick={() => setActiveProject(switchProject)}>switch project</button>
       )}
+      <button type="button" onClick={target.retryStorage}>retry storage</button>
     </div>
   );
 }
@@ -246,6 +253,10 @@ describe("TargetProvider durable repair boundary", () => {
     expect(selectionStatus(view.container, "storage")).toBe("read");
     expect(selectionStatus(view.container, "blocked")).toBe("true");
     expect(view.container.querySelector("[role=alert]")?.textContent).toBe("targetSelection.storageReadError");
+    expect(view.container.querySelector("#target-selection-replacement-engine")).toBeNull();
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.retryStorage"),
+    )).toBe(true);
     expect(invokedMutatingCommands()).toEqual([]);
   });
 
@@ -399,12 +410,12 @@ describe("TargetProvider durable repair boundary", () => {
     mounted.push(view);
 
     await act(async () => {
-      view.container.querySelectorAll("button")[0]?.click();
+      [...view.container.querySelectorAll("button")].find((button) => button.textContent === "retry storage")?.click();
     });
 
     expect(selectionStatus(view.container, "blocked")).toBe("false");
     expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({
-      [PROJECT]: selection("afl++"),
+      [PROJECT]: selection("libfuzzer"),
       [PROJECT_B]: selection("honggfuzz", "parse_other"),
     });
   });
@@ -434,7 +445,7 @@ describe("TargetProvider durable repair boundary", () => {
     mounted.push(view);
 
     await act(async () => {
-      view.container.querySelectorAll("button")[0]?.click();
+      [...view.container.querySelectorAll("button")].find((button) => button.textContent === "retry storage")?.click();
     });
 
     expect(selectionStatus(view.container, "repair")).toBe(expectedRepair);
@@ -451,7 +462,7 @@ describe("TargetProvider durable repair boundary", () => {
     mounted.push(view);
 
     await act(async () => {
-      view.container.querySelectorAll("button")[0]?.click();
+      [...view.container.querySelectorAll("button")].find((button) => button.textContent === "retry storage")?.click();
     });
 
     expect(selectionStatus(view.container, "storage")).toBe("read");
@@ -460,6 +471,97 @@ describe("TargetProvider durable repair boundary", () => {
 });
 
 describe("Harness repair interactions", () => {
+  it("does not let a programmatic active-project repair change an inactive repair owner", async () => {
+    const raw = JSON.stringify({
+      [PROJECT]: selection("honggfuzz"),
+      [PROJECT_B]: selection(RETIRED_SHORT_ALIAS, "parse_other"),
+    });
+    window.localStorage.setItem(STORAGE_KEY, raw);
+    const view = await mount(<TargetProbe switchProject={PROJECT_B} />, {
+      initialProject: PROJECT,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+
+    expect(view.container.querySelector("[data-repair-project]")?.textContent).toBe(PROJECT_B);
+
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+
+    expect(view.container.querySelector("[data-engine]")?.textContent).toBe("honggfuzz");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(raw);
+
+    await act(async () => {
+      view.container.querySelectorAll("button")[2]?.click();
+    });
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({
+      [PROJECT]: selection("honggfuzz"),
+      [PROJECT_B]: selection("afl++", "parse_other"),
+    });
+  });
+
+  it("projects the deterministic first repair when another repaired project is active", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      [PROJECT]: selection(RETIRED_CANONICAL),
+      [PROJECT_B]: selection(RETIRED_SHORT_ALIAS, "parse_other"),
+    }));
+    const view = await mount(<TargetProbe />, {
+      initialProject: PROJECT_B,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+
+    expect(view.container.querySelector("[data-repair-project]")?.textContent).toBe(PROJECT);
+  });
+
+  it("identifies an inactive repair owner and offers a switch instead of a replacement selector", async () => {
+    configureHarnessTransport();
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      [PROJECT]: selection("honggfuzz"),
+      [PROJECT_B]: selection(RETIRED_SHORT_ALIAS, "parse_other"),
+    }));
+    const view = await mount(<HarnessView />, {
+      initialProject: PROJECT,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+    await flushEffects();
+
+    expect(view.container.textContent).toContain(PROJECT_B);
+    expect(view.container.querySelector("#target-selection-replacement-engine")).toBeNull();
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.switchProject"),
+    )).toBe(true);
+
+    await act(async () => {
+      [...view.container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("targetSelection.switchProject"))?.click();
+    });
+    await chooseOption(selectTrigger(view.container, "targetSelection.replacementEngine"), "AFL++");
+
+    const persistedSelection = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}");
+    expect(persistedSelection[PROJECT].engine).toBe("honggfuzz");
+    expect(persistedSelection[PROJECT_B].engine).toBe("afl++");
+  });
+
+  it("offers reset or retry instead of engine replacement for global repairs", async () => {
+    configureHarnessTransport();
+    window.localStorage.setItem(STORAGE_KEY, "{");
+    const view = await mount(<HarnessView />);
+    mounted.push(view);
+    await flushEffects();
+
+    expect(view.container.querySelector("#target-selection-replacement-engine")).toBeNull();
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.reset"),
+    )).toBe(true);
+  });
+
   it("stages two project repairs until the final synchronous write succeeds", async () => {
     const raw = JSON.stringify({
       [PROJECT]: selection(RETIRED_CANONICAL),

@@ -1,26 +1,26 @@
 import { FUZZING_ENGINE_OPTIONS, type FuzzingEngineId } from "../lib/fuzzingSettings";
 import { pruneToKeys } from "../lib/projectState";
 import { isRetiredEngineValue, retiredEngineDiagnostic } from "../lib/retiredEngine";
-import { DEFAULT_TARGET_STATE, type TargetSelectionRepair, type TargetState } from "./target";
+import { DEFAULT_TARGET_STATE, type TargetSelectionIssue, type TargetState } from "./target";
 
 const ACTIVE_ENGINE_IDS = new Set<string>(FUZZING_ENGINE_OPTIONS.map((option) => option.value));
 const TARGET_LANGUAGES = new Set(["c", "cpp", "rust", "go", "python"]);
 
 export interface TargetSelectionEntry {
   state: TargetState;
-  repair: TargetSelectionRepair | null;
+  repair: TargetSelectionIssue | null;
 }
 
 export interface PersistedTargetSelections {
   entries: Record<string, TargetSelectionEntry>;
-  globalRepair: TargetSelectionRepair | null;
+  globalRepair: TargetSelectionIssue | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function invalidEntry(reason: Extract<TargetSelectionRepair, { kind: "invalid_selection" }>["reason"]): TargetSelectionEntry {
+function invalidEntry(reason: Extract<TargetSelectionIssue, { kind: "invalid_selection" }>["reason"]): TargetSelectionEntry {
   return { state: { ...DEFAULT_TARGET_STATE }, repair: { kind: "invalid_selection", reason } };
 }
 

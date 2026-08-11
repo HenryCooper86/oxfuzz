@@ -16,7 +16,7 @@ const RETIRED_ERROR =
 function targetValue(selectionRepair: TargetContextValue["selectionRepair"]): TargetContextValue {
   return {
     target: "parse_input",
-    engine: selectionRepair?.kind === "retired_engine" ? selectionRepair.value : "unknown-engine",
+    engine: selectionRepair?.issue.kind === "retired_engine" ? selectionRepair.issue.value : "unknown-engine",
     lang: "c",
     compiled: false,
     selectionRepair,
@@ -25,6 +25,8 @@ function targetValue(selectionRepair: TargetContextValue["selectionRepair"]): Ta
     setEngine: () => undefined,
     setLang: () => undefined,
     setCompiled: () => undefined,
+    reset: () => undefined,
+    retryStorage: () => undefined,
   };
 }
 
@@ -32,7 +34,10 @@ function renderWithRepair(
   view: React.ReactNode,
   runFuzzer = vi.fn(),
   runSyzkaller = vi.fn(),
-  selectionRepair: TargetContextValue["selectionRepair"] = { kind: "retired_engine", value: RETIRED_ENGINE },
+  selectionRepair: TargetContextValue["selectionRepair"] = {
+    projectKey: "/workspace/example",
+    issue: { kind: "retired_engine", value: RETIRED_ENGINE },
+  },
 ) {
   const html = renderToStaticMarkup(
     <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
@@ -108,12 +113,27 @@ describe("retired persisted target selection repair", () => {
       <RunView />,
       runFuzzer,
       runSyzkaller,
-      { kind: "invalid_selection", reason: "malformed_payload" },
+      { projectKey: "/workspace/example", issue: { kind: "invalid_selection", reason: "malformed_payload" } },
     );
 
     expect(alertText(html)).toBe("targetSelection.invalid");
     expect(html).toContain("targetSelection.replacementEngine");
     expect(html).not.toContain("targetSelection.reset");
+    expect(html).toMatch(/<button disabled=""[^>]*>[\s\S]*?run\.runFuzzer<\/button>/);
+    expect(runFuzzer).not.toHaveBeenCalled();
+    expect(runSyzkaller).not.toHaveBeenCalled();
+  });
+
+  it("keeps global malformed repair reset-only in Run", () => {
+    const { html, runFuzzer, runSyzkaller } = renderWithRepair(
+      <RunView />,
+      undefined,
+      undefined,
+      { projectKey: null, issue: { kind: "invalid_selection", reason: "malformed_payload" } },
+    );
+
+    expect(html).not.toContain('id="target-selection-replacement-engine"');
+    expect(html).toContain("targetSelection.reset");
     expect(html).toMatch(/<button disabled=""[^>]*>[\s\S]*?run\.runFuzzer<\/button>/);
     expect(runFuzzer).not.toHaveBeenCalled();
     expect(runSyzkaller).not.toHaveBeenCalled();

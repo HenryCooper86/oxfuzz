@@ -4,6 +4,7 @@ import {
   DEFAULT_TARGET_STATE,
   TargetContext,
   type TargetSelectionRepair,
+  type TargetSelectionIssue,
   type TargetStorageError,
   type TargetState,
 } from "./target";
@@ -44,10 +45,17 @@ function loadSelection(): LoadedSelection {
   }
 }
 
+function ownedRepair(projectKey: string | null, issue: TargetSelectionIssue): TargetSelectionRepair {
+  return { projectKey, issue };
+}
+
 function firstSelectionRepair(selections: PersistedTargetSelections): TargetSelectionRepair | null {
-  return selections.globalRepair
-    ?? Object.values(selections.entries).find((entry) => entry.repair !== null)?.repair
-    ?? null;
+  if (selections.globalRepair) return ownedRepair(null, selections.globalRepair);
+  for (const projectKey of Object.keys(selections.entries).sort()) {
+    const issue = selections.entries[projectKey].repair;
+    if (issue) return ownedRepair(projectKey, issue);
+  }
+  return null;
 }
 
 export function TargetProvider({ children }: { children: React.ReactNode }) {
@@ -60,9 +68,7 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
   const storageErrorRef = useRef(storageError);
   const retainedSelections = prunePersistedTargetSelections(selections, recentProjects);
   const current = retainedSelections.entries[key] ?? { state: DEFAULT_TARGET_STATE, repair: null };
-  const selectionRepair = retainedSelections.globalRepair
-    ?? current.repair
-    ?? firstSelectionRepair(retainedSelections);
+  const selectionRepair = firstSelectionRepair(retainedSelections);
 
   const replaceState = useCallback((next: PersistedTargetSelections, nextStorageError: TargetStorageError | null) => {
     selectionsRef.current = next;
@@ -82,13 +88,18 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
     }
   }, [recentProjects]);
 
-  const commit = useCallback((next: PersistedTargetSelections, writeFailureState = selectionsRef.current): PersistResult => {
+  const commit = useCallback((
+    next: PersistedTargetSelections,
+    writeFailureState = selectionsRef.current,
+    replacementOwner?: string | null,
+  ): PersistResult => {
+    if (replacementOwner !== undefined && replacementOwner !== key) return "blocked";
     const result = persist(next);
     if (result === "saved") replaceState(next, null);
     else if (result === "blocked") replaceState(next, null);
     else replaceState(writeFailureState, { operation: "write" });
     return result;
-  }, [persist, replaceState]);
+  }, [key, persist, replaceState]);
 
   useEffect(() => {
     const currentSelections = selectionsRef.current;
@@ -133,15 +144,10 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
   const setTarget = useCallback((target: string) => patch({ target }), [patch]);
   const setEngine = useCallback((engine: string) => {
     if (!isActiveEngineId(engine)) return;
-    const reloaded = storageErrorRef.current?.operation === "read" ? loadSelection() : null;
-    if (reloaded?.storageError) {
-      replaceState(selectionsRef.current, reloaded.storageError);
-      return;
-    }
-    const previous = prunePersistedTargetSelections(
-      reloaded?.selections ?? selectionsRef.current,
-      recentProjects,
-    );
+    if (storageErrorRef.current?.operation === "read") return;
+    const previous = prunePersistedTargetSelections(selectionsRef.current, recentProjects);
+    const repair = firstSelectionRepair(previous);
+    if (repair && repair.projectKey !== key) return;
     const entry = previous.entries[key] ?? { state: DEFAULT_TARGET_STATE, repair: null };
     const next = {
       entries: {
@@ -150,13 +156,23 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
       },
       globalRepair: null,
     };
-    commit(next, previous);
-  }, [commit, key, recentProjects, replaceState]);
+    commit(next, previous, repair?.projectKey);
+  }, [commit, key, recentProjects]);
   const setLang = useCallback((lang: string) => patch({ lang }), [patch]);
   const setCompiled = useCallback((compiled: boolean) => patch({ compiled }), [patch]);
+  const reset = useCallback(() => {
+    const previous = prunePersistedTargetSelections(selectionsRef.current, recentProjects);
+    if (!previous.globalRepair) return;
+    commit(emptySelection(), previous);
+  }, [commit, recentProjects]);
+  const retryStorage = useCallback(() => {
+    if (storageErrorRef.current?.operation !== "read") return;
+    const reloaded = loadSelection();
+    replaceState(reloaded.selections, reloaded.storageError);
+  }, [replaceState]);
   const value = useMemo(
-    () => ({ ...current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled }),
-    [current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled],
+    () => ({ ...current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled, reset, retryStorage }),
+    [current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled, reset, retryStorage],
   );
 
   return <TargetContext.Provider value={value}>{children}</TargetContext.Provider>;
