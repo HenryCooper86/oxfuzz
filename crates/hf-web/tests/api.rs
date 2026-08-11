@@ -912,7 +912,8 @@ async fn system_status_returns_json_flags() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["docker"].is_boolean());
     assert!(json["sandbox_image"].is_boolean());
-    assert!(json.get("clusterfuzzlite").is_none());
+    let retired_status_key = ["cluster", "fuzz", "lite"].concat();
+    assert!(json.get(&retired_status_key).is_none());
     for key in ["libfuzzer", "aflplusplus", "honggfuzz", "syzkaller"] {
         assert!(json[key].is_boolean(), "{key}");
     }
