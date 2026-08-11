@@ -1,3 +1,7 @@
+-- SQLite's one-argument trim only removes ASCII space. Every identifier
+-- predicate below supplies the full Unicode White_Space set used by Rust
+-- str::trim so migration and runtime parsing agree.
+
 CREATE TABLE IF NOT EXISTS retired_engine_records (
     record_kind TEXT NOT NULL
         CHECK (record_kind IN (
@@ -58,10 +62,11 @@ SELECT
     ),
     24
 FROM runs
-WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+        IN ('clusterfuzzlite', 'cfl', 'cflite')
    OR CASE WHEN json_valid(config_json) THEN
         json_type(config_json, '$.engine') = 'text'
-        AND lower(trim(json_extract(config_json, '$.engine')))
+        AND lower(trim(json_extract(config_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
             IN ('clusterfuzzlite', 'cfl', 'cflite')
       ELSE 0 END;
 
@@ -82,10 +87,11 @@ SELECT
     ),
     24
 FROM harnesses
-WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+        IN ('clusterfuzzlite', 'cfl', 'cflite')
    OR CASE WHEN json_valid(data_json) THEN
         json_type(data_json, '$.engine') = 'text'
-        AND lower(trim(json_extract(data_json, '$.engine')))
+        AND lower(trim(json_extract(data_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
             IN ('clusterfuzzlite', 'cfl', 'cflite')
       ELSE 0 END;
 
@@ -108,10 +114,11 @@ FROM harness_approvals
 WHERE harness_id IN (
     SELECT id
     FROM harnesses
-    WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+    WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+            IN ('clusterfuzzlite', 'cfl', 'cflite')
        OR CASE WHEN json_valid(data_json) THEN
             json_type(data_json, '$.engine') = 'text'
-            AND lower(trim(json_extract(data_json, '$.engine')))
+            AND lower(trim(json_extract(data_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
                 IN ('clusterfuzzlite', 'cfl', 'cflite')
           ELSE 0 END
 );
@@ -138,10 +145,11 @@ FROM crashes
 WHERE run_id IN (
     SELECT id
     FROM runs
-    WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+    WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+            IN ('clusterfuzzlite', 'cfl', 'cflite')
        OR CASE WHEN json_valid(config_json) THEN
             json_type(config_json, '$.engine') = 'text'
-            AND lower(trim(json_extract(config_json, '$.engine')))
+            AND lower(trim(json_extract(config_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
                 IN ('clusterfuzzlite', 'cfl', 'cflite')
           ELSE 0 END
 );
@@ -166,7 +174,8 @@ WHERE CASE WHEN json_valid(data_json) THEN
     AND lower(trim(json_extract(
         data_json,
         '$.request_summary.parameter_values.engine'
-    ))) IN ('clusterfuzzlite', 'cfl', 'cflite')
+    ), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+        IN ('clusterfuzzlite', 'cfl', 'cflite')
 ELSE 0 END;
 
 INSERT INTO retired_engine_records
@@ -197,7 +206,8 @@ WHERE execution_id IN (
         AND lower(trim(json_extract(
             data_json,
             '$.request_summary.parameter_values.engine'
-        ))) IN ('clusterfuzzlite', 'cfl', 'cflite')
+        ), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+            IN ('clusterfuzzlite', 'cfl', 'cflite')
     ELSE 0 END
 );
 
@@ -210,7 +220,8 @@ WHERE execution_id IN (
         AND lower(trim(json_extract(
             data_json,
             '$.request_summary.parameter_values.engine'
-        ))) IN ('clusterfuzzlite', 'cfl', 'cflite')
+        ), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+            IN ('clusterfuzzlite', 'cfl', 'cflite')
     ELSE 0 END
 );
 
@@ -220,17 +231,19 @@ WHERE CASE WHEN json_valid(data_json) THEN
     AND lower(trim(json_extract(
         data_json,
         '$.request_summary.parameter_values.engine'
-    ))) IN ('clusterfuzzlite', 'cfl', 'cflite')
+    ), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+        IN ('clusterfuzzlite', 'cfl', 'cflite')
 ELSE 0 END;
 
 DELETE FROM harness_approvals
 WHERE harness_id IN (
     SELECT id
     FROM harnesses
-    WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+    WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+            IN ('clusterfuzzlite', 'cfl', 'cflite')
        OR CASE WHEN json_valid(data_json) THEN
             json_type(data_json, '$.engine') = 'text'
-            AND lower(trim(json_extract(data_json, '$.engine')))
+            AND lower(trim(json_extract(data_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
                 IN ('clusterfuzzlite', 'cfl', 'cflite')
           ELSE 0 END
 );
@@ -239,26 +252,29 @@ DELETE FROM crashes
 WHERE run_id IN (
     SELECT id
     FROM runs
-    WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+    WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+            IN ('clusterfuzzlite', 'cfl', 'cflite')
        OR CASE WHEN json_valid(config_json) THEN
             json_type(config_json, '$.engine') = 'text'
-            AND lower(trim(json_extract(config_json, '$.engine')))
+            AND lower(trim(json_extract(config_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
                 IN ('clusterfuzzlite', 'cfl', 'cflite')
           ELSE 0 END
 );
 
 DELETE FROM harnesses
-WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+        IN ('clusterfuzzlite', 'cfl', 'cflite')
    OR CASE WHEN json_valid(data_json) THEN
         json_type(data_json, '$.engine') = 'text'
-        AND lower(trim(json_extract(data_json, '$.engine')))
+        AND lower(trim(json_extract(data_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
             IN ('clusterfuzzlite', 'cfl', 'cflite')
       ELSE 0 END;
 
 DELETE FROM runs
-WHERE lower(trim(engine)) IN ('clusterfuzzlite', 'cfl', 'cflite')
+WHERE lower(trim(engine, char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
+        IN ('clusterfuzzlite', 'cfl', 'cflite')
    OR CASE WHEN json_valid(config_json) THEN
         json_type(config_json, '$.engine') = 'text'
-        AND lower(trim(json_extract(config_json, '$.engine')))
+        AND lower(trim(json_extract(config_json, '$.engine'), char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)))
             IN ('clusterfuzzlite', 'cfl', 'cflite')
       ELSE 0 END;
