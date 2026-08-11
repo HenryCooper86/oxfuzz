@@ -1429,6 +1429,102 @@ async fn proof_api_rejects_a_malformed_persisted_schema_even_if_checks_were_bypa
 }
 
 #[tokio::test]
+async fn proof_apis_reject_noncanonical_json_spelling_without_adopting_it() {
+    let mut adopted = Vec::new();
+    for (case, schedule_ids_json) in [
+        ("whitespace", r#"[ "schedule-a" ]"#),
+        ("alternate-escape", r#"["schedule-\u0061"]"#),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::connect(directory.path().join(format!("{case}-proof.db")))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO schedule_retirement_operations
+                (operation_id, plan_digest, schedule_ids_json)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(OPERATION_ID)
+        .bind(PLAN_DIGEST)
+        .bind(schedule_ids_json)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO schedule_retirement_schedule_ids
+                (schedule_id, operation_id, ordinal)
+             VALUES ('schedule-a', ?1, 0)",
+        )
+        .bind(OPERATION_ID)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let proof_reads = [
+            (
+                "presence",
+                store
+                    .has_schedule_retirement_history_proof()
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "proof",
+                store.schedule_retirement_history_proof().await.map(|_| ()),
+            ),
+            (
+                "tombstones",
+                store.schedule_retirement_tombstone_ids().await.map(|_| ()),
+            ),
+            (
+                "exact-proof",
+                store
+                    .schedule_retirement_history_proven(
+                        OPERATION_ID,
+                        PLAN_DIGEST,
+                        &["schedule-a".to_owned()],
+                    )
+                    .await
+                    .map(|_| ()),
+            ),
+        ];
+        for (read_name, read) in proof_reads {
+            if !matches!(read, Err(StorageError::InvalidData(_))) {
+                adopted.push(format!("{case}:{read_name}"));
+            }
+        }
+        let retry = store
+            .archive_schedule_history_for_retired_engine_operation(
+                OPERATION_ID,
+                PLAN_DIGEST,
+                &["schedule-a".to_owned()],
+            )
+            .await;
+        if !matches!(retry, Err(StorageError::InvalidData(_))) {
+            adopted.push(format!("{case}:operation-retry"));
+        }
+
+        let persisted: (String, String) = sqlx::query_as(
+            "SELECT operation.schedule_ids_json, tombstone.schedule_id
+             FROM schedule_retirement_operations AS operation
+             JOIN schedule_retirement_schedule_ids AS tombstone
+               ON tombstone.operation_id = operation.operation_id",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted,
+            (schedule_ids_json.to_owned(), "schedule-a".to_owned())
+        );
+    }
+    assert!(
+        adopted.is_empty(),
+        "noncanonical evidence adopted by {adopted:?}"
+    );
+}
+
+#[tokio::test]
 async fn migration_0024_archives_every_rust_trimmed_identifier_shape() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("whitespace-migration.db");

@@ -228,6 +228,11 @@ fn decode_proof_ids(schedule_ids_json: &str) -> Result<Vec<String>, StorageError
             "schedule-retirement proof IDs are not sorted and unique".to_owned(),
         ));
     }
+    if manifest.canonical_json() != schedule_ids_json {
+        return Err(StorageError::InvalidData(
+            "schedule-retirement proof ID manifest is not canonical".to_owned(),
+        ));
+    }
     Ok(manifest.into_schedule_ids())
 }
 
