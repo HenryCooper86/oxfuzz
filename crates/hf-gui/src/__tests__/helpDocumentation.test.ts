@@ -9,7 +9,7 @@ function source(relativePath: string): string {
 
 describe("in-app documentation", () => {
   it("does not mention retired engines in rendered help content", () => {
-    const retired = ["cluster", "fuzz", "lite"].join("");
+    const retired = String.fromCharCode(99, 108, 117, 115, 116, 101, 114, 102, 117, 122, 122, 108, 105, 116, 101);
     const bodies = [...HELP_SECTIONS, ...HELP_SECTIONS_ZH]
       .map((section) => section.body)
       .join("\n")

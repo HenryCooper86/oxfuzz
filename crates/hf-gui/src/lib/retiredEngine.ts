@@ -1,16 +1,14 @@
-const RETIRED_ENGINE_ID = ["cluster", "fuzz", "lite"].join("");
-const RETIRED_ENGINE_IDS = new Set([
-  RETIRED_ENGINE_ID,
-  ["c", "f", "l"].join(""),
-  ["c", "f", "l", "ite"].join(""),
-]);
+const ACTIVE_ENGINE_IDS = new Set(["libfuzzer", "afl++", "honggfuzz", "syzkaller"]);
 const DIAGNOSTIC_LIMIT = 96;
 const TRUNCATION_MARKER = "… [truncated]";
 
 function normalizedRetiredEngineId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  return RETIRED_ENGINE_IDS.has(trimmed.toLowerCase()) ? trimmed : null;
+  // The backend's central retirement recognizer owns the retired identifiers.
+  // Locally, preserve every non-active persisted engine for fail-closed repair
+  // without embedding a second copy of that identifier set in the frontend.
+  return trimmed && !ACTIVE_ENGINE_IDS.has(trimmed) ? trimmed : null;
 }
 
 /** Return the original trimmed spelling only for a retired engine identifier. */

@@ -27,13 +27,18 @@ SKIPPED_DIRECTORY_NAMES = {
     ".git", ".claude", "data", "fuzz_workspace", "node_modules", "target",
     "third_party",
 }
-PATTERNS = (
-    re.compile(
-        r"(?<![A-Za-z0-9])cluster[\s_-]*fuzz[\s_-]*lite(?![A-Za-z0-9])",
-        re.IGNORECASE,
-    ),
-    re.compile(r"(?<![A-Za-z0-9])cflite(?![A-Za-z0-9])", re.IGNORECASE),
-    re.compile(r"(?<![A-Za-z0-9])cfl(?![A-Za-z0-9])", re.IGNORECASE),
+CANONICAL_PREFIX = "cluster"
+CANONICAL_MIDDLE = "fuzz"
+CANONICAL_SUFFIX = "lite"
+SHORT_ALIASES = ("cflite", "cfl")
+MAX_CANONICAL_JOINERS = 64
+# Long canonical components may be adjacent or separated by at most 64 of
+# these syntax characters (or Unicode whitespace).  The matcher never
+# evaluates source or removes arbitrary characters.
+CANONICAL_JOINER_PUNCTUATION = frozenset(' _-"\'`.,;:!?()[]{}+-=*/\\|&<>~^%$#@')
+DIRECT_CANONICAL_JOINERS = frozenset(" _-")
+ASCII_ESCAPE = re.compile(
+    r"\\(?:x(?P<hex>[0-9A-Fa-f]{2})|u(?P<unicode>[0-9A-Fa-f]{4})|u\{(?P<braced>[0-9A-Fa-f]{1,6})\})"
 )
 
 
@@ -43,14 +48,28 @@ class HistoricalOccurrenceContract:
     digest: str
 
 
+@dataclass(frozen=True)
+class DecodedSource:
+    text: str
+    source_offsets: tuple[int, ...]
+    escaped_offsets: frozenset[int]
+
+
+@dataclass(frozen=True)
+class Occurrence:
+    line_number: int
+    line: str
+    direct: bool
+
+
 HISTORICAL_OCCURRENCE_CONTRACTS = {
     pathlib.Path("crates/hf-core/src/retired_engine.rs"): HistoricalOccurrenceContract(4, "e15a24a055064af3f6a954a4005caa84b985a4f2158964905efa2b6860baf5ec"),
     pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"): HistoricalOccurrenceContract(27, "e46fc9e9205499e7b572c09f8657713a049057e5d359e5b5dfe08ac92470ddf3"),
-    pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"): HistoricalOccurrenceContract(26, "ea9f3c04f1780be97da27c454d54907ec22671d9c6cb76ec8489bf25983e48fb"),
+    pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"): HistoricalOccurrenceContract(28, "28989e3f83b797ef990b6a8ffa88c2b377120422acfb87282fc65ce51c6e1d22"),
     pathlib.Path("docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"): HistoricalOccurrenceContract(14, "ba68718775b5b9b6db38e28a93a702d20ee5fe4ff75a73922849a686902355b1"),
     pathlib.Path("docs/superpowers/plans/2026-08-11-clusterfuzzlite-removal-implementation.md"): HistoricalOccurrenceContract(0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
-    pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(4, "34473f0e27978458a3b2ebfb10937175597c80d0140956b3b1b9dad33983c8ad"),
-    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(50, "e5668aff6ce4cd36ab20c722299dc14b930c40a70452c06fea3d1f1e6fe1f527"),
+    pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(3, "a4802adbb30ec6feb4ac97a2eb48bccce5e6a4d19310b47b3e4308031b823e5d"),
+    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(61, "b0bfa14333f0a895e4fa28d921ed17191f74beeaf8170ff0049d94712ed3442a"),
 }
 ALLOWED_FILES = set(HISTORICAL_OCCURRENCE_CONTRACTS)
 
@@ -90,30 +109,158 @@ def format_finding(relative: pathlib.PurePath, line_number: int, line: str) -> s
     return f"{relative.as_posix()}:{line_number}:{line.strip()}"
 
 
-def matching_occurrences(lines: list[str]) -> list[tuple[int, str]]:
-    return [
-        (line_number, line)
-        for line_number, line in enumerate(lines, start=1)
-        if any(pattern.search(line) for pattern in PATTERNS)
-    ]
+def decode_ascii_escapes(source: str) -> DecodedSource:
+    decoded: list[str] = []
+    source_offsets: list[int] = []
+    escaped_offsets: set[int] = set()
+    offset = 0
+    while offset < len(source):
+        match = ASCII_ESCAPE.match(source, offset)
+        if match is None:
+            decoded.append(source[offset])
+            source_offsets.append(offset)
+            offset += 1
+            continue
+        codepoint = int(next(value for value in match.groups() if value is not None), 16)
+        character = chr(codepoint)
+        if character.isascii() and character.isalpha():
+            escaped_offsets.add(len(decoded))
+            decoded.append(character)
+            source_offsets.append(offset)
+            offset = match.end()
+            continue
+        for source_offset in range(offset, match.end()):
+            decoded.append(source[source_offset])
+            source_offsets.append(source_offset)
+        offset = match.end()
+    return DecodedSource("".join(decoded), tuple(source_offsets), frozenset(escaped_offsets))
 
 
-def occurrence_digest(occurrences: list[tuple[int, str]]) -> str:
+def is_canonical_joiner(character: str) -> bool:
+    return character.isspace() or character in CANONICAL_JOINER_PUNCTUATION
+
+
+def component_after_joiners(text: str, offset: int, component: str) -> Optional[int]:
+    for joiner_count in range(MAX_CANONICAL_JOINERS + 1):
+        candidate = offset + joiner_count
+        if text.startswith(component, candidate):
+            return candidate
+        if candidate == len(text) or not is_canonical_joiner(text[candidate]):
+            return None
+    return None
+
+
+def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
+    text = decoded.text
+    lowered = text.lower()
+    spans: list[tuple[int, int, bool]] = []
+    search_offset = 0
+    while True:
+        start = lowered.find(CANONICAL_PREFIX, search_offset)
+        if start < 0:
+            return spans
+        fuzz_start = component_after_joiners(
+            lowered,
+            start + len(CANONICAL_PREFIX),
+            CANONICAL_MIDDLE,
+        )
+        if fuzz_start is not None:
+            lite_start = component_after_joiners(
+                lowered,
+                fuzz_start + len(CANONICAL_MIDDLE),
+                CANONICAL_SUFFIX,
+            )
+            if lite_start is not None:
+                end = lite_start + len(CANONICAL_SUFFIX)
+                joiners = (
+                    text[start + len(CANONICAL_PREFIX):fuzz_start]
+                    + text[fuzz_start + len(CANONICAL_MIDDLE):lite_start]
+                )
+                direct = (
+                    not decoded.escaped_offsets.intersection(range(start, end))
+                    and all(character in DIRECT_CANONICAL_JOINERS for character in joiners)
+                )
+                spans.append((start, end, direct))
+        search_offset = start + 1
+
+
+def is_alias_start(text: str, offset: int) -> bool:
+    if offset == 0:
+        return True
+    previous = text[offset - 1]
+    first = text[offset]
+    return (
+        not (previous.isascii() and previous.isalnum())
+        or (previous.islower() and first.isupper())
+    )
+
+
+def is_alias_end(text: str, offset: int) -> bool:
+    if offset == len(text):
+        return True
+    previous = text[offset - 1]
+    following = text[offset]
+    return (
+        not (following.isascii() and following.isalnum())
+        or (following.isupper() and (previous.islower() or previous.isupper()))
+    )
+
+
+def short_alias_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
+    text = decoded.text
+    lowered = text.lower()
+    spans: list[tuple[int, int, bool]] = []
+    for alias in SHORT_ALIASES:
+        search_offset = 0
+        while True:
+            start = lowered.find(alias, search_offset)
+            if start < 0:
+                break
+            end = start + len(alias)
+            if is_alias_start(text, start) and is_alias_end(text, end):
+                direct = not decoded.escaped_offsets.intersection(range(start, end))
+                spans.append((start, end, direct))
+            search_offset = start + 1
+    return spans
+
+
+def matching_occurrences(source: str) -> list[Occurrence]:
+    decoded = decode_ascii_escapes(source)
+    source_lines = source.splitlines()
+    occurrences_by_line: dict[int, Occurrence] = {}
+    for start, _, direct in long_canonical_spans(decoded) + short_alias_spans(decoded):
+        source_offset = decoded.source_offsets[start]
+        line_number = source.count("\n", 0, source_offset) + 1
+        occurrence = Occurrence(line_number, source_lines[line_number - 1], direct)
+        existing = occurrences_by_line.get(line_number)
+        if existing is None:
+            occurrences_by_line[line_number] = occurrence
+        else:
+            occurrences_by_line[line_number] = Occurrence(
+                line_number,
+                existing.line,
+                existing.direct and direct,
+            )
+    return [occurrences_by_line[line_number] for line_number in sorted(occurrences_by_line)]
+
+
+def occurrence_digest(occurrences: list[Occurrence]) -> str:
     digest = hashlib.sha256()
-    for _, line in occurrences:
-        digest.update((line + "\n").encode("utf-8"))
+    for occurrence in occurrences:
+        digest.update((occurrence.line + "\n").encode("utf-8"))
     return digest.hexdigest()
 
 
 def matches_historical_contract(
     relative: pathlib.Path,
-    occurrences: list[tuple[int, str]],
+    occurrences: list[Occurrence],
 ) -> bool:
     contract = HISTORICAL_OCCURRENCE_CONTRACTS.get(relative)
     return (
         contract is not None
         and contract.count == len(occurrences)
         and contract.digest == occurrence_digest(occurrences)
+        and all(occurrence.direct for occurrence in occurrences)
     )
 
 
@@ -197,20 +344,20 @@ def find_forbidden_references(root: pathlib.Path) -> list[str]:
     findings: list[str] = []
     for path, relative in iter_scanned_files(root, tracked_selected_files(root)):
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            source = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as error:
             raise ScanError(relative) from error
         except OSError as error:
             raise ScanError(relative) from error
-        occurrences = matching_occurrences(lines)
+        occurrences = matching_occurrences(source)
         if relative in ALLOWED_FILES and matches_historical_contract(relative, occurrences):
             continue
         if relative in ALLOWED_FILES and not occurrences:
             findings.append(format_finding(relative, 0, "historical occurrence contract mismatch"))
             continue
         findings.extend(
-            format_finding(relative, line_number, line)
-            for line_number, line in occurrences
+            format_finding(relative, occurrence.line_number, occurrence.line)
+            for occurrence in occurrences
         )
     return findings
 

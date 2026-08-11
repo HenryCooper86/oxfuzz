@@ -168,6 +168,33 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     findings,
                 )
 
+    def test_detector_rejects_obfuscated_additions_in_each_allowlisted_file(self) -> None:
+        # Build the adversarial fixture at runtime so the guard test itself
+        # contains no encoded retired-engine representation.
+        prefix, middle, suffix = self.canonical_parts()
+        addition = "[\"" + prefix + "\", \"" + middle + "\", \"" + suffix + "\"].concat()"
+        for relative in sorted(checker.ALLOWED_FILES):
+            with self.subTest(relative=relative):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    destination = root / relative
+                    destination.parent.mkdir(parents=True)
+                    source = REPOSITORY_ROOT / relative
+                    baseline = source.read_text(encoding="utf-8") if source.exists() else ""
+                    addition_line = len(baseline.splitlines()) + 1
+                    destination.write_text(
+                        baseline
+                        + ("" if not baseline or baseline.endswith("\n") else "\n")
+                        + addition
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    findings = find_forbidden_references(root)
+                self.assertIn(
+                    f"{relative.as_posix()}:{addition_line}:{addition}",
+                    findings,
+                )
+
     def test_detector_matches_canonical_separator_and_case_variants(self) -> None:
         cases = (
             ("clusterfuzzlite", True),
@@ -176,8 +203,8 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ("CLUSTER_FUZZ_LITE", True),
             ("Cluster-Fuzz-Lite", True),
             ("cluster_fuzz-lite", True),
-            ("xclusterfuzzlite", False),
-            ("clusterfuzzlite2", False),
+            ("xclusterfuzzlite", True),
+            ("clusterfuzzlite2", True),
         )
         for reference, should_detect in cases:
             with self.subTest(reference=reference):
@@ -189,6 +216,65 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     findings = find_forbidden_references(root)
                 expected = [f"src/engine.rs:1:{reference}"] if should_detect else []
                 self.assertEqual(findings, expected)
+
+    def test_detector_matches_bounded_whole_file_canonical_forms(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        escaped_fuzz = chr(92) + "x66" + "uzz"
+        unicode_escaped_fuzz = chr(92) + "u0066" + "uzz"
+        rust_escaped_fuzz = chr(92) + "u{66}" + "uzz"
+        cases = (
+            ("struct " + self.canonical_title() + "Adapter;", 1, "struct " + self.canonical_title() + "Adapter;"),
+            ("[\"" + prefix + "\", \"" + middle + "\", \"" + suffix + "\"].concat()", 1, "[\"" + prefix + "\", \"" + middle + "\", \"" + suffix + "\"].concat()"),
+            ("\"" + prefix + "\" \"" + middle + "\" \"" + suffix + "\"", 1, "\"" + prefix + "\" \"" + middle + "\" \"" + suffix + "\""),
+            ("\"" + prefix + "\" + \"" + middle + "\" + \"" + suffix + "\"", 1, "\"" + prefix + "\" + \"" + middle + "\" + \"" + suffix + "\""),
+            (prefix + escaped_fuzz + suffix, 1, prefix + escaped_fuzz + suffix),
+            (prefix + unicode_escaped_fuzz + suffix, 1, prefix + unicode_escaped_fuzz + suffix),
+            (prefix + rust_escaped_fuzz + suffix, 1, prefix + rust_escaped_fuzz + suffix),
+            (prefix + "\n" + middle + "\n" + suffix, 1, prefix),
+        )
+        for source_text, expected_line_number, expected_line in cases:
+            with self.subTest(source_text=source_text):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / "engine.rs"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(source_text + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                self.assertEqual(
+                    findings,
+                    [f"src/engine.rs:{expected_line_number}:{expected_line}"],
+                )
+
+    def test_detector_bounds_canonical_joiners_and_ignores_unrelated_words(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        cases = (
+            (prefix + ("_" * 65) + middle + suffix, []),
+            ("clustered fuzziness lite", []),
+            ("scaffold", []),
+        )
+        for source_text, expected in cases:
+            with self.subTest(source_text=source_text):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / "engine.rs"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(source_text + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                self.assertEqual(findings, expected)
+
+    def test_detector_deduplicates_whole_file_matches_on_the_start_line(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        source_text = (
+            "[\"" + prefix + "\", \"" + middle + "\", \"" + suffix + "\"].concat(); "
+            + "\"" + prefix + "\" + \"" + middle + "\" + \"" + suffix + "\""
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "src" / "engine.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source_text + "\n", encoding="utf-8")
+            findings = find_forbidden_references(root)
+        self.assertEqual(findings, [f"src/engine.rs:1:{source_text}"])
 
     def test_detector_matches_alias_identifier_and_punctuation_variants(self) -> None:
         cases = (
@@ -204,6 +290,27 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ("cfl2", False),
             ("xcflite", False),
             ("cflite2", False),
+        )
+        for reference, should_detect in cases:
+            with self.subTest(reference=reference):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / "engine.rs"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(reference + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                expected = [f"src/engine.rs:1:{reference}"] if should_detect else []
+                self.assertEqual(findings, expected)
+
+    def test_detector_matches_alias_identifier_component_variants(self) -> None:
+        cases = (
+            (self.cflite_alias() + "Engine", True),
+            (self.cflite_alias() + "Config", True),
+            (self.cfl_alias() + "Adapter", True),
+            ("x" + self.cfl_alias().lower(), False),
+            ("un" + self.cfl_alias().lower(), False),
+            (self.cfl_alias() + "2", False),
+            (self.cflite_alias() + "2", False),
         )
         for reference, should_detect in cases:
             with self.subTest(reference=reference):
@@ -527,6 +634,23 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         entry = RetiredEngineReferenceTests.file_entry(path)
         entry.is_dir.return_value = True
         return entry
+
+    @staticmethod
+    def canonical_parts() -> tuple[str, str, str]:
+        return "cluster", chr(102) + "uzz", "lite"
+
+    @classmethod
+    def canonical_title(cls) -> str:
+        prefix, middle, suffix = cls.canonical_parts()
+        return prefix.title() + middle.title() + suffix.title()
+
+    @staticmethod
+    def cfl_alias() -> str:
+        return "C" + "FL"
+
+    @staticmethod
+    def cflite_alias() -> str:
+        return "C" + "flite"
 
 
 if __name__ == "__main__":

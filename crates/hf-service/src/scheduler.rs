@@ -3910,10 +3910,19 @@ mod tests {
             .retire_engine_schedules(fixture.store.as_deref())
             .await
             .unwrap();
-        let short_alias = ["c", "f", "l"].concat();
-        let long_alias = ["\tC", "FL", "ITE\n"].concat();
-        let canonical_mixed_case = [" Cluster", "Fuzz", "Lite "].concat();
-        let unicode_trimmed_alias = ["\u{2003}C", "fL", "iTe\u{3000}"].concat();
+        let short_alias = hf_core::retired_engine::RETIRED_ENGINE_IDS[1];
+        let long_alias = format!(
+            "\t{}\n",
+            hf_core::retired_engine::RETIRED_ENGINE_IDS[2].to_uppercase()
+        );
+        let canonical_mixed_case = format!(
+            " {} ",
+            hf_core::retired_engine::RETIRED_ENGINE_ID.to_uppercase()
+        );
+        let unicode_trimmed_alias = format!(
+            "\u{2003}{}\u{3000}",
+            hf_core::retired_engine::RETIRED_ENGINE_IDS[2]
+        );
         fixture.push_schedule(retired_campaign_with_engine("schedule-z", &short_alias));
         fixture.push_schedule(retired_campaign_with_engine("schedule-a", &long_alias));
         fixture.push_schedule(retired_campaign_with_engine(
