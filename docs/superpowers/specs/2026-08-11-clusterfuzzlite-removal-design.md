@@ -144,9 +144,21 @@ A crash after either archive is created but before active-file replacement is sa
 
 Retired schedule definitions are never automatically converted, enabled, or dispatched. The retired archive is evidence only.
 
+All service instances that share `schedules.json` participate in the same
+advisory-lock protocol. Online edits by older binaries, editors, scripts, or
+other processes that ignore that lock are unsupported: stop every service
+instance, make the edit offline, and restart. Service writes verify the exact
+bytes they intended before accepting a new generation, but the protocol does
+not claim atomic compare-and-swap against non-cooperating writers.
+
 ### 8.3 Unsupported legacy input after migration
 
 Any retired record or schedule introduced after the migration, such as by restoring an old configuration or replacing a state file, fails closed with the retirement error. It is not silently ignored when doing so could make the operator believe work was scheduled or replayed.
+
+Receipt version 1 and the intermediate proof layouts were never distributed.
+Receipt version 2, completion certificates, and migration 0025 therefore ship
+as one unreleased migration unit; any other receipt version fails closed rather
+than attempting an ambiguous upgrade.
 
 ## 9. Source and Surface Removal
 
