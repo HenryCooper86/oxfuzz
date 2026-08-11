@@ -349,6 +349,24 @@ record_id)`. The `retired_engine_records_no_update` and
 `retired_engine_records_no_delete` triggers reject mutation or deletion so the
 table remains an archive-only provenance boundary.
 
+### `schedule_retirement_operations`
+
+Immutable completion proofs for the service-owned file-schedule retirement
+protocol. The proof is inserted in the same SQLite transaction that archives
+linked schedule executions and occurrences and deletes their active rows. A
+retry must match all three bound values; completed-state verification also
+requires that no new active history exists for the bound schedule IDs.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `operation_id` | `TEXT PRIMARY KEY` | service-owned UUID also bound by the file receipt and completion certificate |
+| `plan_digest` | `TEXT NOT NULL` | SHA-256 of the operation ID and exact retirement plan |
+| `schedule_ids_json` | `TEXT NOT NULL` | valid JSON containing the sorted unique linked schedule IDs |
+| `completed_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | transactional history-phase completion time |
+
+The `schedule_retirement_operations_no_update` and
+`schedule_retirement_operations_no_delete` triggers make the proof monotonic.
+
 ## 3. Conversation and session tables
 
 ### `sessions`
@@ -635,6 +653,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
 | `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
 | `0024_retired_engine_records.sql` | archives complete retired-engine records as immutable, non-executable evidence before typed deserialization |
+| `0025_schedule_retirement_operations.sql` | adds immutable operation-bound proofs committed with linked schedule-history retirement |
 
 ## 7. Read failure contract
 
