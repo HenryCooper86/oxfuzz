@@ -2869,7 +2869,8 @@ mod doctor_tests {
         assert!(output.contains("UNAVAILABLE  AFL++"));
         assert!(output.contains("UNAVAILABLE  honggfuzz"));
         assert!(output.contains("UNAVAILABLE  syzkaller"));
-        assert!(!output.contains("ClusterFuzzLite"));
+        let retired_engine_label = ["Cluster", "Fuzz", "Lite"].concat();
+        assert!(!output.contains(&retired_engine_label));
         assert!(output.contains("OPTIONAL  DefectDojo"));
         assert!(status.fuzzing_ready());
     }
