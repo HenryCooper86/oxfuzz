@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FuzzingTab } from "../components/settings/FuzzingTab";
 import { I18nContext } from "../i18nContext";
 
@@ -10,6 +10,7 @@ const REPAIR_GUIDANCE = "Update it in RAW mode before saving.";
 
 describe("FuzzingTab", () => {
   it("renders the exact retired-engine error separately from RAW repair guidance", () => {
+    const onChange = vi.fn();
     const html = renderToStaticMarkup(
       <I18nContext.Provider
         value={{
@@ -25,7 +26,7 @@ describe("FuzzingTab", () => {
               default_engine: RETIRED_ENGINE,
             },
           }}
-          onChange={() => undefined}
+          onChange={onChange}
         />
       </I18nContext.Provider>,
     );
@@ -35,5 +36,6 @@ describe("FuzzingTab", () => {
     expect(html).toContain(REPAIR_GUIDANCE);
     expect(html).toContain('aria-describedby="retired-engine-config-guidance"');
     expect(html).toContain('id="retired-engine-config-guidance"');
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
