@@ -327,6 +327,28 @@ the latest on-disk snapshot are deleted, while retained rows preserve known
 source and coverage metadata when a filesystem rescan can classify them only
 as manual. Single-entry deletion is keyed by both target and hash.
 
+### `retired_engine_records`
+
+Immutable, evidence-only storage for complete rows archived when a fuzzing
+engine is retired. Archived records retain their original identity and payload
+but cannot be replayed, promoted, scheduled, or dispatched. There is no
+repository API for replaying or promoting this evidence.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `record_kind` | `TEXT NOT NULL` | run/harness/harness_approval/crash/schedule_execution/schedule_occurrence |
+| `record_id` | `TEXT NOT NULL` | original active-table primary key |
+| `retired_engine` | `TEXT NOT NULL` | canonical retired identifier; constrained to `clusterfuzzlite` |
+| `payload_json` | `TEXT NOT NULL` | valid JSON preserving every original source column |
+| `migration_version` | `INTEGER NOT NULL` | archive schema provenance; constrained to `24` |
+| `archived_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | archival timestamp |
+
+Primary key: `(record_kind, record_id)`. Index:
+`idx_retired_engine_records_archived_at(archived_at DESC, record_kind,
+record_id)`. The `retired_engine_records_no_update` and
+`retired_engine_records_no_delete` triggers reject mutation or deletion so the
+table remains an archive-only provenance boundary.
+
 ## 3. Conversation and session tables
 
 ### `sessions`
@@ -612,6 +634,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0021_run_provenance_components.sql` | adds independently verifiable source, corpus, and sandbox-reference digests to runs |
 | `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
 | `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
+| `0024_retired_engine_records.sql` | archives complete retired-engine records as immutable, non-executable evidence before typed deserialization |
 
 ## 7. Read failure contract
 

@@ -499,6 +499,7 @@ impl Store {
             .connect_with(opts)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        crate::retired_engine::validate_no_active_retired_engine_records(&pool).await?;
         let store = Self { pool };
         // One-time, self-healing cleanup of legacy duplicate crash rows left by
         // pre-deterministic-id triages. Idempotent: a no-op on a clean DB.

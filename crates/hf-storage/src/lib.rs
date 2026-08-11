@@ -8,6 +8,7 @@
 mod store;
 
 pub mod checkpoint_store;
+mod retired_engine;
 mod schedule_occurrence_store;
 pub mod session_store;
 pub mod transcript;

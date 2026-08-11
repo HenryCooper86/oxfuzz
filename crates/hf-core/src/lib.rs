@@ -18,6 +18,7 @@
 //! | [`target`] | `TargetCandidate`, `TargetInventory` | TARGET_TAXONOMY.md |
 //! | [`harness`] | `Harness`, `HarnessDraft` | HARNESS_STANDARD.md |
 //! | [`engine`] | `EngineKind`, `FuzzRunConfig`, `FuzzProgress` | ENGINE_ADAPTER_STANDARD.md |
+//! | [`retired_engine`] | Retired engine identifier recognition | clusterfuzzlite-removal-design.md |
 //! | [`crash`] | `Crash`, `CrashReport` | crash-triage-design.md |
 //! | [`corpus`] | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
 //! | [`coverage`] | `CoverageReport` | corpus-coverage-design.md |
@@ -35,6 +36,7 @@ pub mod harness;
 pub mod memory;
 pub mod permission_types;
 pub mod provider;
+pub mod retired_engine;
 pub mod runtime;
 pub mod session;
 pub mod target;
