@@ -103,22 +103,70 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 self.assertEqual(findings, expected)
 
     def test_detector_uses_the_exact_historical_allowlist(self) -> None:
-        self.assertEqual(
-            checker.ALLOWED_FILES,
-            {
-                pathlib.Path("crates/hf-core/src/retired_engine.rs"),
-                pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"),
-                pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"),
-                pathlib.Path(
-                    "docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"
-                ),
-                pathlib.Path(
-                    "docs/superpowers/plans/2026-08-11-clusterfuzzlite-removal-implementation.md"
-                ),
-                pathlib.Path("scripts/check_retired_engine_references.py"),
-                pathlib.Path("scripts/tests/test_retired_engine_references.py"),
-            },
-        )
+        expected = {
+            pathlib.Path("crates/hf-core/src/retired_engine.rs"),
+            pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"),
+            pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"),
+            pathlib.Path(
+                "docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"
+            ),
+            pathlib.Path(
+                "docs/superpowers/plans/2026-08-11-clusterfuzzlite-removal-implementation.md"
+            ),
+            pathlib.Path("scripts/check_retired_engine_references.py"),
+            pathlib.Path("scripts/tests/test_retired_engine_references.py"),
+        }
+        self.assertEqual(checker.ALLOWED_FILES, expected)
+        self.assertEqual(set(checker.HISTORICAL_OCCURRENCE_CONTRACTS), expected)
+
+    def test_detector_rejects_historical_occurrence_contract_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            relative = pathlib.Path("crates/hf-core/src/retired_engine.rs")
+            source = REPOSITORY_ROOT / relative
+            destination = root / relative
+            destination.parent.mkdir(parents=True)
+            destination.write_text(
+                source.read_text(encoding="utf-8").replace("clusterfuzzlite", "active-engine", 1),
+                encoding="utf-8",
+            )
+            findings = find_forbidden_references(root)
+        self.assertTrue(any(finding.startswith("crates/hf-core/src/retired_engine.rs:") for finding in findings))
+
+    def test_detector_accepts_historical_occurrences_after_unrelated_line_insertion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            relative = pathlib.Path("crates/hf-core/src/retired_engine.rs")
+            source = REPOSITORY_ROOT / relative
+            destination = root / relative
+            destination.parent.mkdir(parents=True)
+            destination.write_text(
+                "// unrelated header\n" + source.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            self.assertEqual(find_forbidden_references(root), [])
+
+    def test_detector_rejects_active_additions_in_each_allowlisted_file(self) -> None:
+        for relative in sorted(checker.ALLOWED_FILES):
+            with self.subTest(relative=relative):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    destination = root / relative
+                    destination.parent.mkdir(parents=True)
+                    source = REPOSITORY_ROOT / relative
+                    baseline = source.read_text(encoding="utf-8") if source.exists() else ""
+                    addition_line = len(baseline.splitlines()) + 1
+                    destination.write_text(
+                        baseline
+                        + ("" if not baseline or baseline.endswith("\n") else "\n")
+                        + 'ACTIVE_ENGINE = "ClusterFuzzLite"\n',
+                        encoding="utf-8",
+                    )
+                    findings = find_forbidden_references(root)
+                self.assertIn(
+                    f'{relative.as_posix()}:{addition_line}:ACTIVE_ENGINE = "ClusterFuzzLite"',
+                    findings,
+                )
 
     def test_detector_matches_canonical_separator_and_case_variants(self) -> None:
         cases = (
@@ -207,10 +255,17 @@ class RetiredEngineReferenceTests(unittest.TestCase):
 
             with mock.patch.object(checker.os, "scandir", recording_scandir):
                 findings = find_forbidden_references(root)
-        self.assertEqual(scanned_directories, [".", "component", "src"])
-        self.assertEqual(findings, ["src/engine.rs:1:ClusterFuzzLite"])
+        nested_directories = [f"component/{name}" for name in sorted(expected_skipped_names)]
+        self.assertEqual(scanned_directories, [".", "component", *nested_directories, "src"])
+        self.assertEqual(
+            findings,
+            [
+                *[f"component/{name}/engine.rs:1:ClusterFuzzLite" for name in sorted(expected_skipped_names)],
+                "src/engine.rs:1:ClusterFuzzLite",
+            ],
+        )
 
-    def test_detector_ignores_only_root_sdd_orchestration_artifacts(self) -> None:
+    def test_detector_scans_superpowers_paths_in_fixture_roots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             paths = (
@@ -226,9 +281,26 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             findings,
             [
                 ".superpowers/active.rs:1:ClusterFuzzLite",
+                ".superpowers/sdd/task.md:1:ClusterFuzzLite",
                 "feature/.superpowers/sdd/active.rs:1:ClusterFuzzLite",
             ],
         )
+
+    def test_detector_scans_only_tracked_selected_files_in_repository_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tracked = root / "src" / "engine.rs"
+            tracked.parent.mkdir(parents=True)
+            tracked.write_text("ClusterFuzzLite\n", encoding="utf-8")
+            untracked = root / "untracked.rs"
+            untracked.write_text("ClusterFuzzLite\n", encoding="utf-8")
+            orchestration_artifact = root / ".superpowers" / "sdd" / "task.md"
+            orchestration_artifact.parent.mkdir(parents=True)
+            orchestration_artifact.write_text("ClusterFuzzLite\n", encoding="utf-8")
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", str(tracked)], check=True)
+            findings = find_forbidden_references(root)
+        self.assertEqual(findings, ["src/engine.rs:1:ClusterFuzzLite"])
 
     def test_detector_skips_file_and_directory_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -252,13 +324,17 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 self.skipTest(f"symlinks unavailable: {error}")
             self.assertEqual(find_forbidden_references(root), [])
 
-    def test_detector_ignores_invalid_utf8(self) -> None:
+    def test_detector_fails_closed_on_invalid_utf8_in_selected_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            path = root / "src" / "invalid.rs"
+            path = root / "src" / "invalid.py"
             path.parent.mkdir(parents=True)
-            path.write_bytes(b'const ENGINE: &str = "ClusterFuzzLite";\xff\n')
-            self.assertEqual(find_forbidden_references(root), [])
+            path.write_bytes(b'ENGINE = "ClusterFuzzLite"\n\xff')
+            with self.assertRaisesRegex(
+                checker.ScanError,
+                r"^scan error: src/invalid\.py$",
+            ):
+                find_forbidden_references(root)
 
     def test_detector_fails_closed_when_a_selected_file_cannot_be_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -393,6 +469,17 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "src/engine.rs:1:CFL_ENGINE\n")
         self.assertEqual(result.stderr, "")
+
+    def test_cli_reports_invalid_utf8_as_a_scan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "src" / "invalid.py"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b'ENGINE = "ClusterFuzzLite"\n\xff')
+            result = self.run_checker(root)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "scan error: src/invalid.py\n")
 
     def test_cli_reports_a_scan_error_with_exit_two(self) -> None:
         stdout = io.StringIO()
