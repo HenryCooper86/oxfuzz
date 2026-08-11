@@ -1,4 +1,5 @@
 import { useI18n } from "../i18nContext";
+import { isNoProjectKey } from "../lib/projectState";
 import { formatRetiredEngineError } from "../lib/retiredEngine";
 import type { TargetSelectionRepair, TargetStorageError } from "../providers/target";
 import { Button, Select } from "./ui";
@@ -12,7 +13,7 @@ const PROJECT_TRUNCATION_MARKER = "… [truncated]";
 interface TargetSelectionRepairNoticeProps {
   repair: TargetSelectionRepair | null;
   storageError: TargetStorageError | null;
-  activeProject: string;
+  activeSelectionKey: string;
   engineOptions: { value: string; label: string }[];
   onSelectEngine: (engine: string) => void;
   onSwitchProject: (project: string) => void;
@@ -29,7 +30,7 @@ function boundedProjectIdentity(project: string): string {
 export function TargetSelectionRepairNotice({
   repair,
   storageError,
-  activeProject,
+  activeSelectionKey,
   engineOptions,
   onSelectEngine,
   onSwitchProject,
@@ -37,19 +38,28 @@ export function TargetSelectionRepairNotice({
   onRetryStorage,
 }: TargetSelectionRepairNoticeProps) {
   const { t } = useI18n();
+  const repairFreeStorageBlocker = repair === null && storageError !== null;
   const message = repair?.issue.kind === "retired_engine"
     ? formatRetiredEngineError(repair.issue.value)
     : repair
       ? t("targetSelection.invalid")
+      : repairFreeStorageBlocker
+        ? t("targetSelection.storageRecoveryError")
       : t(storageError?.operation === "read" ? "targetSelection.storageReadError" : "targetSelection.storageWriteError");
   const repairOwner = repair?.projectKey ?? null;
-  const canReplace = repairOwner !== null && repairOwner === activeProject;
-  const inactiveOwner = repairOwner !== null && repairOwner !== activeProject;
+  const canReplace = repairOwner !== null && repairOwner === activeSelectionKey;
+  const inactiveOwner = repairOwner !== null
+    && repairOwner !== activeSelectionKey
+    && !isNoProjectKey(repairOwner);
   const globalRepair = repair !== null && repairOwner === null;
+  const canRetryStorage = repairFreeStorageBlocker || storageError?.operation === "read";
+  const canReset = globalRepair || repairFreeStorageBlocker;
   const guidance = canReplace
     ? t("targetSelection.repairGuidance")
     : inactiveOwner
       ? t("targetSelection.switchProjectGuidance")
+      : repairFreeStorageBlocker
+        ? t("targetSelection.storageRecoveryGuidance")
       : t(storageError?.operation === "read" ? "targetSelection.retryStorageGuidance" : "targetSelection.resetGuidance");
 
   return (
@@ -93,14 +103,14 @@ export function TargetSelectionRepairNotice({
             {t("targetSelection.switchProject")}
           </Button>
         )}
-        {globalRepair && (
-          <Button variant="outline" size="sm" onClick={onReset}>
-            {t("targetSelection.reset")}
-          </Button>
-        )}
-        {storageError?.operation === "read" && (
+        {canRetryStorage && (
           <Button variant="outline" size="sm" onClick={onRetryStorage}>
             {t("targetSelection.retryStorage")}
+          </Button>
+        )}
+        {canReset && (
+          <Button variant="outline" size="sm" onClick={onReset}>
+            {t("targetSelection.reset")}
           </Button>
         )}
       </div>

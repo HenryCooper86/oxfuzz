@@ -9,6 +9,7 @@ import { useTarget } from "../providers/target";
 import { ProjectContext, useProject } from "../providers/project";
 import { PipelineContext } from "../providers/pipeline";
 import { HarnessView } from "../views/HarnessView";
+import { NO_PROJECT_KEY } from "../lib/projectState";
 
 const transportInvoke = vi.hoisted(() => vi.fn());
 
@@ -83,12 +84,14 @@ function AppProviders({
 
 function TargetProbe({ switchProject }: { switchProject?: string }) {
   const target = useTarget();
-  const { setActiveProject } = useProject();
+  const { activeProject, recentProjects, setActiveProject } = useProject();
   const blocked = Boolean(target.selectionRepair || target.storageError);
   return (
     <div>
       <output data-repair>{target.selectionRepair?.issue.kind ?? "none"}</output>
       <output data-repair-project>{target.selectionRepair?.projectKey ?? "none"}</output>
+      <output data-active-project>{activeProject}</output>
+      <output data-recent-projects>{recentProjects.join("|")}</output>
       <output data-storage>{target.storageError?.operation ?? "none"}</output>
       <output data-blocked>{String(blocked)}</output>
       <output data-engine>{target.engine}</output>
@@ -98,6 +101,7 @@ function TargetProbe({ switchProject }: { switchProject?: string }) {
         <button type="button" onClick={() => setActiveProject(switchProject)}>switch project</button>
       )}
       <button type="button" onClick={target.retryStorage}>retry storage</button>
+      <button type="button" onClick={target.reset}>reset storage</button>
     </div>
   );
 }
@@ -252,11 +256,96 @@ describe("TargetProvider durable repair boundary", () => {
 
     expect(selectionStatus(view.container, "storage")).toBe("read");
     expect(selectionStatus(view.container, "blocked")).toBe("true");
-    expect(view.container.querySelector("[role=alert]")?.textContent).toBe("targetSelection.storageReadError");
+    expect(view.container.querySelector("[role=alert]")?.textContent).toBe("targetSelection.storageRecoveryError");
     expect(view.container.querySelector("#target-selection-replacement-engine")).toBeNull();
     expect([...view.container.querySelectorAll("button")].some((button) =>
       button.textContent?.includes("targetSelection.retryStorage"),
     )).toBe(true);
+    expect(invokedMutatingCommands()).toEqual([]);
+  });
+
+  it("retries a repair-free write blocker in an initial Harness after storage access returns", async () => {
+    configureHarnessTransport();
+    window.localStorage.setItem(STORAGE_KEY, persisted("afl++"));
+    const originalSetItem = Storage.prototype.setItem;
+    const failedWrite = vi.spyOn(Storage.prototype, "setItem").mockImplementation((key, value) => {
+      if (key === STORAGE_KEY) throw new Error("quota exceeded");
+      return originalSetItem.call(window.localStorage, key, value);
+    });
+    const view = await mount(<><TargetProbe /><HarnessView /></>, {
+      initialProject: PROJECT,
+      recentProjects: [],
+    });
+    mounted.push(view);
+    await flushEffects();
+
+    expect(selectionStatus(view.container, "repair")).toBe("none");
+    expect(selectionStatus(view.container, "storage")).toBe("write");
+    expect(view.container.querySelector("[role=alert]")?.textContent).toBe("targetSelection.storageRecoveryError");
+    expect(view.container.textContent).toContain("targetSelection.storageRecoveryGuidance");
+    expect(view.container.querySelector("#target-selection-replacement-engine")).toBeNull();
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.switchProject"),
+    )).toBe(false);
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.retryStorage"),
+    )).toBe(true);
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.reset"),
+    )).toBe(true);
+    expect(invokedMutatingCommands()).toEqual([]);
+
+    failedWrite.mockRestore();
+    await act(async () => {
+      [...view.container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("targetSelection.retryStorage"))?.click();
+    });
+
+    expect(selectionStatus(view.container, "storage")).toBe("none");
+    expect(selectionStatus(view.container, "blocked")).toBe("false");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null")).toEqual({});
+    expect(invokedMutatingCommands()).toEqual([]);
+  });
+
+  it("keeps a repair-free storage blocker until reset can durably clear it", async () => {
+    configureHarnessTransport();
+    const originalGetItem = Storage.prototype.getItem;
+    const originalSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const failedWrite = vi.spyOn(Storage.prototype, "setItem").mockImplementation((key, value) => {
+      if (key === STORAGE_KEY) throw new Error("quota exceeded");
+      return originalSetItem.call(window.localStorage, key, value);
+    });
+    const view = await mount(<><TargetProbe /><HarnessView /></>, {
+      initialProject: "",
+      recentProjects: [],
+    });
+    mounted.push(view);
+    await flushEffects();
+
+    expect(selectionStatus(view.container, "storage")).toBe("read");
+    expect(view.container.querySelector("#target-selection-replacement-engine")).toBeNull();
+    expect(invokedMutatingCommands()).toEqual([]);
+
+    await act(async () => {
+      [...view.container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("targetSelection.reset"))?.click();
+    });
+    expect(selectionStatus(view.container, "storage")).toBe("write");
+    expect(selectionStatus(view.container, "blocked")).toBe("true");
+    expect(invokedMutatingCommands()).toEqual([]);
+
+    failedWrite.mockRestore();
+    await act(async () => {
+      [...view.container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("targetSelection.reset"))?.click();
+    });
+
+    expect(selectionStatus(view.container, "storage")).toBe("none");
+    expect(selectionStatus(view.container, "blocked")).toBe("false");
+    expect(JSON.parse(originalGetItem.call(window.localStorage, STORAGE_KEY) ?? "null")).toEqual({});
     expect(invokedMutatingCommands()).toEqual([]);
   });
 
@@ -471,6 +560,41 @@ describe("TargetProvider durable repair boundary", () => {
 });
 
 describe("Harness repair interactions", () => {
+  it("repairs the standalone no-project selection without exposing its storage bucket", async () => {
+    configureHarnessTransport();
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      [NO_PROJECT_KEY]: selection(RETIRED_CANONICAL),
+    }));
+    const view = await mount(<><TargetProbe /><HarnessView /></>, {
+      initialProject: "",
+      recentProjects: [],
+    });
+    mounted.push(view);
+    await flushEffects();
+
+    expect(view.container.querySelector("[data-repair-project]")?.textContent).toBe(NO_PROJECT_KEY);
+    expect(view.container.querySelector("#target-selection-replacement-engine")).not.toBeNull();
+    expect(view.container.querySelector("[role=alert]")?.parentElement?.textContent).not.toContain(NO_PROJECT_KEY);
+    expect([...view.container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("targetSelection.switchProject"),
+    )).toBe(false);
+    expect(view.container.querySelector("[data-active-project]")?.textContent).toBe("");
+    expect(view.container.querySelector("[data-recent-projects]")?.textContent).toBe("");
+
+    await act(async () => {
+      [...view.container.querySelectorAll("button")]
+        .find((button) => button.textContent === "replace engine")?.click();
+    });
+
+    expect(selectionStatus(view.container, "repair")).toBe("none");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null")).toEqual({
+      [NO_PROJECT_KEY]: selection("afl++"),
+    });
+    expect(view.container.querySelector("[data-active-project]")?.textContent).toBe("");
+    expect(view.container.querySelector("[data-recent-projects]")?.textContent).toBe("");
+    expect(invokedMutatingCommands()).toEqual([]);
+  });
+
   it("does not let a programmatic active-project repair change an inactive repair owner", async () => {
     const raw = JSON.stringify({
       [PROJECT]: selection("honggfuzz"),
