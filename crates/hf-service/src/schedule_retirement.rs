@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use hf_scheduler::Schedule;
-use hf_storage::Store;
+use hf_storage::{
+    validate_schedule_retirement_ids, validate_schedule_retirement_operation_id, Store,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -21,6 +23,7 @@ const COMPLETION_VERSION: u32 = 1;
 const MAX_RECEIPT_SCHEDULES: usize = 4_096;
 const MAX_RECEIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SCHEDULE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SCHEDULE_ID_BYTES: usize = 512;
 const MAX_ERROR_IDS: usize = 20;
 const MAX_ERROR_ID_CHARS: usize = 128;
 const MAX_ERROR_DETAIL_CHARS: usize = 1_024;
@@ -50,6 +53,17 @@ enum HistoryRequirement {
     Database,
     NotConfigured,
     NoRetiredSchedules,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryProofPhase {
+    BeforeHistory,
+    HistoryMayBeCommitted,
+    HistoryMustBeCommitted,
+}
+
+struct ReconciledAuthorities {
+    permanently_retired_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,14 +406,18 @@ async fn retire_with_lease(
     let active = load_image(schedules_path)?;
     validate_unique_ids(&active.schedules, "active schedule file")?;
     validate_schedule_bounds(&active.schedules)?;
+    let receipt_path = retired_schedule_retirement_path(schedules_path);
+    let loaded_receipt = load_receipt(&receipt_path)?;
+    if loaded_receipt.is_none() {
+        validate_initial_retired_ids(&active.schedules)?;
+    }
     let archive_path = retired_schedule_path(schedules_path);
     let archive = load_image(&archive_path)
         .map_err(|error| archive_error(&retired_ids(&active.schedules), error))?;
     validate_unique_ids(&archive.schedules, "retired schedule archive")?;
     validate_schedule_bounds(&archive.schedules)?;
 
-    let receipt_path = retired_schedule_retirement_path(schedules_path);
-    let mut receipt = if let Some(receipt) = load_receipt(&receipt_path)? {
+    let mut receipt = if let Some(receipt) = loaded_receipt {
         validate_receipt(&receipt)?;
         receipt
     } else {
@@ -436,6 +454,18 @@ async fn retire_with_lease(
                 return Ok(outcome);
             }
         }
+        let proof_phase = match receipt.state {
+            RetiredScheduleRetirementState::ArchivePending => HistoryProofPhase::BeforeHistory,
+            RetiredScheduleRetirementState::HistoryPending => {
+                HistoryProofPhase::HistoryMayBeCommitted
+            }
+            RetiredScheduleRetirementState::ActiveRewritePending
+            | RetiredScheduleRetirementState::CompletionPending
+            | RetiredScheduleRetirementState::Completed => {
+                HistoryProofPhase::HistoryMustBeCommitted
+            }
+        };
+        let authorities = reconcile_durable_authorities(storage, &receipt, proof_phase).await?;
         let ids = receipt_ids(&receipt);
         match receipt.state {
             RetiredScheduleRetirementState::ArchivePending => {
@@ -489,7 +519,12 @@ async fn retire_with_lease(
                     .pause_at(ScheduleRetirementPausePoint::HistoryArchive)
                     .await;
                 archive_history(storage, &receipt).await?;
-                require_history_proof(storage, &receipt).await?;
+                reconcile_durable_authorities(
+                    storage,
+                    &receipt,
+                    HistoryProofPhase::HistoryMustBeCommitted,
+                )
+                .await?;
                 #[cfg(test)]
                 faults
                     .pause_at(ScheduleRetirementPausePoint::Receipt(
@@ -511,7 +546,6 @@ async fn retire_with_lease(
                     return Err(active_third_state_error(&current_active.schedules, &ids));
                 }
                 require_archive_postimage(&archive_path, &receipt)?;
-                require_history_proof(storage, &receipt).await?;
                 if image_matches(&current_active, &receipt.plan.active_pre)? {
                     if !image_matches(&receipt.plan.active_pre, &receipt.plan.active_post)? {
                         #[cfg(test)]
@@ -556,7 +590,6 @@ async fn retire_with_lease(
                     "completion active image",
                 )?;
                 require_archive_postimage(&archive_path, &receipt)?;
-                require_history_proof(storage, &receipt).await?;
                 #[cfg(test)]
                 faults
                     .pause_at(ScheduleRetirementPausePoint::CompletionCertificate)
@@ -578,17 +611,19 @@ async fn retire_with_lease(
             RetiredScheduleRetirementState::Completed => {
                 let current_active = load_image(schedules_path)?;
                 validate_unique_ids(&current_active.schedules, "active schedule file")?;
-                let prohibited = prohibited_active_ids(&current_active.schedules, &ids);
+                let prohibited = prohibited_active_ids(
+                    &current_active.schedules,
+                    &authorities.permanently_retired_ids,
+                );
                 if !prohibited.is_empty() {
                     return Err(permanently_retired_error(&prohibited));
                 }
                 require_archive_postimage(&archive_path, &receipt)?;
-                require_history_proof(storage, &receipt).await?;
                 require_completion_certificate(schedules_path, &receipt)?;
                 let generation = current_active.generation();
                 return Ok(RetirementOutcome {
                     schedules: current_active.schedules,
-                    permanently_retired_ids: ids.clone(),
+                    permanently_retired_ids: authorities.permanently_retired_ids,
                     #[cfg(test)]
                     retired_ids: if already_completed { Vec::new() } else { ids },
                     generation,
@@ -619,13 +654,14 @@ async fn reconcile_completed_evidence(
     let active = load_image(schedules_path)?;
     validate_unique_ids(&active.schedules, "active schedule file")?;
     validate_schedule_bounds(&active.schedules)?;
-    let ids = receipt_ids(receipt);
-    let prohibited = prohibited_active_ids(&active.schedules, &ids);
+    let authorities =
+        reconcile_durable_authorities(storage, receipt, HistoryProofPhase::HistoryMustBeCommitted)
+            .await?;
+    let prohibited = prohibited_active_ids(&active.schedules, &authorities.permanently_retired_ids);
     if !prohibited.is_empty() {
         return Err(permanently_retired_error(&prohibited));
     }
     require_archive_postimage(&retired_schedule_path(schedules_path), receipt)?;
-    require_history_proof(storage, receipt).await?;
 
     if receipt.state != RetiredScheduleRetirementState::Completed {
         transition(
@@ -638,7 +674,7 @@ async fn reconcile_completed_evidence(
     Ok(Some(RetirementOutcome {
         generation: active.generation(),
         schedules: active.schedules,
-        permanently_retired_ids: ids,
+        permanently_retired_ids: authorities.permanently_retired_ids,
         #[cfg(test)]
         retired_ids: Vec::new(),
         lease: None,
@@ -659,13 +695,16 @@ async fn reject_independent_evidence_without_receipt(
         .map(|schedule| schedule.id.clone())
         .collect::<Vec<_>>();
     let database_evidence = if let RetirementStorage::Available(store) = storage {
-        let mut tombstone_ids = store
-            .schedule_retirement_tombstone_ids()
+        let proof = store
+            .schedule_retirement_history_proof()
             .await
             .map_err(|error| archive_error(&ids, error))?;
-        let present = !tombstone_ids.is_empty();
-        permanent_ids.append(&mut tombstone_ids);
-        present
+        if let Some(proof) = proof {
+            permanent_ids.extend(proof.schedule_ids);
+            true
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -729,14 +768,13 @@ fn initial_receipt(
             })
         })
         .collect::<Result<Vec<_>, CampaignSchedulerError>>()?;
-    let history = if snapshots.is_empty() {
-        HistoryRequirement::NoRetiredSchedules
-    } else {
-        match storage {
-            RetirementStorage::NotConfigured => HistoryRequirement::NotConfigured,
-            RetirementStorage::Available(_) | RetirementStorage::Unavailable => {
-                HistoryRequirement::Database
-            }
+    let history = match (snapshots.is_empty(), storage) {
+        (_, RetirementStorage::NotConfigured) => HistoryRequirement::NotConfigured,
+        (true, RetirementStorage::Available(_) | RetirementStorage::Unavailable) => {
+            HistoryRequirement::NoRetiredSchedules
+        }
+        (false, RetirementStorage::Available(_) | RetirementStorage::Unavailable) => {
+            HistoryRequirement::Database
         }
     };
     let plan = RetirementPlan {
@@ -763,61 +801,77 @@ async fn archive_history(
     receipt: &RetiredScheduleRetirementReceipt,
 ) -> Result<(), CampaignSchedulerError> {
     let ids = receipt_ids(receipt);
-    match (receipt.plan.history, storage) {
-        (HistoryRequirement::Database, RetirementStorage::Available(store)) => {
-            store
-                .archive_schedule_history_for_retired_engine_operation(
-                    &receipt.operation_id,
-                    &receipt.plan_digest,
-                    &ids,
-                )
-                .await
-                .map_err(|error| archive_error(&ids, error))?;
-            Ok(())
-        }
-        (HistoryRequirement::Database, RetirementStorage::Unavailable) => Err(archive_error(
-            &ids,
-            "linked schedule history storage is unavailable",
-        )),
-        (HistoryRequirement::Database, RetirementStorage::NotConfigured) => Err(receipt_error(
-            &ids,
-            "database-backed history proof is required",
-        )),
-        (HistoryRequirement::NotConfigured, RetirementStorage::NotConfigured)
-        | (HistoryRequirement::NoRetiredSchedules, _) => Ok(()),
-        (HistoryRequirement::NotConfigured, RetirementStorage::Available(_)) => Err(receipt_error(
-            &ids,
-            "database persistence was configured after the history waiver",
-        )),
-        (HistoryRequirement::NotConfigured, RetirementStorage::Unavailable) => Err(archive_error(
-            &ids,
-            "database persistence is configured but unavailable after the history waiver",
-        )),
+    if receipt.plan.history != HistoryRequirement::Database {
+        return Ok(());
     }
+    let RetirementStorage::Available(store) = storage else {
+        return Err(receipt_error(
+            &ids,
+            "database history authority was not reconciled",
+        ));
+    };
+    store
+        .archive_schedule_history_for_retired_engine_operation(
+            &receipt.operation_id,
+            &receipt.plan_digest,
+            &ids,
+        )
+        .await
+        .map_err(|error| archive_error(&ids, error))?;
+    Ok(())
 }
 
-async fn require_history_proof(
+async fn reconcile_durable_authorities(
     storage: RetirementStorage<'_>,
     receipt: &RetiredScheduleRetirementReceipt,
-) -> Result<(), CampaignSchedulerError> {
+    phase: HistoryProofPhase,
+) -> Result<ReconciledAuthorities, CampaignSchedulerError> {
     let ids = receipt_ids(receipt);
     match (receipt.plan.history, storage) {
         (HistoryRequirement::Database, RetirementStorage::Available(store)) => {
-            if store
-                .schedule_retirement_history_proven(
-                    &receipt.operation_id,
-                    &receipt.plan_digest,
-                    &ids,
-                )
+            let proof = store
+                .schedule_retirement_history_proof()
                 .await
-                .map_err(|error| archive_error(&ids, error))?
-            {
-                Ok(())
-            } else {
-                Err(receipt_error(&ids, "linked history proof is missing"))
+                .map_err(|error| archive_error(&ids, error))?;
+            match proof {
+                None if phase == HistoryProofPhase::HistoryMustBeCommitted => {
+                    Err(receipt_error(&ids, "linked history proof is missing"))
+                }
+                None => Ok(ReconciledAuthorities {
+                    permanently_retired_ids: ids,
+                }),
+                Some(proof) => {
+                    let exact = proof.operation_id == receipt.operation_id
+                        && proof.plan_digest == receipt.plan_digest
+                        && proof.schedule_ids == ids;
+                    if !exact {
+                        return Err(receipt_error(
+                            &ids,
+                            "database retirement proof contradicts the receipt",
+                        ));
+                    }
+                    if phase == HistoryProofPhase::BeforeHistory {
+                        return Err(receipt_error(
+                            &ids,
+                            "database retirement proof exists before its receipt phase",
+                        ));
+                    }
+                    if !proof.history_archived {
+                        return Err(receipt_error(
+                            &ids,
+                            "linked history proof has active schedule history",
+                        ));
+                    }
+                    Ok(ReconciledAuthorities {
+                        permanently_retired_ids: proof.schedule_ids,
+                    })
+                }
             }
         }
-        (HistoryRequirement::Database, RetirementStorage::Unavailable) => Err(archive_error(
+        (
+            HistoryRequirement::Database | HistoryRequirement::NoRetiredSchedules,
+            RetirementStorage::Unavailable,
+        ) => Err(archive_error(
             &ids,
             "linked schedule history storage is unavailable",
         )),
@@ -825,8 +879,27 @@ async fn require_history_proof(
             &ids,
             "database-backed history proof is required",
         )),
-        (HistoryRequirement::NotConfigured, RetirementStorage::NotConfigured)
-        | (HistoryRequirement::NoRetiredSchedules, _) => Ok(()),
+        (HistoryRequirement::NotConfigured, RetirementStorage::NotConfigured) => {
+            Ok(ReconciledAuthorities {
+                permanently_retired_ids: ids,
+            })
+        }
+        (HistoryRequirement::NoRetiredSchedules, RetirementStorage::Available(store)) => {
+            let proof = store
+                .schedule_retirement_history_proof()
+                .await
+                .map_err(|error| archive_error(&ids, error))?;
+            if proof.is_some() {
+                Err(receipt_error(
+                    &ids,
+                    "database retirement proof contradicts an empty receipt",
+                ))
+            } else {
+                Ok(ReconciledAuthorities {
+                    permanently_retired_ids: Vec::new(),
+                })
+            }
+        }
         (HistoryRequirement::NotConfigured, RetirementStorage::Available(_)) => Err(receipt_error(
             &ids,
             "database persistence was configured after the history waiver",
@@ -835,6 +908,9 @@ async fn require_history_proof(
             &ids,
             "database persistence is configured but unavailable after the history waiver",
         )),
+        (HistoryRequirement::NoRetiredSchedules, RetirementStorage::NotConfigured) => Err(
+            receipt_error(&ids, "configured database authority disappeared"),
+        ),
     }
 }
 
@@ -956,10 +1032,7 @@ fn validate_receipt(
     if receipt.version != RECEIPT_VERSION {
         return Err(receipt_error(&ids, "unsupported receipt version"));
     }
-    if !matches!(
-        uuid::Uuid::parse_str(&receipt.operation_id),
-        Ok(operation_id) if operation_id.to_string() == receipt.operation_id
-    ) {
+    if validate_schedule_retirement_operation_id(&receipt.operation_id).is_err() {
         return Err(receipt_error(&ids, "invalid operation identifier"));
     }
     for image in [
@@ -974,6 +1047,18 @@ fn validate_receipt(
     }
     if receipt.plan.retired.len() > MAX_RECEIPT_SCHEDULES {
         return Err(receipt_error(&ids, "receipt schedule count exceeds limit"));
+    }
+    let proof_ids = receipt
+        .plan
+        .retired
+        .iter()
+        .map(|snapshot| snapshot.schedule.id.clone())
+        .collect::<Vec<_>>();
+    if !proof_ids.is_empty() && validate_schedule_retirement_ids(&proof_ids).is_err() {
+        return Err(receipt_error(
+            &ids,
+            "receipt contains an invalid retirement proof identity",
+        ));
     }
     for snapshot in &receipt.plan.retired {
         validate_id_bound(&snapshot.schedule.id)?;
@@ -1060,7 +1145,10 @@ fn validate_plan_semantics(
     }
 
     let history_matches = if classified.is_empty() {
-        plan.history == HistoryRequirement::NoRetiredSchedules
+        matches!(
+            plan.history,
+            HistoryRequirement::NoRetiredSchedules | HistoryRequirement::NotConfigured
+        )
     } else {
         matches!(
             plan.history,
@@ -1378,8 +1466,23 @@ fn validate_schedule_bounds(schedules: &[Schedule]) -> Result<(), CampaignSchedu
     Ok(())
 }
 
+fn validate_initial_retired_ids(schedules: &[Schedule]) -> Result<(), CampaignSchedulerError> {
+    let ids = retired_ids(schedules);
+    if ids.is_empty() {
+        return Ok(());
+    }
+    validate_schedule_retirement_ids(&ids).map_err(|_| {
+        archive_error(
+            &ids,
+            "invalid legacy retired schedule identity; assign a new schedule ID or remove the \
+             invalid legacy definition offline, then restart",
+        )
+    })?;
+    Ok(())
+}
+
 fn validate_id_bound(id: &str) -> Result<(), CampaignSchedulerError> {
-    if id.chars().count() <= MAX_ERROR_ID_CHARS {
+    if id.len() <= MAX_SCHEDULE_ID_BYTES {
         Ok(())
     } else {
         Err(receipt_error(
@@ -1596,7 +1699,7 @@ mod tests {
 
     #[test]
     fn receipt_validation_bounds_identifier_length_without_echoing_it() {
-        let private_id = "P".repeat(MAX_ERROR_ID_CHARS + 1);
+        let private_id = "P".repeat(MAX_SCHEDULE_ID_BYTES + 1);
         let mut receipt = test_receipt();
         receipt.plan.active_pre.schedules[0].id = private_id.clone();
 

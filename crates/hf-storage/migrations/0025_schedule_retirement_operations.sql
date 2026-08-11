@@ -11,7 +11,7 @@ CREATE TABLE schedule_retirement_operations (
             AND length(replace(operation_id, '-', '')) = 32
             AND substr(operation_id, 9, 1) = '-'
             AND substr(operation_id, 14, 1) = '-'
-            AND substr(operation_id, 15, 1) GLOB '[1-5]'
+            AND substr(operation_id, 15, 1) = '4'
             AND substr(operation_id, 19, 1) = '-'
             AND substr(operation_id, 20, 1) GLOB '[89ab]'
             AND substr(operation_id, 24, 1) = '-'

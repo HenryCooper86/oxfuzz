@@ -2,7 +2,7 @@
 
 use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
-use uuid::Uuid;
+use uuid::{Uuid, Variant, Version};
 
 use crate::{StorageError, Store};
 
@@ -108,12 +108,19 @@ const MAX_RETIREMENT_IDS_JSON_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RETIREMENT_SCHEDULE_ID_BYTES: usize = 512;
 const MAX_RETIREMENT_SCHEDULE_IDS: usize = 4_096;
 
-fn canonical_schedule_ids(schedule_ids: &[String]) -> Result<Vec<String>, StorageError> {
+/// Validate and canonicalize the permanent schedule identities in a retirement proof.
+///
+/// # Errors
+/// Returns [`StorageError::InvalidData`] for an empty or oversized manifest,
+/// an empty, oversized, or NUL-containing identity, or a duplicate identity.
+pub fn validate_schedule_retirement_ids(
+    schedule_ids: &[String],
+) -> Result<Vec<String>, StorageError> {
     let mut canonical = schedule_ids.to_vec();
     canonical.sort_unstable();
-    canonical.dedup();
     if canonical.is_empty()
         || canonical.len() > MAX_RETIREMENT_SCHEDULE_IDS
+        || canonical.windows(2).any(|ids| ids[0] == ids[1])
         || canonical.iter().any(|id| {
             id.is_empty()
                 || id.len() > MAX_RETIREMENT_SCHEDULE_ID_BYTES
@@ -127,14 +134,29 @@ fn canonical_schedule_ids(schedule_ids: &[String]) -> Result<Vec<String>, Storag
     Ok(canonical)
 }
 
+/// Validate the operation-identity domain shared by receipt and database proofs.
+///
+/// # Errors
+/// Returns [`StorageError::InvalidData`] unless the value is a canonical
+/// lowercase RFC 4122 version-4 UUID.
+pub fn validate_schedule_retirement_operation_id(operation_id: &str) -> Result<(), StorageError> {
+    let parsed = Uuid::parse_str(operation_id).map_err(|_| {
+        StorageError::InvalidData("invalid schedule-retirement operation ID".to_owned())
+    })?;
+    if parsed.to_string() != operation_id
+        || parsed.get_version() != Some(Version::Random)
+        || parsed.get_variant() != Variant::RFC4122
+    {
+        return Err(StorageError::InvalidData(
+            "invalid schedule-retirement operation ID".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_operation_binding(operation_id: &str, plan_digest: &str) -> Result<(), StorageError> {
-    let canonical_uuid = Uuid::parse_str(operation_id)
-        .map_err(|_| {
-            StorageError::InvalidData("invalid schedule-retirement operation ID".to_owned())
-        })?
-        .to_string();
-    if canonical_uuid != operation_id
-        || plan_digest.len() != 64
+    validate_schedule_retirement_operation_id(operation_id)?;
+    if plan_digest.len() != 64
         || !plan_digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -155,13 +177,26 @@ fn decode_proof_ids(schedule_ids_json: &str) -> Result<Vec<String>, StorageError
     let ids: Vec<String> = serde_json::from_str(schedule_ids_json).map_err(|_| {
         StorageError::InvalidData("malformed schedule-retirement proof ID manifest".to_owned())
     })?;
-    let canonical = canonical_schedule_ids(&ids)?;
+    let canonical = validate_schedule_retirement_ids(&ids)?;
     if canonical != ids {
         return Err(StorageError::InvalidData(
             "schedule-retirement proof IDs are not sorted and unique".to_owned(),
         ));
     }
     Ok(ids)
+}
+
+/// One fully validated database authority for permanently retired schedules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleRetirementHistoryProof {
+    /// Receipt operation identity bound into the proof.
+    pub operation_id: String,
+    /// Receipt plan digest bound into the proof.
+    pub plan_digest: String,
+    /// Sorted, unique permanent schedule identities.
+    pub schedule_ids: Vec<String>,
+    /// Whether all matching execution and occurrence history has been archived.
+    pub history_archived: bool,
 }
 
 async fn load_validated_proofs(
@@ -256,7 +291,7 @@ impl Store {
         schedule_ids: &[String],
     ) -> Result<u64, StorageError> {
         validate_operation_binding(operation_id, plan_digest)?;
-        let schedule_ids = canonical_schedule_ids(schedule_ids)?;
+        let schedule_ids = validate_schedule_retirement_ids(schedule_ids)?;
         let schedule_ids_json = serde_json::to_string(&schedule_ids)?;
         if schedule_ids_json.len() > MAX_RETIREMENT_IDS_JSON_BYTES {
             return Err(StorageError::InvalidData(
@@ -327,7 +362,7 @@ impl Store {
         schedule_ids: &[String],
     ) -> Result<bool, StorageError> {
         validate_operation_binding(operation_id, plan_digest)?;
-        let schedule_ids = canonical_schedule_ids(schedule_ids)?;
+        let schedule_ids = validate_schedule_retirement_ids(schedule_ids)?;
         let mut transaction = self.pool().begin().await?;
         let proofs = load_validated_proofs(&mut transaction).await?;
         let marker_matches = proofs.len() == 1
@@ -349,6 +384,37 @@ impl Store {
         let has_proof = !load_validated_proofs(&mut transaction).await?.is_empty();
         transaction.commit().await?;
         Ok(has_proof)
+    }
+
+    /// Load the sole validated retirement proof authority, when one exists.
+    ///
+    /// # Errors
+    /// Returns an error if proof metadata or tombstones are malformed, if more
+    /// than one operation exists, or if the query cannot be completed.
+    pub async fn schedule_retirement_history_proof(
+        &self,
+    ) -> Result<Option<ScheduleRetirementHistoryProof>, StorageError> {
+        let mut transaction = self.pool().begin().await?;
+        let mut proofs = load_validated_proofs(&mut transaction).await?;
+        if proofs.len() > 1 {
+            return Err(StorageError::InvalidData(
+                "multiple schedule-retirement operation proofs exist".to_owned(),
+            ));
+        }
+        let proof = if let Some((operation_id, plan_digest, schedule_ids)) = proofs.pop() {
+            let history_archived =
+                !has_active_schedule_history(&mut transaction, &schedule_ids).await?;
+            Some(ScheduleRetirementHistoryProof {
+                operation_id,
+                plan_digest,
+                schedule_ids,
+                history_archived,
+            })
+        } else {
+            None
+        };
+        transaction.commit().await?;
+        Ok(proof)
     }
 
     /// Return the permanent schedule identities bound by validated retirement proofs.
