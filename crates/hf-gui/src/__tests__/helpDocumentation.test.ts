@@ -8,6 +8,16 @@ function source(relativePath: string): string {
 }
 
 describe("in-app documentation", () => {
+  it("does not mention retired engines in rendered help content", () => {
+    const retired = ["cluster", "fuzz", "lite"].join("");
+    const bodies = [...HELP_SECTIONS, ...HELP_SECTIONS_ZH]
+      .map((section) => section.body)
+      .join("\n")
+      .toLowerCase();
+
+    expect(bodies).not.toContain(retired);
+  });
+
   it("documents every current library surface in both languages", () => {
     const englishIds = HELP_SECTIONS.map((section) => section.id);
     const chineseIds = HELP_SECTIONS_ZH.map((section) => section.id);

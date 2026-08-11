@@ -287,9 +287,9 @@ smoke-test it in the sandbox, then explicitly **approve** it for campaigns.
 **Build & Smoke-Test** (the primary button) runs steps 1-3 and seeds in one go,
 but deliberately stops before approval so a human always reviews.
 
-**Selectors:** Target (sorted by fit), Engine (libFuzzer / AFL++ / honggfuzz /
-ClusterFuzzLite; Rust restricts to libFuzzer / ClusterFuzzLite), and Language
-(C / C++ / Rust).
+**Selectors:** Target (sorted by fit), Engine (libFuzzer / AFL++ / honggfuzz
+for generated function harnesses; Rust uses libFuzzer), and Language (C / C++ /
+Rust). syzkaller is for kernel targets rather than generated function harnesses.
 
 **Gotchas:** regenerating or recompiling a harness invalidates a prior approval
 -- you must approve again, because the source the engine will run has changed. If
@@ -730,8 +730,8 @@ const REF_GLOSSARY = `
 - **Harness** -- the small piece of test code that feeds fuzz bytes into the
   target. oxfuzz writes this for you.
 - **Fuzzing engine** -- the tool that generates inputs and runs the target
-  millions of times: libFuzzer, AFL++, honggfuzz, plus ClusterFuzzLite and
-  Syzkaller.
+  millions of times: libFuzzer, AFL++, and honggfuzz for user-space targets,
+  with syzkaller for kernel targets.
 - **Corpus** -- the collection of example inputs the fuzzer keeps and mutates. A
   good starter ("seed") corpus speeds up bug-finding.
 - **Coverage** -- how much of the program's code the fuzzer has exercised. More

@@ -31,8 +31,7 @@ function buildReport(status: SystemStatus | null): string {
           `- Docker running: ${yn(status.docker)}`,
           `- Sandbox image built: ${yn(status.sandbox_image)}`,
           `- Engines: libFuzzer=${yn(status.libfuzzer)}, AFL++=${yn(status.aflplusplus)}, ` +
-            `honggfuzz=${yn(status.honggfuzz)}, ClusterFuzzLite=${yn(status.clusterfuzzlite)}, ` +
-            `syzkaller=${yn(status.syzkaller)}`,
+            `honggfuzz=${yn(status.honggfuzz)}, syzkaller=${yn(status.syzkaller)}`,
           `- DefectDojo reachable: ${yn(status.defectdojo)}`,
         ].join("\n")
       : "- System status: unavailable (backend did not respond)",
@@ -97,7 +96,7 @@ export function AboutTab() {
           <Badge variant="accent">libFuzzer</Badge>
           <Badge variant="accent">AFL++</Badge>
           <Badge variant="accent">honggfuzz</Badge>
-          <Badge variant="accent">ClusterFuzzLite</Badge>
+          <Badge variant="accent">syzkaller (kernel)</Badge>
         </div>
       </div>
 
