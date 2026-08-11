@@ -361,7 +361,7 @@ requires that no new active history exists for the bound schedule IDs.
 
 | column | SQLite declaration | notes |
 | --- | --- | --- |
-| `operation_id` | `TEXT NOT NULL PRIMARY KEY` | checked exact lowercase canonical UUID shape, also bound by the file receipt and completion certificate |
+| `operation_id` | `TEXT NOT NULL PRIMARY KEY` | checked canonical lowercase RFC 4122 version-4 UUID, also bound by the file receipt and completion certificate |
 | `plan_digest` | `TEXT NOT NULL` | checked lowercase SHA-256 of the operation ID and exact retirement plan |
 | `schedule_ids_json` | `TEXT NOT NULL` | TEXT-only, bounded non-empty JSON array containing 1–4096 sorted unique linked schedule IDs; each ID is TEXT, 1–512 bytes, and contains no NUL |
 | `completed_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | transactional history-phase completion time |
@@ -378,6 +378,15 @@ also rejects any pre-existing non-TEXT history ID before completion. The
 evidence rows, active-row deletion, operation proof, and tombstones commit in
 one transaction; an exact retry revalidates the full proof and absence of linked
 active rows in its own transaction.
+
+The service reloads this validated proof authority in every receipt phase when
+persistence is available. A non-empty database-backed receipt must match the
+exact operation ID, plan digest, and normalized schedule-ID set. An empty
+database-backed receipt requires this table to be empty. Explicit no-database
+receipts reject a later store attachment, and configured-but-unavailable
+persistence is never interpreted as an empty proof set. Only a successful
+reconciliation supplies permanent IDs to registration, persistence, and
+dispatch guards.
 
 ### `schedule_retirement_schedule_ids`
 
@@ -676,7 +685,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
 | `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
 | `0024_retired_engine_records.sql` | archives complete retired-engine records as immutable, non-executable evidence before typed deserialization |
-| `0025_schedule_retirement_operations.sql` | adds shape-checked immutable operation proofs and exact normalized permanent-ID tombstones committed with linked schedule-history retirement; hardens retired archive and history insert/update immutability |
+| `0025_schedule_retirement_operations.sql` | adds canonical lowercase RFC 4122 v4, shape-checked immutable operation proofs and exact normalized permanent-ID tombstones committed with linked schedule-history retirement; hardens retired archive and history insert/update immutability |
 
 ## 7. Read failure contract
 

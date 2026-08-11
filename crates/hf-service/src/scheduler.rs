@@ -3164,6 +3164,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_empty_receipt_rejects_same_database_proof_before_startup_mutation() {
+        let fixture = scheduler_fixture_with_store().await;
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.stop().await;
+        let store = fixture.store.as_deref().unwrap();
+        store
+            .archive_schedule_history_for_retired_engine_operation(
+                "33333333-3333-4333-8333-333333333333",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &["schedule-database-retired".to_owned()],
+            )
+            .await
+            .unwrap();
+        fixture.write_interval("schedule-supported");
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let archive_before = optional_file_bytes(&retired_schedule_path(&fixture.schedules_path));
+        let receipt_before =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        let completion_before =
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap();
+        let proof_before: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM schedule_executions),
+                (SELECT COUNT(*) FROM schedule_occurrences),
+                (SELECT COUNT(*) FROM schedule_retirement_operations),
+                (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+
+        let error = fixture
+            .start()
+            .await
+            .err()
+            .expect("database proof contradicting an empty receipt must fail startup");
+
+        assert!(error.to_string().contains("retirement receipt"));
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            optional_file_bytes(&retired_schedule_path(&fixture.schedules_path)),
+            archive_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap(),
+            receipt_before
+        );
+        assert_eq!(
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap(),
+            completion_before
+        );
+        let proof_after: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM schedule_executions),
+                (SELECT COUNT(*) FROM schedule_occurrences),
+                (SELECT COUNT(*) FROM schedule_retirement_operations),
+                (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(proof_after, proof_before);
+    }
+
+    #[tokio::test]
+    async fn completed_empty_no_database_receipt_rejects_later_database_attachment() {
+        let fixture = scheduler_fixture_without_store();
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.stop().await;
+        fixture.push_schedule(active_campaign("schedule-supported"));
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let archive_before = std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap();
+        let receipt_before =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        let completion_before =
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap();
+        let store = Arc::new(
+            Store::connect(fixture.directory.path().join("attached.db"))
+                .await
+                .unwrap(),
+        );
+        let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_store(Arc::clone(&store));
+
+        let error = CampaignScheduler::try_start(container, fixture.schedules_path.clone(), None)
+            .await
+            .err()
+            .expect("attaching persistence after a no-database receipt must fail startup");
+
+        assert!(error
+            .to_string()
+            .contains("configured after the history waiver"));
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap(),
+            receipt_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap(),
+            archive_before
+        );
+        assert_eq!(
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap(),
+            completion_before
+        );
+        assert!(!store.has_schedule_retirement_history_proof().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn completed_empty_database_receipt_rejects_unavailable_restart() {
+        let fixture = scheduler_fixture_with_store().await;
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.stop().await;
+        fixture.push_schedule(active_campaign("schedule-supported"));
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let archive_before = std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap();
+        let receipt_before =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        let completion_before =
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap();
+        let unavailable = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
+            .with_unavailable_store_for_test();
+
+        let error = CampaignScheduler::try_start(unavailable, fixture.schedules_path.clone(), None)
+            .await
+            .err()
+            .expect("unavailable configured persistence must fail startup");
+
+        assert!(matches!(
+            error,
+            CampaignSchedulerError::RetiredScheduleArchive { .. }
+        ));
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap(),
+            receipt_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap(),
+            archive_before
+        );
+        assert_eq!(
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap(),
+            completion_before
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_retired_schedule_ids_fail_preflight_without_durable_effects() {
+        for invalid_id in ["", "invalid\0schedule"] {
+            let fixture = scheduler_fixture_with_store().await;
+            fixture.push_schedule(retired_campaign(invalid_id));
+            let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+            let store = fixture.store.as_deref().unwrap();
+
+            for _ in 0..2 {
+                let error = fixture
+                    .start()
+                    .await
+                    .err()
+                    .expect("invalid proof identity must fail preflight");
+                let detail = error.to_string();
+                assert!(detail.contains("assign a new schedule ID"));
+                assert!(detail.contains("remove the invalid legacy definition offline"));
+                assert_eq!(
+                    std::fs::read(&fixture.schedules_path).unwrap(),
+                    active_before
+                );
+                assert_eq!(
+                    optional_file_bytes(&retired_schedule_path(&fixture.schedules_path)),
+                    None
+                );
+                assert_eq!(
+                    optional_file_bytes(&retired_schedule_retirement_path(&fixture.schedules_path)),
+                    None
+                );
+                assert_eq!(
+                    optional_file_bytes(&retirement_completion_path(&fixture.schedules_path)),
+                    None
+                );
+                let counts: (i64, i64, i64) = sqlx::query_as(
+                    "SELECT
+                        (SELECT COUNT(*) FROM retired_engine_records),
+                        (SELECT COUNT(*) FROM schedule_retirement_operations),
+                        (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+                )
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+                assert_eq!(counts, (0, 0, 0));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn initial_receipt_failures_leave_state_unchanged_and_retry() {
         for (failure_state, with_retired_schedule) in [
             (RetiredScheduleRetirementState::ArchivePending, true),

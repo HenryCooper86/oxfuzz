@@ -140,6 +140,14 @@ The step performs this order:
 5. only after both archives are durable, atomically rewrite the active schedule file without those schedules;
 6. load the remaining schedules into the scheduler.
 
+Before the first durable effect, the service validates every classified
+retired schedule identity against the database proof domain: the manifest is
+non-empty when a retirement is required, contains at most 4,096 unique IDs,
+and every ID is non-empty, NUL-free, and at most 512 UTF-8 bytes. Invalid
+legacy identities leave the active file and every archive, receipt,
+certificate, proof, and tombstone unchanged; recovery is an offline rename or
+removal followed by restart.
+
 A crash after either archive is created but before active-file replacement is safe: the next initialization deduplicates both archives by record identity and repeats the remaining work. If the file or SQLite archive cannot be written, the active file is not changed and service initialization fails with the affected schedule IDs and a recovery path.
 
 Retired schedule definitions are never automatically converted, enabled, or dispatched. The retired archive is evidence only.
@@ -152,6 +160,17 @@ ID; changing the engine does not revive the retired identity. The service
 checks the receipt and normalized database tombstones before registration and
 dispatch so a persistence rejection cannot be logged and then followed by
 execution.
+
+One reconciliation result is the sole source of the runtime permanent-ID set.
+Whenever SQLite persistence is available, every receipt phase reloads the
+validated operation proof and normalized tombstones. A database-backed
+non-empty receipt must match the exact operation ID, plan digest, and schedule
+identity set; a database-backed empty receipt requires no proof at all. An
+explicit no-database receipt is valid only while persistence remains
+unconfigured. A configured-but-unavailable store never implies an empty proof
+set. Missing, attached, or contradictory authorities fail before scheduler
+registration or dispatch and do not mutate durable evidence. Receipt operation
+IDs and database proofs use canonical lowercase RFC 4122 version-4 UUIDs.
 
 All service instances that share `schedules.json` participate in the same
 advisory-lock protocol. Online edits by older binaries, editors, scripts, or
