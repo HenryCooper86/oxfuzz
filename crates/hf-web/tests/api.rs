@@ -1018,7 +1018,7 @@ async fn system_status_returns_json_flags() {
     assert!(json["docker"].is_boolean());
     assert!(json["sandbox_image"].is_boolean());
     let retired_status_key = hf_service::RETIRED_ENGINE_ID;
-    assert!(json.get(&retired_status_key).is_none());
+    assert!(json.get(retired_status_key).is_none());
     for key in ["libfuzzer", "aflplusplus", "honggfuzz", "syzkaller"] {
         assert!(json[key].is_boolean(), "{key}");
     }
