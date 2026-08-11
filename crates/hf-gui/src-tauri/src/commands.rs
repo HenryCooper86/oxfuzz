@@ -2365,10 +2365,10 @@ mod campaign_advice_command_tests {
     fn tauri_advice_boundary_preserves_engine_parse_errors() {
         let container = hf_service::ServiceContainer::stubbed();
         let retired_values = [
-            ["cluster", "fuzz", "lite"].concat(),
-            ["c", "f", "l"].concat(),
-            ["c", "f", "lite"].concat(),
-            format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+            RETIRED_ENGINE_ID.to_owned(),
+            RETIRED_ENGINE_IDS[1].to_owned(),
+            RETIRED_ENGINE_IDS[2].to_owned(),
+            format!(" {} ", RETIRED_ENGINE_ID),
         ];
 
         for value in retired_values {

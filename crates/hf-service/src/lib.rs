@@ -62,6 +62,7 @@ pub use hf_core::crash::Crash;
 pub use hf_core::engine::{EngineCapabilities, EngineKind, FuzzProgress};
 pub use hf_core::error::ClassifiedError;
 pub use hf_core::provider::ProviderStatus;
+pub use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 pub use hf_core::runtime::{
     CommandResult, CommandTermination, ImmutableImageReference, ResourceLimits, RuntimeAdapter,
 };

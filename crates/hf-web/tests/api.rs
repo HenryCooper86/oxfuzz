@@ -335,10 +335,10 @@ async fn campaign_advice_rest_boundary_preserves_engine_parse_errors() {
     allow_open_dev_mode();
     let app = hf_web::router::build();
     let retired_values = [
-        ["cluster", "fuzz", "lite"].concat(),
-        ["c", "f", "l"].concat(),
-        ["c", "f", "lite"].concat(),
-        format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+        hf_service::RETIRED_ENGINE_ID.to_owned(),
+        hf_service::RETIRED_ENGINE_IDS[1].to_owned(),
+        hf_service::RETIRED_ENGINE_IDS[2].to_owned(),
+        format!(" {} ", hf_service::RETIRED_ENGINE_ID),
     ];
 
     for value in retired_values {
@@ -1017,7 +1017,7 @@ async fn system_status_returns_json_flags() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["docker"].is_boolean());
     assert!(json["sandbox_image"].is_boolean());
-    let retired_status_key = ["cluster", "fuzz", "lite"].concat();
+    let retired_status_key = hf_service::RETIRED_ENGINE_ID;
     assert!(json.get(&retired_status_key).is_none());
     for key in ["libfuzzer", "aflplusplus", "honggfuzz", "syzkaller"] {
         assert!(json[key].is_boolean(), "{key}");
@@ -1028,7 +1028,7 @@ async fn system_status_returns_json_flags() {
 async fn retired_engine_is_rejected_with_actionable_api_error() {
     allow_open_dev_mode();
     let app = hf_web::router::build();
-    let retired_engine_id = ["cluster", "fuzz", "lite"].concat();
+    let retired_engine_id = hf_service::RETIRED_ENGINE_ID;
     let response = app
         .oneshot(
             Request::builder()
