@@ -338,7 +338,7 @@ repository API for replaying or promoting this evidence.
 | --- | --- | --- |
 | `record_kind` | `TEXT NOT NULL` | run/harness/harness_approval/crash/schedule_execution/schedule_occurrence |
 | `record_id` | `TEXT NOT NULL` | original active-table primary key |
-| `retired_engine` | `TEXT NOT NULL` | canonical retired identifier; constrained to `clusterfuzzlite` |
+| `retired_engine` | `TEXT NOT NULL` | constrained to the canonical identifier exposed by `hf_core::retired_engine::RETIRED_ENGINE_ID` |
 | `payload_json` | `TEXT NOT NULL` | valid JSON preserving every original source column |
 | `migration_version` | `INTEGER NOT NULL` | archive schema provenance; constrained to `24` |
 | `archived_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | archival timestamp |
