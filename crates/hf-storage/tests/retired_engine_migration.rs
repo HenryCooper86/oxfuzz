@@ -1,9 +1,49 @@
-use hf_storage::{validate_schedule_retirement_ids, StorageError, Store};
+use hf_storage::{
+    validate_schedule_retirement_ids, validate_schedule_retirement_manifest, StorageError, Store,
+};
 
 const OPERATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const SECOND_OPERATION_ID: &str = "22222222-2222-4222-8222-222222222222";
 const PLAN_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SECOND_PLAN_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const MAX_RETIREMENT_MANIFEST_BYTES: usize = 2_097_152;
+
+fn escaping_boundary_ids(extra_escaped_prefix_bytes: usize) -> Vec<String> {
+    let escaped_tail = "\"\\".repeat(254);
+    (0..2_050)
+        .map(|index| {
+            let mut prefix = format!("{index:04x}");
+            if index == 0 {
+                let replacement = match extra_escaped_prefix_bytes {
+                    0 => "00",
+                    1 => "\"0",
+                    2 => "\"\\",
+                    other => panic!("unsupported escaped-prefix byte count: {other}"),
+                };
+                prefix.replace_range(..2, replacement);
+            }
+            format!("{prefix}{escaped_tail}")
+        })
+        .collect()
+}
+
+fn maximum_count_and_length_ids() -> Vec<String> {
+    (0..4_096)
+        .map(|index| format!("{index:04x}{}", "a".repeat(508)))
+        .collect()
+}
+
+async fn operation_state_counts(store: &Store) -> (i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap()
+}
 
 async fn pre_0024_pool(path: &std::path::Path) -> sqlx::SqlitePool {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -933,6 +973,90 @@ fn retirement_proof_id_validator_enforces_the_exact_shared_domain() {
             Err(StorageError::InvalidData(_))
         ));
     }
+}
+
+#[tokio::test]
+async fn operation_manifest_validator_and_store_accept_one_byte_under_encoded_limit() {
+    let ids = escaping_boundary_ids(0);
+    let encoded = serde_json::to_string(&ids).unwrap();
+    assert_eq!(encoded.len(), MAX_RETIREMENT_MANIFEST_BYTES - 1);
+    let manifest = validate_schedule_retirement_manifest(&ids).unwrap();
+    assert_eq!(manifest.schedule_ids(), ids);
+    assert_eq!(manifest.canonical_json(), encoded);
+    assert_eq!(
+        validate_schedule_retirement_ids(&ids).unwrap().len(),
+        ids.len()
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("manifest-under.db"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids,)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(store
+        .schedule_retirement_history_proven(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap());
+    assert_eq!(operation_state_counts(&store).await, (0, 1, 2_050));
+}
+
+#[tokio::test]
+async fn operation_manifest_validator_and_store_reject_one_byte_over_encoded_limit() {
+    let ids = escaping_boundary_ids(2);
+    assert_eq!(ids.iter().map(String::len).sum::<usize>(), 1_049_600);
+    let encoded = serde_json::to_string(&ids).unwrap();
+    assert_eq!(encoded.len(), MAX_RETIREMENT_MANIFEST_BYTES + 1);
+    assert!(matches!(
+        validate_schedule_retirement_manifest(&ids),
+        Err(StorageError::InvalidData(_))
+    ));
+    assert!(matches!(
+        validate_schedule_retirement_ids(&ids),
+        Err(StorageError::InvalidData(_))
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("manifest-over.db"))
+        .await
+        .unwrap();
+
+    let store_error = store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(store_error, StorageError::InvalidData(_)));
+    assert_eq!(operation_state_counts(&store).await, (0, 0, 0));
+}
+
+#[tokio::test]
+async fn operation_manifest_rejects_maximum_count_and_length_without_mutation() {
+    let ids = maximum_count_and_length_ids();
+    assert_eq!(ids.len(), 4_096);
+    assert!(ids.iter().all(|id| id.len() == 512));
+    let encoded = serde_json::to_string(&ids).unwrap();
+    assert_eq!(encoded.len(), 2_109_441);
+    assert!(matches!(
+        validate_schedule_retirement_ids(&ids),
+        Err(StorageError::InvalidData(_))
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("manifest-maxima.db"))
+        .await
+        .unwrap();
+
+    let store_error = store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(store_error, StorageError::InvalidData(_)));
+    assert_eq!(operation_state_counts(&store).await, (0, 0, 0));
 }
 
 #[tokio::test]

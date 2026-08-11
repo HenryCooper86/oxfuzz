@@ -143,10 +143,14 @@ The step performs this order:
 Before the first durable effect, the service validates every classified
 retired schedule identity against the database proof domain: the manifest is
 non-empty when a retirement is required, contains at most 4,096 unique IDs,
-and every ID is non-empty, NUL-free, and at most 512 UTF-8 bytes. Invalid
-legacy identities leave the active file and every archive, receipt,
-certificate, proof, and tombstone unchanged; recovery is an offline rename or
-removal followed by restart.
+every ID is non-empty, NUL-free, and at most 512 UTF-8 bytes, and the exact
+compact JSON encoding of the sorted identities is at most 2,097,152 bytes,
+including quotes, commas, UTF-8, and JSON escaping. One shared validated
+manifest owns both the canonical identities and those encoded bytes so service
+preflight and SQLite persistence cannot apply different bounds. Invalid legacy
+identities leave the active file and every archive, receipt, certificate,
+proof, and tombstone unchanged; recovery is an offline rename or removal
+followed by restart.
 
 A crash after either archive is created but before active-file replacement is safe: the next initialization deduplicates both archives by record identity and repeats the remaining work. If the file or SQLite archive cannot be written, the active file is not changed and service initialization fails with the affected schedule IDs and a recovery path.
 

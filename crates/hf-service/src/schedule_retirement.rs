@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use hf_scheduler::Schedule;
 use hf_storage::{
-    validate_schedule_retirement_ids, validate_schedule_retirement_operation_id, Store,
+    validate_schedule_retirement_manifest, validate_schedule_retirement_operation_id, Store,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1054,7 +1054,7 @@ fn validate_receipt(
         .iter()
         .map(|snapshot| snapshot.schedule.id.clone())
         .collect::<Vec<_>>();
-    if !proof_ids.is_empty() && validate_schedule_retirement_ids(&proof_ids).is_err() {
+    if !proof_ids.is_empty() && validate_schedule_retirement_manifest(&proof_ids).is_err() {
         return Err(receipt_error(
             &ids,
             "receipt contains an invalid retirement proof identity",
@@ -1471,7 +1471,7 @@ fn validate_initial_retired_ids(schedules: &[Schedule]) -> Result<(), CampaignSc
     if ids.is_empty() {
         return Ok(());
     }
-    validate_schedule_retirement_ids(&ids).map_err(|_| {
+    validate_schedule_retirement_manifest(&ids).map_err(|_| {
         archive_error(
             &ids,
             "invalid legacy retired schedule identity; assign a new schedule ID or remove the \

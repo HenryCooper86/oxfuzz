@@ -363,7 +363,7 @@ requires that no new active history exists for the bound schedule IDs.
 | --- | --- | --- |
 | `operation_id` | `TEXT NOT NULL PRIMARY KEY` | checked canonical lowercase RFC 4122 version-4 UUID, also bound by the file receipt and completion certificate |
 | `plan_digest` | `TEXT NOT NULL` | checked lowercase SHA-256 of the operation ID and exact retirement plan |
-| `schedule_ids_json` | `TEXT NOT NULL` | TEXT-only, bounded non-empty JSON array containing 1–4096 sorted unique linked schedule IDs; each ID is TEXT, 1–512 bytes, and contains no NUL |
+| `schedule_ids_json` | `TEXT NOT NULL` | TEXT-only, non-empty compact JSON array containing 1–4096 sorted unique linked schedule IDs; each ID is TEXT, 1–512 bytes, and contains no NUL; the exact canonical encoding is at most 2,097,152 bytes including JSON syntax, UTF-8, and escaping |
 | `completed_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | transactional history-phase completion time |
 
 `schedule_retirement_schedule_ids` normalizes that manifest into immutable,
@@ -386,7 +386,10 @@ database-backed receipt requires this table to be empty. Explicit no-database
 receipts reject a later store attachment, and configured-but-unavailable
 persistence is never interpreted as an empty proof set. Only a successful
 reconciliation supplies permanent IDs to registration, persistence, and
-dispatch guards.
+dispatch guards. Service preflight and Store operations use one validated
+manifest value that owns both the sorted unique IDs and their exact bounded
+canonical JSON, preventing either layer from accepting an identity set that
+the other cannot persist.
 
 ### `schedule_retirement_schedule_ids`
 

@@ -108,14 +108,39 @@ const MAX_RETIREMENT_IDS_JSON_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RETIREMENT_SCHEDULE_ID_BYTES: usize = 512;
 const MAX_RETIREMENT_SCHEDULE_IDS: usize = 4_096;
 
-/// Validate and canonicalize the permanent schedule identities in a retirement proof.
+/// A validated permanent schedule-identity manifest and its canonical encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedScheduleRetirementManifest {
+    schedule_ids: Vec<String>,
+    canonical_json: String,
+}
+
+impl ValidatedScheduleRetirementManifest {
+    /// Return the sorted, unique schedule identities.
+    #[must_use]
+    pub fn schedule_ids(&self) -> &[String] {
+        &self.schedule_ids
+    }
+
+    /// Return the exact compact JSON encoding validated against the storage bound.
+    #[must_use]
+    pub fn canonical_json(&self) -> &str {
+        &self.canonical_json
+    }
+
+    fn into_schedule_ids(self) -> Vec<String> {
+        self.schedule_ids
+    }
+}
+
+/// Validate and canonically encode the permanent identities in a retirement proof.
 ///
 /// # Errors
 /// Returns [`StorageError::InvalidData`] for an empty or oversized manifest,
 /// an empty, oversized, or NUL-containing identity, or a duplicate identity.
-pub fn validate_schedule_retirement_ids(
+pub fn validate_schedule_retirement_manifest(
     schedule_ids: &[String],
-) -> Result<Vec<String>, StorageError> {
+) -> Result<ValidatedScheduleRetirementManifest, StorageError> {
     let mut canonical = schedule_ids.to_vec();
     canonical.sort_unstable();
     if canonical.is_empty()
@@ -131,7 +156,27 @@ pub fn validate_schedule_retirement_ids(
             "schedule-retirement proof contains an invalid schedule ID".to_owned(),
         ));
     }
-    Ok(canonical)
+    let canonical_json = serde_json::to_string(&canonical)?;
+    if canonical_json.len() > MAX_RETIREMENT_IDS_JSON_BYTES {
+        return Err(StorageError::InvalidData(
+            "schedule-retirement proof ID manifest is oversized".to_owned(),
+        ));
+    }
+    Ok(ValidatedScheduleRetirementManifest {
+        schedule_ids: canonical,
+        canonical_json,
+    })
+}
+
+/// Validate and canonicalize the permanent schedule identities in a retirement proof.
+///
+/// # Errors
+/// Returns [`StorageError::InvalidData`] when the shared manifest domain is invalid.
+pub fn validate_schedule_retirement_ids(
+    schedule_ids: &[String],
+) -> Result<Vec<String>, StorageError> {
+    validate_schedule_retirement_manifest(schedule_ids)
+        .map(ValidatedScheduleRetirementManifest::into_schedule_ids)
 }
 
 /// Validate the operation-identity domain shared by receipt and database proofs.
@@ -177,13 +222,13 @@ fn decode_proof_ids(schedule_ids_json: &str) -> Result<Vec<String>, StorageError
     let ids: Vec<String> = serde_json::from_str(schedule_ids_json).map_err(|_| {
         StorageError::InvalidData("malformed schedule-retirement proof ID manifest".to_owned())
     })?;
-    let canonical = validate_schedule_retirement_ids(&ids)?;
-    if canonical != ids {
+    let manifest = validate_schedule_retirement_manifest(&ids)?;
+    if manifest.schedule_ids() != ids {
         return Err(StorageError::InvalidData(
             "schedule-retirement proof IDs are not sorted and unique".to_owned(),
         ));
     }
-    Ok(ids)
+    Ok(manifest.into_schedule_ids())
 }
 
 /// One fully validated database authority for permanently retired schedules.
@@ -291,13 +336,8 @@ impl Store {
         schedule_ids: &[String],
     ) -> Result<u64, StorageError> {
         validate_operation_binding(operation_id, plan_digest)?;
-        let schedule_ids = validate_schedule_retirement_ids(schedule_ids)?;
-        let schedule_ids_json = serde_json::to_string(&schedule_ids)?;
-        if schedule_ids_json.len() > MAX_RETIREMENT_IDS_JSON_BYTES {
-            return Err(StorageError::InvalidData(
-                "schedule-retirement proof ID manifest is oversized".to_owned(),
-            ));
-        }
+        let manifest = validate_schedule_retirement_manifest(schedule_ids)?;
+        let schedule_ids = manifest.schedule_ids();
         let mut transaction = self.pool().begin().await?;
         let proofs = load_validated_proofs(&mut transaction).await?;
         if has_non_text_schedule_history(&mut transaction).await? {
@@ -310,7 +350,7 @@ impl Store {
                 && proofs[0].0 == operation_id
                 && proofs[0].1 == plan_digest
                 && proofs[0].2 == schedule_ids;
-            if exact && !has_active_schedule_history(&mut transaction, &schedule_ids).await? {
+            if exact && !has_active_schedule_history(&mut transaction, schedule_ids).await? {
                 transaction.commit().await?;
                 return Ok(0);
             }
@@ -318,7 +358,7 @@ impl Store {
                 "schedule-retirement operation proof conflicts with persisted evidence".to_owned(),
             ));
         }
-        let archived = archive_schedule_history_rows(&mut transaction, &schedule_ids).await?;
+        let archived = archive_schedule_history_rows(&mut transaction, schedule_ids).await?;
         sqlx::query(
             "INSERT INTO schedule_retirement_operations
                 (operation_id, plan_digest, schedule_ids_json)
@@ -326,7 +366,7 @@ impl Store {
         )
         .bind(operation_id)
         .bind(plan_digest)
-        .bind(&schedule_ids_json)
+        .bind(manifest.canonical_json())
         .execute(&mut *transaction)
         .await?;
         for (ordinal, schedule_id) in schedule_ids.iter().enumerate() {
@@ -342,7 +382,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
-        if has_active_schedule_history(&mut transaction, &schedule_ids).await? {
+        if has_active_schedule_history(&mut transaction, schedule_ids).await? {
             return Err(StorageError::InvalidData(
                 "active history remains for a proven-retired schedule".to_owned(),
             ));
@@ -362,7 +402,8 @@ impl Store {
         schedule_ids: &[String],
     ) -> Result<bool, StorageError> {
         validate_operation_binding(operation_id, plan_digest)?;
-        let schedule_ids = validate_schedule_retirement_ids(schedule_ids)?;
+        let manifest = validate_schedule_retirement_manifest(schedule_ids)?;
+        let schedule_ids = manifest.schedule_ids();
         let mut transaction = self.pool().begin().await?;
         let proofs = load_validated_proofs(&mut transaction).await?;
         let marker_matches = proofs.len() == 1
@@ -370,7 +411,7 @@ impl Store {
             && proofs[0].1 == plan_digest
             && proofs[0].2 == schedule_ids;
         let proven =
-            marker_matches && !has_active_schedule_history(&mut transaction, &schedule_ids).await?;
+            marker_matches && !has_active_schedule_history(&mut transaction, schedule_ids).await?;
         transaction.commit().await?;
         Ok(proven)
     }
