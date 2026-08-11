@@ -49,13 +49,13 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ['src/engine.rs:1:const ENGINE: &str = "ClusterFuzzLite";'],
         )
 
-    def test_detector_scans_every_nul_free_fixture_file_and_skips_nul_binary(self) -> None:
+    def test_detector_scans_every_regular_fixture_file_and_skips_magic_media(self) -> None:
         reference = self.canonical_title()
         cases = (
             ("adapter.go", reference.encode("utf-8"), True),
             ("bridge.hh", reference.encode("utf-8"), True),
             ("extensionless", reference.encode("utf-8"), True),
-            ("media.png", b"\x89PNG\r\n\x1a\n\0" + reference.encode("utf-8"), False),
+            ("media.bin", b"\x89PNG\r\n\x1a\n\xff", False),
         )
         for relative, payload, should_detect in cases:
             with self.subTest(relative=relative):
@@ -68,13 +68,13 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 expected = [f"{relative}:1:{reference}"] if should_detect else []
                 self.assertEqual(findings, expected)
 
-    def test_detector_scans_every_tracked_nul_free_file(self) -> None:
+    def test_detector_scans_every_tracked_regular_file(self) -> None:
         reference = self.canonical_title()
         tracked_paths = (
             pathlib.Path("adapter.go"),
             pathlib.Path("bridge.hh"),
             pathlib.Path("extensionless"),
-            pathlib.Path("media.png"),
+            pathlib.Path("media.bin"),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -82,8 +82,8 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 payload = reference.encode("utf-8")
-                if relative.name == "media.png":
-                    payload = b"\x89PNG\r\n\x1a\n\0" + payload
+                if relative.name == "media.bin":
+                    payload = b"\x89PNG\r\n\x1a\n\xff"
                 path.write_bytes(payload + b"\n")
             subprocess.run(["git", "init", "--quiet", str(root)], check=True)
             subprocess.run(
@@ -144,19 +144,13 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         for relative in sources:
             self.assertIn(f"{relative.as_posix()}:", result.stdout)
 
-    def test_detector_fails_closed_on_nul_invalid_known_text_paths(self) -> None:
-        suffixes = {
-            ".c", ".cc", ".command", ".cpp", ".css", ".cxx", ".go", ".h", ".hh",
-            ".hpp", ".html", ".in", ".js", ".json", ".jsx", ".lock", ".md", ".mjs",
-            ".py", ".rb", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt",
-            ".yaml", ".yml",
-        }
-        filenames = {".gitattributes", ".gitignore", "Dockerfile", "LICENSE", "Makefile"}
-        compound_suffixes = {".env.example", ".yaml.example", ".yml.example"}
+    def test_detector_fails_closed_on_unknown_invalid_utf8_regardless_of_filename(self) -> None:
         paths = (
-            *(pathlib.Path("source" + suffix) for suffix in suffixes),
-            *(pathlib.Path(name) for name in filenames),
-            *(pathlib.Path("config" + suffix) for suffix in compound_suffixes),
+            pathlib.Path("source.c"),
+            pathlib.Path("source.C"),
+            pathlib.Path("source.inc"),
+            pathlib.Path("extensionless"),
+            pathlib.Path("misleading.png"),
         )
         for relative in paths:
             with self.subTest(relative=relative):
@@ -164,10 +158,71 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     root = pathlib.Path(directory)
                     path = root / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"\0\xff")
+                    path.write_bytes(b"active source\0\xff")
                     with self.assertRaises(checker.ScanError) as raised:
                         find_forbidden_references(root)
                 self.assertEqual(str(raised.exception), f"scan error: {relative.as_posix()}")
+
+    def test_detector_reports_invalid_utf8_nul_c_source_under_every_filename(self) -> None:
+        reference = self.canonical_title()
+        source = (
+            b"/* \xff ignored by C */\n"
+            + b"static const char *engine = \""
+            + reference.encode("utf-8")
+            + b"\";\0\nint main(void) { return 0; }\n"
+        )
+        paths = (
+            pathlib.Path("source.c"),
+            pathlib.Path("source.C"),
+            pathlib.Path("source.inc"),
+            pathlib.Path("extensionless"),
+        )
+        for relative in paths:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                path = root / relative
+                path.write_bytes(source)
+                compilation = subprocess.run(
+                    ["cc", "-x", "c", "-fsyntax-only", str(path)],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(compilation.returncode, 0, compilation.stderr)
+                subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+                subprocess.run(["git", "-C", str(root), "add", str(relative)], check=True)
+                result = self.run_checker(root)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(
+                    result.stdout,
+                    f'{relative.as_posix()}:2:static const char *engine = "{reference}";\\0\n',
+                )
+
+    def test_detector_skips_genuine_binary_media_without_a_reference(self) -> None:
+        media = (
+            ("uppercase.C", b"\x89PNG\r\n\x1a\n\xff"),
+            ("extensionless", b"\xff\xd8\xff\xe0\xff"),
+            ("source.inc", b"\x00\x01\x00\x00\xff"),
+            ("database.txt", b"SQLite format 3\x00\xff"),
+            ("archive.data", b"PK\x03\x04\xff"),
+            ("icon.ico", b"\x00\x00\x01\x00\xff"),
+        )
+        for filename, contents in media:
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    (root / filename).write_bytes(contents)
+                    self.assertEqual(find_forbidden_references(root), [])
+
+    def test_detector_reports_a_reference_before_skipping_magic_media(self) -> None:
+        reference = self.canonical_title()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "binary.bin"
+            path.write_bytes(b"\xff\xd8\xff" + reference.encode("utf-8"))
+            findings = find_forbidden_references(root)
+        self.assertEqual(findings, [f"binary.bin:1:\\xff\\xd8\\xff{reference}"])
 
     def test_detector_fails_closed_on_tracked_invalid_utf8_without_nul(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -440,11 +495,13 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         ruby = "E = \"" + prefix + "\" # active adapter\n\"" + middle + "\" \"" + suffix + "\""
         cases = (
             ("engine.rs", nested_rust, 2, nested_rust.split("\n")[1].strip()),
+            ("extensionless-rust", nested_rust, 2, nested_rust.split("\n")[1].strip()),
             ("engine.js", javascript_cr, 1, javascript_cr),
             ("engine.js", javascript_crlf, 1, javascript_crlf.split("\n")[0].strip()),
             ("engine.js", javascript_u2028, 1, javascript_u2028),
             ("engine.js", javascript_u2029, 1, javascript_u2029),
             ("engine.py", python, 1, python.split("\n")[0]),
+            ("extensionless-python", python, 1, python.split("\n")[0]),
             ("engine.sh", shell, 1, shell.split("\n")[0]),
             ("engine.rb", ruby, 1, ruby.split("\n")[0]),
         )
@@ -488,6 +545,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             + "\") process.exit(1);\n"
         )
         python = (
+            "#!/usr/bin/env python3\n"
             "value = (\""
             + prefix
             + "\" # active adapter\n"
@@ -500,22 +558,31 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             + reference
             + "\"\n"
         )
+        python_without_shebang = python.split("\n", 1)[1]
         fixtures = (
-            ("nested.rs", rust, "rust"),
-            ("line.js", javascript, "node"),
-            ("line.py", python, "python"),
+            ("nested.rs", rust, "rust", "nested"),
+            ("extensionless-rust", rust, "rust", "extensionless_rust"),
+            ("line.js", javascript, "node", None),
+            ("extensionless-python", python, "python", None),
+            ("extensionless-python-no-shebang", python_without_shebang, "python", None),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             rust_output = root / "rust-output"
             rust_output.mkdir()
-            for filename, source, runtime in fixtures:
+            for filename, source, runtime, rust_binary in fixtures:
                 path = root / filename
                 path.write_text(source, encoding="utf-8")
                 findings = find_forbidden_references(root)
                 self.assertTrue(any(finding.startswith(f"{filename}:") for finding in findings))
                 command = {
-                    "rust": ["rustc", "--out-dir", str(rust_output)],
+                    "rust": [
+                        "rustc",
+                        "--crate-name",
+                        rust_binary,
+                        "--out-dir",
+                        str(rust_output),
+                    ],
                     "node": ["node"],
                     "python": [sys.executable],
                 }[runtime]
@@ -528,7 +595,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 self.assertEqual(compilation.returncode, 0, compilation.stderr)
                 if runtime == "rust":
                     execution = subprocess.run(
-                        [str(rust_output / path.stem)],
+                        [str(rust_output / rust_binary)],
                         check=False,
                         text=True,
                         capture_output=True,
@@ -769,7 +836,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             root = pathlib.Path(directory)
             path = root / "src" / "invalid.py"
             path.parent.mkdir(parents=True)
-            path.write_bytes(b'ENGINE = "ClusterFuzzLite"\n\xff')
+            path.write_bytes(b"active source\n\xff")
             with self.assertRaisesRegex(
                 checker.ScanError,
                 r"^scan error: src/invalid\.py$",
@@ -915,22 +982,22 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             root = pathlib.Path(directory)
             source = root / "src" / "invalid.py"
             source.parent.mkdir(parents=True)
-            source.write_bytes(b'ENGINE = "ClusterFuzzLite"\n\xff')
+            source.write_bytes(b"active source\n\xff")
             result = self.run_checker(root)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "scan error: src/invalid.py\n")
 
-    def test_cli_reports_nul_invalid_utf8_source_as_a_scan_error(self) -> None:
+    def test_cli_reports_nul_invalid_utf8_as_a_scan_error_for_an_extensionless_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            source = root / "src" / "invalid.c"
+            source = root / "src" / "invalid"
             source.parent.mkdir(parents=True)
             source.write_bytes(b"int main(void) { return 0; }\0\xff")
             result = self.run_checker(root)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "scan error: src/invalid.c\n")
+        self.assertEqual(result.stderr, "scan error: src/invalid\n")
 
     def test_cli_reports_a_scan_error_with_exit_two(self) -> None:
         stdout = io.StringIO()
