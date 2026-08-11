@@ -17,13 +17,20 @@ interface FuzzingTabProps {
   onChange: (next: ConfigValue) => void;
 }
 
+const RETIRED_ENGINE_CONFIG_GUIDANCE_ID = "retired-engine-config-guidance";
+
 export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
   const { t } = useI18n();
   const normalized = normalizeFuzzingSettings(value);
   if (normalized.error !== null) {
     return (
-      <div role="alert" className="text-text-secondary" style={{ fontSize: "13px" }}>
-        {formatRetiredEngineError(normalized.error.value)} {t("settings.fuzzing.retiredEngineConfig")}
+      <div className="text-text-secondary" style={{ fontSize: "13px" }}>
+        <div role="alert" aria-describedby={RETIRED_ENGINE_CONFIG_GUIDANCE_ID}>
+          {formatRetiredEngineError(normalized.error.value)}
+        </div>
+        <p id={RETIRED_ENGINE_CONFIG_GUIDANCE_ID}>
+          {t("settings.fuzzing.retiredEngineConfig")}
+        </p>
       </div>
     );
   }
