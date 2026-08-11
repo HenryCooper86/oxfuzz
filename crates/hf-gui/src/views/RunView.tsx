@@ -34,6 +34,8 @@ export function RunView({
     compiled,
     selectionRepair,
     storageError,
+    reset,
+    retryStorage,
   } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
@@ -202,8 +204,12 @@ export function RunView({
         <TargetSelectionRepairNotice
           repair={selectionRepair}
           storageError={storageError}
+          activeProject={activeProject}
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
+          onSwitchProject={setActiveProject}
+          onReset={reset}
+          onRetryStorage={retryStorage}
         />
       )}
 
