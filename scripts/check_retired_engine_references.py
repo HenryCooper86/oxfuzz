@@ -13,9 +13,24 @@ import sys
 from typing import Optional
 
 
-# Every regular tracked file is selected. A NUL byte is the explicit binary
-# classifier: files containing one are skipped, while every NUL-free file must
-# decode as UTF-8 or fail the scan closed. Fixture roots use the same rule.
+# Every regular tracked file is selected. The following closed list is used
+# only to disambiguate invalid UTF-8 NUL-containing bytes: these known source,
+# config, and documentation paths fail closed rather than being binary. It is
+# never used to select files for scanning.
+BINARY_DISAMBIGUATION_SUFFIXES = frozenset({
+    ".c", ".cc", ".command", ".cpp", ".css", ".cxx", ".go", ".h", ".hh",
+    ".hpp", ".html", ".in", ".js", ".json", ".jsx", ".lock", ".md", ".mjs",
+    ".py", ".rb", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt",
+    ".yaml", ".yml",
+})
+BINARY_DISAMBIGUATION_FILENAMES = frozenset({
+    ".gitattributes", ".gitignore", "Dockerfile", "LICENSE", "Makefile",
+})
+BINARY_DISAMBIGUATION_COMPOUND_SUFFIXES = frozenset({
+    ".env.example", ".yaml.example", ".yml.example",
+})
+RUST_NESTED_BLOCK_COMMENT_SUFFIXES = frozenset({".rs"})
+HASH_LINE_COMMENT_SUFFIXES = frozenset({".command", ".py", ".rb", ".sh"})
 SKIPPED_DIRECTORY_NAMES = {
     ".git", ".claude", "data", "fuzz_workspace", "node_modules", "target",
     "third_party",
@@ -76,6 +91,14 @@ class ScanError(Exception):
 
 def is_skipped_directory(path: pathlib.Path) -> bool:
     return len(path.parts) == 1 and path.name in SKIPPED_DIRECTORY_NAMES
+
+
+def requires_utf8_despite_nul(path: pathlib.PurePath) -> bool:
+    return (
+        path.suffix in BINARY_DISAMBIGUATION_SUFFIXES
+        or path.name in BINARY_DISAMBIGUATION_FILENAMES
+        or any(path.name.endswith(suffix) for suffix in BINARY_DISAMBIGUATION_COMPOUND_SUFFIXES)
+    )
 
 
 def scan_error_for(
@@ -154,19 +177,61 @@ def source_offset_after(decoded: DecodedSource, offset: int) -> int:
     return decoded.source_offsets[offset]
 
 
-def comment_end(text: str, offset: int) -> Optional[int]:
-    if text.startswith("/*", offset):
+def block_comment_end(text: str, offset: int, nested: bool) -> Optional[int]:
+    if not nested:
         end = text.find("*/", offset + 2)
         return None if end < 0 else end + 2
+    depth = 1
+    candidate = offset + 2
+    while depth:
+        opening = text.find("/*", candidate)
+        closing = text.find("*/", candidate)
+        if closing < 0:
+            return None
+        if opening >= 0 and opening < closing:
+            depth += 1
+            candidate = opening + 2
+        else:
+            depth -= 1
+            candidate = closing + 2
+    return candidate
+
+
+def line_comment_end(text: str, offset: int, marker_length: int) -> Optional[int]:
+    for candidate in range(offset + marker_length, len(text)):
+        if text[candidate] in "\n\r\u2028\u2029":
+            return candidate + 1
+    return None
+
+
+def comment_end(
+    text: str,
+    offset: int,
+    relative: pathlib.PurePath,
+) -> Optional[int]:
+    if text.startswith("/*", offset):
+        return block_comment_end(
+            text,
+            offset,
+            relative.suffix in RUST_NESTED_BLOCK_COMMENT_SUFFIXES,
+        )
     if text.startswith("//", offset):
-        newline = text.find("\n", offset + 2)
-        return None if newline < 0 else newline + 1
-    return offset
+        return line_comment_end(text, offset, 2)
+    if relative.suffix in HASH_LINE_COMMENT_SUFFIXES and text.startswith("#", offset):
+        return line_comment_end(text, offset, 1)
+    return None
+
+
+def starts_comment(text: str, offset: int, relative: pathlib.PurePath) -> bool:
+    return text.startswith(("/*", "//"), offset) or (
+        relative.suffix in HASH_LINE_COMMENT_SUFFIXES and text.startswith("#", offset)
+    )
 
 
 def component_after_joiners(
     decoded: DecodedSource,
     normalized: str,
+    relative: pathlib.PurePath,
     offset: int,
     component: str,
 ) -> Optional[int]:
@@ -177,8 +242,8 @@ def component_after_joiners(
             return candidate
         if candidate == len(text):
             return None
-        if text.startswith(("/*", "//"), candidate):
-            comment = comment_end(text, candidate)
+        if starts_comment(text, candidate, relative):
+            comment = comment_end(text, candidate, relative)
             if comment is None:
                 return None
             candidate = comment
@@ -193,7 +258,10 @@ def component_after_joiners(
             return None
 
 
-def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
+def long_canonical_spans(
+    decoded: DecodedSource,
+    relative: pathlib.PurePath,
+) -> list[tuple[int, int, bool]]:
     text = decoded.text
     lowered = ascii_lower(text)
     spans: list[tuple[int, int, bool]] = []
@@ -205,6 +273,7 @@ def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
         fuzz_start = component_after_joiners(
             decoded,
             lowered,
+            relative,
             start + len(CANONICAL_PREFIX),
             CANONICAL_MIDDLE,
         )
@@ -212,6 +281,7 @@ def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
             lite_start = component_after_joiners(
                 decoded,
                 lowered,
+                relative,
                 fuzz_start + len(CANONICAL_MIDDLE),
                 CANONICAL_SUFFIX,
             )
@@ -269,11 +339,14 @@ def short_alias_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
     return spans
 
 
-def matching_occurrences(source: str) -> list[Occurrence]:
+def matching_occurrences(
+    source: str,
+    relative: pathlib.PurePath = pathlib.PurePath(),
+) -> list[Occurrence]:
     decoded = decode_ascii_escapes(source)
     source_lines = source.split("\n")
     occurrences_by_line: dict[int, Occurrence] = {}
-    for start, _, direct in long_canonical_spans(decoded) + short_alias_spans(decoded):
+    for start, _, direct in long_canonical_spans(decoded, relative) + short_alias_spans(decoded):
         source_offset = decoded.source_offsets[start]
         line_number = source.count("\n", 0, source_offset) + 1
         occurrence = Occurrence(line_number, source_lines[line_number - 1], direct)
@@ -398,13 +471,13 @@ def find_forbidden_references(root: pathlib.Path) -> list[str]:
             contents = path.read_bytes()
         except OSError as error:
             raise ScanError(relative) from error
-        if b"\0" in contents:
-            continue
         try:
             source = contents.decode("utf-8")
         except UnicodeDecodeError as error:
+            if b"\0" in contents and not requires_utf8_despite_nul(relative):
+                continue
             raise ScanError(relative) from error
-        occurrences = matching_occurrences(source)
+        occurrences = matching_occurrences(source, relative)
         if relative in ALLOWED_FILES and matches_historical_contract(relative, occurrences):
             continue
         if relative in ALLOWED_FILES and not occurrences:
