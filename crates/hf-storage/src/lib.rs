@@ -16,8 +16,9 @@ pub mod transcript_display;
 
 pub use checkpoint_store::SqliteChatCheckpointStore;
 pub use retired_engine::{
-    validate_schedule_retirement_ids, validate_schedule_retirement_operation_id,
-    ScheduleRetirementHistoryProof,
+    validate_schedule_retirement_ids, validate_schedule_retirement_manifest,
+    validate_schedule_retirement_operation_id, ScheduleRetirementHistoryProof,
+    ValidatedScheduleRetirementManifest,
 };
 pub use schedule_occurrence_store::{
     NewScheduleOccurrence, ScheduleOccurrenceAcknowledgement, ScheduleOccurrenceInspection,

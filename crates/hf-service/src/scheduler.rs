@@ -3105,6 +3105,12 @@ mod tests {
         }))
     }
 
+    fn aggregate_oversized_schedule_ids() -> Vec<String> {
+        (0..4_096)
+            .map(|index| format!("{index:04x}{}", "a".repeat(505)))
+            .collect()
+    }
+
     fn retired_campaign_with_engine(id: &str, engine: &str) -> Schedule {
         let mut schedule = retired_campaign(id);
         schedule.parameter_values["engine"] = serde_json::Value::String(engine.to_owned());
@@ -3364,6 +3370,72 @@ mod tests {
                 .unwrap();
                 assert_eq!(counts, (0, 0, 0));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_oversized_retired_manifest_fails_cleanly_on_first_start_and_retry() {
+        let fixture = scheduler_fixture_with_store().await;
+        let ids = aggregate_oversized_schedule_ids();
+        assert_eq!(serde_json::to_string(&ids).unwrap().len(), 2_097_153);
+        let schedules = ids
+            .iter()
+            .map(|id| retired_campaign(id))
+            .collect::<Vec<_>>();
+        atomic_write_schedules(&fixture.schedules_path, &schedules).unwrap();
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let store = fixture.store.as_deref().unwrap();
+        let database_before: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM schedule_executions),
+                (SELECT COUNT(*) FROM schedule_occurrences),
+                (SELECT COUNT(*) FROM retired_engine_records),
+                (SELECT COUNT(*) FROM schedule_retirement_operations),
+                (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            let error = fixture
+                .start()
+                .await
+                .err()
+                .expect("aggregate-oversized proof identity set must fail preflight");
+
+            assert_eq!(
+                std::fs::read(&fixture.schedules_path).unwrap(),
+                active_before
+            );
+            assert!(
+                optional_file_bytes(&retired_schedule_path(&fixture.schedules_path)).is_none(),
+                "an aggregate-oversized manifest must not create the archive"
+            );
+            assert!(
+                optional_file_bytes(&retired_schedule_retirement_path(&fixture.schedules_path))
+                    .is_none(),
+                "an aggregate-oversized manifest must not create the receipt"
+            );
+            assert!(
+                optional_file_bytes(&retirement_completion_path(&fixture.schedules_path)).is_none(),
+                "an aggregate-oversized manifest must not create the completion certificate"
+            );
+            let database_after: (i64, i64, i64, i64, i64) = sqlx::query_as(
+                "SELECT
+                    (SELECT COUNT(*) FROM schedule_executions),
+                    (SELECT COUNT(*) FROM schedule_occurrences),
+                    (SELECT COUNT(*) FROM retired_engine_records),
+                    (SELECT COUNT(*) FROM schedule_retirement_operations),
+                    (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+            )
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(database_after, database_before);
+            let detail = error.to_string();
+            assert!(detail.contains("assign a new schedule ID"));
+            assert!(detail.contains("remove the invalid legacy definition offline"));
         }
     }
 
