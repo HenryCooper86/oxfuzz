@@ -1035,7 +1035,6 @@ function HealthPanel({ status, dashboard }: { status: SystemStatus | null; dashb
     ["libFuzzer", status?.libfuzzer],
     ["AFL++", status?.aflplusplus],
     ["honggfuzz", status?.honggfuzz],
-    ["ClusterFuzzLite", status?.clusterfuzzlite],
     ["syzkaller", status?.syzkaller],
   ] as const;
   return (

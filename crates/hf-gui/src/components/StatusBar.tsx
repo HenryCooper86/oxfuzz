@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { getTransport, useDefectDojo } from "../lib";
 import { usePrefs } from "../providers/prefs";
 import { useRunStatus } from "../providers/runStatus";
-import type { SystemStatus } from "../types";
+import type { EngineId, SystemStatus } from "../types";
 import { Container, Box, ShieldCheck } from "lucide-react";
 
 const EMPTY_STATUS: SystemStatus = {
@@ -11,18 +11,16 @@ const EMPTY_STATUS: SystemStatus = {
   libfuzzer: false,
   aflplusplus: false,
   honggfuzz: false,
-  clusterfuzzlite: false,
   syzkaller: false,
   defectdojo: false,
 };
 
 // Engine display order + how each maps to a SystemStatus flag and the engine id
 // the Run view reports while running (so we can highlight the active one).
-const ENGINES: { label: string; key: keyof SystemStatus; runId: string }[] = [
+const ENGINES: { label: string; key: keyof SystemStatus; runId: EngineId }[] = [
   { label: "libFuzzer", key: "libfuzzer", runId: "libfuzzer" },
   { label: "AFL++", key: "aflplusplus", runId: "afl++" },
   { label: "honggfuzz", key: "honggfuzz", runId: "honggfuzz" },
-  { label: "ClusterFuzzLite", key: "clusterfuzzlite", runId: "clusterfuzzlite" },
   { label: "syzkaller", key: "syzkaller", runId: "syzkaller" },
 ];
 

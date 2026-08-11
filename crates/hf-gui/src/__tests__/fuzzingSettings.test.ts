@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_FUZZING_SETTINGS,
   enabledEngineOptions,
+  FUZZING_ENGINE_OPTIONS,
   fuzzingActionsEnabled,
   loadEffectiveFuzzingSettings,
   normalizeFuzzingSettings,
@@ -10,6 +11,23 @@ import {
 } from "../lib/fuzzingSettings";
 
 describe("fuzzing settings", () => {
+  it("exposes exactly the supported engine portfolio", () => {
+    expect(FUZZING_ENGINE_OPTIONS.map((option) => option.value)).toEqual([
+      "libfuzzer",
+      "afl++",
+      "honggfuzz",
+      "syzkaller",
+    ]);
+  });
+
+  it("rejects retired engine values from service policy", () => {
+    const retired = ["cluster", "fuzz", "lite"].join("");
+    expect(validateEffectiveFuzzingSettings({
+      ...DEFAULT_FUZZING_SETTINGS,
+      enabled_engines: ["libfuzzer", retired],
+    })).toBeNull();
+  });
+
   it("normalizes persisted values and drops unknown engines", () => {
     const settings = normalizeFuzzingSettings({
       fuzzing: {

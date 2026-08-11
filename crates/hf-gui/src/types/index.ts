@@ -186,7 +186,6 @@ export interface SystemStatus {
   libfuzzer: boolean;
   aflplusplus: boolean;
   honggfuzz: boolean;
-  clusterfuzzlite: boolean;
   syzkaller: boolean;
   /** The configured DefectDojo is answering (false also when unconfigured). */
   defectdojo: boolean;
@@ -212,7 +211,7 @@ export interface DefectDojoStatus {
 }
 
 /** Engine identifiers used across the Run view and status bar. */
-export type EngineId = "libfuzzer" | "afl++" | "honggfuzz" | "clusterfuzzlite" | "syzkaller";
+export type EngineId = "libfuzzer" | "afl++" | "honggfuzz" | "syzkaller";
 
 export interface WorkbenchTotals {
   projects: number;
