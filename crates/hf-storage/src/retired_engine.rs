@@ -1,53 +1,63 @@
 //! Persistence boundaries for records belonging to retired fuzzing engines.
 
-use hf_core::retired_engine::RETIRED_ENGINE_ID;
+use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::{StorageError, Store};
 
-const RETIRED_IDS: &str = "('clusterfuzzlite', 'cfl', 'cflite')";
-
 pub(super) async fn validate_no_active_retired_engine_records(
     pool: &SqlitePool,
 ) -> Result<(), StorageError> {
-    let run_query = format!(
+    let mut run_query = QueryBuilder::<Sqlite>::new(
         "SELECT id FROM runs
-         WHERE lower(trim(engine)) IN {RETIRED_IDS}
+         WHERE lower(trim(engine)) IN (",
+    );
+    push_retired_engine_id_binds(&mut run_query);
+    run_query.push(
+        ")
             OR CASE WHEN json_valid(config_json) THEN
                  json_type(config_json, '$.engine') = 'text'
-                 AND lower(trim(json_extract(config_json, '$.engine'))) IN {RETIRED_IDS}
-               ELSE 0 END
-         ORDER BY id LIMIT 20"
+                 AND lower(trim(json_extract(config_json, '$.engine'))) IN (",
     );
-    reject_ids(pool, "run", &run_query).await?;
+    push_retired_engine_id_binds(&mut run_query);
+    run_query.push(") ELSE 0 END ORDER BY id LIMIT 20");
+    reject_ids(pool, "run", run_query).await?;
 
-    let harness_query = format!(
+    let mut harness_query = QueryBuilder::<Sqlite>::new(
         "SELECT id FROM harnesses
-         WHERE lower(trim(engine)) IN {RETIRED_IDS}
+         WHERE lower(trim(engine)) IN (",
+    );
+    push_retired_engine_id_binds(&mut harness_query);
+    harness_query.push(
+        ")
             OR CASE WHEN json_valid(data_json) THEN
                  json_type(data_json, '$.engine') = 'text'
-                 AND lower(trim(json_extract(data_json, '$.engine'))) IN {RETIRED_IDS}
-               ELSE 0 END
-         ORDER BY id LIMIT 20"
+                 AND lower(trim(json_extract(data_json, '$.engine'))) IN (",
     );
-    reject_ids(pool, "harness", &harness_query).await?;
+    push_retired_engine_id_binds(&mut harness_query);
+    harness_query.push(") ELSE 0 END ORDER BY id LIMIT 20");
+    reject_ids(pool, "harness", harness_query).await?;
 
-    let execution_query = format!(
+    let mut execution_query = QueryBuilder::<Sqlite>::new(
         "SELECT id FROM schedule_executions
          WHERE CASE WHEN json_valid(data_json) THEN
              json_type(data_json, '$.request_summary.parameter_values.engine') = 'text'
              AND lower(trim(json_extract(
                  data_json,
                  '$.request_summary.parameter_values.engine'
-             ))) IN {RETIRED_IDS}
-         ELSE 0 END
-         ORDER BY id LIMIT 20"
+             ))) IN (",
     );
-    reject_ids(pool, "schedule execution", &execution_query).await
+    push_retired_engine_id_binds(&mut execution_query);
+    execution_query.push(") ELSE 0 END ORDER BY id LIMIT 20");
+    reject_ids(pool, "schedule execution", execution_query).await
 }
 
-async fn reject_ids(pool: &SqlitePool, kind: &str, query: &str) -> Result<(), StorageError> {
-    let ids: Vec<String> = sqlx::query_scalar(query).fetch_all(pool).await?;
+async fn reject_ids(
+    pool: &SqlitePool,
+    kind: &str,
+    mut query: QueryBuilder<'_, Sqlite>,
+) -> Result<(), StorageError> {
+    let ids: Vec<String> = query.build_query_scalar().fetch_all(pool).await?;
     if ids.is_empty() {
         return Ok(());
     }
@@ -56,6 +66,13 @@ async fn reject_ids(pool: &SqlitePool, kind: &str, query: &str) -> Result<(), St
         RETIRED_ENGINE_ID,
         ids.join(", "),
     )))
+}
+
+fn push_retired_engine_id_binds(query: &mut QueryBuilder<'_, Sqlite>) {
+    let mut separated = query.separated(", ");
+    for identifier in RETIRED_ENGINE_IDS {
+        separated.push_bind(*identifier);
+    }
 }
 
 fn push_schedule_id_filter<'args>(
@@ -92,7 +109,11 @@ impl Store {
             "INSERT INTO retired_engine_records
                 (record_kind, record_id, retired_engine, payload_json, migration_version)
              SELECT
-                'schedule_occurrence', id, 'clusterfuzzlite',
+                'schedule_occurrence', id, ",
+        );
+        occurrences.push_bind(RETIRED_ENGINE_ID);
+        occurrences.push(
+            ",
                 json_object(
                     'id', id,
                     'schedule_id', schedule_id,
@@ -120,7 +141,11 @@ impl Store {
             "INSERT INTO retired_engine_records
                 (record_kind, record_id, retired_engine, payload_json, migration_version)
              SELECT
-                'schedule_execution', id, 'clusterfuzzlite',
+                'schedule_execution', id, ",
+        );
+        executions.push_bind(RETIRED_ENGINE_ID);
+        executions.push(
+            ",
                 json_object(
                     'id', id,
                     'schedule_id', schedule_id,
