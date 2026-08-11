@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nContext } from "../i18nContext";
 import { TargetProvider } from "../providers/TargetContext";
 import { useTarget } from "../providers/target";
-import { ProjectContext } from "../providers/project";
+import { ProjectContext, useProject } from "../providers/project";
 import { PipelineContext } from "../providers/pipeline";
 import { HarnessView } from "../views/HarnessView";
 
@@ -22,6 +22,7 @@ vi.mock("../lib", async () => {
 
 const STORAGE_KEY = "hf_target_selection_v1";
 const PROJECT = "/workspace/example";
+const PROJECT_B = "/workspace/other";
 const RETIRED_CANONICAL = ["cluster", "fuzz", "lite"].join("");
 const RETIRED_SHORT_ALIAS = ["c", "f", "l"].join("");
 
@@ -31,24 +32,30 @@ Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
   value: () => undefined,
 });
 
-function persisted(engine: unknown) {
-  return JSON.stringify({
-    [PROJECT]: {
-      target: "parse_input",
-      engine,
-      lang: "c",
-      compiled: false,
-    },
-  });
+function selection(engine: unknown, target = "parse_input") {
+  return { target, engine, lang: "c", compiled: false };
 }
 
-function AppProviders({ children }: { children: React.ReactNode }) {
+function persisted(engine: unknown) {
+  return JSON.stringify({ [PROJECT]: selection(engine) });
+}
+
+function AppProviders({
+  children,
+  initialProject = PROJECT,
+  recentProjects = [PROJECT],
+}: {
+  children: React.ReactNode;
+  initialProject?: string;
+  recentProjects?: string[];
+}) {
+  const [activeProject, setActiveProject] = useState(initialProject);
   return (
     <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
       <ProjectContext.Provider value={{
-        activeProject: PROJECT,
-        recentProjects: [PROJECT],
-        setActiveProject: () => undefined,
+        activeProject,
+        recentProjects,
+        setActiveProject,
         addRecent: () => undefined,
         removeRecent: () => undefined,
         deleteProjectData: async () => undefined,
@@ -70,8 +77,9 @@ function AppProviders({ children }: { children: React.ReactNode }) {
   );
 }
 
-function TargetProbe() {
+function TargetProbe({ switchProject }: { switchProject?: string }) {
   const target = useTarget();
+  const { setActiveProject } = useProject();
   const blocked = Boolean(target.selectionRepair || target.storageError);
   return (
     <div>
@@ -80,6 +88,9 @@ function TargetProbe() {
       <output data-blocked>{String(blocked)}</output>
       <button type="button" onClick={() => target.setEngine("afl++")}>replace engine</button>
       <button type="button" onClick={() => target.setLang("rust")}>change language</button>
+      {switchProject && (
+        <button type="button" onClick={() => setActiveProject(switchProject)}>switch project</button>
+      )}
     </div>
   );
 }
@@ -90,12 +101,15 @@ interface MountedView {
   unmount: () => Promise<void>;
 }
 
-async function mount(view: React.ReactNode): Promise<MountedView> {
+async function mount(
+  view: React.ReactNode,
+  providerOptions?: Omit<React.ComponentProps<typeof AppProviders>, "children">,
+): Promise<MountedView> {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<AppProviders>{view}</AppProviders>);
+    root.render(<AppProviders {...providerOptions}>{view}</AppProviders>);
     await Promise.resolve();
   });
   return {
@@ -139,7 +153,11 @@ function selectTrigger(container: HTMLElement, labelText: string): HTMLButtonEle
 
 function dispatchStoredSelection(raw: string) {
   window.localStorage.setItem(STORAGE_KEY, raw);
-  window.dispatchEvent(new StorageEvent("storage", { key: STORAGE_KEY, newValue: raw }));
+  window.dispatchEvent(new StorageEvent("storage", {
+    key: STORAGE_KEY,
+    newValue: raw,
+    storageArea: window.localStorage,
+  }));
 }
 
 function invokedMutatingCommands() {
@@ -323,6 +341,33 @@ describe("TargetProvider durable repair boundary", () => {
     expect(selectionStatus(view.container, "blocked")).toBe("true");
   });
 
+  it("ignores same-key sessionStorage and null-area events", async () => {
+    window.localStorage.setItem(STORAGE_KEY, persisted("afl++"));
+    const view = await mount(<TargetProbe />);
+    mounted.push(view);
+    const retired = persisted(RETIRED_SHORT_ALIAS);
+
+    window.sessionStorage.setItem(STORAGE_KEY, retired);
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: STORAGE_KEY,
+        newValue: retired,
+        storageArea: window.sessionStorage,
+      }));
+    });
+    expect(selectionStatus(view.container, "repair")).toBe("none");
+
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: STORAGE_KEY, newValue: retired }));
+    });
+    expect(selectionStatus(view.container, "repair")).toBe("none");
+
+    await act(async () => {
+      dispatchStoredSelection(retired);
+    });
+    expect(selectionStatus(view.container, "repair")).toBe("retired_engine");
+  });
+
   it("cleans up the exact-key storage listener on unmount", async () => {
     const removeEventListener = vi.spyOn(window, "removeEventListener");
     const view = await mount(<TargetProbe />);
@@ -331,9 +376,142 @@ describe("TargetProvider durable repair boundary", () => {
 
     expect(removeEventListener).toHaveBeenCalledWith("storage", expect.any(Function));
   });
+
+  it("revalidates a readable multi-project selection before recovering a read failure", async () => {
+    const raw = JSON.stringify({
+      [PROJECT]: selection("libfuzzer"),
+      [PROJECT_B]: selection("honggfuzz", "parse_other"),
+    });
+    window.localStorage.setItem(STORAGE_KEY, raw);
+    const originalGetItem = Storage.prototype.getItem;
+    let firstRead = true;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation((key) => {
+      if (key === STORAGE_KEY && firstRead) {
+        firstRead = false;
+        throw new Error("storage unavailable");
+      }
+      return originalGetItem.call(window.localStorage, key);
+    });
+    const view = await mount(<TargetProbe />, {
+      initialProject: PROJECT,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+
+    expect(selectionStatus(view.container, "blocked")).toBe("false");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({
+      [PROJECT]: selection("afl++"),
+      [PROJECT_B]: selection("honggfuzz", "parse_other"),
+    });
+  });
+
+  it.each([
+    ["retired", selection(RETIRED_SHORT_ALIAS, "parse_other"), "retired_engine"],
+    ["malformed", { engine: "afl++" }, "invalid_selection"],
+  ])("keeps a re-read %s project repair without deleting it", async (_kind, repairedSelection, expectedRepair) => {
+    const raw = JSON.stringify({
+      [PROJECT]: selection("libfuzzer"),
+      [PROJECT_B]: repairedSelection,
+    });
+    window.localStorage.setItem(STORAGE_KEY, raw);
+    const originalGetItem = Storage.prototype.getItem;
+    let firstRead = true;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation((key) => {
+      if (key === STORAGE_KEY && firstRead) {
+        firstRead = false;
+        throw new Error("storage unavailable");
+      }
+      return originalGetItem.call(window.localStorage, key);
+    });
+    const view = await mount(<TargetProbe />, {
+      initialProject: PROJECT,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+
+    expect(selectionStatus(view.container, "repair")).toBe(expectedRepair);
+    expect(selectionStatus(view.container, "blocked")).toBe("true");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(raw);
+  });
+
+  it("keeps the read blocker when explicit recovery cannot re-read storage", async () => {
+    window.localStorage.setItem(STORAGE_KEY, persisted("libfuzzer"));
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const view = await mount(<TargetProbe />);
+    mounted.push(view);
+
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+
+    expect(selectionStatus(view.container, "storage")).toBe("read");
+    expect(selectionStatus(view.container, "blocked")).toBe("true");
+  });
 });
 
 describe("Harness repair interactions", () => {
+  it("stages two project repairs until the final synchronous write succeeds", async () => {
+    const raw = JSON.stringify({
+      [PROJECT]: selection(RETIRED_CANONICAL),
+      [PROJECT_B]: selection(RETIRED_SHORT_ALIAS, "parse_other"),
+    });
+    window.localStorage.setItem(STORAGE_KEY, raw);
+    const view = await mount(<TargetProbe switchProject={PROJECT_B} />, {
+      initialProject: PROJECT,
+      recentProjects: [PROJECT, PROJECT_B],
+    });
+    mounted.push(view);
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+    expect(selectionStatus(view.container, "repair")).toBe("retired_engine");
+    expect(selectionStatus(view.container, "blocked")).toBe("true");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(raw);
+    expect(invokedMutatingCommands()).toEqual([]);
+
+    await act(async () => {
+      view.container.querySelectorAll("button")[2]?.click();
+    });
+
+    const originalSetItem = Storage.prototype.setItem;
+    const failedWrite = vi.spyOn(Storage.prototype, "setItem").mockImplementation((key, value) => {
+      if (key === STORAGE_KEY) throw new Error("quota exceeded");
+      return originalSetItem.call(window.localStorage, key, value);
+    });
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+    expect(selectionStatus(view.container, "repair")).toBe("retired_engine");
+    expect(selectionStatus(view.container, "storage")).toBe("write");
+    expect(selectionStatus(view.container, "blocked")).toBe("true");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(raw);
+    expect(invokedMutatingCommands()).toEqual([]);
+
+    failedWrite.mockRestore();
+    await act(async () => {
+      view.container.querySelectorAll("button")[0]?.click();
+    });
+
+    expect(selectionStatus(view.container, "repair")).toBe("none");
+    expect(selectionStatus(view.container, "storage")).toBe("none");
+    expect(selectionStatus(view.container, "blocked")).toBe("false");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({
+      [PROJECT]: selection("afl++"),
+      [PROJECT_B]: selection("afl++", "parse_other"),
+    });
+    expect(invokedMutatingCommands()).toEqual([]);
+  });
+
   it.each([RETIRED_CANONICAL, RETIRED_SHORT_ALIAS, "unknown-engine"])(
     "does not replace %j when the language changes before explicit engine selection",
     async (engine) => {
