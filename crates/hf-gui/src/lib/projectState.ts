@@ -10,6 +10,16 @@
  */
 export const NO_PROJECT_KEY = "__none__";
 
+/** Map an empty active project to the internal bucket used by project-keyed state. */
+export function projectStorageKey(activeProject: string): string {
+  return activeProject || NO_PROJECT_KEY;
+}
+
+/** The internal no-project bucket is never a switchable project identity. */
+export function isNoProjectKey(key: string): boolean {
+  return key === NO_PROJECT_KEY;
+}
+
 export function pruneToKeys<T>(
   map: Record<string, T>,
   allowed: readonly string[],

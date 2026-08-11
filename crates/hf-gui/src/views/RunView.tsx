@@ -14,6 +14,7 @@ import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions } from "../lib/fuzzingSettings";
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
+import { projectStorageKey } from "../lib/projectState";
 
 export function RunView({
   embedded = false,
@@ -204,7 +205,7 @@ export function RunView({
         <TargetSelectionRepairNotice
           repair={selectionRepair}
           storageError={storageError}
-          activeProject={activeProject}
+          activeSelectionKey={projectStorageKey(activeProject)}
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
           onSwitchProject={setActiveProject}

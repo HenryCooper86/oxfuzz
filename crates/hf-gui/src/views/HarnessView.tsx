@@ -16,6 +16,7 @@ import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions, fuzzingActionsEnabled } from "../lib/fuzzingSettings";
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
 import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
+import { projectStorageKey } from "../lib/projectState";
 
 interface HarnessResult {
   source: string;
@@ -359,7 +360,7 @@ export function HarnessView({
         <TargetSelectionRepairNotice
           repair={selectionRepair}
           storageError={storageError}
-          activeProject={activeProject}
+          activeSelectionKey={projectStorageKey(activeProject)}
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
           onSwitchProject={setActiveProject}
