@@ -2369,7 +2369,7 @@ mod campaign_advice_command_tests {
             RETIRED_ENGINE_ID.to_owned(),
             RETIRED_ENGINE_IDS[1].to_owned(),
             RETIRED_ENGINE_IDS[2].to_owned(),
-            format!(" {} ", RETIRED_ENGINE_ID),
+            format!(" {RETIRED_ENGINE_ID} "),
         ];
 
         for value in retired_values {

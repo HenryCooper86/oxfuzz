@@ -2875,7 +2875,7 @@ mod doctor_tests {
         assert!(output.contains("UNAVAILABLE  honggfuzz"));
         assert!(output.contains("UNAVAILABLE  syzkaller"));
         let retired_engine_label = RETIRED_ENGINE_ID;
-        assert!(!output.contains(&retired_engine_label));
+        assert!(!output.contains(retired_engine_label));
         assert!(output.contains("OPTIONAL  DefectDojo"));
         assert!(status.fuzzing_ready());
     }
@@ -2883,7 +2883,7 @@ mod doctor_tests {
     #[test]
     fn cli_rejects_the_retired_engine_with_an_actionable_error() {
         let retired_engine_id = RETIRED_ENGINE_ID;
-        let error = parse_engine(&retired_engine_id).unwrap_err();
+        let error = parse_engine(retired_engine_id).unwrap_err();
         assert!(error.to_string().contains("has been retired"));
     }
 
