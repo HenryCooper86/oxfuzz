@@ -13,16 +13,9 @@ import sys
 from typing import Optional
 
 
-# This is the complete tracked text source, configuration, documentation, and
-# frontend surface. Binary media and untyped fixture data remain unscanned.
-SCANNED_SUFFIXES = {
-    ".c", ".cc", ".command", ".cpp", ".css", ".cxx", ".h", ".hpp",
-    ".html", ".in", ".js", ".json", ".jsx", ".lock", ".md", ".mjs",
-    ".py", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt",
-    ".yaml", ".yml",
-}
-SCANNED_FILENAMES = {".gitattributes", ".gitignore", "Dockerfile", "LICENSE", "Makefile"}
-SCANNED_COMPOUND_SUFFIXES = {".env.example", ".yaml.example", ".yml.example"}
+# Every regular tracked file is selected. A NUL byte is the explicit binary
+# classifier: files containing one are skipped, while every NUL-free file must
+# decode as UTF-8 or fail the scan closed. Fixture roots use the same rule.
 SKIPPED_DIRECTORY_NAMES = {
     ".git", ".claude", "data", "fuzz_workspace", "node_modules", "target",
     "third_party",
@@ -53,6 +46,7 @@ class DecodedSource:
     text: str
     source_offsets: tuple[int, ...]
     escaped_offsets: frozenset[int]
+    source_length: int
 
 
 @dataclass(frozen=True)
@@ -69,7 +63,7 @@ HISTORICAL_OCCURRENCE_CONTRACTS = {
     pathlib.Path("docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"): HistoricalOccurrenceContract(14, "ba68718775b5b9b6db38e28a93a702d20ee5fe4ff75a73922849a686902355b1"),
     pathlib.Path("crates/hf-gui/src/lib/retiredEngine.ts"): HistoricalOccurrenceContract(3, "0c84e97c315144c25b4db1128c6dd9c1b22374666f7b91f6318f5e6e273e11df"),
     pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(2, "19fe94b96ae26495bd3633c46648d264d33bbd222b371e5971fd5dd4a1b23c43"),
-    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(61, "3b25421bc0824f816268c4cd1d7b6deca8cebac31ad26bfac95cd094d11c2032"),
+    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(59, "74736db291f09a6e2bed1c211b487ea4dce621c9d904891e4884a016ad0f12c9"),
 }
 ALLOWED_FILES = set(HISTORICAL_OCCURRENCE_CONTRACTS)
 
@@ -78,14 +72,6 @@ class ScanError(Exception):
     def __init__(self, relative: pathlib.PurePath) -> None:
         self.relative = relative
         super().__init__(f"scan error: {relative.as_posix()}")
-
-
-def is_scanned_file(path: pathlib.Path) -> bool:
-    return (
-        path.suffix in SCANNED_SUFFIXES
-        or path.name in SCANNED_FILENAMES
-        or any(path.name.endswith(suffix) for suffix in SCANNED_COMPOUND_SUFFIXES)
-    )
 
 
 def is_skipped_directory(path: pathlib.Path) -> bool:
@@ -133,7 +119,12 @@ def decode_ascii_escapes(source: str) -> DecodedSource:
             decoded.append(source[source_offset])
             source_offsets.append(source_offset)
         offset = match.end()
-    return DecodedSource("".join(decoded), tuple(source_offsets), frozenset(escaped_offsets))
+    return DecodedSource(
+        "".join(decoded),
+        tuple(source_offsets),
+        frozenset(escaped_offsets),
+        len(source),
+    )
 
 
 def is_canonical_joiner(character: str) -> bool:
@@ -157,14 +148,49 @@ def is_ascii_upper(character: str) -> bool:
     return "A" <= character <= "Z"
 
 
-def component_after_joiners(text: str, offset: int, component: str) -> Optional[int]:
-    for joiner_count in range(MAX_CANONICAL_JOINERS + 1):
-        candidate = offset + joiner_count
+def source_offset_after(decoded: DecodedSource, offset: int) -> int:
+    if offset == len(decoded.text):
+        return decoded.source_length
+    return decoded.source_offsets[offset]
+
+
+def comment_end(text: str, offset: int) -> Optional[int]:
+    if text.startswith("/*", offset):
+        end = text.find("*/", offset + 2)
+        return None if end < 0 else end + 2
+    if text.startswith("//", offset):
+        newline = text.find("\n", offset + 2)
+        return None if newline < 0 else newline + 1
+    return offset
+
+
+def component_after_joiners(
+    decoded: DecodedSource,
+    normalized: str,
+    offset: int,
+    component: str,
+) -> Optional[int]:
+    text = normalized
+    candidate = offset
+    while True:
         if text.startswith(component, candidate):
             return candidate
-        if candidate == len(text) or not is_canonical_joiner(text[candidate]):
+        if candidate == len(text):
             return None
-    return None
+        if text.startswith(("/*", "//"), candidate):
+            comment = comment_end(text, candidate)
+            if comment is None:
+                return None
+            candidate = comment
+        elif is_canonical_joiner(text[candidate]):
+            candidate += 1
+        else:
+            return None
+        raw_span = source_offset_after(decoded, candidate) - source_offset_after(decoded, offset)
+        # This bound is measured in original source characters, so a comment's
+        # complete raw spelling and content cannot disappear from the budget.
+        if raw_span > MAX_CANONICAL_JOINERS:
+            return None
 
 
 def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
@@ -177,12 +203,14 @@ def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
         if start < 0:
             return spans
         fuzz_start = component_after_joiners(
+            decoded,
             lowered,
             start + len(CANONICAL_PREFIX),
             CANONICAL_MIDDLE,
         )
         if fuzz_start is not None:
             lite_start = component_after_joiners(
+                decoded,
                 lowered,
                 fuzz_start + len(CANONICAL_MIDDLE),
                 CANONICAL_SUFFIX,
@@ -302,7 +330,10 @@ def tracked_selected_files(root: pathlib.Path) -> Optional[set[pathlib.Path]]:
     return {
         relative
         for name in names
-        if name and (relative := pathlib.Path(name)) and is_scanned_file(relative)
+        if name
+        and (relative := pathlib.Path(name))
+        and not relative.is_absolute()
+        and ".." not in relative.parts
     }
 
 
@@ -349,10 +380,13 @@ def iter_scanned_files(
                     directories is None or relative in directories
                 ):
                     child_directories.append((path, relative))
-            elif is_scanned_file(relative) and (
-                selected_files is None or relative in selected_files
-            ):
-                files.append((path, relative))
+            else:
+                try:
+                    is_regular_file = entry.is_file(follow_symlinks=False)
+                except OSError as error:
+                    raise scan_error_for(root, error, relative) from error
+                if is_regular_file and (selected_files is None or relative in selected_files):
+                    files.append((path, relative))
         pending_directories.extend(reversed(child_directories))
     yield from sorted(files, key=lambda item: item[1].as_posix())
 
@@ -361,10 +395,14 @@ def find_forbidden_references(root: pathlib.Path) -> list[str]:
     findings: list[str] = []
     for path, relative in iter_scanned_files(root, tracked_selected_files(root)):
         try:
-            source = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as error:
-            raise ScanError(relative) from error
+            contents = path.read_bytes()
         except OSError as error:
+            raise ScanError(relative) from error
+        if b"\0" in contents:
+            continue
+        try:
+            source = contents.decode("utf-8")
+        except UnicodeDecodeError as error:
             raise ScanError(relative) from error
         occurrences = matching_occurrences(source)
         if relative in ALLOWED_FILES and matches_historical_contract(relative, occurrences):

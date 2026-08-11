@@ -49,58 +49,68 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ['src/engine.rs:1:const ENGINE: &str = "ClusterFuzzLite";'],
         )
 
-    def test_detector_selects_the_tracked_text_surface(self) -> None:
+    def test_detector_scans_every_nul_free_fixture_file_and_skips_nul_binary(self) -> None:
+        reference = self.canonical_title()
         cases = (
-            ("source.c", True),
-            ("source.cc", True),
-            ("setup.command", True),
-            ("source.cpp", True),
-            ("style.css", True),
-            ("source.cxx", True),
-            ("source.h", True),
-            ("source.hpp", True),
-            ("page.html", True),
-            ("MANIFEST.in", True),
-            ("script.js", True),
-            ("config.json", True),
-            ("component.jsx", True),
-            ("Cargo.lock", True),
-            ("guide.md", True),
-            ("bundle.mjs", True),
-            ("guard.py", True),
-            ("engine.rs", True),
-            ("setup.sh", True),
-            ("migration.sql", True),
-            ("config.toml", True),
-            ("component.ts", True),
-            ("component.tsx", True),
-            ("prompt.txt", True),
-            ("config.yaml", True),
-            ("config.yml", True),
-            (".gitattributes", True),
-            (".gitignore", True),
-            ("Dockerfile", True),
-            ("Makefile", True),
-            ("LICENSE", True),
-            (".env.example", True),
-            ("workflow.yaml.example", True),
-            ("workflow.yml.example", True),
-            ("asset.png", False),
-            ("icon.ico", False),
-            ("document.pdf", False),
-            ("payload.bin", False),
-            ("untyped", False),
+            ("adapter.go", reference.encode("utf-8"), True),
+            ("bridge.hh", reference.encode("utf-8"), True),
+            ("extensionless", reference.encode("utf-8"), True),
+            ("media.png", b"\x89PNG\r\n\x1a\n\0" + reference.encode("utf-8"), False),
         )
-        for relative, should_detect in cases:
+        for relative, payload, should_detect in cases:
             with self.subTest(relative=relative):
                 with tempfile.TemporaryDirectory() as directory:
                     root = pathlib.Path(directory)
                     path = root / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("ClusterFuzzLite\n", encoding="utf-8")
+                    path.write_bytes(payload + b"\n")
                     findings = find_forbidden_references(root)
-                expected = [f"{relative}:1:ClusterFuzzLite"] if should_detect else []
+                expected = [f"{relative}:1:{reference}"] if should_detect else []
                 self.assertEqual(findings, expected)
+
+    def test_detector_scans_every_tracked_nul_free_file(self) -> None:
+        reference = self.canonical_title()
+        tracked_paths = (
+            pathlib.Path("adapter.go"),
+            pathlib.Path("bridge.hh"),
+            pathlib.Path("extensionless"),
+            pathlib.Path("media.png"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for relative in tracked_paths:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = reference.encode("utf-8")
+                if relative.name == "media.png":
+                    payload = b"\x89PNG\r\n\x1a\n\0" + payload
+                path.write_bytes(payload + b"\n")
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", *(str(path) for path in tracked_paths)],
+                check=True,
+            )
+            self.assertEqual(checker.tracked_selected_files(root), set(tracked_paths))
+            findings = find_forbidden_references(root)
+        self.assertEqual(
+            findings,
+            [
+                f"adapter.go:1:{reference}",
+                f"bridge.hh:1:{reference}",
+                f"extensionless:1:{reference}",
+            ],
+        )
+
+    def test_detector_fails_closed_on_tracked_invalid_utf8_without_nul(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            relative = pathlib.Path("extensionless-source")
+            path = root / relative
+            path.write_bytes(b"active source\xff")
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", str(relative)], check=True)
+            with self.assertRaisesRegex(checker.ScanError, r"^scan error: extensionless-source$"):
+                find_forbidden_references(root)
 
     def test_detector_uses_the_exact_historical_allowlist(self) -> None:
         expected = {
@@ -193,6 +203,31 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     findings,
                 )
 
+    def test_detector_rejects_comment_joined_additions_in_each_allowlisted_file(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        addition = "\"" + prefix + "\" /* active adapter */ + \"" + middle + "\" + \"" + suffix + "\""
+        for relative in sorted(checker.ALLOWED_FILES):
+            with self.subTest(relative=relative):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    destination = root / relative
+                    destination.parent.mkdir(parents=True)
+                    source = REPOSITORY_ROOT / relative
+                    baseline = source.read_text(encoding="utf-8") if source.exists() else ""
+                    addition_line = len(baseline.splitlines()) + 1
+                    destination.write_text(
+                        baseline
+                        + ("" if not baseline or baseline.endswith("\n") else "\n")
+                        + addition
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    findings = find_forbidden_references(root)
+                self.assertIn(
+                    f"{relative.as_posix()}:{addition_line}:{addition}",
+                    findings,
+                )
+
     def test_detector_matches_canonical_separator_and_case_variants(self) -> None:
         cases = (
             ("clusterfuzzlite", True),
@@ -243,12 +278,66 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     [f"src/engine.rs:{expected_line_number}:{expected_line}"],
                 )
 
+    def test_detector_matches_comment_joined_canonical_forms_with_start_line_mapping(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        rust = (
+            "const ENGINE: &str = concat!(\""
+            + prefix
+            + "\" /* active adapter */, \""
+            + middle
+            + "\", \""
+            + suffix
+            + "\");"
+        )
+        javascript = (
+            "const engine = \""
+            + prefix
+            + "\" // active adapter\n+  + \""
+            + middle
+            + "\" + \""
+            + suffix
+            + "\";"
+        )
+        cases = ((rust, 1, rust), (javascript, 1, javascript.split("\n")[0]))
+        for source_text, expected_line_number, expected_line in cases:
+            with self.subTest(source_text=source_text):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / "engine.rs"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(source_text + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                self.assertEqual(
+                    findings,
+                    [f"src/engine.rs:{expected_line_number}:{expected_line}"],
+                )
+
     def test_detector_bounds_canonical_joiners_and_ignores_unrelated_words(self) -> None:
         prefix, middle, suffix = self.canonical_parts()
         cases = (
             (prefix + ("_" * 65) + middle + suffix, []),
             ("clustered fuzziness lite", []),
             ("scaffold", []),
+        )
+        for source_text, expected in cases:
+            with self.subTest(source_text=source_text):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / "engine.rs"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(source_text + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                self.assertEqual(findings, expected)
+
+    def test_detector_bounds_and_validates_comment_joiners(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        at_bound = prefix + "/*" + ("x" * 60) + "*/" + middle + suffix
+        cases = (
+            (at_bound, [f"src/engine.rs:1:{at_bound}"]),
+            (prefix + "/*" + ("x" * 61) + "*/" + middle + suffix, []),
+            (prefix + "/* unclosed " + middle + suffix, []),
+            (prefix + "/* active adapter */ed" + middle + suffix, []),
+            (prefix + "// active adapter " + middle + suffix, []),
         )
         for source_text, expected in cases:
             with self.subTest(source_text=source_text):
@@ -467,7 +556,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             path = root / "src" / "engine.rs"
             path.parent.mkdir(parents=True)
             path.write_text("ClusterFuzzLite\n", encoding="utf-8")
-            with mock.patch.object(pathlib.Path, "read_text", side_effect=OSError("denied")):
+            with mock.patch.object(pathlib.Path, "read_bytes", side_effect=OSError("denied")):
                 with self.assertRaisesRegex(
                     checker.ScanError,
                     r"^scan error: src/engine\.rs$",
@@ -644,6 +733,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         entry.name = path.name
         entry.path = str(path)
         entry.is_dir.return_value = False
+        entry.is_file.return_value = True
         entry.is_symlink.return_value = False
         return entry
 
@@ -651,6 +741,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
     def directory_entry(path: pathlib.Path) -> mock.Mock:
         entry = RetiredEngineReferenceTests.file_entry(path)
         entry.is_dir.return_value = True
+        entry.is_file.return_value = False
         return entry
 
     @staticmethod
