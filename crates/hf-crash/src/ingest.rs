@@ -169,14 +169,12 @@ fn collect_artifacts(run_dir: &Path, mode: IngestMode) -> Result<BoundedPaths, C
     let mut artifacts = BoundedPaths::default();
 
     if matches!(mode, IngestMode::Legacy)
-        || matches!(mode, IngestMode::Engine(engine) if matches!(engine, EngineKind::Honggfuzz | EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite))
+        || matches!(mode, IngestMode::Engine(engine) if matches!(engine, EngineKind::Honggfuzz | EngineKind::LibFuzzer))
     {
         collect_files(run_dir, &mut artifacts, |name| match mode {
             IngestMode::Legacy => is_libfuzzer_crash(name) || is_honggfuzz_crash(name),
             IngestMode::Engine(EngineKind::Honggfuzz) => is_honggfuzz_crash(name),
-            IngestMode::Engine(EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite) => {
-                is_libfuzzer_crash(name)
-            }
+            IngestMode::Engine(EngineKind::LibFuzzer) => is_libfuzzer_crash(name),
             IngestMode::Engine(EngineKind::AflPlusPlus | EngineKind::Syzkaller) => false,
         })?;
     }

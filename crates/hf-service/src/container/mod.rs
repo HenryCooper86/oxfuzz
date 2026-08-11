@@ -1810,7 +1810,6 @@ fn engine_label(engine: EngineKind) -> &'static str {
         EngineKind::LibFuzzer => "libFuzzer",
         EngineKind::AflPlusPlus => "AFL++",
         EngineKind::Honggfuzz => "honggfuzz",
-        EngineKind::ClusterFuzzLite => "ClusterFuzzLite",
         EngineKind::Syzkaller => "syzkaller",
     }
 }

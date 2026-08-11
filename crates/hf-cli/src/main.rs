@@ -53,7 +53,7 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Fuzzing engine (afl++, honggfuzz, libfuzzer, clusterfuzzlite).
+        /// Fuzzing engine (afl++, honggfuzz, libfuzzer, syzkaller).
         #[arg(long)]
         engine: String,
         /// Target language (c, cpp, rust, go, python). Defaults to c.
@@ -564,7 +564,6 @@ fn doctor_lines(status: &hf_service::SystemStatus) -> Vec<String> {
         engine(status.libfuzzer.is_ready(), "libFuzzer"),
         engine(status.aflplusplus.is_ready(), "AFL++"),
         engine(status.honggfuzz.is_ready(), "honggfuzz"),
-        engine(status.clusterfuzzlite.is_ready(), "ClusterFuzzLite"),
         engine(status.syzkaller.is_ready(), "syzkaller"),
         format!(
             "{}  DefectDojo",
@@ -2828,7 +2827,7 @@ mod doctor_tests {
     use hf_service::system::StatusFlag;
     use hf_service::SystemStatus;
 
-    use super::{doctor_lines, parse_lang};
+    use super::{doctor_lines, parse_engine, parse_lang};
     #[cfg(feature = "semgrep-enrichment")]
     use super::{Cli, Commands};
 
@@ -2859,7 +2858,6 @@ mod doctor_tests {
             libfuzzer: StatusFlag::from(true),
             aflplusplus: StatusFlag::from(false),
             honggfuzz: StatusFlag::from(false),
-            clusterfuzzlite: StatusFlag::from(false),
             syzkaller: StatusFlag::from(false),
             defectdojo: StatusFlag::from(false),
         };
@@ -2868,8 +2866,19 @@ mod doctor_tests {
         assert!(output.contains("READY  Docker daemon"));
         assert!(output.contains("READY  sandbox image"));
         assert!(output.contains("READY  libFuzzer"));
+        assert!(output.contains("UNAVAILABLE  AFL++"));
+        assert!(output.contains("UNAVAILABLE  honggfuzz"));
+        assert!(output.contains("UNAVAILABLE  syzkaller"));
+        assert!(!output.contains("ClusterFuzzLite"));
         assert!(output.contains("OPTIONAL  DefectDojo"));
         assert!(status.fuzzing_ready());
+    }
+
+    #[test]
+    fn cli_rejects_the_retired_engine_with_an_actionable_error() {
+        let retired_engine_id = ["cluster", "fuzz", "lite"].concat();
+        let error = parse_engine(&retired_engine_id).unwrap_err();
+        assert!(error.to_string().contains("has been retired"));
     }
 
     #[test]

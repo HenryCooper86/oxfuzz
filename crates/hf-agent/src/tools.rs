@@ -25,7 +25,7 @@ const TOOL_USAGE: &[(&str, &str)] = &[
     ),
     (
         "harness",
-        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|clusterfuzzlite", "lang": "c"} -> draft, compile, and smoke-test a harness; a human must promote it"#,
+        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|syzkaller", "lang": "c"} -> draft, compile, and smoke-test a harness; a human must promote it"#,
     ),
     (
         "refine",

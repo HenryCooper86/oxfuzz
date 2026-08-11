@@ -40,7 +40,7 @@ auto_revert_notify_only = false
 # before every new harness operation or campaign. A Settings save therefore
 # affects the next operation without changing a campaign already in flight.
 [fuzzing]
-enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "clusterfuzzlite", "syzkaller"]
+enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"]
 default_engine = "libfuzzer"
 default_duration_secs = 60
 
