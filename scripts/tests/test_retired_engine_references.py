@@ -16,6 +16,23 @@ import check_retired_engine_references as checker
 from check_retired_engine_references import find_forbidden_references
 
 
+class ScandirEntries:
+    def __init__(self, entries: tuple[mock.Mock, ...]) -> None:
+        self.entries = iter(entries)
+
+    def __enter__(self) -> "ScandirEntries":
+        return self
+
+    def __exit__(self, exception_type: object, exception: object, traceback: object) -> None:
+        return None
+
+    def __iter__(self) -> "ScandirEntries":
+        return self
+
+    def __next__(self) -> mock.Mock:
+        return next(self.entries)
+
+
 class RetiredEngineReferenceTests(unittest.TestCase):
     def test_detector_rejects_an_active_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -160,35 +177,37 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 path.write_text("ClusterFuzzLite\n", encoding="utf-8")
             self.assertEqual(find_forbidden_references(root), [])
 
-    def test_detector_prunes_ignored_trees_before_descent(self) -> None:
+    def test_detector_prunes_every_configured_ignored_tree_before_descent(self) -> None:
+        expected_skipped_names = {
+            ".claude",
+            ".git",
+            "data",
+            "fuzz_workspace",
+            "node_modules",
+            "target",
+            "third_party",
+        }
+        self.assertEqual(checker.SKIPPED_DIRECTORY_NAMES, expected_skipped_names)
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "src" / "engine.rs"
             source.parent.mkdir()
             source.write_text("ClusterFuzzLite\n", encoding="utf-8")
-            retained_directories: list[str] = []
+            for parent in [root, root / "component"]:
+                for name in expected_skipped_names:
+                    skipped_source = parent / name / "engine.rs"
+                    skipped_source.parent.mkdir(parents=True)
+                    skipped_source.write_text("ClusterFuzzLite\n", encoding="utf-8")
+            scanned_directories: list[str] = []
+            real_scandir = checker.os.scandir
 
-            def controlled_walk(
-                walked_root: pathlib.Path,
-                *,
-                topdown: bool,
-                followlinks: bool,
-                onerror: object,
-            ):
-                self.assertEqual(walked_root, root)
-                self.assertTrue(topdown)
-                self.assertFalse(followlinks)
-                self.assertTrue(callable(onerror))
-                directories = ["target", "src"]
-                yield str(root), directories, []
-                retained_directories.extend(directories)
-                if "target" in directories:
-                    raise AssertionError("ignored directory was not pruned")
-                yield str(source.parent), [], [source.name]
+            def recording_scandir(path: pathlib.Path):
+                scanned_directories.append(pathlib.Path(path).relative_to(root).as_posix())
+                return real_scandir(path)
 
-            with mock.patch.object(checker.os, "walk", controlled_walk):
+            with mock.patch.object(checker.os, "scandir", recording_scandir):
                 findings = find_forbidden_references(root)
-        self.assertEqual(retained_directories, ["src"])
+        self.assertEqual(scanned_directories, [".", "component", "src"])
         self.assertEqual(findings, ["src/engine.rs:1:ClusterFuzzLite"])
 
     def test_detector_ignores_only_root_sdd_orchestration_artifacts(self) -> None:
@@ -254,31 +273,73 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 ):
                     find_forbidden_references(root)
 
-    def test_detector_fails_closed_when_directory_traversal_fails(self) -> None:
+    def test_detector_fails_closed_when_directory_enumeration_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             blocked = root / "blocked"
-
-            def failing_walk(
-                walked_root: pathlib.Path,
-                *,
-                topdown: bool,
-                followlinks: bool,
-                onerror: object,
-            ) -> object:
-                self.assertEqual(walked_root, root)
-                self.assertTrue(topdown)
-                self.assertFalse(followlinks)
-                self.assertTrue(callable(onerror))
-                onerror(OSError(5, "unreadable", str(blocked)))
-                return iter(())
-
-            with mock.patch.object(checker.os, "walk", failing_walk):
+            with mock.patch.object(
+                checker.os,
+                "scandir",
+                side_effect=OSError(5, "unreadable", str(blocked)),
+            ):
                 with self.assertRaisesRegex(
                     checker.ScanError,
                     r"^scan error: blocked$",
                 ):
                     find_forbidden_references(root)
+
+    def test_detector_fails_closed_when_a_directory_entry_is_dir_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            entry = self.directory_entry(root / "blocked")
+            entry.is_dir.side_effect = OSError(13, "denied", str(root / "blocked"))
+            with mock.patch.object(
+                checker.os,
+                "scandir",
+                return_value=self.scandir_with(entry),
+            ):
+                with self.assertRaisesRegex(
+                    checker.ScanError,
+                    r"^scan error: blocked$",
+                ):
+                    find_forbidden_references(root)
+            entry.is_dir.assert_called_once_with(follow_symlinks=False)
+
+    def test_detector_fails_closed_when_a_file_entry_is_symlink_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            entry = self.file_entry(root / "engine.rs")
+            entry.is_symlink.side_effect = OSError(13, "denied", str(root / "engine.rs"))
+            with mock.patch.object(
+                checker.os,
+                "scandir",
+                return_value=self.scandir_with(entry),
+            ):
+                with self.assertRaisesRegex(
+                    checker.ScanError,
+                    r"^scan error: engine\.rs$",
+                ):
+                    find_forbidden_references(root)
+            entry.is_dir.assert_called_once_with(follow_symlinks=False)
+            entry.is_symlink.assert_called_once_with()
+
+    def test_detector_fails_closed_when_a_directory_entry_is_symlink_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            entry = self.directory_entry(root / "src")
+            entry.is_symlink.side_effect = OSError(13, "denied", str(root / "src"))
+            with mock.patch.object(
+                checker.os,
+                "scandir",
+                side_effect=[self.scandir_with(entry), self.scandir_with()],
+            ):
+                with self.assertRaisesRegex(
+                    checker.ScanError,
+                    r"^scan error: src$",
+                ):
+                    find_forbidden_references(root)
+            entry.is_dir.assert_called_once_with(follow_symlinks=False)
+            entry.is_symlink.assert_called_once_with()
 
     def test_detector_reports_sorted_paths_lines_and_exact_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -309,6 +370,11 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             "  CFL_ENGINE  ",
         )
         self.assertEqual(diagnostic, "src/engine.rs:7:CFL_ENGINE")
+
+    def test_scan_errors_do_not_expose_host_paths(self) -> None:
+        error = OSError(13, "denied", "/private/host-only/engine.rs")
+        scan_error = checker.scan_error_for(pathlib.Path("/repository"), error, pathlib.Path("."))
+        self.assertEqual(str(scan_error), "scan error: engine.rs")
 
     def test_cli_is_silent_for_a_clean_isolated_repository(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -355,6 +421,25 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             text=True,
             capture_output=True,
         )
+
+    @staticmethod
+    def scandir_with(*entries: mock.Mock) -> ScandirEntries:
+        return ScandirEntries(entries)
+
+    @staticmethod
+    def file_entry(path: pathlib.Path) -> mock.Mock:
+        entry = mock.Mock()
+        entry.name = path.name
+        entry.path = str(path)
+        entry.is_dir.return_value = False
+        entry.is_symlink.return_value = False
+        return entry
+
+    @staticmethod
+    def directory_entry(path: pathlib.Path) -> mock.Mock:
+        entry = RetiredEngineReferenceTests.file_entry(path)
+        entry.is_dir.return_value = True
+        return entry
 
 
 if __name__ == "__main__":
