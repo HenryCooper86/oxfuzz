@@ -25,7 +25,7 @@ const TOOL_USAGE: &[(&str, &str)] = &[
     ),
     (
         "harness",
-        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz|syzkaller", "lang": "c"} -> draft, compile, and smoke-test a harness; a human must promote it"#,
+        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz", "lang": "c"} -> draft, compile, and smoke-test a function harness; a human must promote it. For syzkaller, use the dedicated run_syzkaller kernel campaign path; function-harness generation is not supported"#,
     ),
     (
         "refine",
@@ -210,5 +210,14 @@ mod tests {
             !catalog.contains("triage"),
             "unlisted tools stay hidden: {catalog}"
         );
+    }
+
+    #[test]
+    fn generated_harness_catalog_lists_only_userspace_engines() {
+        let catalog = catalog_for(&["harness".to_owned()]);
+        assert!(catalog.contains("libfuzzer|afl++|honggfuzz"), "{catalog}");
+        assert!(!catalog.contains("honggfuzz|syzkaller"), "{catalog}");
+        assert!(catalog.contains("run_syzkaller"), "{catalog}");
+        assert!(catalog.contains("kernel campaign"), "{catalog}");
     }
 }

@@ -53,7 +53,10 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Fuzzing engine (afl++, honggfuzz, libfuzzer, syzkaller).
+        /// Function-harness engine (afl++, honggfuzz, libfuzzer).
+        ///
+        /// Use the dedicated `run_syzkaller` kernel-campaign path for
+        /// syzkaller; function-harness generation is not supported.
         #[arg(long)]
         engine: String,
         /// Target language (c, cpp, rust, go, python). Defaults to c.
@@ -2890,6 +2893,27 @@ mod doctor_tests {
         assert!(parse_lang("go").is_ok());
         assert!(parse_lang("python").is_ok());
         assert!(parse_lang("cobol").is_err());
+    }
+}
+
+#[cfg(test)]
+mod harness_help_tests {
+    use clap::CommandFactory as _;
+
+    use super::Cli;
+
+    #[test]
+    fn generated_harness_help_lists_only_userspace_engines() {
+        let mut command = Cli::command();
+        let harness = command
+            .find_subcommand_mut("harness")
+            .expect("harness subcommand");
+        let help = harness.render_long_help().to_string();
+
+        assert!(help.contains("afl++, honggfuzz, libfuzzer"), "{help}");
+        assert!(!help.contains("libfuzzer, syzkaller"), "{help}");
+        assert!(help.contains("run_syzkaller"), "{help}");
+        assert!(help.contains("kernel-campaign"), "{help}");
     }
 }
 

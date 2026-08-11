@@ -784,8 +784,10 @@ fn public_value<T: Serialize>(value: T) -> serde_json::Value {
 #[cfg(feature = "proof-carrying")]
 async fn campaign_advice(
     State(state): State<AppState>,
-    Json(request): Json<hf_service::campaign_intelligence::CampaignAdviceRequest>,
+    Json(request): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
+    let request =
+        serde_json::from_value(request).map_err(map_err(StatusCode::UNPROCESSABLE_ENTITY))?;
     let advice = state
         .container
         .campaign_advice(&request)

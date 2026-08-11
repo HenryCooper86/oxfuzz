@@ -12,13 +12,33 @@ use uuid::Uuid;
 use crate::target::Sanitizer;
 
 /// The kind of fuzzing engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EngineKind {
     AflPlusPlus,
     Honggfuzz,
     LibFuzzer,
     /// Google's coverage-guided OS kernel fuzzer (syscall sequences).
     Syzkaller,
+}
+
+impl Serialize for EngineKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EngineKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Static capability description for an engine/language combination. Keeping
@@ -194,6 +214,60 @@ pub enum FuzzProgress {
 mod tests {
     use super::EngineKind;
     use crate::target::TargetLanguage;
+    use serde_json::json;
+
+    #[test]
+    fn engine_serde_uses_canonical_ids_and_accepts_historical_active_names() {
+        let cases = [
+            (EngineKind::LibFuzzer, "libfuzzer", "LibFuzzer"),
+            (EngineKind::AflPlusPlus, "afl++", "AflPlusPlus"),
+            (EngineKind::Honggfuzz, "honggfuzz", "Honggfuzz"),
+            (EngineKind::Syzkaller, "syzkaller", "Syzkaller"),
+        ];
+
+        for (engine, canonical, historical) in cases {
+            assert_eq!(serde_json::to_value(engine).unwrap(), json!(canonical));
+            assert_eq!(
+                serde_json::from_value::<EngineKind>(json!(canonical)).unwrap(),
+                engine
+            );
+            let restored = serde_json::from_value::<EngineKind>(json!(historical)).unwrap();
+            assert_eq!(restored, engine);
+            assert_eq!(serde_json::to_value(restored).unwrap(), json!(canonical));
+        }
+    }
+
+    #[test]
+    fn engine_serde_preserves_exact_retirement_errors() {
+        let values = [
+            ["cluster", "fuzz", "lite"].concat(),
+            ["c", "f", "l"].concat(),
+            ["c", "f", "lite"].concat(),
+            format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+        ];
+
+        for value in values {
+            let error = serde_json::from_value::<EngineKind>(json!(value)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "fuzzing engine '{}' has been retired; choose one of: \
+                     afl++, honggfuzz, libfuzzer, syzkaller",
+                    value.trim()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn engine_serde_preserves_the_generic_unknown_engine_error() {
+        let error = serde_json::from_value::<EngineKind>(json!("not-an-engine")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unknown fuzzing engine 'not-an-engine' (expected one of: \
+             afl++, honggfuzz, libfuzzer, syzkaller)"
+        );
+    }
 
     #[test]
     fn active_engine_ids_are_exact_and_round_trip() {
