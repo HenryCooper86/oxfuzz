@@ -5,9 +5,10 @@ Status: **active**. Owner: `hf-engine`. Standard: `ENGINE_ADAPTER_STANDARD.md`.
 ## 1. Goal
 
 Provide a single `EngineAdapter` contract for AFL++, honggfuzz, libFuzzer, and
-syzkaller. Adapters construct an engine command only; `EngineRunner` runs that
-command through `hf-runtime` and converts its output into shared progress and
-coverage evidence.
+syzkaller. Adapters construct an engine command only. For userspace campaigns,
+`hf-service` stages the run artifacts and delegates adapter argv execution to
+`EngineRunner`, which uses `hf-runtime` and converts output into shared progress
+and coverage evidence.
 
 ## 2. EngineAdapter Contract
 
@@ -37,11 +38,13 @@ or runs a campaign; presentation layers do not select an adapter directly.
 | libFuzzer | `LibFuzzer` | `clang` / `clang++` with `-fsanitize=fuzzer` | the harness binary |
 | syzkaller | `Syzkaller` | KCOV-enabled kernel build (`make CONFIG_KCOV=y CONFIG_DEBUG_INFO=y`) | `syz-manager -config=<manager.cfg>` |
 
-Syzkaller is the manager-config exception. It fuzzes syscall sequences against
-a kernel in a managed VM, not a generated single-function harness. For its
-adapter, `binary` is the staged `manager.cfg` path; `corpus` and `out` are
-managed by `syz-manager` through that configuration and are not forwarded on
-the command line.
+Syzkaller is the service-owned manager-config exception. It fuzzes syscall
+sequences against a kernel in a managed VM, not a generated single-function
+harness. Its registered adapter represents the `syz-manager -config` argv
+contract, where `binary` is the staged `manager.cfg` path and `corpus`/`out`
+are not forwarded. The service kernel-campaign path stages and rewrites the
+manager config, then invokes `hf-runtime` directly with its bounded timeout
+command rather than delegating execution to `EngineRunner`.
 
 ## 4. FuzzRunConfig
 
@@ -78,15 +81,19 @@ operation-wide duration for coverage measurement.
 ## 5. Run Lifecycle
 
 For the three userspace engines, `hf-harness` compiles a reviewed,
-smoke-qualified harness inside `hf-runtime`; `EngineRunner` then creates a
-run-scoped corpus/output workspace and invokes the selected adapter there.
-The runner streams shared `FuzzProgress` events, while `hf-crash` ingests
-run-owned artifacts and `hf-coverage` retains coverage evidence.
+smoke-qualified harness inside `hf-runtime`. `hf-service` stages each
+run-scoped corpus/output workspace and delegates the selected adapter argv to
+`EngineRunner`. The runner streams shared `FuzzProgress` events, while
+`hf-crash` ingests run-owned artifacts and `hf-coverage` retains coverage
+evidence.
 
 For syzkaller, `hf-service` stages the manager configuration and kernel-campaign
-inputs in the managed workspace. `EngineRunner` invokes `syz-manager` through
-the syzkaller runtime profile. The manager owns the campaign corpus, workdir,
-and output through its configuration; it does not use the userspace harness
+inputs in the managed workspace, including rewriting configured paths to the
+staged artifacts. It invokes the bounded-timeout `syz-manager` command directly
+through `hf-runtime`. The registered syzkaller adapter remains available for
+the common argv contract, but the service kernel-campaign execution path does
+not use `EngineRunner`. The manager owns the campaign corpus, workdir, and
+output through its configuration; it does not use the userspace harness
 lifecycle.
 
 Every consumer resolves output through the persisted run id. Target-wide flat

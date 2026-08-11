@@ -5,10 +5,17 @@ Status: **active**. Scope: `hf-engine`, `hf-core`.
 ## 1. Contract
 
 Every engine adapter implements `EngineAdapter` from `hf-engine`. Adapters own
-only argument construction; the engine-agnostic `EngineRunner` executes the
-command via `hf-runtime` and parses progress/coverage from its output uniformly
-(`hf-engine::progress`). This keeps the sandbox-execution and output-parsing
-policy in one place rather than duplicated per engine.
+only argument construction. For AFL++, honggfuzz, and libFuzzer, `hf-service`
+stages userspace corpus/output artifacts and delegates adapter argv execution
+to the engine-agnostic `EngineRunner`, which executes through `hf-runtime` and
+parses progress/coverage from output uniformly (`hf-engine::progress`).
+
+Syzkaller remains a registered adapter, but kernel-campaign execution is the
+service-owned manager exception: `hf-service` stages and rewrites the manager
+config, then invokes its bounded-timeout command directly through `hf-runtime`.
+It does not delegate that execution path to `EngineRunner`. This keeps the
+sandbox-execution and output-parsing policy in one place without obscuring the
+kernel campaign's distinct safety boundary.
 
 ```rust
 pub trait EngineAdapter: Send + Sync {
@@ -39,7 +46,9 @@ Syzkaller is the manager-config exception. It fuzzes syscall sequences in a
 managed VM rather than a generated single-function harness. The adapter's
 `binary` argument is the staged manager-config path, and `syz-manager` manages
 the campaign corpus and output through that configuration instead of its
-`corpus` and `out` arguments.
+`corpus` and `out` arguments. For kernel campaigns, `hf-service` stages and
+rewrites that config and invokes its bounded-timeout command directly through
+`hf-runtime`, rather than through `EngineRunner`.
 
 ## 3. Run Args
 
@@ -83,10 +92,12 @@ helpers. Omitting `@@` selects AFL++'s stdin mode and is a contract violation.
 
 ## 4. Progress Streaming
 
-`EngineRunner` forwards `FuzzProgress` events as a run executes and returns
-the final progress and coverage evidence. The events are `ExecsPerSec`,
-`EdgesCovered`, `CrashesFound`, and `LogLine`; adapters supply the command
-whose stdout/stderr the runner parses into those events.
+For userspace runs, `EngineRunner` forwards `FuzzProgress` events as a run
+executes and returns the final progress and coverage evidence. The events are
+`ExecsPerSec`, `EdgesCovered`, `CrashesFound`, `LogLine`, and `Done`; `Done` is
+the successful terminal event. Adapters supply the command whose stdout/stderr
+the runner parses into those events. The direct service-owned syzkaller path
+uses the same event types and emits `Done` on successful completion.
 
 For AFL++, stdout/stderr parsing is live-log telemetry only. Persisted terminal
 statistics must be read from that run's exact `default/fuzzer_stats` file with
@@ -125,10 +136,12 @@ single crash). A crash without a matched log ingests as `CrashKind::Other`.
 
 ## 6. Registration
 
-The service selects the built-in adapter by `EngineKind` and confirms runtime
-toolchain availability before use. Engine policy is not currently
-user-editable; a TOML registry must not be exposed until `hf-service` owns and
-applies a typed loader for it.
+The registry contains one built-in adapter per `EngineKind`. For userspace
+workflows, `hf-service` confirms runtime toolchain availability before it
+delegates the selected adapter argv to `EngineRunner`. Syzkaller remains
+registered but uses the service-owned manager-config execution path described
+above. Engine policy is not currently user-editable; a TOML registry must not
+be exposed until `hf-service` owns and applies a typed loader for it.
 
 ## 7. Non-Engine Protocol Adapters
 
