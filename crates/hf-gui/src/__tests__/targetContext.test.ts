@@ -82,7 +82,7 @@ describe("TargetProvider persisted selection validation", () => {
     ["malformed JSON", "{", "invalid_selection"],
     ["non-object payload", JSON.stringify([]), "invalid_selection"],
     ["invalid selection shape", JSON.stringify({ "/workspace/example": { engine: "afl++" } }), "invalid_selection"],
-    ["unrecognized persisted engine", persisted("unknown-engine"), "retired_engine"],
+    ["unrecognized persisted engine", persisted("unknown-engine"), "invalid_selection"],
   ])("fails closed for %s", (_name, raw, repairKind) => {
     const loaded = parsePersistedTargetSelections(raw);
     const entry = loaded.entries["/workspace/example"];

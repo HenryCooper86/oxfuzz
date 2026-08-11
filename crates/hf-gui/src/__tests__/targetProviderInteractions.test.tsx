@@ -864,7 +864,7 @@ describe("Harness repair interactions", () => {
       await act(async () => {
         dispatchStoredSelection(raw);
       });
-      const expectedRepair = "retired_engine";
+      const expectedRepair = engine === "unknown-engine" ? "invalid_selection" : "retired_engine";
       expect(selectionStatus(view.container, "repair")).toBe(expectedRepair);
 
       await chooseOption(selectTrigger(view.container, "harness.language"), "Rust");

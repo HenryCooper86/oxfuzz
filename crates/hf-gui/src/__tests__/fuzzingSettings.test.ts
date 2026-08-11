@@ -41,11 +41,11 @@ describe("fuzzing settings", () => {
     );
   });
 
-  it("normalizes persisted active values", () => {
+  it("normalizes persisted values and drops unknown engines", () => {
     const normalized = normalizeFuzzingSettings({
       fuzzing: {
-        enabled_engines: ["afl++", "afl++", "honggfuzz"],
-        default_engine: "afl++",
+        enabled_engines: ["unknown", "afl++", "afl++", "honggfuzz"],
+        default_engine: "unknown",
         default_duration_secs: 45,
         sandbox: { max_mem_mb: 3072, max_cpus: 2, max_duration_secs: 600 },
       },

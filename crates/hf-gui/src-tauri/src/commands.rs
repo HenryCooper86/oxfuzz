@@ -2329,6 +2329,7 @@ fn campaign_advice_value(
 #[cfg(all(test, feature = "proof-carrying"))]
 mod campaign_advice_command_tests {
     use super::campaign_advice_value;
+    use hf_service::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
 
     fn request(engine: &str) -> serde_json::Value {
         serde_json::json!({
