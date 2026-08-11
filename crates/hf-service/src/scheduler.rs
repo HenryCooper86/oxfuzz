@@ -142,6 +142,86 @@ impl ScheduleFileStore {
         load_schedules(&self.path)
     }
 
+    async fn retire_engine_schedules(
+        &self,
+        store: Option<&Store>,
+    ) -> Result<Vec<String>, CampaignSchedulerError> {
+        let _admission = self.mutation_admission.lock().await;
+        let _write = self.write_lock.lock().await;
+        let schedules = load_schedules(&self.path)?;
+        let (retired, active): (Vec<_>, Vec<_>) =
+            schedules.into_iter().partition(is_retired_campaign);
+        if retired.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut ids = retired
+            .iter()
+            .map(|schedule| schedule.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        let rendered_ids = ids.join(", ");
+        let archive_path = retired_schedule_path(&self.path);
+        let mut archive = load_schedules(&archive_path).map_err(|error| {
+            CampaignSchedulerError::RetiredScheduleArchive {
+                schedule_ids: rendered_ids.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+
+        for schedule in &retired {
+            match archive.iter().find(|existing| existing.id == schedule.id) {
+                Some(existing) => {
+                    let existing_value = serde_json::to_value(existing).map_err(|error| {
+                        CampaignSchedulerError::RetiredScheduleArchive {
+                            schedule_ids: schedule.id.clone(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    let schedule_value = serde_json::to_value(schedule).map_err(|error| {
+                        CampaignSchedulerError::RetiredScheduleArchive {
+                            schedule_ids: schedule.id.clone(),
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    if existing_value != schedule_value {
+                        return Err(CampaignSchedulerError::RetiredScheduleArchive {
+                            schedule_ids: schedule.id.clone(),
+                            reason: "archive contains different data for the same schedule id"
+                                .to_owned(),
+                        });
+                    }
+                }
+                None => archive.push(schedule.clone()),
+            }
+        }
+        archive.sort_by(|left, right| left.id.cmp(&right.id));
+
+        atomic_write_schedules(&archive_path, &archive).map_err(|error| {
+            CampaignSchedulerError::RetiredScheduleArchive {
+                schedule_ids: rendered_ids.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        if let Some(store) = store {
+            store
+                .archive_schedule_history_for_retired_engine(&ids)
+                .await
+                .map_err(|error| CampaignSchedulerError::RetiredScheduleArchive {
+                    schedule_ids: rendered_ids.clone(),
+                    reason: error.to_string(),
+                })?;
+        }
+        atomic_write_schedules(&self.path, &active).map_err(|error| {
+            CampaignSchedulerError::RetiredScheduleArchive {
+                schedule_ids: rendered_ids,
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(ids)
+    }
+
     async fn replace(&self, schedules: &[Schedule]) -> Result<(), StateFileError> {
         let _guard = self.write_lock.lock().await;
         let mut schedules = schedules.to_vec();
@@ -1471,6 +1551,12 @@ pub enum CampaignSchedulerError {
     /// Schedule or campaign sidecar I/O/JSON failure.
     #[error(transparent)]
     State(#[from] StateFileError),
+    /// Retired schedule definitions or linked history could not be archived.
+    #[error("could not retire legacy schedules [{schedule_ids}]: {reason}")]
+    RetiredScheduleArchive {
+        schedule_ids: String,
+        reason: String,
+    },
     /// Persisted execution history could not be inspected.
     #[error("scheduler history error: {0}")]
     History(String),
@@ -1564,6 +1650,7 @@ impl CampaignSchedulerError {
                 message: "one-time recovery occurrence cannot be acknowledged",
             },
             Self::State(_)
+            | Self::RetiredScheduleArchive { .. }
             | Self::History(_)
             | Self::InvalidLastFire { .. }
             | Self::DurabilityUnavailable(_)
@@ -1609,6 +1696,22 @@ fn campaign_state_path(schedules_path: &Path) -> PathBuf {
     )
 }
 
+fn retired_schedule_path(schedules_path: &Path) -> PathBuf {
+    schedules_path.parent().map_or_else(
+        || PathBuf::from("retired_schedules.json"),
+        |parent| parent.join("retired_schedules.json"),
+    )
+}
+
+fn is_retired_campaign(schedule: &Schedule) -> bool {
+    schedule.workflow_id == CAMPAIGN_KIND
+        && schedule
+            .parameter_values
+            .get("engine")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(hf_core::retired_engine::is_retired_engine_id)
+}
+
 impl CampaignScheduler {
     /// Start the scheduler: install the dispatcher, reload persisted schedules,
     /// and begin ticking. Campaigns run with permissive guardrails -- creating a
@@ -1646,10 +1749,11 @@ impl CampaignScheduler {
         let history_retention_limit = scheduler_config.history_retention_limit;
         let scheduler_workflow_dispatch_limit = scheduler_config.max_concurrent_executions.max(1);
         let manager = Arc::new(SchedulerManager::new(scheduler_config));
-        let schedules = Arc::new(ScheduleFileStore::new(store_path.clone()));
         // Grab the DB handle (for persisted execution history) before the
         // container is moved into the dispatcher.
         let store = container.store().cloned();
+        let schedules = Arc::new(ScheduleFileStore::new(store_path.clone()));
+        schedules.retire_engine_schedules(store.as_deref()).await?;
         let state = Arc::new(CampaignStateStore::try_load(campaign_state_path(
             &store_path,
         ))?);
@@ -2817,6 +2921,158 @@ mod tests {
             store: None,
             directory,
         }
+    }
+
+    fn retired_campaign(id: &str) -> Schedule {
+        Schedule::new(
+            id,
+            "retired campaign",
+            TriggerConfig::Interval { interval_secs: 300 },
+            CAMPAIGN_KIND,
+        )
+        .with_params(serde_json::json!({
+            "project": "/project",
+            "target": "parse",
+            "engine": hf_core::retired_engine::RETIRED_ENGINE_ID,
+            "lang": "c",
+            "duration_secs": 60
+        }))
+    }
+
+    fn active_campaign(id: &str) -> Schedule {
+        Schedule::new(
+            id,
+            "active campaign",
+            TriggerConfig::Interval { interval_secs: 300 },
+            CAMPAIGN_KIND,
+        )
+        .with_params(serde_json::json!({
+            "project": "/project",
+            "target": "parse",
+            "engine": "libfuzzer",
+            "lang": "c",
+            "duration_secs": 60
+        }))
+    }
+
+    #[tokio::test]
+    async fn startup_archives_retired_schedules_and_linked_history_once() {
+        let fixture = scheduler_fixture_with_store().await;
+        let retired = retired_campaign("schedule-retired");
+        fixture.push_schedule(retired.clone());
+        let mut active = active_campaign("schedule-active");
+        active.enabled = false;
+        fixture.push_schedule(active);
+        fixture
+            .reserve_receipt(
+                "schedule-retired",
+                "occ-retired",
+                "exec-retired",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
+        let scheduler = fixture.start().await.unwrap();
+        scheduler.stop().await;
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        let second = repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+        assert!(second.is_empty());
+
+        let active = load_schedules(&fixture.schedules_path).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "schedule-active");
+        let archived = load_schedules(&retired_schedule_path(&fixture.schedules_path)).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&archived[0]).unwrap(),
+            serde_json::to_value(&retired).unwrap(),
+        );
+
+        let store = fixture.store.as_ref().unwrap();
+        let executions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schedule_executions")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let occurrences: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schedule_occurrences")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let evidence: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM retired_engine_records
+             WHERE record_kind IN ('schedule_execution', 'schedule_occurrence')",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!((executions, occurrences, evidence), (0, 0, 2));
+    }
+
+    #[tokio::test]
+    async fn retired_schedule_archive_conflict_leaves_active_file_unchanged() {
+        let fixture = scheduler_fixture_without_store();
+        let active = retired_campaign("schedule-retired");
+        fixture.push_schedule(active);
+        let mut conflicting = retired_campaign("schedule-retired");
+        conflicting.name = "different archived evidence".to_owned();
+        atomic_write_schedules(
+            &retired_schedule_path(&fixture.schedules_path),
+            &[conflicting],
+        )
+        .unwrap();
+        let before = std::fs::read(&fixture.schedules_path).unwrap();
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        let error = repository.retire_engine_schedules(None).await.unwrap_err();
+        assert!(error.to_string().contains("schedule-retired"));
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn retired_schedule_archive_io_failure_leaves_active_file_unchanged() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.push_schedule(retired_campaign("schedule-retired"));
+        let archive_path = retired_schedule_path(&fixture.schedules_path);
+        std::fs::create_dir_all(&archive_path).unwrap();
+        let before = std::fs::read(&fixture.schedules_path).unwrap();
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        let error = repository.retire_engine_schedules(None).await.unwrap_err();
+        assert!(error.to_string().contains("schedule-retired"));
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn retired_schedule_history_failure_leaves_active_file_unchanged() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-retired"));
+        let before = std::fs::read(&fixture.schedules_path).unwrap();
+        let store = fixture.store.as_ref().unwrap();
+        sqlx::query("DROP TABLE retired_engine_records")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        let error = repository
+            .retire_engine_schedules(Some(store.as_ref()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("schedule-retired"));
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn active_schedules_are_not_rewritten_when_no_retired_engine_exists() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.push_schedule(active_campaign("schedule-active"));
+        let before = std::fs::read(&fixture.schedules_path).unwrap();
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        let retired = repository.retire_engine_schedules(None).await.unwrap();
+        assert!(retired.is_empty());
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
     }
 
     fn due_trigger() -> TriggerConfig {
