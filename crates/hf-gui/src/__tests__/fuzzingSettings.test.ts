@@ -29,7 +29,7 @@ describe("fuzzing settings", () => {
   });
 
   it("normalizes persisted values and drops unknown engines", () => {
-    const settings = normalizeFuzzingSettings({
+    const normalized = normalizeFuzzingSettings({
       fuzzing: {
         enabled_engines: ["unknown", "afl++", "afl++", "honggfuzz"],
         default_engine: "unknown",
@@ -38,19 +38,58 @@ describe("fuzzing settings", () => {
       },
     });
 
-    expect(settings.enabled_engines).toEqual(["afl++", "honggfuzz"]);
-    expect(settings.default_engine).toBe("afl++");
-    expect(settings.default_duration_secs).toBe(45);
-    expect(settings.sandbox).toEqual({
-      max_mem_mb: 3072,
-      max_cpus: 2,
-      max_duration_secs: 600,
+    expect(normalized).toEqual({
+      settings: {
+        enabled_engines: ["afl++", "honggfuzz"],
+        default_engine: "afl++",
+        default_duration_secs: 45,
+        sandbox: {
+          max_mem_mb: 3072,
+          max_cpus: 2,
+          max_duration_secs: 600,
+        },
+      },
+      error: null,
     });
+  });
+
+  it("fails closed for mixed persisted retired engine values", () => {
+    const retired = ["cluster", "fuzz", "lite"].join("");
+
+    expect(normalizeFuzzingSettings({
+      fuzzing: {
+        ...DEFAULT_FUZZING_SETTINGS,
+        enabled_engines: ["libfuzzer", ` ${retired.toUpperCase()} `],
+      },
+    })).toEqual({ settings: null, error: "retired_engine" });
+  });
+
+  it("fails closed for only-retired persisted engine aliases", () => {
+    for (const retired of [" Cfl ", "cFlItE"]) {
+      expect(normalizeFuzzingSettings({
+        fuzzing: {
+          ...DEFAULT_FUZZING_SETTINGS,
+          enabled_engines: [retired],
+          default_engine: retired,
+        },
+      })).toEqual({ settings: null, error: "retired_engine" });
+    }
+  });
+
+  it("fails closed for a retired persisted default engine", () => {
+    const retired = ["cluster", "fuzz", "lite"].join("");
+
+    expect(normalizeFuzzingSettings({
+      fuzzing: {
+        ...DEFAULT_FUZZING_SETTINGS,
+        default_engine: ` ${retired.toUpperCase()} `,
+      },
+    })).toEqual({ settings: null, error: "retired_engine" });
   });
 
   it("falls back to safe defaults when the stored shape is unusable", () => {
     expect(normalizeFuzzingSettings({ fuzzing: { enabled_engines: [] } }))
-      .toEqual(DEFAULT_FUZZING_SETTINGS);
+      .toEqual({ settings: DEFAULT_FUZZING_SETTINGS, error: null });
   });
 
   it("filters selectors to enabled engines and target language", () => {
@@ -63,6 +102,8 @@ describe("fuzzing settings", () => {
       .toEqual(["libfuzzer", "afl++", "syzkaller"]);
     expect(enabledEngineOptions(settings, { language: "rust" }).map((item) => item.value))
       .toEqual(["libfuzzer"]);
+    expect(enabledEngineOptions(settings, { language: "rust", includeSyzkaller: true })
+      .map((item) => item.value)).toEqual(["libfuzzer"]);
     // Go/Python are discoverable but have no harness-building engine yet.
     expect(enabledEngineOptions(settings, { language: "go" })).toEqual([]);
     expect(enabledEngineOptions(settings, { language: "python" })).toEqual([]);

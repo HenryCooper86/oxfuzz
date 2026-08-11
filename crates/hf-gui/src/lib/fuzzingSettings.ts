@@ -20,6 +20,10 @@ export interface FuzzingSettings {
   sandbox: FuzzingSandboxSettings;
 }
 
+export type FuzzingSettingsNormalization =
+  | { settings: FuzzingSettings; error: null }
+  | { settings: null; error: "retired_engine" };
+
 /** A fuzzing action is available only after the typed service policy validates. */
 export function fuzzingActionsEnabled(
   settings: FuzzingSettings | null,
@@ -39,6 +43,7 @@ export const DEFAULT_FUZZING_SETTINGS: FuzzingSettings = {
 };
 
 const ENGINE_IDS = new Set<string>(FUZZING_ENGINE_OPTIONS.map((option) => option.value));
+const RETIRED_ENGINE_IDS = new Set(["clusterfuzzlite", "cfl", "cflite"]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -58,6 +63,10 @@ function cloneDefaults(): FuzzingSettings {
     enabled_engines: [...DEFAULT_FUZZING_SETTINGS.enabled_engines],
     sandbox: { ...DEFAULT_FUZZING_SETTINGS.sandbox },
   };
+}
+
+function isRetiredEngineId(value: unknown): boolean {
+  return typeof value === "string" && RETIRED_ENGINE_IDS.has(value.trim().toLowerCase());
 }
 
 function boundedPositiveInteger(value: unknown, maximum: number): value is number {
@@ -108,13 +117,16 @@ export async function loadEffectiveFuzzingSettings(
 }
 
 /** Convert the untyped global TOML value into the validated UI shape. */
-export function normalizeFuzzingSettings(root: unknown): FuzzingSettings {
+export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormalization {
   const fuzzing = asRecord(asRecord(root).fuzzing);
   const rawEnabled = Array.isArray(fuzzing.enabled_engines) ? fuzzing.enabled_engines : [];
+  if (rawEnabled.some(isRetiredEngineId) || isRetiredEngineId(fuzzing.default_engine)) {
+    return { settings: null, error: "retired_engine" };
+  }
   const enabled = [...new Set(rawEnabled.filter(
     (engine): engine is FuzzingEngineId => typeof engine === "string" && ENGINE_IDS.has(engine),
   ))];
-  if (enabled.length === 0) return cloneDefaults();
+  if (enabled.length === 0) return { settings: cloneDefaults(), error: null };
 
   const sandbox = asRecord(fuzzing.sandbox);
   const maxDuration = positiveInteger(
@@ -133,22 +145,25 @@ export function normalizeFuzzingSettings(root: unknown): FuzzingSettings {
     : enabled[0];
 
   return {
-    enabled_engines: enabled,
-    default_engine: defaultEngine,
-    default_duration_secs: requestedDefault,
-    sandbox: {
-      max_mem_mb: positiveInteger(
-        sandbox.max_mem_mb,
-        DEFAULT_FUZZING_SETTINGS.sandbox.max_mem_mb,
-        64 * 1024,
-      ),
-      max_cpus: positiveInteger(
-        sandbox.max_cpus,
-        DEFAULT_FUZZING_SETTINGS.sandbox.max_cpus,
-        64,
-      ),
-      max_duration_secs: maxDuration,
+    settings: {
+      enabled_engines: enabled,
+      default_engine: defaultEngine,
+      default_duration_secs: requestedDefault,
+      sandbox: {
+        max_mem_mb: positiveInteger(
+          sandbox.max_mem_mb,
+          DEFAULT_FUZZING_SETTINGS.sandbox.max_mem_mb,
+          64 * 1024,
+        ),
+        max_cpus: positiveInteger(
+          sandbox.max_cpus,
+          DEFAULT_FUZZING_SETTINGS.sandbox.max_cpus,
+          64,
+        ),
+        max_duration_secs: maxDuration,
+      },
     },
+    error: null,
   };
 }
 
@@ -180,16 +195,17 @@ export function enabledEngineOptions(
   const enabled = new Set(settings.enabled_engines);
   return FUZZING_ENGINE_OPTIONS.filter((option) => {
     if (!enabled.has(option.value)) return false;
+    if (language !== undefined) {
+      if (option.value === "syzkaller") return false;
+      if (language === "rust") return option.value === "libfuzzer";
+      if (language === "go" || language === "python") {
+        // Discovery scans Go/Python, but no engine adapter builds those
+        // harness languages yet (EngineKind::supports_language in hf-core);
+        // returning no options keeps the harness action disabled.
+        return false;
+      }
+    }
     if (option.value === "syzkaller") return includeSyzkaller;
-    if (language === "rust") {
-      return option.value === "libfuzzer";
-    }
-    if (language === "go" || language === "python") {
-      // Discovery scans Go/Python, but no engine adapter builds those
-      // harness languages yet (EngineKind::supports_language in hf-core);
-      // returning no options keeps the harness action disabled.
-      return false;
-    }
     return true;
   });
 }
