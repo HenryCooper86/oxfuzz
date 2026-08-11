@@ -224,6 +224,56 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             findings = find_forbidden_references(root)
         self.assertEqual(findings, [f"binary.bin:1:\\xff\\xd8\\xff{reference}"])
 
+    def test_decoder_preserves_non_ascii_and_invalid_escape_spellings(self) -> None:
+        slash = chr(92)
+        spellings = (
+            slash + "x30",
+            slash + "u0030",
+            slash + "u{d800}",
+            slash + "u{10ffff}",
+            slash + "u{110000}",
+            slash + "u{ffffff}",
+        )
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                source = "prefix" + spelling + "suffix"
+                decoded = checker.decode_ascii_escapes(source)
+                self.assertEqual(decoded.text, source)
+                self.assertEqual(decoded.source_offsets, tuple(range(len(source))))
+                self.assertEqual(decoded.escaped_offsets, frozenset())
+
+    def test_cli_classifies_large_escape_spellings_without_tracebacks(self) -> None:
+        slash = chr(92)
+        spellings = (
+            slash + "u{10ffff}",
+            slash + "u{110000}",
+            slash + "u{ffffff}",
+        )
+        for spelling in spellings:
+            cases = (
+                ("utf8.txt", b'plain = "' + spelling.encode("ascii") + b'"\n', 0, ""),
+                ("unknown.bin", b"active \xff" + spelling.encode("ascii") + b"\n", 2, "scan error: unknown.bin\n"),
+                ("png.bin", b"\x89PNG\r\n\x1a\n\xff" + spelling.encode("ascii") + b"\n", 0, ""),
+            )
+            for filename, contents, expected_exit, expected_stderr in cases:
+                with self.subTest(spelling=spelling, filename=filename), tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    (root / filename).write_bytes(contents)
+                    result = self.run_checker(root)
+                    self.assertEqual(result.returncode, expected_exit)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, expected_stderr)
+
+    def test_detector_keeps_ascii_letter_escapes_matchable(self) -> None:
+        prefix, _, suffix = self.canonical_parts()
+        source = prefix + chr(92) + "x66uzz" + suffix
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "engine.txt"
+            path.write_text(source + "\n", encoding="utf-8")
+            findings = find_forbidden_references(root)
+        self.assertEqual(findings, [f"engine.txt:1:{source}"])
+
     def test_detector_fails_closed_on_tracked_invalid_utf8_without_nul(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
