@@ -101,6 +101,74 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ],
         )
 
+    def test_detector_scans_tracked_utf8_nul_source_references(self) -> None:
+        reference = self.canonical_title()
+        prefix, middle, suffix = self.canonical_parts()
+        sources = {
+            pathlib.Path("direct.c"): (
+                "static const char *engine = \""
+                + reference
+                + "\";\0\nint main(void) { return engine[0] == 0; }\n"
+            ),
+            pathlib.Path("assembled.c"): (
+                "static const char *engine = \""
+                + prefix
+                + "\" \""
+                + middle
+                + "\" \""
+                + suffix
+                + "\";\0\nint main(void) { return engine[0] == 0; }\n"
+            ),
+            pathlib.Path("adapter.go"): "package adapter\nconst Engine = \"" + reference + "\"\0\n",
+            pathlib.Path("extensionless"): "engine=\"" + reference + "\"\0\n",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for relative, source in sources.items():
+                (root / relative).write_text(source, encoding="utf-8")
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", *(str(path) for path in sources)],
+                check=True,
+            )
+            for relative in (pathlib.Path("direct.c"), pathlib.Path("assembled.c")):
+                compilation = subprocess.run(
+                    ["cc", "-fsyntax-only", str(root / relative)],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(compilation.returncode, 0, compilation.stderr)
+            result = self.run_checker(root)
+        self.assertEqual(result.returncode, 1)
+        for relative in sources:
+            self.assertIn(f"{relative.as_posix()}:", result.stdout)
+
+    def test_detector_fails_closed_on_nul_invalid_known_text_paths(self) -> None:
+        suffixes = {
+            ".c", ".cc", ".command", ".cpp", ".css", ".cxx", ".go", ".h", ".hh",
+            ".hpp", ".html", ".in", ".js", ".json", ".jsx", ".lock", ".md", ".mjs",
+            ".py", ".rb", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt",
+            ".yaml", ".yml",
+        }
+        filenames = {".gitattributes", ".gitignore", "Dockerfile", "LICENSE", "Makefile"}
+        compound_suffixes = {".env.example", ".yaml.example", ".yml.example"}
+        paths = (
+            *(pathlib.Path("source" + suffix) for suffix in suffixes),
+            *(pathlib.Path(name) for name in filenames),
+            *(pathlib.Path("config" + suffix) for suffix in compound_suffixes),
+        )
+        for relative in paths:
+            with self.subTest(relative=relative):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"\0\xff")
+                    with self.assertRaises(checker.ScanError) as raised:
+                        find_forbidden_references(root)
+                self.assertEqual(str(raised.exception), f"scan error: {relative.as_posix()}")
+
     def test_detector_fails_closed_on_tracked_invalid_utf8_without_nul(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -312,6 +380,161 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     [f"src/engine.rs:{expected_line_number}:{expected_line}"],
                 )
 
+    def test_detector_matches_nested_and_line_terminator_comment_forms(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        nested_rust = (
+            "const E: &str = concat!(\n  \""
+            + prefix
+            + "\" /* outer /* inner */ still outer */, \""
+            + middle
+            + "\", \""
+            + suffix
+            + "\",\n);"
+        )
+        javascript_cr = (
+            "const e = \""
+            + prefix
+            + "\" // active adapter\r + \""
+            + middle
+            + "\" + \""
+            + suffix
+            + "\";"
+        )
+        javascript_crlf = (
+            "const e = \""
+            + prefix
+            + "\" // active adapter\r\n + \""
+            + middle
+            + "\" + \""
+            + suffix
+            + "\";"
+        )
+        javascript_u2028 = (
+            "const e = \""
+            + prefix
+            + "\" // active adapter\u2028 + \""
+            + middle
+            + "\" + \""
+            + suffix
+            + "\";"
+        )
+        javascript_u2029 = (
+            "const e = \""
+            + prefix
+            + "\" // active adapter\u2029 + \""
+            + middle
+            + "\" + \""
+            + suffix
+            + "\";"
+        )
+        python = (
+            "E = (\""
+            + prefix
+            + "\" # active adapter\n     \""
+            + middle
+            + "\" \""
+            + suffix
+            + "\")"
+        )
+        shell = "echo \"" + prefix + "\" # active adapter\n\"" + middle + "\" \"" + suffix + "\""
+        ruby = "E = \"" + prefix + "\" # active adapter\n\"" + middle + "\" \"" + suffix + "\""
+        cases = (
+            ("engine.rs", nested_rust, 2, nested_rust.split("\n")[1].strip()),
+            ("engine.js", javascript_cr, 1, javascript_cr),
+            ("engine.js", javascript_crlf, 1, javascript_crlf.split("\n")[0].strip()),
+            ("engine.js", javascript_u2028, 1, javascript_u2028),
+            ("engine.js", javascript_u2029, 1, javascript_u2029),
+            ("engine.py", python, 1, python.split("\n")[0]),
+            ("engine.sh", shell, 1, shell.split("\n")[0]),
+            ("engine.rb", ruby, 1, ruby.split("\n")[0]),
+        )
+        for filename, source_text, line_number, line in cases:
+            with self.subTest(filename=filename, source_text=source_text):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / filename
+                    path.parent.mkdir(parents=True)
+                    path.write_text(source_text + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                self.assertEqual(findings, [f"src/{filename}:{line_number}:{line}"])
+
+    def test_comment_joined_reproductions_compile_or_execute_and_are_detected(self) -> None:
+        prefix, middle, suffix = self.canonical_parts()
+        reference = prefix + middle + suffix
+        rust = (
+            "fn main() {\n"
+            "    let value = concat!(\""
+            + prefix
+            + "\" /* outer /* inner */ still outer */, \""
+            + middle
+            + "\", \""
+            + suffix
+            + "\");\n"
+            "    assert_eq!(value, \""
+            + reference
+            + "\");\n"
+            "}\n"
+        )
+        javascript = (
+            "const value = \""
+            + prefix
+            + "\" // active adapter\u2028 + \""
+            + middle
+            + "\" + \""
+            + suffix
+            + "\";\n"
+            "if (value !== \""
+            + reference
+            + "\") process.exit(1);\n"
+        )
+        python = (
+            "value = (\""
+            + prefix
+            + "\" # active adapter\n"
+            "         \""
+            + middle
+            + "\" \""
+            + suffix
+            + "\")\n"
+            "assert value == \""
+            + reference
+            + "\"\n"
+        )
+        fixtures = (
+            ("nested.rs", rust, "rust"),
+            ("line.js", javascript, "node"),
+            ("line.py", python, "python"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            rust_output = root / "rust-output"
+            rust_output.mkdir()
+            for filename, source, runtime in fixtures:
+                path = root / filename
+                path.write_text(source, encoding="utf-8")
+                findings = find_forbidden_references(root)
+                self.assertTrue(any(finding.startswith(f"{filename}:") for finding in findings))
+                command = {
+                    "rust": ["rustc", "--out-dir", str(rust_output)],
+                    "node": ["node"],
+                    "python": [sys.executable],
+                }[runtime]
+                compilation = subprocess.run(
+                    [*command, str(path)],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(compilation.returncode, 0, compilation.stderr)
+                if runtime == "rust":
+                    execution = subprocess.run(
+                        [str(rust_output / path.stem)],
+                        check=False,
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(execution.returncode, 0, execution.stderr)
+
     def test_detector_bounds_canonical_joiners_and_ignores_unrelated_words(self) -> None:
         prefix, middle, suffix = self.canonical_parts()
         cases = (
@@ -336,8 +559,11 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             (at_bound, [f"src/engine.rs:1:{at_bound}"]),
             (prefix + "/*" + ("x" * 61) + "*/" + middle + suffix, []),
             (prefix + "/* unclosed " + middle + suffix, []),
+            (prefix + "/* outer /* inner */ still outer " + middle + suffix, []),
             (prefix + "/* active adapter */ed" + middle + suffix, []),
             (prefix + "// active adapter " + middle + suffix, []),
+            (prefix + "//" + ("x" * 61) + "\n" + middle + suffix, [f"src/engine.rs:1:{prefix}//" + ("x" * 61)]),
+            (prefix + "//" + ("x" * 62) + "\n" + middle + suffix, []),
         )
         for source_text, expected in cases:
             with self.subTest(source_text=source_text):
@@ -694,6 +920,17 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "scan error: src/invalid.py\n")
+
+    def test_cli_reports_nul_invalid_utf8_source_as_a_scan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "src" / "invalid.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int main(void) { return 0; }\0\xff")
+            result = self.run_checker(root)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "scan error: src/invalid.c\n")
 
     def test_cli_reports_a_scan_error_with_exit_two(self) -> None:
         stdout = io.StringIO()
