@@ -67,9 +67,9 @@ HISTORICAL_OCCURRENCE_CONTRACTS = {
     pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"): HistoricalOccurrenceContract(27, "e46fc9e9205499e7b572c09f8657713a049057e5d359e5b5dfe08ac92470ddf3"),
     pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"): HistoricalOccurrenceContract(28, "28989e3f83b797ef990b6a8ffa88c2b377120422acfb87282fc65ce51c6e1d22"),
     pathlib.Path("docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"): HistoricalOccurrenceContract(14, "ba68718775b5b9b6db38e28a93a702d20ee5fe4ff75a73922849a686902355b1"),
-    pathlib.Path("docs/superpowers/plans/2026-08-11-clusterfuzzlite-removal-implementation.md"): HistoricalOccurrenceContract(0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
-    pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(3, "a4802adbb30ec6feb4ac97a2eb48bccce5e6a4d19310b47b3e4308031b823e5d"),
-    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(61, "b0bfa14333f0a895e4fa28d921ed17191f74beeaf8170ff0049d94712ed3442a"),
+    pathlib.Path("crates/hf-gui/src/lib/retiredEngine.ts"): HistoricalOccurrenceContract(3, "0c84e97c315144c25b4db1128c6dd9c1b22374666f7b91f6318f5e6e273e11df"),
+    pathlib.Path("scripts/check_retired_engine_references.py"): HistoricalOccurrenceContract(2, "19fe94b96ae26495bd3633c46648d264d33bbd222b371e5971fd5dd4a1b23c43"),
+    pathlib.Path("scripts/tests/test_retired_engine_references.py"): HistoricalOccurrenceContract(61, "3b25421bc0824f816268c4cd1d7b6deca8cebac31ad26bfac95cd094d11c2032"),
 }
 ALLOWED_FILES = set(HISTORICAL_OCCURRENCE_CONTRACTS)
 
@@ -140,6 +140,23 @@ def is_canonical_joiner(character: str) -> bool:
     return character.isspace() or character in CANONICAL_JOINER_PUNCTUATION
 
 
+def ascii_lower(text: str) -> str:
+    return "".join(
+        chr(ord(character) + (ord("a") - ord("A")))
+        if "A" <= character <= "Z"
+        else character
+        for character in text
+    )
+
+
+def is_ascii_lower(character: str) -> bool:
+    return "a" <= character <= "z"
+
+
+def is_ascii_upper(character: str) -> bool:
+    return "A" <= character <= "Z"
+
+
 def component_after_joiners(text: str, offset: int, component: str) -> Optional[int]:
     for joiner_count in range(MAX_CANONICAL_JOINERS + 1):
         candidate = offset + joiner_count
@@ -152,7 +169,7 @@ def component_after_joiners(text: str, offset: int, component: str) -> Optional[
 
 def long_canonical_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
     text = decoded.text
-    lowered = text.lower()
+    lowered = ascii_lower(text)
     spans: list[tuple[int, int, bool]] = []
     search_offset = 0
     while True:
@@ -191,7 +208,7 @@ def is_alias_start(text: str, offset: int) -> bool:
     first = text[offset]
     return (
         not (previous.isascii() and previous.isalnum())
-        or (previous.islower() and first.isupper())
+        or (is_ascii_lower(previous) and is_ascii_upper(first))
     )
 
 
@@ -202,13 +219,13 @@ def is_alias_end(text: str, offset: int) -> bool:
     following = text[offset]
     return (
         not (following.isascii() and following.isalnum())
-        or (following.isupper() and (previous.islower() or previous.isupper()))
+        or (is_ascii_upper(following) and (is_ascii_lower(previous) or is_ascii_upper(previous)))
     )
 
 
 def short_alias_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
     text = decoded.text
-    lowered = text.lower()
+    lowered = ascii_lower(text)
     spans: list[tuple[int, int, bool]] = []
     for alias in SHORT_ALIASES:
         search_offset = 0
@@ -226,7 +243,7 @@ def short_alias_spans(decoded: DecodedSource) -> list[tuple[int, int, bool]]:
 
 def matching_occurrences(source: str) -> list[Occurrence]:
     decoded = decode_ascii_escapes(source)
-    source_lines = source.splitlines()
+    source_lines = source.split("\n")
     occurrences_by_line: dict[int, Occurrence] = {}
     for start, _, direct in long_canonical_spans(decoded) + short_alias_spans(decoded):
         source_offset = decoded.source_offsets[start]

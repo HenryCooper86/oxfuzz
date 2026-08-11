@@ -2830,7 +2830,7 @@ mod doctor_tests {
     #[cfg(feature = "semgrep-enrichment")]
     use clap::Parser as _;
     use hf_service::system::StatusFlag;
-    use hf_service::SystemStatus;
+    use hf_service::{SystemStatus, RETIRED_ENGINE_ID};
 
     use super::{doctor_lines, parse_engine, parse_lang};
     #[cfg(feature = "semgrep-enrichment")]

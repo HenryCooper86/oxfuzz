@@ -110,9 +110,7 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             pathlib.Path(
                 "docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"
             ),
-            pathlib.Path(
-                "docs/superpowers/plans/2026-08-11-clusterfuzzlite-removal-implementation.md"
-            ),
+            pathlib.Path("crates/hf-gui/src/lib/retiredEngine.ts"),
             pathlib.Path("scripts/check_retired_engine_references.py"),
             pathlib.Path("scripts/tests/test_retired_engine_references.py"),
         }
@@ -275,6 +273,26 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             path.write_text(source_text + "\n", encoding="utf-8")
             findings = find_forbidden_references(root)
         self.assertEqual(findings, [f"src/engine.rs:1:{source_text}"])
+
+    def test_detector_preserves_ascii_boundaries_and_physical_lines_with_unicode(self) -> None:
+        canonical = self.canonical_title()
+        alias = self.cfl_alias().lower()
+        cases = (
+            ("\u0130" + alias, [f"src/engine.rs:1:\u0130{alias}"]),
+            ("\u0130" + ("\u0130" * 99) + "\n" + canonical, [f"src/engine.rs:2:{canonical}"]),
+            ("header\u2028" + canonical, [f"src/engine.rs:1:header\u2028{canonical}"]),
+            ("header\r\n" + canonical, [f"src/engine.rs:2:{canonical}"]),
+            ("\u0130x" + alias, []),
+        )
+        for source_text, expected in cases:
+            with self.subTest(source_text=source_text):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    path = root / "src" / "engine.rs"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(source_text + "\n", encoding="utf-8")
+                    findings = find_forbidden_references(root)
+                self.assertEqual(findings, expected)
 
     def test_detector_matches_alias_identifier_and_punctuation_variants(self) -> None:
         cases = (
