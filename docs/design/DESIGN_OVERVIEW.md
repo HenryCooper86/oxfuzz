@@ -18,8 +18,9 @@ all under human-in-the-loop supervision.
    approved by a human before execution.
 3. **Durable workflow** -- target -> harness -> engine -> crash -> corpus ->
    coverage -> target. This loop is stable across model generations.
-4. **Observability** -- every run is journaled and replayable; cost and
-   coverage deltas are first-class metrics.
+4. **Observability** -- all run evidence is journaled and preserved; replay is
+   available only for supported active-engine runs; cost and coverage deltas are
+   first-class metrics.
 
 ## 3. Alignment Table
 
