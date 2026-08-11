@@ -42,8 +42,6 @@ pub struct SystemStatus {
     pub aflplusplus: StatusFlag,
     /// honggfuzz tooling is present in the sandbox image.
     pub honggfuzz: StatusFlag,
-    /// `ClusterFuzzLite` tooling is present in the sandbox image.
-    pub clusterfuzzlite: StatusFlag,
     /// syzkaller tooling is present in the sandbox image.
     pub syzkaller: StatusFlag,
     /// The configured `DefectDojo` instance is answering. False when it is not
@@ -62,7 +60,6 @@ impl SystemStatus {
             && (self.libfuzzer.is_ready()
                 || self.aflplusplus.is_ready()
                 || self.honggfuzz.is_ready()
-                || self.clusterfuzzlite.is_ready()
                 || self.syzkaller.is_ready())
     }
 }
@@ -89,9 +86,6 @@ pub async fn system_status() -> SystemStatus {
         honggfuzz: engines
             .supports(hf_core::engine::EngineKind::Honggfuzz)
             .into(),
-        clusterfuzzlite: engines
-            .supports(hf_core::engine::EngineKind::ClusterFuzzLite)
-            .into(),
         syzkaller: engines
             .supports(hf_core::engine::EngineKind::Syzkaller)
             .into(),
@@ -110,7 +104,6 @@ mod tests {
             libfuzzer: StatusFlag(libfuzzer),
             aflplusplus: StatusFlag(false),
             honggfuzz: StatusFlag(false),
-            clusterfuzzlite: StatusFlag(false),
             syzkaller: StatusFlag(false),
             defectdojo: StatusFlag(false),
         }

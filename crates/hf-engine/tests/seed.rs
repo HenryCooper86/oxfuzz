@@ -4,7 +4,6 @@
 //! Seed support reality check (verified against engine sources/docs):
 //! - AFL++: `afl-fuzz -s <seed>` (no `AFL_SEED` environment variable exists).
 //! - libFuzzer: `-seed=N` (`-seed=0` means "generate a random seed").
-//! - `ClusterFuzzLite`: trailing fuzzer args are forwarded to libFuzzer.
 //! - honggfuzz: no user-specified RNG seed exists; nothing may be emitted.
 
 use hf_core::engine::{EngineKind, FuzzRunConfig};
@@ -127,32 +126,5 @@ fn honggfuzz_never_emits_a_seed_flag() {
         !args.iter().any(|arg| arg.contains("seed")),
         "honggfuzz has no seed knob; no seed flag may be emitted: {}",
         args.join(" ")
-    );
-}
-
-#[test]
-fn clusterfuzzlite_forwards_seed_to_libfuzzer() {
-    let seeded = hf_engine::clusterfuzzlite::build_run_args(
-        &cfg(EngineKind::ClusterFuzzLite, Some(7)),
-        "/work/oss-fuzz/project/fuzz_bin",
-        "/work/corpus",
-        "/work/out",
-    );
-    assert!(
-        seeded.iter().any(|arg| arg == "-seed=7"),
-        "ClusterFuzzLite must forward -seed=7 to libFuzzer: {}",
-        seeded.join(" ")
-    );
-
-    let unseeded = hf_engine::clusterfuzzlite::build_run_args(
-        &cfg(EngineKind::ClusterFuzzLite, None),
-        "/work/oss-fuzz/project/fuzz_bin",
-        "/work/corpus",
-        "/work/out",
-    );
-    assert!(
-        !unseeded.iter().any(|arg| arg.starts_with("-seed=")),
-        "an unseeded config must not pin the forwarded seed: {}",
-        unseeded.join(" ")
     );
 }

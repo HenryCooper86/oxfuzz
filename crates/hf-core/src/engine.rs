@@ -17,7 +17,6 @@ pub enum EngineKind {
     AflPlusPlus,
     Honggfuzz,
     LibFuzzer,
-    ClusterFuzzLite,
     /// Google's coverage-guided OS kernel fuzzer (syscall sequences).
     Syzkaller,
 }
@@ -43,6 +42,14 @@ pub struct EngineArtifacts {
 }
 
 impl EngineKind {
+    /// Every active fuzzing engine in canonical presentation order.
+    pub const ALL: [Self; 4] = [
+        Self::LibFuzzer,
+        Self::AflPlusPlus,
+        Self::Honggfuzz,
+        Self::Syzkaller,
+    ];
+
     /// The canonical id used on the wire, in configs, and on the command line.
     /// Round-trips through [`std::str::FromStr`], so a value handed to a frontend
     /// comes back parseable.
@@ -52,7 +59,6 @@ impl EngineKind {
             Self::AflPlusPlus => "afl++",
             Self::Honggfuzz => "honggfuzz",
             Self::LibFuzzer => "libfuzzer",
-            Self::ClusterFuzzLite => "clusterfuzzlite",
             Self::Syzkaller => "syzkaller",
         }
     }
@@ -93,17 +99,14 @@ impl EngineKind {
                     requires_corpus_directory: false,
                 },
             },
-            Self::ClusterFuzzLite | Self::Syzkaller => EngineCapabilities {
+            Self::Syzkaller => EngineCapabilities {
                 telemetry: EngineTelemetry {
                     supports_live_stats: true,
                     supports_coverage: true,
                 },
                 artifacts: EngineArtifacts {
-                    // ClusterFuzzLite is driven through `infra/helper.py`, not a
-                    // raw libFuzzer binary, so `-minimize_crash=1` does not
-                    // apply; syzkaller minimizes via `syz-repro`, driven
-                    // separately. `hf_crash::build_minimize_args` returns
-                    // `None` for both.
+                    // Syzkaller minimizes via `syz-repro`, driven separately.
+                    // `hf_crash::build_minimize_args` returns `None` for it.
                     supports_crash_minimization: false,
                     requires_corpus_directory: false,
                 },
@@ -119,9 +122,9 @@ impl EngineKind {
                 language,
                 crate::target::TargetLanguage::C | crate::target::TargetLanguage::Cpp
             ),
-            // libFuzzer-driven engines accept anything that compiles to a
-            // libFuzzer binary -- the single source of truth on `TargetLanguage`.
-            Self::LibFuzzer | Self::ClusterFuzzLite => language.libfuzzer_compatible(),
+            // libFuzzer accepts anything that compiles to a libFuzzer binary --
+            // the single source of truth on `TargetLanguage`.
+            Self::LibFuzzer => language.libfuzzer_compatible(),
             Self::Syzkaller => false,
         }
     }
@@ -134,15 +137,21 @@ impl std::str::FromStr for EngineKind {
     /// names are rejected so every entrypoint (CLI/web/GUI) fails the same way
     /// instead of silently defaulting to a different engine.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let trimmed = s.trim();
+        if crate::retired_engine::is_retired_engine_id(trimmed) {
+            return Err(format!(
+                "fuzzing engine '{trimmed}' has been retired; choose one of: \
+                 afl++, honggfuzz, libfuzzer, syzkaller"
+            ));
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
             "afl++" | "aflplusplus" | "afl" => Ok(Self::AflPlusPlus),
             "honggfuzz" | "hfuzz" => Ok(Self::Honggfuzz),
             "libfuzzer" | "libfuzz" | "lf" => Ok(Self::LibFuzzer),
-            "clusterfuzzlite" | "cfl" | "cflite" => Ok(Self::ClusterFuzzLite),
             "syzkaller" | "syz" => Ok(Self::Syzkaller),
             other => Err(format!(
                 "unknown fuzzing engine '{other}' (expected one of: \
-                 afl++, honggfuzz, libfuzzer, clusterfuzzlite, syzkaller)"
+                 afl++, honggfuzz, libfuzzer, syzkaller)"
             )),
         }
     }
@@ -187,16 +196,43 @@ mod tests {
     use crate::target::TargetLanguage;
 
     #[test]
+    fn active_engine_ids_are_exact_and_round_trip() {
+        assert_eq!(
+            EngineKind::ALL.map(EngineKind::as_str),
+            ["libfuzzer", "afl++", "honggfuzz", "syzkaller"],
+        );
+        for engine in EngineKind::ALL {
+            assert_eq!(engine.as_str().parse::<EngineKind>(), Ok(engine));
+        }
+    }
+
+    #[test]
+    fn retired_engine_aliases_return_actionable_errors() {
+        let values = [
+            crate::retired_engine::RETIRED_ENGINE_ID.to_owned(),
+            ["c", "f", "l"].concat(),
+            ["c", "f", "lite"].concat(),
+            format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+        ];
+        for value in values {
+            let error = value.parse::<EngineKind>().unwrap_err();
+            assert!(error.contains("has been retired"), "{error}");
+            assert!(
+                error.contains("afl++, honggfuzz, libfuzzer, syzkaller"),
+                "{error}"
+            );
+        }
+        assert!("not-an-engine"
+            .parse::<EngineKind>()
+            .unwrap_err()
+            .contains("unknown fuzzing engine"));
+    }
+
+    #[test]
     fn engine_and_language_ids_round_trip_through_from_str() {
         // A frontend gets `as_str()` and hands it back; it must parse to the
         // same variant, or a scheduled campaign would silently change engine.
-        for engine in [
-            EngineKind::AflPlusPlus,
-            EngineKind::Honggfuzz,
-            EngineKind::LibFuzzer,
-            EngineKind::ClusterFuzzLite,
-            EngineKind::Syzkaller,
-        ] {
+        for engine in EngineKind::ALL {
             assert_eq!(engine.as_str().parse::<EngineKind>(), Ok(engine));
         }
         for lang in [
@@ -241,11 +277,7 @@ mod tests {
         );
         // Engines without a built-in minimizer must not advertise one; the
         // minimizer itself (`hf_crash::build_minimize_args`) rejects them.
-        for engine in [
-            EngineKind::Honggfuzz,
-            EngineKind::ClusterFuzzLite,
-            EngineKind::Syzkaller,
-        ] {
+        for engine in [EngineKind::Honggfuzz, EngineKind::Syzkaller] {
             assert!(
                 !engine.capabilities().artifacts.supports_crash_minimization,
                 "{engine:?} has no built-in crash minimizer"

@@ -376,7 +376,7 @@ fn engine_entry_point(engine: EngineKind) -> &'static str {
         EngineKind::Honggfuzz => {
             "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) // with HF_ITER"
         }
-        EngineKind::LibFuzzer | EngineKind::AflPlusPlus | EngineKind::ClusterFuzzLite => {
+        EngineKind::LibFuzzer | EngineKind::AflPlusPlus => {
             "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)"
         }
         EngineKind::Syzkaller => {
@@ -390,7 +390,6 @@ fn engine_name(engine: EngineKind) -> &'static str {
         EngineKind::LibFuzzer => "libFuzzer",
         EngineKind::AflPlusPlus => "AFL++",
         EngineKind::Honggfuzz => "honggfuzz",
-        EngineKind::ClusterFuzzLite => "ClusterFuzzLite (libFuzzer-compatible)",
         EngineKind::Syzkaller => "syzkaller (kernel)",
     }
 }

@@ -38,13 +38,9 @@ pub fn build_minimize_args(
             "@@".to_owned(),
         ]),
         // No built-in raw-binary minimizer for these engines:
-        // - ClusterFuzzLite is driven through `infra/helper.py` (see
-        //   `hf_engine::clusterfuzzlite`), not a raw libFuzzer binary, so the
-        //   `binary -minimize_crash=1` form does not apply; minimization goes
-        //   through oss-fuzz tooling (`helper.py reproduce`).
         // - honggfuzz has no inline minimizer.
         // - syzkaller uses `syz-repro` on the crash log, driven separately from
         //   a harness binary.
-        EngineKind::ClusterFuzzLite | EngineKind::Honggfuzz | EngineKind::Syzkaller => None,
+        EngineKind::Honggfuzz | EngineKind::Syzkaller => None,
     }
 }

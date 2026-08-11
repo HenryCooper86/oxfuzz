@@ -530,18 +530,8 @@ const HARD_MAX_FUZZ_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const HARD_MAX_FUZZ_MEMORY_MB: u64 = 64 * 1024;
 const HARD_MAX_FUZZ_CPUS: u32 = 64;
 
-fn all_engines() -> [EngineKind; 5] {
-    [
-        EngineKind::LibFuzzer,
-        EngineKind::AflPlusPlus,
-        EngineKind::Honggfuzz,
-        EngineKind::ClusterFuzzLite,
-        EngineKind::Syzkaller,
-    ]
-}
-
 fn all_engine_ids() -> Vec<String> {
-    all_engines()
+    EngineKind::ALL
         .into_iter()
         .map(|engine| engine.as_str().to_owned())
         .collect()
@@ -3478,6 +3468,11 @@ default_duration_secs = 22
 
     #[test]
     fn fuzzing_policy_uses_defaults_and_rejects_disabled_or_excessive_runs() {
+        assert_eq!(
+            FuzzingSettings::default().enabled_engines,
+            vec!["libfuzzer", "afl++", "honggfuzz", "syzkaller"],
+        );
+
         let settings = FuzzingSettings {
             enabled_engines: vec!["honggfuzz".to_owned()],
             default_engine: "honggfuzz".to_owned(),

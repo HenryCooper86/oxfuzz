@@ -243,7 +243,7 @@ pub fn sandbox_image_arch() -> Option<String> {
 /// what can run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SandboxEngines {
-    available: [bool; 5],
+    available: [bool; 4],
 }
 
 impl SandboxEngines {
@@ -254,8 +254,7 @@ impl SandboxEngines {
             EngineKind::LibFuzzer => 0,
             EngineKind::AflPlusPlus => 1,
             EngineKind::Honggfuzz => 2,
-            EngineKind::ClusterFuzzLite => 3,
-            EngineKind::Syzkaller => 4,
+            EngineKind::Syzkaller => 3,
         }]
     }
 }
@@ -288,9 +287,7 @@ fn sandbox_image_id() -> Option<String> {
 /// Map the probe script's stdout (one present-binary name per line) to the
 /// per-engine availability. Each engine maps to the binary its adapter invokes
 /// inside the sandbox: libFuzzer compiles/runs via `clang`; AFL++ -> `afl-fuzz`;
-/// honggfuzz -> `honggfuzz`; syzkaller -> `syz-manager`; `ClusterFuzzLite` shells
-/// `python3 infra/helper.py`, so it needs `python3` (the helper itself comes
-/// from the project, not the image).
+/// honggfuzz -> `honggfuzz`; syzkaller -> `syz-manager`.
 fn engines_from_probe_output(found: &str) -> SandboxEngines {
     let has = |bin: &str| found.lines().any(|l| l.trim() == bin);
     SandboxEngines {
@@ -298,7 +295,6 @@ fn engines_from_probe_output(found: &str) -> SandboxEngines {
             has("clang"),
             has("afl-fuzz"),
             has("honggfuzz"),
-            has("python3"),
             has("syz-manager"),
         ],
     }
@@ -315,7 +311,7 @@ fn probe_sandbox_engines() -> SandboxEngines {
             "sh",
             SANDBOX_IMAGE,
             "-c",
-            "for b in clang afl-fuzz honggfuzz syz-manager python3; do \
+            "for b in clang afl-fuzz honggfuzz syz-manager; do \
              command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done",
         ]),
         DOCKER_PROBE_TIMEOUT,
@@ -501,13 +497,12 @@ mod tests {
 
     #[test]
     fn probe_output_maps_present_binaries_to_engines() {
-        // The image bundles clang/afl-fuzz/honggfuzz/syz-manager but not python3.
+        // The image bundles the binaries required by every active engine.
         let out = "clang\nafl-fuzz\nhonggfuzz\nsyz-manager\n";
         let engines = engines_from_probe_output(out);
         assert!(engines.supports(EngineKind::LibFuzzer));
         assert!(engines.supports(EngineKind::AflPlusPlus));
         assert!(engines.supports(EngineKind::Honggfuzz));
-        assert!(!engines.supports(EngineKind::ClusterFuzzLite));
         assert!(engines.supports(EngineKind::Syzkaller));
     }
 
@@ -517,14 +512,11 @@ mod tests {
     }
 
     #[test]
-    fn probe_output_clusterfuzzlite_needs_python3() {
-        let out = "clang\npython3\n";
-        let e = engines_from_probe_output(out);
-        assert!(e.supports(EngineKind::LibFuzzer));
-        assert!(e.supports(EngineKind::ClusterFuzzLite));
-        assert!(!e.supports(EngineKind::AflPlusPlus));
-        assert!(!e.supports(EngineKind::Honggfuzz));
-        assert!(!e.supports(EngineKind::Syzkaller));
+    fn python_alone_does_not_mark_an_engine_ready() {
+        let engines = engines_from_probe_output("python3\n");
+        assert!(EngineKind::ALL
+            .into_iter()
+            .all(|engine| !engines.supports(engine)));
     }
 
     #[test]

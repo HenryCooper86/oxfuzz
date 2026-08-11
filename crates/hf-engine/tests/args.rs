@@ -184,39 +184,3 @@ fn extra_args_are_appended() {
         "extra_args must be appended: {joined}"
     );
 }
-
-#[test]
-fn clusterfuzzlite_args_have_helper_py() {
-    let c = cfg(EngineKind::ClusterFuzzLite, 3600);
-    let args = hf_engine::clusterfuzzlite::build_run_args(
-        &c,
-        "/work/fuzz_bin",
-        "/work/corpus",
-        "/work/out",
-    );
-    let joined = args.join(" ");
-    assert!(
-        joined.contains("infra/helper.py"),
-        "ClusterFuzzLite must use infra/helper.py: {joined}"
-    );
-    // helper.py has no --timeout flag; the budget is forwarded to the fuzzer as
-    // -max_total_time after the positional <project> <fuzzer_name> args.
-    assert!(
-        !joined.contains("--timeout"),
-        "ClusterFuzzLite must NOT pass the unsupported --timeout flag: {joined}"
-    );
-    assert!(
-        joined.contains("-max_total_time=3600"),
-        "ClusterFuzzLite must forward the budget as -max_total_time: {joined}"
-    );
-    let max_total_pos = joined.find("-max_total_time").unwrap();
-    let fuzzer_pos = joined.find("fuzz_bin").unwrap();
-    assert!(
-        max_total_pos > fuzzer_pos,
-        "-max_total_time must trail the positional fuzzer name: {joined}"
-    );
-    assert!(
-        joined.contains("run_fuzzer"),
-        "ClusterFuzzLite must use run_fuzzer subcommand: {joined}"
-    );
-}

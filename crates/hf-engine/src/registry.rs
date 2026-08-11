@@ -58,11 +58,6 @@ impl_adapter!(
     crate::honggfuzz::build_run_args
 );
 impl_adapter!(
-    crate::clusterfuzzlite::ClusterFuzzLite,
-    EngineKind::ClusterFuzzLite,
-    crate::clusterfuzzlite::build_run_args
-);
-impl_adapter!(
     crate::syzkaller::Syzkaller,
     EngineKind::Syzkaller,
     crate::syzkaller::build_run_args
@@ -75,7 +70,6 @@ pub fn adapter_for(kind: EngineKind) -> Box<dyn EngineAdapter> {
         EngineKind::LibFuzzer => Box::new(crate::libfuzzer::LibFuzzer),
         EngineKind::AflPlusPlus => Box::new(crate::afl::AflPlusPlus),
         EngineKind::Honggfuzz => Box::new(crate::honggfuzz::Honggfuzz),
-        EngineKind::ClusterFuzzLite => Box::new(crate::clusterfuzzlite::ClusterFuzzLite),
         EngineKind::Syzkaller => Box::new(crate::syzkaller::Syzkaller),
     }
 }

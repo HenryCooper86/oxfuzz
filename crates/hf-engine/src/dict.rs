@@ -253,9 +253,7 @@ pub fn render_dict(tokens: &[Vec<u8>]) -> String {
 #[must_use]
 pub fn dict_run_args(engine: EngineKind, container_path: &str) -> Vec<String> {
     match engine {
-        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => {
-            vec![format!("-dict={container_path}")]
-        }
+        EngineKind::LibFuzzer => vec![format!("-dict={container_path}")],
         // afl-fuzz takes `-x <dir-or-file>`.
         EngineKind::AflPlusPlus => vec!["-x".to_owned(), container_path.to_owned()],
         // honggfuzz takes `-w <file>`.
