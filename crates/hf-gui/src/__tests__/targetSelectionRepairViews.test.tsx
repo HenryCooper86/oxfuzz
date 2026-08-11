@@ -8,6 +8,7 @@ import { PipelineContext } from "../providers/pipeline";
 import { PrefsContext } from "../providers/prefs";
 import { RunOutputContext } from "../providers/runOutput";
 import { TargetContext, type TargetContextValue } from "../providers/target";
+import { NO_PROJECT_KEY } from "../lib/projectState";
 
 const RETIRED_ENGINE = ["cluster", "fuzz", "lite"].join("");
 const RETIRED_ERROR =
@@ -25,7 +26,8 @@ function targetValue(selectionRepair: TargetContextValue["selectionRepair"]): Ta
     setEngine: () => undefined,
     setLang: () => undefined,
     setCompiled: () => undefined,
-    reset: () => undefined,
+    canResetTargetSelections: selectionRepair?.projectKey === null,
+    resetTargetSelections: () => undefined,
     retryStorage: () => undefined,
   };
 }
@@ -40,7 +42,11 @@ function renderWithRepair(
   },
 ) {
   const html = renderToStaticMarkup(
-    <I18nContext.Provider value={{ locale: "en", setLocale: () => undefined, t: (key) => key }}>
+    <I18nContext.Provider value={{
+      locale: "en",
+      setLocale: () => undefined,
+      t: (key, params) => params?.project ? `${key}:${params.project}` : key,
+    }}>
       <ProjectContext.Provider value={{
         activeProject: "/workspace/example",
         recentProjects: ["/workspace/example"],
@@ -135,6 +141,22 @@ describe("retired persisted target selection repair", () => {
     expect(html).not.toContain('id="target-selection-replacement-engine"');
     expect(html).toContain("targetSelection.reset");
     expect(html).toMatch(/<button disabled=""[^>]*>[\s\S]*?run\.runFuzzer<\/button>/);
+    expect(runFuzzer).not.toHaveBeenCalled();
+    expect(runSyzkaller).not.toHaveBeenCalled();
+  });
+
+  it("identifies a retained standalone repair in Run without exposing its storage key", () => {
+    const { html, runFuzzer, runSyzkaller } = renderWithRepair(
+      <RunView />,
+      undefined,
+      undefined,
+      { projectKey: NO_PROJECT_KEY, issue: { kind: "retired_engine", value: RETIRED_ENGINE } },
+    );
+
+    expect(html).toContain("targetSelection.standaloneTarget");
+    expect(html).toContain("targetSelection.switchStandaloneTarget");
+    expect(html).not.toContain(NO_PROJECT_KEY);
+    expect(html).not.toContain('id="target-selection-replacement-engine"');
     expect(runFuzzer).not.toHaveBeenCalled();
     expect(runSyzkaller).not.toHaveBeenCalled();
   });

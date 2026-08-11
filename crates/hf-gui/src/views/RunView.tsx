@@ -35,7 +35,8 @@ export function RunView({
     compiled,
     selectionRepair,
     storageError,
-    reset,
+    canResetTargetSelections,
+    resetTargetSelections,
     retryStorage,
   } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
@@ -209,7 +210,8 @@ export function RunView({
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
           onSwitchProject={setActiveProject}
-          onReset={reset}
+          canResetTargetSelections={canResetTargetSelections}
+          onResetTargetSelections={resetTargetSelections}
           onRetryStorage={retryStorage}
         />
       )}

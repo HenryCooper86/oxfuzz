@@ -17,7 +17,8 @@ interface TargetSelectionRepairNoticeProps {
   engineOptions: { value: string; label: string }[];
   onSelectEngine: (engine: string) => void;
   onSwitchProject: (project: string) => void;
-  onReset: () => void;
+  canResetTargetSelections: boolean;
+  onResetTargetSelections: () => void;
   onRetryStorage: () => void;
 }
 
@@ -34,7 +35,8 @@ export function TargetSelectionRepairNotice({
   engineOptions,
   onSelectEngine,
   onSwitchProject,
-  onReset,
+  canResetTargetSelections,
+  onResetTargetSelections,
   onRetryStorage,
 }: TargetSelectionRepairNoticeProps) {
   const { t } = useI18n();
@@ -48,16 +50,18 @@ export function TargetSelectionRepairNotice({
       : t(storageError?.operation === "read" ? "targetSelection.storageReadError" : "targetSelection.storageWriteError");
   const repairOwner = repair?.projectKey ?? null;
   const canReplace = repairOwner !== null && repairOwner === activeSelectionKey;
+  const standaloneOwner = repairOwner !== null && isNoProjectKey(repairOwner);
+  const canSwitchToStandalone = standaloneOwner && repairOwner !== activeSelectionKey;
   const inactiveOwner = repairOwner !== null
     && repairOwner !== activeSelectionKey
-    && !isNoProjectKey(repairOwner);
-  const globalRepair = repair !== null && repairOwner === null;
+    && !standaloneOwner;
   const canRetryStorage = repairFreeStorageBlocker || storageError?.operation === "read";
-  const canReset = globalRepair || repairFreeStorageBlocker;
   const guidance = canReplace
     ? t("targetSelection.repairGuidance")
     : inactiveOwner
       ? t("targetSelection.switchProjectGuidance")
+      : canSwitchToStandalone
+        ? t("targetSelection.switchStandaloneTargetGuidance")
       : repairFreeStorageBlocker
         ? t("targetSelection.storageRecoveryGuidance")
       : t(storageError?.operation === "read" ? "targetSelection.retryStorageGuidance" : "targetSelection.resetGuidance");
@@ -73,9 +77,11 @@ export function TargetSelectionRepairNotice({
           {t(storageError.operation === "read" ? "targetSelection.storageReadError" : "targetSelection.storageWriteError")}
         </p>
       )}
-      {inactiveOwner && (
+      {(inactiveOwner || canSwitchToStandalone) && (
         <p className="text-xs text-text-secondary" role="status">
-          {t("targetSelection.repairProject", { project: boundedProjectIdentity(repairOwner) })}
+          {t("targetSelection.repairProject", {
+            project: canSwitchToStandalone ? t("targetSelection.standaloneTarget") : boundedProjectIdentity(repairOwner ?? ""),
+          })}
         </p>
       )}
       <p id={GUIDANCE_ID} className="text-xs text-text-secondary">
@@ -103,13 +109,18 @@ export function TargetSelectionRepairNotice({
             {t("targetSelection.switchProject")}
           </Button>
         )}
+        {canSwitchToStandalone && (
+          <Button variant="outline" size="sm" onClick={() => onSwitchProject("")}>
+            {t("targetSelection.switchStandaloneTarget")}
+          </Button>
+        )}
         {canRetryStorage && (
           <Button variant="outline" size="sm" onClick={onRetryStorage}>
             {t("targetSelection.retryStorage")}
           </Button>
         )}
-        {canReset && (
-          <Button variant="outline" size="sm" onClick={onReset}>
+        {canResetTargetSelections && (
+          <Button variant="outline" size="sm" onClick={onResetTargetSelections}>
             {t("targetSelection.reset")}
           </Button>
         )}

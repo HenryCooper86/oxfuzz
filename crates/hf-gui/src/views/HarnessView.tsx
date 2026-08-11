@@ -83,7 +83,8 @@ export function HarnessView({
     setCompiled,
     selectionRepair,
     storageError,
-    reset,
+    canResetTargetSelections,
+    resetTargetSelections,
     retryStorage,
   } = useTarget();
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
@@ -364,7 +365,8 @@ export function HarnessView({
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
           onSwitchProject={setActiveProject}
-          onReset={reset}
+          canResetTargetSelections={canResetTargetSelections}
+          onResetTargetSelections={resetTargetSelections}
           onRetryStorage={retryStorage}
         />
       )}

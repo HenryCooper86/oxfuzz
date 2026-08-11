@@ -11,7 +11,8 @@ export interface TargetContextValue {
   setEngine: (engine: string) => void;
   setLang: (language: string) => void;
   setCompiled: (compiled: boolean) => void;
-  reset: () => void;
+  canResetTargetSelections: boolean;
+  resetTargetSelections: () => void;
   retryStorage: () => void;
 }
 
@@ -51,7 +52,8 @@ export function useTarget(): TargetContextValue {
       setEngine: () => {},
       setLang: () => {},
       setCompiled: () => {},
-      reset: () => {},
+      canResetTargetSelections: false,
+      resetTargetSelections: () => {},
       retryStorage: () => {},
     }
   );

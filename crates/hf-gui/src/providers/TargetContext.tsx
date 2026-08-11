@@ -59,6 +59,13 @@ function firstSelectionRepair(selections: PersistedTargetSelections): TargetSele
   return null;
 }
 
+function canResetPersistedTargetSelections(
+  selections: PersistedTargetSelections,
+  storageError: TargetStorageError | null,
+): boolean {
+  return selections.globalRepair !== null || (firstSelectionRepair(selections) === null && storageError !== null);
+}
+
 export function TargetProvider({ children }: { children: React.ReactNode }) {
   const { activeProject, recentProjects } = useProject();
   const key = projectStorageKey(activeProject);
@@ -70,6 +77,7 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
   const retainedSelections = prunePersistedTargetSelections(selections, recentProjects);
   const current = retainedSelections.entries[key] ?? { state: DEFAULT_TARGET_STATE, repair: null };
   const selectionRepair = firstSelectionRepair(retainedSelections);
+  const canResetTargetSelections = canResetPersistedTargetSelections(retainedSelections, storageError);
 
   const replaceState = useCallback((next: PersistedTargetSelections, nextStorageError: TargetStorageError | null) => {
     selectionsRef.current = next;
@@ -161,10 +169,12 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
   }, [commit, key, recentProjects]);
   const setLang = useCallback((lang: string) => patch({ lang }), [patch]);
   const setCompiled = useCallback((compiled: boolean) => patch({ compiled }), [patch]);
-  const reset = useCallback(() => {
+  const resetTargetSelections = useCallback(() => {
     const previous = prunePersistedTargetSelections(selectionsRef.current, recentProjects);
-    const result = persist(emptySelection());
-    if (result === "saved") replaceState(emptySelection(), null);
+    if (!canResetPersistedTargetSelections(previous, storageErrorRef.current)) return;
+    const next = emptySelection();
+    const result = persist(next);
+    if (result === "saved") replaceState(next, null);
     else replaceState(previous, { operation: "write" });
   }, [persist, recentProjects, replaceState]);
   const retryStorage = useCallback(() => {
@@ -181,8 +191,30 @@ export function TargetProvider({ children }: { children: React.ReactNode }) {
     else replaceState(currentSelections, { operation: "write" });
   }, [persist, recentProjects, replaceState]);
   const value = useMemo(
-    () => ({ ...current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled, reset, retryStorage }),
-    [current.state, selectionRepair, storageError, setTarget, setEngine, setLang, setCompiled, reset, retryStorage],
+    () => ({
+      ...current.state,
+      selectionRepair,
+      storageError,
+      setTarget,
+      setEngine,
+      setLang,
+      setCompiled,
+      canResetTargetSelections,
+      resetTargetSelections,
+      retryStorage,
+    }),
+    [
+      current.state,
+      selectionRepair,
+      storageError,
+      setTarget,
+      setEngine,
+      setLang,
+      setCompiled,
+      canResetTargetSelections,
+      resetTargetSelections,
+      retryStorage,
+    ],
   );
 
   return <TargetContext.Provider value={value}>{children}</TargetContext.Provider>;
