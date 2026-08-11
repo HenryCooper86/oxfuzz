@@ -240,8 +240,9 @@ const SCREEN_HARNESS = `
 **构建并冒烟测试**（主按钮）会一次性运行步骤 1-3 并播种，但会刻意在批准之前停下，以确保
 始终有人工审查。
 
-**选择器：** 目标（按契合度排序）、引擎（libFuzzer / AFL++ / honggfuzz /
-ClusterFuzzLite；Rust 仅限 libFuzzer / ClusterFuzzLite）以及语言（C / C++ / Rust）。
+**选择器：** 目标（按契合度排序）、引擎（用于生成函数测试桩的 libFuzzer / AFL++ /
+honggfuzz；Rust 使用 libFuzzer）以及语言（C / C++ / Rust）。syzkaller 面向内核目标，
+而不是生成的函数测试桩。
 
 **注意事项：** 重新生成或重新编译测试桩会使先前的批准失效——你必须重新批准，因为引擎将要
 运行的源码已经改变。如果某个测试桩此前已经构建过，本界面会将其加载进来并显示一个
@@ -625,8 +626,8 @@ const REF_GLOSSARY = `
   （解析器、解码器等）。
 - **Harness（测试桩）** —— 将模糊测试字节喂给目标的那一小段测试代码。oxfuzz 会为你编
   写它。
-- **Fuzzing engine（模糊测试引擎）** —— 生成输入并将目标运行数百万次的工具：libFuzzer、
-  AFL++、honggfuzz，外加 ClusterFuzzLite 和 Syzkaller。
+- **Fuzzing engine（模糊测试引擎）** —— 生成输入并将目标运行数百万次的工具：面向用户态目标的
+  libFuzzer、AFL++ 和 honggfuzz，以及面向内核目标的 syzkaller。
 - **Corpus（语料库）** —— 模糊测试保留并变异的示例输入集合。一个好的初始（"种子"）语料库
   能加快缺陷发现。
 - **Coverage（覆盖率）** —— 模糊测试已触及了程序代码的多少。覆盖率越高，探索到的行为越多。

@@ -2,7 +2,6 @@ export const FUZZING_ENGINE_OPTIONS = [
   { value: "libfuzzer", label: "libFuzzer" },
   { value: "afl++", label: "AFL++" },
   { value: "honggfuzz", label: "honggfuzz" },
-  { value: "clusterfuzzlite", label: "ClusterFuzzLite" },
   { value: "syzkaller", label: "syzkaller (kernel)" },
 ] as const;
 
@@ -183,7 +182,7 @@ export function enabledEngineOptions(
     if (!enabled.has(option.value)) return false;
     if (option.value === "syzkaller") return includeSyzkaller;
     if (language === "rust") {
-      return option.value === "libfuzzer" || option.value === "clusterfuzzlite";
+      return option.value === "libfuzzer";
     }
     if (language === "go" || language === "python") {
       // Discovery scans Go/Python, but no engine adapter builds those
