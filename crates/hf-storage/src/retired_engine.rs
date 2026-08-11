@@ -308,23 +308,6 @@ async fn has_active_schedule_history(
 }
 
 impl Store {
-    /// Archive and remove scheduler history linked to retired file schedules.
-    ///
-    /// # Errors
-    /// Returns an error if archival or deletion cannot be completed atomically.
-    pub async fn archive_schedule_history_for_retired_engine(
-        &self,
-        schedule_ids: &[String],
-    ) -> Result<u64, StorageError> {
-        let mut schedule_ids = schedule_ids.to_vec();
-        schedule_ids.sort_unstable();
-        schedule_ids.dedup();
-        if schedule_ids.is_empty() {
-            return Ok(0);
-        }
-        self.archive_schedule_history(&schedule_ids).await
-    }
-
     /// Archive linked scheduler history and durably prove one retirement plan.
     ///
     /// The proof row is inserted in the same transaction as the evidence rows
@@ -478,13 +461,6 @@ impl Store {
         ids.dedup();
         transaction.commit().await?;
         Ok(ids)
-    }
-
-    async fn archive_schedule_history(&self, schedule_ids: &[String]) -> Result<u64, StorageError> {
-        let mut transaction = self.pool().begin().await?;
-        let archived = archive_schedule_history_rows(&mut transaction, schedule_ids).await?;
-        transaction.commit().await?;
-        Ok(archived)
     }
 }
 
