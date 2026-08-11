@@ -13,9 +13,10 @@ parses progress/coverage from output uniformly (`hf-engine::progress`).
 Syzkaller remains a registered adapter, but kernel-campaign execution is the
 service-owned manager exception: `hf-service` stages and rewrites the manager
 config, then invokes its bounded-timeout command directly through `hf-runtime`.
-It does not delegate that execution path to `EngineRunner`. This keeps the
-sandbox-execution and output-parsing policy in one place without obscuring the
-kernel campaign's distinct safety boundary.
+It does not delegate that execution path to `EngineRunner`. Userspace execution
+and output parsing are centralized in `EngineRunner`, while the distinct
+syzkaller execution and parsing policy remains in the service-owned
+kernel-campaign path.
 
 ```rust
 pub trait EngineAdapter: Send + Sync {
