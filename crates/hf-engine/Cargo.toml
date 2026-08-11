@@ -3,7 +3,7 @@ name = "hf-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "FuzzEngine adapters: AFL++, honggfuzz, libFuzzer, syzkaller"
+description = "EngineAdapter implementations for AFL++, honggfuzz, libFuzzer, and syzkaller"
 
 [dependencies]
 hf-core = { workspace = true }

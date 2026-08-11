@@ -2311,12 +2311,85 @@ pub fn campaign_advice(
     state: tauri::State<'_, crate::state::AppState>,
     request: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    campaign_advice_value(&state.container, request)
+}
+
+#[cfg(feature = "proof-carrying")]
+fn campaign_advice_value(
+    container: &hf_service::ServiceContainer,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let request = serde_json::from_value(request).map_err(|error| error.to_string())?;
-    let advice = state
-        .container
+    let advice = container
         .campaign_advice(&request)
         .map_err(|error| error.to_string())?;
     serde_json::to_value(advice).map_err(|error| error.to_string())
+}
+
+#[cfg(all(test, feature = "proof-carrying"))]
+mod campaign_advice_command_tests {
+    use super::campaign_advice_value;
+
+    fn request(engine: &str) -> serde_json::Value {
+        serde_json::json!({
+            "current_engine": engine,
+            "enabled_engines": [engine],
+            "engine_rates": [{"engine": engine, "usd_per_hour": 1.0}],
+            "observations": [],
+            "budget": {
+                "max_total_cost_usd": 10.0,
+                "min_edges_per_dollar": 1.0,
+                "plateau_runs": 1
+            }
+        })
+    }
+
+    #[test]
+    fn tauri_advice_boundary_uses_canonical_ids_and_accepts_historical_names() {
+        let container = hf_service::ServiceContainer::stubbed();
+        for (historical, canonical) in [
+            ("LibFuzzer", "libfuzzer"),
+            ("AflPlusPlus", "afl++"),
+            ("Honggfuzz", "honggfuzz"),
+            ("Syzkaller", "syzkaller"),
+        ] {
+            let canonical_output = campaign_advice_value(&container, request(canonical)).unwrap();
+            assert_eq!(canonical_output["action"]["engine"], canonical);
+
+            let historical_output = campaign_advice_value(&container, request(historical)).unwrap();
+            assert_eq!(historical_output["action"]["engine"], canonical);
+        }
+    }
+
+    #[test]
+    fn tauri_advice_boundary_preserves_engine_parse_errors() {
+        let container = hf_service::ServiceContainer::stubbed();
+        let retired_values = [
+            ["cluster", "fuzz", "lite"].concat(),
+            ["c", "f", "l"].concat(),
+            ["c", "f", "lite"].concat(),
+            format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+        ];
+
+        for value in retired_values {
+            let error = campaign_advice_value(&container, request(&value)).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "fuzzing engine '{}' has been retired; choose one of: \
+                     afl++, honggfuzz, libfuzzer, syzkaller",
+                    value.trim()
+                )
+            );
+        }
+
+        let error = campaign_advice_value(&container, request("not-an-engine")).unwrap_err();
+        assert_eq!(
+            error,
+            "unknown fuzzing engine 'not-an-engine' (expected one of: \
+             afl++, honggfuzz, libfuzzer, syzkaller)"
+        );
+    }
 }
 
 /// Explain that campaign intelligence was excluded from this build.
