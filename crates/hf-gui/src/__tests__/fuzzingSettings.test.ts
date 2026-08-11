@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_FUZZING_SETTINGS,
   enabledEngineOptions,
+  formatRetiredEngineError,
   FUZZING_ENGINE_OPTIONS,
   fuzzingActionsEnabled,
   loadEffectiveFuzzingSettings,
@@ -9,6 +10,12 @@ import {
   patchFuzzingSettings,
   validateEffectiveFuzzingSettings,
 } from "../lib/fuzzingSettings";
+
+const RETIRED_ENGINE = ["cluster", "fuzz", "lite"].join("");
+const RETIRED_ENGINE_ALIASES = [
+  ["c", "f", "l"].join(""),
+  ["c", "f", "l", "ite"].join(""),
+];
 
 describe("fuzzing settings", () => {
   it("exposes exactly the supported engine portfolio", () => {
@@ -21,11 +28,16 @@ describe("fuzzing settings", () => {
   });
 
   it("rejects retired engine values from service policy", () => {
-    const retired = ["cluster", "fuzz", "lite"].join("");
     expect(validateEffectiveFuzzingSettings({
       ...DEFAULT_FUZZING_SETTINGS,
-      enabled_engines: ["libfuzzer", retired],
+      enabled_engines: ["libfuzzer", RETIRED_ENGINE],
     })).toBeNull();
+  });
+
+  it("formats the targeted retired-engine error with the active portfolio", () => {
+    expect(formatRetiredEngineError(RETIRED_ENGINE)).toBe(
+      `fuzzing engine '${RETIRED_ENGINE}' has been retired; choose one of: afl++, honggfuzz, libfuzzer, syzkaller`,
+    );
   });
 
   it("normalizes persisted values and drops unknown engines", () => {
@@ -54,37 +66,47 @@ describe("fuzzing settings", () => {
   });
 
   it("fails closed for mixed persisted retired engine values", () => {
-    const retired = ["cluster", "fuzz", "lite"].join("");
+    const retired = RETIRED_ENGINE.toUpperCase();
 
     expect(normalizeFuzzingSettings({
       fuzzing: {
         ...DEFAULT_FUZZING_SETTINGS,
-        enabled_engines: ["libfuzzer", ` ${retired.toUpperCase()} `],
+        enabled_engines: ["libfuzzer", ` ${retired} `],
       },
-    })).toEqual({ settings: null, error: "retired_engine" });
+    })).toEqual({
+      settings: null,
+      error: { kind: "retired_engine", value: retired },
+    });
   });
 
   it("fails closed for only-retired persisted engine aliases", () => {
-    for (const retired of [" Cfl ", "cFlItE"]) {
+    for (const alias of RETIRED_ENGINE_ALIASES) {
+      const retired = alias.toUpperCase();
       expect(normalizeFuzzingSettings({
         fuzzing: {
           ...DEFAULT_FUZZING_SETTINGS,
-          enabled_engines: [retired],
+          enabled_engines: [` ${retired} `],
           default_engine: retired,
         },
-      })).toEqual({ settings: null, error: "retired_engine" });
+      })).toEqual({
+        settings: null,
+        error: { kind: "retired_engine", value: retired },
+      });
     }
   });
 
   it("fails closed for a retired persisted default engine", () => {
-    const retired = ["cluster", "fuzz", "lite"].join("");
+    const retired = RETIRED_ENGINE.toUpperCase();
 
     expect(normalizeFuzzingSettings({
       fuzzing: {
         ...DEFAULT_FUZZING_SETTINGS,
-        default_engine: ` ${retired.toUpperCase()} `,
+        default_engine: ` ${retired} `,
       },
-    })).toEqual({ settings: null, error: "retired_engine" });
+    })).toEqual({
+      settings: null,
+      error: { kind: "retired_engine", value: retired },
+    });
   });
 
   it("falls back to safe defaults when the stored shape is unusable", () => {

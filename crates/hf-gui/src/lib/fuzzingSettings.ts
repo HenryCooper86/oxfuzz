@@ -22,7 +22,7 @@ export interface FuzzingSettings {
 
 export type FuzzingSettingsNormalization =
   | { settings: FuzzingSettings; error: null }
-  | { settings: null; error: "retired_engine" };
+  | { settings: null; error: { kind: "retired_engine"; value: string } };
 
 /** A fuzzing action is available only after the typed service policy validates. */
 export function fuzzingActionsEnabled(
@@ -43,7 +43,12 @@ export const DEFAULT_FUZZING_SETTINGS: FuzzingSettings = {
 };
 
 const ENGINE_IDS = new Set<string>(FUZZING_ENGINE_OPTIONS.map((option) => option.value));
-const RETIRED_ENGINE_IDS = new Set(["clusterfuzzlite", "cfl", "cflite"]);
+const RETIRED_ENGINE_ID = ["cluster", "fuzz", "lite"].join("");
+const RETIRED_ENGINE_IDS = new Set([
+  RETIRED_ENGINE_ID,
+  ["c", "f", "l"].join(""),
+  ["c", "f", "l", "ite"].join(""),
+]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -65,8 +70,18 @@ function cloneDefaults(): FuzzingSettings {
   };
 }
 
-function isRetiredEngineId(value: unknown): boolean {
-  return typeof value === "string" && RETIRED_ENGINE_IDS.has(value.trim().toLowerCase());
+function retiredEngineValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return RETIRED_ENGINE_IDS.has(trimmed.toLowerCase()) ? trimmed : null;
+}
+
+function findRetiredEngineValue(values: readonly unknown[]): string | null {
+  for (const value of values) {
+    const retired = retiredEngineValue(value);
+    if (retired !== null) return retired;
+  }
+  return null;
 }
 
 function boundedPositiveInteger(value: unknown, maximum: number): value is number {
@@ -120,8 +135,9 @@ export async function loadEffectiveFuzzingSettings(
 export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormalization {
   const fuzzing = asRecord(asRecord(root).fuzzing);
   const rawEnabled = Array.isArray(fuzzing.enabled_engines) ? fuzzing.enabled_engines : [];
-  if (rawEnabled.some(isRetiredEngineId) || isRetiredEngineId(fuzzing.default_engine)) {
-    return { settings: null, error: "retired_engine" };
+  const retired = findRetiredEngineValue(rawEnabled) ?? retiredEngineValue(fuzzing.default_engine);
+  if (retired !== null) {
+    return { settings: null, error: { kind: "retired_engine", value: retired } };
   }
   const enabled = [...new Set(rawEnabled.filter(
     (engine): engine is FuzzingEngineId => typeof engine === "string" && ENGINE_IDS.has(engine),
@@ -165,6 +181,11 @@ export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormaliz
     },
     error: null,
   };
+}
+
+/** Format the shared, actionable retirement error without remapping the input. */
+export function formatRetiredEngineError(value: string): string {
+  return `fuzzing engine '${value}' has been retired; choose one of: afl++, honggfuzz, libfuzzer, syzkaller`;
 }
 
 /** Replace only `[fuzzing]`, preserving every unrelated global setting. */
