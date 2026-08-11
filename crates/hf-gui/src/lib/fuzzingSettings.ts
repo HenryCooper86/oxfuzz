@@ -1,3 +1,7 @@
+import { retiredEngineValue } from "./retiredEngine";
+
+export { formatRetiredEngineError } from "./retiredEngine";
+
 export const FUZZING_ENGINE_OPTIONS = [
   { value: "libfuzzer", label: "libFuzzer" },
   { value: "afl++", label: "AFL++" },
@@ -43,12 +47,6 @@ export const DEFAULT_FUZZING_SETTINGS: FuzzingSettings = {
 };
 
 const ENGINE_IDS = new Set<string>(FUZZING_ENGINE_OPTIONS.map((option) => option.value));
-const RETIRED_ENGINE_ID = ["cluster", "fuzz", "lite"].join("");
-const RETIRED_ENGINE_IDS = new Set([
-  RETIRED_ENGINE_ID,
-  ["c", "f", "l"].join(""),
-  ["c", "f", "l", "ite"].join(""),
-]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -68,12 +66,6 @@ function cloneDefaults(): FuzzingSettings {
     enabled_engines: [...DEFAULT_FUZZING_SETTINGS.enabled_engines],
     sandbox: { ...DEFAULT_FUZZING_SETTINGS.sandbox },
   };
-}
-
-function retiredEngineValue(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return RETIRED_ENGINE_IDS.has(trimmed.toLowerCase()) ? trimmed : null;
 }
 
 function findRetiredEngineValue(values: readonly unknown[]): string | null {
@@ -181,11 +173,6 @@ export function normalizeFuzzingSettings(root: unknown): FuzzingSettingsNormaliz
     },
     error: null,
   };
-}
-
-/** Format the shared, actionable retirement error without remapping the input. */
-export function formatRetiredEngineError(value: string): string {
-  return `fuzzing engine '${value}' has been retired; choose one of: afl++, honggfuzz, libfuzzer, syzkaller`;
 }
 
 /** Replace only `[fuzzing]`, preserving every unrelated global setting. */
