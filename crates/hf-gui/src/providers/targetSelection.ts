@@ -1,6 +1,6 @@
 import { FUZZING_ENGINE_OPTIONS, type FuzzingEngineId } from "../lib/fuzzingSettings";
 import { pruneToKeys } from "../lib/projectState";
-import { retiredEngineValue } from "../lib/retiredEngine";
+import { isRetiredEngineValue, retiredEngineDiagnostic } from "../lib/retiredEngine";
 import { DEFAULT_TARGET_STATE, type TargetSelectionRepair, type TargetState } from "./target";
 
 const ACTIVE_ENGINE_IDS = new Set<string>(FUZZING_ENGINE_OPTIONS.map((option) => option.value));
@@ -31,9 +31,8 @@ function parseTargetSelection(value: unknown): TargetSelectionEntry {
     return invalidEntry("invalid_shape");
   }
   const state: TargetState = { target, engine, lang, compiled };
-  const retired = retiredEngineValue(engine);
-  if (retired !== null) {
-    return { state, repair: { kind: "retired_engine", value: retired } };
+  if (isRetiredEngineValue(engine)) {
+    return { state, repair: { kind: "retired_engine", value: retiredEngineDiagnostic(engine) } };
   }
   if (!ACTIVE_ENGINE_IDS.has(engine) || !TARGET_LANGUAGES.has(lang)) {
     return invalidEntry("unknown_engine");
@@ -69,6 +68,15 @@ export function isActiveEngineId(engine: string): engine is FuzzingEngineId {
   return ACTIVE_ENGINE_IDS.has(engine);
 }
 
+/** Remove selections for projects the user no longer retains. */
+export function prunePersistedTargetSelections(
+  selections: PersistedTargetSelections,
+  recentProjects: string[],
+): PersistedTargetSelections {
+  const entries = pruneToKeys(selections.entries, recentProjects);
+  return entries === selections.entries ? selections : { ...selections, entries };
+}
+
 /** Replace a repaired value only after the user selects an active engine. */
 export function repairTargetSelectionEngine(
   entry: TargetSelectionEntry,
@@ -85,11 +93,12 @@ export function serializableTargetSelections(
   selections: PersistedTargetSelections,
   recentProjects: string[],
 ): Record<string, TargetState> | null {
-  if (selections.globalRepair || Object.values(selections.entries).some((entry) => entry.repair !== null)) {
+  const retained = prunePersistedTargetSelections(selections, recentProjects);
+  if (retained.globalRepair || Object.values(retained.entries).some((entry) => entry.repair !== null)) {
     return null;
   }
   const states = Object.fromEntries(
-    Object.entries(selections.entries).map(([project, entry]) => [project, entry.state]),
+    Object.entries(retained.entries).map(([project, entry]) => [project, entry.state]),
   );
-  return pruneToKeys(states, recentProjects);
+  return states;
 }

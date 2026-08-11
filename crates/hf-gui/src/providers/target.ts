@@ -6,11 +6,11 @@ export interface TargetContextValue {
   lang: string;
   compiled: boolean;
   selectionRepair: TargetSelectionRepair | null;
+  storageError: TargetStorageError | null;
   setTarget: (target: string) => void;
   setEngine: (engine: string) => void;
   setLang: (language: string) => void;
   setCompiled: (compiled: boolean) => void;
-  reset: () => void;
 }
 
 export type TargetState = Pick<TargetContextValue, "target" | "engine" | "lang" | "compiled">;
@@ -18,6 +18,10 @@ export type TargetState = Pick<TargetContextValue, "target" | "engine" | "lang" 
 export type TargetSelectionRepair =
   | { kind: "retired_engine"; value: string }
   | { kind: "invalid_selection"; reason: "malformed_payload" | "invalid_shape" | "unknown_engine" };
+
+export interface TargetStorageError {
+  operation: "read" | "write";
+}
 
 export const DEFAULT_TARGET_STATE: TargetState = {
   target: "",
@@ -34,11 +38,11 @@ export function useTarget(): TargetContextValue {
     useContext(TargetContext) ?? {
       ...DEFAULT_TARGET_STATE,
       selectionRepair: null,
+      storageError: null,
       setTarget: () => {},
       setEngine: () => {},
       setLang: () => {},
       setCompiled: () => {},
-      reset: () => {},
     }
   );
 }
