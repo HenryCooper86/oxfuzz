@@ -1,7 +1,8 @@
 //! Persistence boundaries for records belonging to retired fuzzing engines.
 
 use hf_core::retired_engine::{RETIRED_ENGINE_ID, RETIRED_ENGINE_IDS};
-use sqlx::{QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool, Transaction};
+use uuid::Uuid;
 
 use crate::{StorageError, Store};
 
@@ -103,6 +104,114 @@ fn push_schedule_id_filter<'args>(
     separated.push_unseparated(")");
 }
 
+const MAX_RETIREMENT_IDS_JSON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RETIREMENT_SCHEDULE_ID_BYTES: usize = 512;
+const MAX_RETIREMENT_SCHEDULE_IDS: usize = 4_096;
+
+fn canonical_schedule_ids(schedule_ids: &[String]) -> Result<Vec<String>, StorageError> {
+    let mut canonical = schedule_ids.to_vec();
+    canonical.sort_unstable();
+    canonical.dedup();
+    if canonical.len() > MAX_RETIREMENT_SCHEDULE_IDS
+        || canonical.iter().any(|id| {
+            id.is_empty()
+                || id.len() > MAX_RETIREMENT_SCHEDULE_ID_BYTES
+                || id.as_bytes().contains(&0)
+        })
+    {
+        return Err(StorageError::InvalidData(
+            "schedule-retirement proof contains an invalid schedule ID".to_owned(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn validate_operation_binding(operation_id: &str, plan_digest: &str) -> Result<(), StorageError> {
+    let canonical_uuid = Uuid::parse_str(operation_id)
+        .map_err(|_| {
+            StorageError::InvalidData("invalid schedule-retirement operation ID".to_owned())
+        })?
+        .to_string();
+    if canonical_uuid != operation_id
+        || plan_digest.len() != 64
+        || !plan_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StorageError::InvalidData(
+            "invalid schedule-retirement operation proof binding".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn decode_proof_ids(schedule_ids_json: &str) -> Result<Vec<String>, StorageError> {
+    if schedule_ids_json.len() > MAX_RETIREMENT_IDS_JSON_BYTES {
+        return Err(StorageError::InvalidData(
+            "schedule-retirement proof ID manifest is oversized".to_owned(),
+        ));
+    }
+    let ids: Vec<String> = serde_json::from_str(schedule_ids_json).map_err(|_| {
+        StorageError::InvalidData("malformed schedule-retirement proof ID manifest".to_owned())
+    })?;
+    let canonical = canonical_schedule_ids(&ids)?;
+    if canonical != ids {
+        return Err(StorageError::InvalidData(
+            "schedule-retirement proof IDs are not sorted and unique".to_owned(),
+        ));
+    }
+    Ok(ids)
+}
+
+async fn load_validated_proofs(
+    transaction: &mut Transaction<'_, Sqlite>,
+) -> Result<Vec<(String, String, Vec<String>)>, StorageError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT operation_id, plan_digest, schedule_ids_json
+         FROM schedule_retirement_operations ORDER BY operation_id",
+    )
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut proofs = Vec::with_capacity(rows.len());
+    for (operation_id, plan_digest, schedule_ids_json) in rows {
+        validate_operation_binding(&operation_id, &plan_digest)?;
+        let ids = decode_proof_ids(&schedule_ids_json)?;
+        let tombstones: Vec<String> = sqlx::query_scalar(
+            "SELECT schedule_id FROM schedule_retirement_schedule_ids
+             WHERE operation_id = ?1 ORDER BY ordinal",
+        )
+        .bind(&operation_id)
+        .fetch_all(&mut **transaction)
+        .await?;
+        if tombstones != ids {
+            return Err(StorageError::InvalidData(
+                "schedule-retirement proof tombstones do not match its ID manifest".to_owned(),
+            ));
+        }
+        proofs.push((operation_id, plan_digest, ids));
+    }
+    Ok(proofs)
+}
+
+async fn has_active_schedule_history(
+    transaction: &mut Transaction<'_, Sqlite>,
+    schedule_ids: &[String],
+) -> Result<bool, StorageError> {
+    if schedule_ids.is_empty() {
+        return Ok(false);
+    }
+    let mut active = QueryBuilder::<Sqlite>::new("SELECT EXISTS(SELECT 1 FROM schedule_executions");
+    push_schedule_id_filter(&mut active, schedule_ids);
+    active.push(" UNION ALL SELECT 1 FROM schedule_occurrences");
+    push_schedule_id_filter(&mut active, schedule_ids);
+    active.push(")");
+    active
+        .build_query_scalar()
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(StorageError::from)
+}
+
 impl Store {
     /// Archive and remove scheduler history linked to retired file schedules.
     ///
@@ -118,7 +227,7 @@ impl Store {
         if schedule_ids.is_empty() {
             return Ok(0);
         }
-        self.archive_schedule_history(&schedule_ids, None).await
+        self.archive_schedule_history(&schedule_ids).await
     }
 
     /// Archive linked scheduler history and durably prove one retirement plan.
@@ -136,26 +245,60 @@ impl Store {
         plan_digest: &str,
         schedule_ids: &[String],
     ) -> Result<u64, StorageError> {
-        let mut schedule_ids = schedule_ids.to_vec();
-        schedule_ids.sort_unstable();
-        schedule_ids.dedup();
+        validate_operation_binding(operation_id, plan_digest)?;
+        let schedule_ids = canonical_schedule_ids(schedule_ids)?;
         let schedule_ids_json = serde_json::to_string(&schedule_ids)?;
-        if let Some((existing_digest, existing_ids)) = self
-            .schedule_retirement_history_payload(operation_id)
-            .await?
-        {
-            if existing_digest == plan_digest && existing_ids == schedule_ids_json {
+        if schedule_ids_json.len() > MAX_RETIREMENT_IDS_JSON_BYTES {
+            return Err(StorageError::InvalidData(
+                "schedule-retirement proof ID manifest is oversized".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let proofs = load_validated_proofs(&mut transaction).await?;
+        if !proofs.is_empty() {
+            let exact = proofs.len() == 1
+                && proofs[0].0 == operation_id
+                && proofs[0].1 == plan_digest
+                && proofs[0].2 == schedule_ids;
+            if exact && !has_active_schedule_history(&mut transaction, &schedule_ids).await? {
+                transaction.commit().await?;
                 return Ok(0);
             }
             return Err(StorageError::InvalidData(
                 "schedule-retirement operation proof conflicts with persisted evidence".to_owned(),
             ));
         }
-        self.archive_schedule_history(
-            &schedule_ids,
-            Some((operation_id, plan_digest, &schedule_ids_json)),
+        let archived = archive_schedule_history_rows(&mut transaction, &schedule_ids).await?;
+        sqlx::query(
+            "INSERT INTO schedule_retirement_operations
+                (operation_id, plan_digest, schedule_ids_json)
+             VALUES (?1, ?2, ?3)",
         )
-        .await
+        .bind(operation_id)
+        .bind(plan_digest)
+        .bind(&schedule_ids_json)
+        .execute(&mut *transaction)
+        .await?;
+        for (ordinal, schedule_id) in schedule_ids.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO schedule_retirement_schedule_ids
+                    (schedule_id, operation_id, ordinal) VALUES (?1, ?2, ?3)",
+            )
+            .bind(schedule_id)
+            .bind(operation_id)
+            .bind(i64::try_from(ordinal).map_err(|_| {
+                StorageError::InvalidData("too many schedule-retirement IDs".to_owned())
+            })?)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        if has_active_schedule_history(&mut transaction, &schedule_ids).await? {
+            return Err(StorageError::InvalidData(
+                "active history remains for a proven-retired schedule".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(archived)
     }
 
     /// Return whether the exact operation-bound retirement history proof exists.
@@ -168,27 +311,18 @@ impl Store {
         plan_digest: &str,
         schedule_ids: &[String],
     ) -> Result<bool, StorageError> {
-        let mut schedule_ids = schedule_ids.to_vec();
-        schedule_ids.sort_unstable();
-        schedule_ids.dedup();
-        let expected_ids = serde_json::to_string(&schedule_ids)?;
-        let marker_matches = self
-            .schedule_retirement_history_payload(operation_id)
-            .await?
-            .is_some_and(|(persisted_digest, persisted_ids)| {
-                persisted_digest == plan_digest && persisted_ids == expected_ids
-            });
-        if !marker_matches || schedule_ids.is_empty() {
-            return Ok(marker_matches);
-        }
-        let mut active =
-            QueryBuilder::<Sqlite>::new("SELECT EXISTS(SELECT 1 FROM schedule_executions");
-        push_schedule_id_filter(&mut active, &schedule_ids);
-        active.push(" UNION ALL SELECT 1 FROM schedule_occurrences");
-        push_schedule_id_filter(&mut active, &schedule_ids);
-        active.push(")");
-        let has_active: bool = active.build_query_scalar().fetch_one(self.pool()).await?;
-        Ok(!has_active)
+        validate_operation_binding(operation_id, plan_digest)?;
+        let schedule_ids = canonical_schedule_ids(schedule_ids)?;
+        let mut transaction = self.pool().begin().await?;
+        let proofs = load_validated_proofs(&mut transaction).await?;
+        let marker_matches = proofs.len() == 1
+            && proofs[0].0 == operation_id
+            && proofs[0].1 == plan_digest
+            && proofs[0].2 == schedule_ids;
+        let proven =
+            marker_matches && !has_active_schedule_history(&mut transaction, &schedule_ids).await?;
+        transaction.commit().await?;
+        Ok(proven)
     }
 
     /// Return whether any schedule-retirement history proof exists.
@@ -196,46 +330,33 @@ impl Store {
     /// # Errors
     /// Returns an error if the proof query fails.
     pub async fn has_schedule_retirement_history_proof(&self) -> Result<bool, StorageError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS(
-                SELECT 1 FROM schedule_retirement_operations
-             )",
-        )
-        .fetch_one(self.pool())
-        .await
-        .map_err(StorageError::from)
-    }
-
-    async fn schedule_retirement_history_payload(
-        &self,
-        operation_id: &str,
-    ) -> Result<Option<(String, String)>, StorageError> {
-        sqlx::query_as(
-            "SELECT plan_digest, schedule_ids_json
-             FROM schedule_retirement_operations WHERE operation_id = ?1",
-        )
-        .bind(operation_id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(StorageError::from)
-    }
-
-    async fn archive_schedule_history(
-        &self,
-        schedule_ids: &[String],
-        operation_proof: Option<(&str, &str, &str)>,
-    ) -> Result<u64, StorageError> {
         let mut transaction = self.pool().begin().await?;
+        let has_proof = !load_validated_proofs(&mut transaction).await?.is_empty();
+        transaction.commit().await?;
+        Ok(has_proof)
+    }
 
-        let mut occurrences = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO retired_engine_records
+    async fn archive_schedule_history(&self, schedule_ids: &[String]) -> Result<u64, StorageError> {
+        let mut transaction = self.pool().begin().await?;
+        let archived = archive_schedule_history_rows(&mut transaction, schedule_ids).await?;
+        transaction.commit().await?;
+        Ok(archived)
+    }
+}
+
+async fn archive_schedule_history_rows(
+    transaction: &mut Transaction<'_, Sqlite>,
+    schedule_ids: &[String],
+) -> Result<u64, StorageError> {
+    let mut occurrences = QueryBuilder::<Sqlite>::new(
+        "INSERT INTO retired_engine_records
                 (record_kind, record_id, retired_engine, payload_json, migration_version)
              SELECT
                 'schedule_occurrence', id, ",
-        );
-        occurrences.push_bind(RETIRED_ENGINE_ID);
-        occurrences.push(
-            ",
+    );
+    occurrences.push_bind(RETIRED_ENGINE_ID);
+    occurrences.push(
+        ",
                 json_object(
                     'id', id,
                     'schedule_id', schedule_id,
@@ -250,23 +371,23 @@ impl Store {
                 ),
                 24
              FROM schedule_occurrences",
-        );
-        push_schedule_id_filter(&mut occurrences, schedule_ids);
-        let occurrence_count = occurrences
-            .build()
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
+    );
+    push_schedule_id_filter(&mut occurrences, schedule_ids);
+    let occurrence_count = occurrences
+        .build()
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected();
 
-        let mut executions = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO retired_engine_records
+    let mut executions = QueryBuilder::<Sqlite>::new(
+        "INSERT INTO retired_engine_records
                 (record_kind, record_id, retired_engine, payload_json, migration_version)
              SELECT
                 'schedule_execution', id, ",
-        );
-        executions.push_bind(RETIRED_ENGINE_ID);
-        executions.push(
-            ",
+    );
+    executions.push_bind(RETIRED_ENGINE_ID);
+    executions.push(
+        ",
                 json_object(
                     'id', id,
                     'schedule_id', schedule_id,
@@ -276,40 +397,27 @@ impl Store {
                 ),
                 24
              FROM schedule_executions",
-        );
-        push_schedule_id_filter(&mut executions, schedule_ids);
-        let execution_count = executions
-            .build()
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
+    );
+    push_schedule_id_filter(&mut executions, schedule_ids);
+    let execution_count = executions
+        .build()
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected();
 
-        let mut delete_occurrences =
-            QueryBuilder::<Sqlite>::new("DELETE FROM schedule_occurrences");
-        push_schedule_id_filter(&mut delete_occurrences, schedule_ids);
-        delete_occurrences
-            .build()
-            .execute(&mut *transaction)
-            .await?;
+    let mut delete_occurrences = QueryBuilder::<Sqlite>::new("DELETE FROM schedule_occurrences");
+    push_schedule_id_filter(&mut delete_occurrences, schedule_ids);
+    delete_occurrences
+        .build()
+        .execute(&mut **transaction)
+        .await?;
 
-        let mut delete_executions = QueryBuilder::<Sqlite>::new("DELETE FROM schedule_executions");
-        push_schedule_id_filter(&mut delete_executions, schedule_ids);
-        delete_executions.build().execute(&mut *transaction).await?;
+    let mut delete_executions = QueryBuilder::<Sqlite>::new("DELETE FROM schedule_executions");
+    push_schedule_id_filter(&mut delete_executions, schedule_ids);
+    delete_executions
+        .build()
+        .execute(&mut **transaction)
+        .await?;
 
-        if let Some((operation_id, plan_digest, schedule_ids_json)) = operation_proof {
-            sqlx::query(
-                "INSERT INTO schedule_retirement_operations
-                    (operation_id, plan_digest, schedule_ids_json)
-                 VALUES (?1, ?2, ?3)",
-            )
-            .bind(operation_id)
-            .bind(plan_digest)
-            .bind(schedule_ids_json)
-            .execute(&mut *transaction)
-            .await?;
-        }
-
-        transaction.commit().await?;
-        Ok(occurrence_count + execution_count)
-    }
+    Ok(occurrence_count + execution_count)
 }

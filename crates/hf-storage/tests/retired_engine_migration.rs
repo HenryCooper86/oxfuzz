@@ -1,5 +1,10 @@
 use hf_storage::{StorageError, Store};
 
+const OPERATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+const SECOND_OPERATION_ID: &str = "22222222-2222-4222-8222-222222222222";
+const PLAN_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SECOND_PLAN_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
 async fn pre_0024_pool(path: &std::path::Path) -> sqlx::SqlitePool {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(path)
@@ -597,17 +602,13 @@ async fn operation_bound_schedule_history_archive_persists_an_idempotent_proof()
 
     assert_eq!(
         store
-            .archive_schedule_history_for_retired_engine_operation(
-                "operation-proof",
-                "plan-proof",
-                &ids,
-            )
+            .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids,)
             .await
             .unwrap(),
         2
     );
     assert!(store
-        .schedule_retirement_history_proven("operation-proof", "plan-proof", &ids)
+        .schedule_retirement_history_proven(OPERATION_ID, PLAN_DIGEST, &ids)
         .await
         .unwrap());
     assert!(store.has_schedule_retirement_history_proof().await.unwrap());
@@ -615,27 +616,27 @@ async fn operation_bound_schedule_history_archive_persists_an_idempotent_proof()
     let before = archive_rows(store.pool()).await;
     assert_eq!(
         store
-            .archive_schedule_history_for_retired_engine_operation(
-                "operation-proof",
-                "plan-proof",
-                &ids,
-            )
+            .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids,)
             .await
             .unwrap(),
         0
     );
     assert_eq!(archive_rows(store.pool()).await, before);
 
-    insert_schedule_history(
-        store.pool(),
-        "execution-late",
-        "occurrence-late",
-        "schedule-proof",
-        "late",
+    let late = sqlx::query(
+        "INSERT INTO schedule_executions
+            (id, schedule_id, triggered_at, status, data_json)
+         VALUES ('execution-late', 'schedule-proof', '2026-08-11T00:00:00Z',
+                 'pending', '{}')",
     )
+    .execute(store.pool())
     .await;
-    assert!(!store
-        .schedule_retirement_history_proven("operation-proof", "plan-proof", &ids)
+    assert!(
+        late.is_err(),
+        "retired schedule tombstone must reject late history"
+    );
+    assert!(store
+        .schedule_retirement_history_proven(OPERATION_ID, PLAN_DIGEST, &ids)
         .await
         .unwrap());
 }
@@ -648,19 +649,15 @@ async fn operation_bound_schedule_history_proof_rejects_divergent_reuse() {
         .unwrap();
     let ids = vec!["schedule-proof".to_owned()];
     store
-        .archive_schedule_history_for_retired_engine_operation(
-            "operation-proof",
-            "plan-proof",
-            &ids,
-        )
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
         .await
         .unwrap();
     let before = archive_rows(store.pool()).await;
 
     let error = store
         .archive_schedule_history_for_retired_engine_operation(
-            "operation-proof",
-            "different-plan",
+            OPERATION_ID,
+            SECOND_PLAN_DIGEST,
             &ids,
         )
         .await
@@ -668,6 +665,218 @@ async fn operation_bound_schedule_history_proof_rejects_divergent_reuse() {
 
     assert!(matches!(error, StorageError::InvalidData(_)));
     assert_eq!(archive_rows(store.pool()).await, before);
+}
+
+#[tokio::test]
+async fn operation_proof_rejects_every_sql_mutation_form() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("immutable-proof.db"))
+        .await
+        .unwrap();
+    let ids = vec!["schedule-proof".to_owned()];
+    store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap();
+
+    let statements = [
+        format!(
+            "UPDATE schedule_retirement_operations SET plan_digest = '{SECOND_PLAN_DIGEST}' \
+             WHERE operation_id = '{OPERATION_ID}'"
+        ),
+        format!(
+            "DELETE FROM schedule_retirement_operations \
+             WHERE operation_id = '{OPERATION_ID}'"
+        ),
+        format!(
+            "INSERT OR REPLACE INTO schedule_retirement_operations \
+             (operation_id, plan_digest, schedule_ids_json) VALUES \
+             ('{OPERATION_ID}', '{SECOND_PLAN_DIGEST}', '[\"other\"]')"
+        ),
+        format!(
+            "INSERT INTO schedule_retirement_operations \
+             (operation_id, plan_digest, schedule_ids_json) VALUES \
+             ('{OPERATION_ID}', '{SECOND_PLAN_DIGEST}', '[\"other\"]') \
+             ON CONFLICT(operation_id) DO UPDATE SET plan_digest = excluded.plan_digest"
+        ),
+    ];
+    for statement in statements {
+        assert!(sqlx::query(&statement).execute(store.pool()).await.is_err());
+    }
+
+    assert!(store
+        .schedule_retirement_history_proven(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn operation_proof_schema_rejects_invalid_shape_and_bounds() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("proof-shape.db"))
+        .await
+        .unwrap();
+    let invalid_rows = [
+        format!("NULL, '{PLAN_DIGEST}', '[]'"),
+        format!("'not-a-uuid', '{PLAN_DIGEST}', '[]'"),
+        format!("'{OPERATION_ID}', 'short', '[]'"),
+        format!("'{OPERATION_ID}', '{PLAN_DIGEST}', '{{}}'"),
+        format!("'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', '[\"dup\",\"dup\"]'"),
+        format!("'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', '[1]'"),
+        format!(
+            "'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', '[\"{}\"]'",
+            "x".repeat(513)
+        ),
+    ];
+    for values in invalid_rows {
+        let statement = format!(
+            "INSERT INTO schedule_retirement_operations \
+             (operation_id, plan_digest, schedule_ids_json) VALUES ({values})"
+        );
+        assert!(
+            sqlx::query(&statement).execute(store.pool()).await.is_err(),
+            "invalid proof row was accepted: {values}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operation_tombstones_reject_late_inserts_and_schedule_id_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("proof-tombstones.db"))
+        .await
+        .unwrap();
+    let ids = vec!["schedule-proof".to_owned()];
+    store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap();
+
+    let execution_insert = sqlx::query(
+        "INSERT INTO schedule_executions
+            (id, schedule_id, triggered_at, status, data_json)
+         VALUES ('late-execution', 'schedule-proof', '2026-08-11T00:00:00Z',
+                 'pending', '{}')",
+    )
+    .execute(store.pool())
+    .await;
+    assert!(execution_insert.is_err());
+
+    let occurrence_insert = sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id,
+             lease_expires_at)
+         VALUES ('late-occurrence', 'schedule-proof', 'late-occurrence-execution',
+                 '2026-08-11T00:00:00Z', 'reserved', 'owner',
+                 '2026-08-11T00:10:00Z')",
+    )
+    .execute(store.pool())
+    .await;
+    assert!(occurrence_insert.is_err());
+
+    insert_schedule_history(
+        store.pool(),
+        "active-execution",
+        "active-occurrence",
+        "active-schedule",
+        "active",
+    )
+    .await;
+    assert!(sqlx::query(
+        "UPDATE schedule_executions SET schedule_id = 'schedule-proof' \
+         WHERE id = 'active-execution'",
+    )
+    .execute(store.pool())
+    .await
+    .is_err());
+    assert!(sqlx::query(
+        "UPDATE schedule_occurrences SET schedule_id = 'schedule-proof' \
+         WHERE id = 'active-occurrence'",
+    )
+    .execute(store.pool())
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn operation_retry_rejects_unrelated_proof_and_revalidates_exact_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("proof-retry.db"))
+        .await
+        .unwrap();
+    store
+        .archive_schedule_history_for_retired_engine_operation(
+            OPERATION_ID,
+            PLAN_DIGEST,
+            &["schedule-proof".to_owned()],
+        )
+        .await
+        .unwrap();
+
+    let unrelated = store
+        .archive_schedule_history_for_retired_engine_operation(
+            SECOND_OPERATION_ID,
+            SECOND_PLAN_DIGEST,
+            &["other-schedule".to_owned()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(unrelated, StorageError::InvalidData(_)));
+
+    assert_eq!(
+        store
+            .archive_schedule_history_for_retired_engine_operation(
+                OPERATION_ID,
+                PLAN_DIGEST,
+                &["schedule-proof".to_owned()],
+            )
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn proof_api_rejects_a_malformed_persisted_schema_even_if_checks_were_bypassed() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("malformed-proof.db"))
+        .await
+        .unwrap();
+    let mut connection = store.pool().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO schedule_retirement_operations
+            (operation_id, plan_digest, schedule_ids_json)
+         VALUES (?1, 'malformed-digest', '[\"schedule-proof\"]')",
+    )
+    .bind(OPERATION_ID)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO schedule_retirement_schedule_ids
+            (schedule_id, operation_id, ordinal)
+         VALUES ('schedule-proof', ?1, 0)",
+    )
+    .bind(OPERATION_ID)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = store
+        .has_schedule_retirement_history_proof()
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
 }
 
 #[tokio::test]

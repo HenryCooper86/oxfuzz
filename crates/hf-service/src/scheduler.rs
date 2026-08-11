@@ -39,14 +39,15 @@ use crate::campaign_state::{
 };
 use crate::container::{PersistenceAvailability, SchedulableTarget, ServiceContainer};
 use crate::schedule_retirement::{
-    acquire_schedule_path_lease, current_generation, retire, RetirementFaults, RetirementOutcome,
-    RetirementStorage, ScheduleGeneration,
+    acquire_schedule_path_lease, current_generation, expected_written_generation, retire,
+    verify_written_generation, RetirementFaults, RetirementOutcome, RetirementStorage,
+    ScheduleGeneration,
 };
 #[cfg(test)]
 use crate::schedule_retirement::{
-    retired_schedule_path, retired_schedule_retirement_path, retirement_completion_path,
-    RetiredScheduleRetirementReceipt, RetiredScheduleRetirementState, RetirementPauseHook,
-    ScheduleRetirementFailurePoint, ScheduleRetirementPausePoint,
+    process_lock_strong_count, retired_schedule_path, retired_schedule_retirement_path,
+    retirement_completion_path, RetiredScheduleRetirementReceipt, RetiredScheduleRetirementState,
+    RetirementPauseHook, ScheduleRetirementFailurePoint, ScheduleRetirementPausePoint,
 };
 
 /// Notified to the presentation layer when a scheduled campaign finds crashes,
@@ -129,6 +130,8 @@ struct ScheduleFileStore {
     #[cfg(test)]
     quarantine_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
     #[cfg(test)]
+    post_write_verification_hook: Mutex<Option<Arc<ScheduleRaceHook>>>,
+    #[cfg(test)]
     mutation_admission_waiters: AtomicUsize,
 }
 
@@ -149,6 +152,8 @@ impl ScheduleFileStore {
             acknowledgement_cursor_hook: Mutex::new(None),
             #[cfg(test)]
             quarantine_hook: Mutex::new(None),
+            #[cfg(test)]
+            post_write_verification_hook: Mutex::new(None),
             #[cfg(test)]
             mutation_admission_waiters: AtomicUsize::new(0),
         }
@@ -202,8 +207,11 @@ impl ScheduleFileStore {
         self.require_expected_generation().await?;
         let mut schedules = schedules.to_vec();
         self.restore_quarantined_schedules(&mut schedules).await;
+        let written = expected_written_generation(&self.path, &schedules)?;
         atomic_write_schedules(&self.path, &schedules)?;
-        self.refresh_expected_generation().await
+        #[cfg(test)]
+        self.pause_post_write_verification_for_test().await;
+        self.accept_written_generation(written).await
     }
 
     async fn replace_from_manager(&self, manager: &SchedulerManager) -> Result<(), StateFileError> {
@@ -212,8 +220,11 @@ impl ScheduleFileStore {
         self.require_expected_generation().await?;
         let mut schedules = manager.list_schedules().await;
         self.restore_quarantined_schedules(&mut schedules).await;
+        let written = expected_written_generation(&self.path, &schedules)?;
         atomic_write_schedules(&self.path, &schedules)?;
-        self.refresh_expected_generation().await
+        #[cfg(test)]
+        self.pause_post_write_verification_for_test().await;
+        self.accept_written_generation(written).await
     }
 
     async fn upsert(&self, schedule: &Schedule) -> Result<(), StateFileError> {
@@ -231,8 +242,11 @@ impl ScheduleFileStore {
         let mut schedules = load_schedules(&self.path)?;
         schedules.retain(|existing| existing.id != schedule.id);
         schedules.push(schedule.clone());
+        let written = expected_written_generation(&self.path, &schedules)?;
         atomic_write_schedules(&self.path, &schedules)?;
-        self.refresh_expected_generation().await
+        #[cfg(test)]
+        self.pause_post_write_verification_for_test().await;
+        self.accept_written_generation(written).await
     }
 
     async fn quarantine(&self, schedule_id: &str) -> Result<(), StateFileError> {
@@ -272,8 +286,12 @@ impl ScheduleFileStore {
         }
     }
 
-    async fn refresh_expected_generation(&self) -> Result<(), StateFileError> {
-        *self.expected_generation.lock().await = Some(current_generation(&self.path)?);
+    async fn accept_written_generation(
+        &self,
+        written: ScheduleGeneration,
+    ) -> Result<(), StateFileError> {
+        verify_written_generation(&self.path, &written)?;
+        *self.expected_generation.lock().await = Some(written);
         Ok(())
     }
 
@@ -290,6 +308,26 @@ impl ScheduleFileStore {
             .direct_mutation_hook
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn set_post_write_verification_hook(&self, hook: Option<Arc<ScheduleRaceHook>>) {
+        *self
+            .post_write_verification_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    async fn pause_post_write_verification_for_test(&self) {
+        let hook = self
+            .post_write_verification_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
     }
 
     #[cfg(test)]
@@ -2574,6 +2612,7 @@ impl CampaignScheduler {
 }
 
 fn atomic_write_schedules(path: &Path, schedules: &[Schedule]) -> Result<(), StateFileError> {
+    expected_written_generation(path, schedules)?;
     atomic_write_json(path, &schedules)
 }
 
@@ -3159,12 +3198,18 @@ mod tests {
             );
 
             let restarted = ScheduleFileStore::new(fixture.schedules_path.clone());
+            let expected_retired =
+                if durable_state == RetiredScheduleRetirementState::CompletionPending {
+                    Vec::new()
+                } else {
+                    vec!["schedule-retired".to_owned()]
+                };
             assert_eq!(
                 restarted
                     .retire_engine_schedules(fixture.store.as_deref())
                     .await
                     .unwrap(),
-                vec!["schedule-retired".to_owned()]
+                expected_retired
             );
             assert_eq!(
                 retirement_receipt(&fixture).state,
@@ -3662,6 +3707,248 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_evidence_rejects_a_restored_stale_phase_and_active_preimage() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-stale"));
+        fixture.push_schedule(active_campaign("schedule-supported"));
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        repository.set_retirement_failure_for_test(Some(ScheduleRetirementFailurePoint::Receipt(
+            RetiredScheduleRetirementState::ActiveRewritePending,
+        )));
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            retirement_receipt(&fixture).state,
+            RetiredScheduleRetirementState::HistoryPending
+        );
+        let stale_receipt =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        let stale_active = std::fs::read(&fixture.schedules_path).unwrap();
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+
+        std::fs::write(
+            retired_schedule_retirement_path(&fixture.schedules_path),
+            &stale_receipt,
+        )
+        .unwrap();
+        std::fs::write(&fixture.schedules_path, &stale_active).unwrap();
+        let archive_before = std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap();
+        let completion_before =
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap();
+        let history_before = retired_history_rows(fixture.store.as_deref().unwrap()).await;
+        let restarted = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        let error = restarted
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CampaignSchedulerError::RetiredScheduleRestore { .. }
+        ));
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            stale_active
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap(),
+            stale_receipt
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap(),
+            archive_before
+        );
+        assert_eq!(
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap(),
+            completion_before
+        );
+        assert_eq!(
+            retired_history_rows(fixture.store.as_deref().unwrap()).await,
+            history_before
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_evidence_fast_forwards_stale_phase_with_supported_evolution() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-stale"));
+        fixture.push_schedule(active_campaign("schedule-supported"));
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        repository.set_retirement_failure_for_test(Some(ScheduleRetirementFailurePoint::Receipt(
+            RetiredScheduleRetirementState::ActiveRewritePending,
+        )));
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap_err();
+        let stale_receipt =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+        fixture.push_schedule(active_campaign("schedule-later"));
+        std::fs::write(
+            retired_schedule_retirement_path(&fixture.schedules_path),
+            stale_receipt,
+        )
+        .unwrap();
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let restarted = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        restarted
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            retirement_receipt(&fixture).state,
+            RetiredScheduleRetirementState::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_receipt_and_unavailable_storage_fail_before_any_artifact_write() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.push_schedule(retired_campaign("schedule-unavailable"));
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        repository
+            .retire_engine_schedules_with_storage(RetirementStorage::Unavailable)
+            .await
+            .err()
+            .expect("unavailable storage must reject initialization");
+
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            optional_file_bytes(&retired_schedule_path(&fixture.schedules_path)),
+            None
+        );
+        assert_eq!(
+            optional_file_bytes(&retired_schedule_retirement_path(&fixture.schedules_path)),
+            None
+        );
+        assert_eq!(
+            optional_file_bytes(&retirement_completion_path(&fixture.schedules_path)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_file_evidence_cannot_reopen_database_proof_while_unavailable() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-database-proof"));
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+        for path in [
+            retired_schedule_path(&fixture.schedules_path),
+            retired_schedule_retirement_path(&fixture.schedules_path),
+            retirement_completion_path(&fixture.schedules_path),
+        ] {
+            std::fs::remove_file(path).unwrap();
+        }
+        fixture.push_schedule(retired_campaign("schedule-database-proof"));
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let restarted = ScheduleFileStore::new(fixture.schedules_path.clone());
+
+        restarted
+            .retire_engine_schedules_with_storage(RetirementStorage::Unavailable)
+            .await
+            .err()
+            .expect("unavailable storage must not reopen retirement");
+
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            optional_file_bytes(&retired_schedule_path(&fixture.schedules_path)),
+            None
+        );
+        assert_eq!(
+            optional_file_bytes(&retired_schedule_retirement_path(&fixture.schedules_path)),
+            None
+        );
+        assert_eq!(
+            optional_file_bytes(&retirement_completion_path(&fixture.schedules_path)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn no_database_waiver_fails_closed_after_database_attachment() {
+        let fixture = scheduler_fixture_without_store();
+        fixture.push_schedule(retired_campaign("schedule-attached"));
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        repository.retire_engine_schedules(None).await.unwrap();
+        let store = Store::connect(fixture.directory.path().join("attached.db"))
+            .await
+            .unwrap();
+        store
+            .upsert_schedule_execution(
+                "execution-attached",
+                "schedule-attached",
+                "2026-08-11T00:00:00Z",
+                "pending",
+                "{}",
+            )
+            .await
+            .unwrap();
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let archive_before = std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap();
+        let receipt_before =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        let completion_before =
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap();
+
+        repository
+            .retire_engine_schedules(Some(&store))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap(),
+            archive_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap(),
+            receipt_before
+        );
+        assert_eq!(
+            std::fs::read(retirement_completion_path(&fixture.schedules_path)).unwrap(),
+            completion_before
+        );
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schedule_executions WHERE schedule_id = 'schedule-attached'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(linked, 1);
+    }
+
+    #[tokio::test]
     async fn startup_archives_retired_schedules_and_linked_history_once() {
         let fixture = scheduler_fixture_with_store().await;
         let retired = retired_campaign("schedule-retired");
@@ -3761,6 +4048,14 @@ mod tests {
     async fn retired_schedule_history_failure_leaves_active_file_unchanged() {
         let fixture = scheduler_fixture_with_store().await;
         fixture.push_schedule(retired_campaign("schedule-retired"));
+        fixture
+            .reserve_receipt(
+                "schedule-retired",
+                "occ-retired",
+                "exec-retired",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
         let before = std::fs::read(&fixture.schedules_path).unwrap();
         let store = fixture.store.as_ref().unwrap();
         sqlx::query("DROP TABLE retired_engine_records")
@@ -3779,38 +4074,55 @@ mod tests {
             retirement_receipt(&fixture).state,
             RetiredScheduleRetirementState::HistoryPending
         );
+
+        let repair_schema = format!(
+            "CREATE TABLE retired_engine_records (
+                record_kind TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                retired_engine TEXT NOT NULL CHECK (retired_engine = '{}'),
+                payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                migration_version INTEGER NOT NULL CHECK (migration_version = 24),
+                archived_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                PRIMARY KEY (record_kind, record_id)
+            )",
+            hf_core::retired_engine::RETIRED_ENGINE_ID,
+        );
+        sqlx::query(&repair_schema)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER retired_engine_records_no_update
+             BEFORE UPDATE ON retired_engine_records
+             BEGIN SELECT RAISE(ABORT, 'retired engine evidence is immutable'); END",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER retired_engine_records_no_delete
+             BEFORE DELETE ON retired_engine_records
+             BEGIN SELECT RAISE(ABORT, 'retired engine evidence is immutable'); END",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        repository
+            .retire_engine_schedules(Some(store.as_ref()))
+            .await
+            .unwrap();
+        assert!(load_schedules(&fixture.schedules_path).unwrap().is_empty());
+        assert_eq!(
+            retirement_receipt(&fixture).state,
+            RetiredScheduleRetirementState::Completed
+        );
+        assert_eq!(retired_history_rows(store).await.len(), 2);
     }
 
     #[tokio::test]
-    async fn unavailable_bootstrap_storage_stays_history_pending_and_recovers() {
+    async fn unavailable_bootstrap_storage_writes_nothing_and_recovers() {
         let fixture = scheduler_fixture_with_store().await;
-        let invalid_path = fixture.directory.path().join("validation-failure.db");
-        let invalid_store = Store::connect(&invalid_path).await.unwrap();
-        sqlx::query(
-            "INSERT INTO schedule_executions
-                (id, schedule_id, triggered_at, status, data_json)
-             VALUES ('invalid-execution', 'invalid-schedule', '2026-08-11T00:00:00Z',
-                     'pending', ?1)",
-        )
-        .bind(
-            serde_json::json!({
-                "request_summary": {
-                    "parameter_values": {
-                        "engine": hf_core::retired_engine::RETIRED_ENGINE_ID
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .execute(invalid_store.pool())
-        .await
-        .unwrap();
-        invalid_store.pool().close().await;
-        let Err(validation_error) = Store::connect(&invalid_path).await else {
-            panic!("retired active history must fail storage validation");
-        };
-        assert!(matches!(validation_error, StorageError::InvalidData(_)));
-
         fixture.push_schedule(retired_campaign("schedule-retired"));
         fixture
             .reserve_receipt(
@@ -3838,8 +4150,12 @@ mod tests {
             active_before
         );
         assert_eq!(
-            retirement_receipt(&fixture).state,
-            RetiredScheduleRetirementState::HistoryPending
+            optional_file_bytes(&retired_schedule_retirement_path(&fixture.schedules_path)),
+            None
+        );
+        assert_eq!(
+            optional_file_bytes(&retired_schedule_path(&fixture.schedules_path)),
+            None
         );
         assert!(retired_history_rows(fixture.store.as_deref().unwrap())
             .await
@@ -3935,16 +4251,21 @@ mod tests {
                 tokio::spawn(async move { initializer.retire_engine_schedules(None).await })
             };
             hook.wait_until_paused().await;
-            let mut writer_task = {
+            let writer_task = {
                 let writer = Arc::clone(&writer);
                 tokio::spawn(
                     async move { writer.upsert(&active_campaign("schedule-concurrent")).await },
                 )
             };
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while process_lock_strong_count(&fixture.schedules_path) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("writer never reached the path-global lease");
             assert!(
-                tokio::time::timeout(Duration::from_millis(25), &mut writer_task)
-                    .await
-                    .is_err(),
+                !writer_task.is_finished(),
                 "writer crossed retirement boundary {point:?}"
             );
 
@@ -3983,6 +4304,39 @@ mod tests {
 
         assert!(matches!(error, StateFileError::Conflict { .. }));
         assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn non_locking_post_write_overwrite_is_detected_and_never_adopted() {
+        let fixture = scheduler_fixture_without_store();
+        let store = Arc::new(ScheduleFileStore::new(fixture.schedules_path.clone()));
+        store
+            .replace(&[active_campaign("schedule-initial")])
+            .await
+            .unwrap();
+        let hook = Arc::new(ScheduleRaceHook::new());
+        store.set_post_write_verification_hook(Some(Arc::clone(&hook)));
+        let writer = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.upsert(&active_campaign("schedule-intended")).await })
+        };
+        hook.wait_until_paused().await;
+        let external = active_campaign("schedule-external");
+        atomic_write_schedules(&fixture.schedules_path, std::slice::from_ref(&external)).unwrap();
+        hook.resume().await;
+
+        let error = writer
+            .await
+            .unwrap()
+            .expect_err("post-write overwrite must be detected");
+
+        assert!(matches!(error, StateFileError::Conflict { .. }));
+        let persisted = load_schedules(&fixture.schedules_path).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id, external.id);
+        store.set_post_write_verification_hook(None);
+        let second = store.upsert(&active_campaign("schedule-second")).await;
+        assert!(matches!(second, Err(StateFileError::Conflict { .. })));
     }
 
     #[tokio::test]

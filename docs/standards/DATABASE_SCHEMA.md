@@ -359,13 +359,31 @@ requires that no new active history exists for the bound schedule IDs.
 
 | column | SQLite declaration | notes |
 | --- | --- | --- |
-| `operation_id` | `TEXT PRIMARY KEY` | service-owned UUID also bound by the file receipt and completion certificate |
-| `plan_digest` | `TEXT NOT NULL` | SHA-256 of the operation ID and exact retirement plan |
-| `schedule_ids_json` | `TEXT NOT NULL` | valid JSON containing the sorted unique linked schedule IDs |
+| `operation_id` | `TEXT NOT NULL PRIMARY KEY` | checked canonical UUID also bound by the file receipt and completion certificate |
+| `plan_digest` | `TEXT NOT NULL` | checked lowercase SHA-256 of the operation ID and exact retirement plan |
+| `schedule_ids_json` | `TEXT NOT NULL` | bounded valid JSON array containing the sorted unique linked schedule IDs |
 | `completed_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | transactional history-phase completion time |
 
-The `schedule_retirement_operations_no_update` and
-`schedule_retirement_operations_no_delete` triggers make the proof monotonic.
+`schedule_retirement_schedule_ids` normalizes that manifest into immutable,
+bounded schedule-ID tombstones. A `BEFORE INSERT` conflict trigger prevents
+`REPLACE` and UPSERT from replacing an operation proof even when recursive
+SQLite triggers are disabled; UPDATE and DELETE triggers protect both tables.
+Insert/update triggers on `schedule_executions` and `schedule_occurrences`
+reject future rows linked to a proven-retired schedule ID. The evidence rows,
+active-row deletion, operation proof, and tombstones commit in one transaction;
+an exact retry revalidates the full proof and absence of linked active rows in
+its own transaction.
+
+### `schedule_retirement_schedule_ids`
+
+Normalized immutable tombstones bound to a file-schedule retirement operation.
+The table is evidence-only and has no API that promotes a retired schedule.
+
+| column | SQLite declaration | notes |
+| --- | --- | --- |
+| `schedule_id` | `TEXT NOT NULL PRIMARY KEY` | bounded original schedule identifier; globally prevents a second retirement operation for the same identity |
+| `operation_id` | `TEXT NOT NULL` | references `schedule_retirement_operations(operation_id)` |
+| `ordinal` | `INTEGER NOT NULL` | checked zero-based position in the operation's sorted unique ID manifest; unique with `operation_id` |
 
 ## 3. Conversation and session tables
 
