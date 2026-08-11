@@ -45,6 +45,39 @@ async fn operation_state_counts(store: &Store) -> (i64, i64, i64) {
     .unwrap()
 }
 
+async fn schedule_history_snapshot(store: &Store) -> (Vec<String>, Vec<String>) {
+    let executions = sqlx::query_scalar(
+        "SELECT json_object(
+            'id', id,
+            'schedule_id', schedule_id,
+            'triggered_at', triggered_at,
+            'status', status,
+            'data_json', data_json
+         ) FROM schedule_executions ORDER BY id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    let occurrences = sqlx::query_scalar(
+        "SELECT json_object(
+            'id', id,
+            'schedule_id', schedule_id,
+            'execution_id', execution_id,
+            'triggered_at', triggered_at,
+            'state', state,
+            'owner_id', owner_id,
+            'lease_expires_at', lease_expires_at,
+            'recovery_detail', recovery_detail,
+            'created_at', created_at,
+            'updated_at', updated_at
+         ) FROM schedule_occurrences ORDER BY id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    (executions, occurrences)
+}
+
 async fn pre_0024_pool(path: &std::path::Path) -> sqlx::SqlitePool {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(path)
@@ -514,23 +547,7 @@ async fn reconnect_rejects_retired_rows_restored_after_migration() {
 }
 
 #[tokio::test]
-async fn archive_schedule_history_returns_zero_for_empty_input() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::connect(directory.path().join("empty.db"))
-        .await
-        .unwrap();
-
-    assert_eq!(
-        store
-            .archive_schedule_history_for_retired_engine(&[])
-            .await
-            .unwrap(),
-        0
-    );
-}
-
-#[tokio::test]
-async fn archive_schedule_history_archives_bound_deduplicated_schedule_ids() {
+async fn supported_history_requires_a_valid_operation_and_preserves_original_payloads() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::connect(directory.path().join("schedule-history.db"))
         .await
@@ -576,12 +593,31 @@ async fn archive_schedule_history_archives_bound_deduplicated_schedule_ids() {
         .unwrap();
     }
 
+    let ids = vec!["schedule-a".to_owned(), "schedule-b".to_owned()];
+    let empty_ids = Vec::new();
+    let active_before = schedule_history_snapshot(&store).await;
+    assert_eq!(operation_state_counts(&store).await, (0, 0, 0));
+
+    for (operation_id, plan_digest, schedule_ids) in [
+        ("", PLAN_DIGEST, ids.as_slice()),
+        (OPERATION_ID, "", ids.as_slice()),
+        (OPERATION_ID, PLAN_DIGEST, empty_ids.as_slice()),
+    ] {
+        let error = store
+            .archive_schedule_history_for_retired_engine_operation(
+                operation_id,
+                plan_digest,
+                schedule_ids,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StorageError::InvalidData(_)));
+        assert_eq!(schedule_history_snapshot(&store).await, active_before);
+        assert_eq!(operation_state_counts(&store).await, (0, 0, 0));
+    }
+
     let archived = store
-        .archive_schedule_history_for_retired_engine(&[
-            "schedule-b".to_owned(),
-            "schedule-a".to_owned(),
-            "schedule-a".to_owned(),
-        ])
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
         .await
         .unwrap();
     assert_eq!(archived, 4);
@@ -612,12 +648,62 @@ async fn archive_schedule_history_archives_bound_deduplicated_schedule_ids() {
     .unwrap();
     assert_eq!(active, 0);
 
+    assert_eq!(operation_state_counts(&store).await, (4, 1, 2));
+    let operation: (String, String, String) = sqlx::query_as(
+        "SELECT operation_id, plan_digest, schedule_ids_json
+         FROM schedule_retirement_operations",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(operation.0, OPERATION_ID);
+    assert_eq!(operation.1, PLAN_DIGEST);
+    assert_eq!(operation.2, serde_json::to_string(&ids).unwrap());
+    let tombstones: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT schedule_id, operation_id, ordinal
+         FROM schedule_retirement_schedule_ids ORDER BY ordinal",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        tombstones,
+        vec![
+            ("schedule-a".to_owned(), OPERATION_ID.to_owned(), 0),
+            ("schedule-b".to_owned(), OPERATION_ID.to_owned(), 1),
+        ]
+    );
+
+    let archived_payloads: Vec<String> = sqlx::query_scalar(
+        "SELECT payload_json FROM retired_engine_records
+         ORDER BY record_kind, record_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    let archived_payloads = archived_payloads
+        .iter()
+        .map(|payload| serde_json::from_str::<serde_json::Value>(payload).unwrap())
+        .collect::<Vec<_>>();
+    let original_payloads = active_before
+        .0
+        .iter()
+        .chain(&active_before.1)
+        .map(|payload| serde_json::from_str::<serde_json::Value>(payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(archived_payloads, original_payloads);
+    for archived_payload in &archived_payloads[..2] {
+        let original_model: serde_json::Value =
+            serde_json::from_str(archived_payload["data_json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            original_model["request_summary"]["parameter_values"]["engine"],
+            "libfuzzer"
+        );
+    }
+
     let before_retry = archive_rows(store.pool()).await;
     let retry_count = store
-        .archive_schedule_history_for_retired_engine(&[
-            "schedule-a".to_owned(),
-            "schedule-b".to_owned(),
-        ])
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
         .await
         .unwrap();
     assert_eq!(retry_count, 0);
@@ -705,7 +791,17 @@ async fn operation_bound_schedule_history_proof_rejects_divergent_reuse() {
         .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
         .await
         .unwrap();
-    let before = archive_rows(store.pool()).await;
+    insert_schedule_history(
+        store.pool(),
+        "execution-supported",
+        "occurrence-supported",
+        "schedule-supported",
+        "active",
+    )
+    .await;
+    let archive_before = archive_rows(store.pool()).await;
+    let active_before = schedule_history_snapshot(&store).await;
+    let proof_before = operation_state_counts(&store).await;
 
     let error = store
         .archive_schedule_history_for_retired_engine_operation(
@@ -717,7 +813,9 @@ async fn operation_bound_schedule_history_proof_rejects_divergent_reuse() {
         .unwrap_err();
 
     assert!(matches!(error, StorageError::InvalidData(_)));
-    assert_eq!(archive_rows(store.pool()).await, before);
+    assert_eq!(archive_rows(store.pool()).await, archive_before);
+    assert_eq!(schedule_history_snapshot(&store).await, active_before);
+    assert_eq!(operation_state_counts(&store).await, proof_before);
 }
 
 #[tokio::test]
@@ -1649,13 +1747,22 @@ async fn execution_archive_collision_rolls_back_without_discarding_active_histor
     )
     .await;
     let before = archive_rows(store.pool()).await;
+    let active_before = schedule_history_snapshot(&store).await;
+    let proof_before = operation_state_counts(&store).await;
+    assert_eq!(proof_before, (1, 0, 0));
 
     let error = store
-        .archive_schedule_history_for_retired_engine(&["schedule-collision".to_owned()])
+        .archive_schedule_history_for_retired_engine_operation(
+            OPERATION_ID,
+            PLAN_DIGEST,
+            &["schedule-collision".to_owned()],
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, StorageError::Db(_)));
     assert_eq!(archive_rows(store.pool()).await, before);
+    assert_eq!(schedule_history_snapshot(&store).await, active_before);
+    assert_eq!(operation_state_counts(&store).await, proof_before);
     let active: i64 = sqlx::query_scalar(
         "SELECT
             (SELECT COUNT(*) FROM schedule_executions WHERE id = 'execution-collision') +
@@ -1700,13 +1807,22 @@ async fn occurrence_archive_collision_rolls_back_without_discarding_active_histo
     )
     .await;
     let before = archive_rows(store.pool()).await;
+    let active_before = schedule_history_snapshot(&store).await;
+    let proof_before = operation_state_counts(&store).await;
+    assert_eq!(proof_before, (1, 0, 0));
 
     let error = store
-        .archive_schedule_history_for_retired_engine(&["schedule-collision".to_owned()])
+        .archive_schedule_history_for_retired_engine_operation(
+            OPERATION_ID,
+            PLAN_DIGEST,
+            &["schedule-collision".to_owned()],
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, StorageError::Db(_)));
     assert_eq!(archive_rows(store.pool()).await, before);
+    assert_eq!(schedule_history_snapshot(&store).await, active_before);
+    assert_eq!(operation_state_counts(&store).await, proof_before);
     let active: i64 = sqlx::query_scalar(
         "SELECT
             (SELECT COUNT(*) FROM schedule_executions WHERE id = 'execution-new') +
