@@ -64,7 +64,7 @@ async fn pre_0024_pool(path: &std::path::Path) -> sqlx::SqlitePool {
 }
 
 fn legacy_serde_engine_name() -> String {
-    ["Cluster", "Fuzz", "Lite"].concat()
+    "ClusterFuzzLite".to_owned()
 }
 
 async fn insert_run(pool: &sqlx::SqlitePool, id: &str, engine: &str) {

@@ -240,10 +240,10 @@ mod tests {
     #[test]
     fn engine_serde_preserves_exact_retirement_errors() {
         let values = [
-            ["cluster", "fuzz", "lite"].concat(),
-            ["c", "f", "l"].concat(),
-            ["c", "f", "lite"].concat(),
-            format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+            crate::retired_engine::RETIRED_ENGINE_ID.to_owned(),
+            crate::retired_engine::RETIRED_ENGINE_IDS[1].to_owned(),
+            crate::retired_engine::RETIRED_ENGINE_IDS[2].to_owned(),
+            format!(" {} ", crate::retired_engine::RETIRED_ENGINE_ID),
         ];
 
         for value in values {
@@ -284,9 +284,9 @@ mod tests {
     fn retired_engine_aliases_return_actionable_errors() {
         let values = [
             crate::retired_engine::RETIRED_ENGINE_ID.to_owned(),
-            ["c", "f", "l"].concat(),
-            ["c", "f", "lite"].concat(),
-            format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+            crate::retired_engine::RETIRED_ENGINE_IDS[1].to_owned(),
+            crate::retired_engine::RETIRED_ENGINE_IDS[2].to_owned(),
+            format!(" {} ", crate::retired_engine::RETIRED_ENGINE_ID),
         ];
         for value in values {
             let error = value.parse::<EngineKind>().unwrap_err();
