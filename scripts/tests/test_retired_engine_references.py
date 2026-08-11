@@ -1,14 +1,18 @@
+import contextlib
+import io
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHECKER_SOURCE = REPOSITORY_ROOT / "scripts" / "check_retired_engine_references.py"
 sys.path.insert(0, str(REPOSITORY_ROOT / "scripts"))
 
+import check_retired_engine_references as checker
 from check_retired_engine_references import find_forbidden_references
 
 
@@ -31,26 +35,39 @@ class RetiredEngineReferenceTests(unittest.TestCase):
     def test_detector_selects_the_tracked_text_surface(self) -> None:
         cases = (
             ("source.c", True),
-            ("source.h", True),
             ("source.cc", True),
+            ("setup.command", True),
             ("source.cpp", True),
+            ("style.css", True),
             ("source.cxx", True),
+            ("source.h", True),
             ("source.hpp", True),
             ("page.html", True),
-            ("style.css", True),
-            ("script.js", True),
-            ("component.jsx", True),
-            ("bundle.mjs", True),
-            ("setup.command", True),
-            (".env.example", True),
-            ("workflow.yml.example", True),
-            ("workflow.yaml.example", True),
-            ("Cargo.lock", True),
             ("MANIFEST.in", True),
+            ("script.js", True),
+            ("config.json", True),
+            ("component.jsx", True),
+            ("Cargo.lock", True),
+            ("guide.md", True),
+            ("bundle.mjs", True),
+            ("guard.py", True),
+            ("engine.rs", True),
+            ("setup.sh", True),
+            ("migration.sql", True),
+            ("config.toml", True),
+            ("component.ts", True),
+            ("component.tsx", True),
+            ("prompt.txt", True),
+            ("config.yaml", True),
+            ("config.yml", True),
+            (".gitattributes", True),
+            (".gitignore", True),
             ("Dockerfile", True),
             ("Makefile", True),
             ("LICENSE", True),
-            (".gitignore", True),
+            (".env.example", True),
+            ("workflow.yaml.example", True),
+            ("workflow.yml.example", True),
             ("asset.png", False),
             ("icon.ico", False),
             ("document.pdf", False),
@@ -67,6 +84,24 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                     findings = find_forbidden_references(root)
                 expected = [f"{relative}:1:ClusterFuzzLite"] if should_detect else []
                 self.assertEqual(findings, expected)
+
+    def test_detector_uses_the_exact_historical_allowlist(self) -> None:
+        self.assertEqual(
+            checker.ALLOWED_FILES,
+            {
+                pathlib.Path("crates/hf-core/src/retired_engine.rs"),
+                pathlib.Path("crates/hf-storage/migrations/0024_retired_engine_records.sql"),
+                pathlib.Path("crates/hf-storage/tests/retired_engine_migration.rs"),
+                pathlib.Path(
+                    "docs/superpowers/specs/2026-08-11-clusterfuzzlite-removal-design.md"
+                ),
+                pathlib.Path(
+                    "docs/superpowers/plans/2026-08-11-clusterfuzzlite-removal-implementation.md"
+                ),
+                pathlib.Path("scripts/check_retired_engine_references.py"),
+                pathlib.Path("scripts/tests/test_retired_engine_references.py"),
+            },
+        )
 
     def test_detector_matches_canonical_separator_and_case_variants(self) -> None:
         cases = (
@@ -125,6 +160,37 @@ class RetiredEngineReferenceTests(unittest.TestCase):
                 path.write_text("ClusterFuzzLite\n", encoding="utf-8")
             self.assertEqual(find_forbidden_references(root), [])
 
+    def test_detector_prunes_ignored_trees_before_descent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "src" / "engine.rs"
+            source.parent.mkdir()
+            source.write_text("ClusterFuzzLite\n", encoding="utf-8")
+            retained_directories: list[str] = []
+
+            def controlled_walk(
+                walked_root: pathlib.Path,
+                *,
+                topdown: bool,
+                followlinks: bool,
+                onerror: object,
+            ):
+                self.assertEqual(walked_root, root)
+                self.assertTrue(topdown)
+                self.assertFalse(followlinks)
+                self.assertTrue(callable(onerror))
+                directories = ["target", "src"]
+                yield str(root), directories, []
+                retained_directories.extend(directories)
+                if "target" in directories:
+                    raise AssertionError("ignored directory was not pruned")
+                yield str(source.parent), [], [source.name]
+
+            with mock.patch.object(checker.os, "walk", controlled_walk):
+                findings = find_forbidden_references(root)
+        self.assertEqual(retained_directories, ["src"])
+        self.assertEqual(findings, ["src/engine.rs:1:ClusterFuzzLite"])
+
     def test_detector_ignores_only_root_sdd_orchestration_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -175,6 +241,45 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             path.write_bytes(b'const ENGINE: &str = "ClusterFuzzLite";\xff\n')
             self.assertEqual(find_forbidden_references(root), [])
 
+    def test_detector_fails_closed_when_a_selected_file_cannot_be_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "src" / "engine.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text("ClusterFuzzLite\n", encoding="utf-8")
+            with mock.patch.object(pathlib.Path, "read_text", side_effect=OSError("denied")):
+                with self.assertRaisesRegex(
+                    checker.ScanError,
+                    r"^scan error: src/engine\.rs$",
+                ):
+                    find_forbidden_references(root)
+
+    def test_detector_fails_closed_when_directory_traversal_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            blocked = root / "blocked"
+
+            def failing_walk(
+                walked_root: pathlib.Path,
+                *,
+                topdown: bool,
+                followlinks: bool,
+                onerror: object,
+            ) -> object:
+                self.assertEqual(walked_root, root)
+                self.assertTrue(topdown)
+                self.assertFalse(followlinks)
+                self.assertTrue(callable(onerror))
+                onerror(OSError(5, "unreadable", str(blocked)))
+                return iter(())
+
+            with mock.patch.object(checker.os, "walk", failing_walk):
+                with self.assertRaisesRegex(
+                    checker.ScanError,
+                    r"^scan error: blocked$",
+                ):
+                    find_forbidden_references(root)
+
     def test_detector_reports_sorted_paths_lines_and_exact_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -197,6 +302,14 @@ class RetiredEngineReferenceTests(unittest.TestCase):
             ],
         )
 
+    def test_diagnostic_paths_are_normalized_to_posix(self) -> None:
+        diagnostic = checker.format_finding(
+            pathlib.PureWindowsPath("src") / "engine.rs",
+            7,
+            "  CFL_ENGINE  ",
+        )
+        self.assertEqual(diagnostic, "src/engine.rs:7:CFL_ENGINE")
+
     def test_cli_is_silent_for_a_clean_isolated_repository(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_checker(pathlib.Path(directory))
@@ -214,6 +327,19 @@ class RetiredEngineReferenceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "src/engine.rs:1:CFL_ENGINE\n")
         self.assertEqual(result.stderr, "")
+
+    def test_cli_reports_a_scan_error_with_exit_two(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            checker,
+            "find_forbidden_references",
+            side_effect=checker.ScanError(pathlib.Path("src") / "engine.rs"),
+        ):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(checker.main(), 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "scan error: src/engine.rs\n")
 
     def test_repository_contains_only_historical_references(self) -> None:
         self.assertEqual(find_forbidden_references(REPOSITORY_ROOT), [])

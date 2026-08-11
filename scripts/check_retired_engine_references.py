@@ -43,6 +43,12 @@ PATTERNS = (
 )
 
 
+class ScanError(Exception):
+    def __init__(self, relative: pathlib.PurePath) -> None:
+        self.relative = relative
+        super().__init__(f"scan error: {relative.as_posix()}")
+
+
 def is_scanned_file(path: pathlib.Path) -> bool:
     return (
         path.suffix in SCANNED_SUFFIXES
@@ -58,21 +64,56 @@ def is_skipped_directory(path: pathlib.Path) -> bool:
     )
 
 
+def scan_error_for(
+    root: pathlib.Path,
+    error: OSError,
+    fallback: pathlib.Path,
+) -> ScanError:
+    error_path = pathlib.Path(error.filename) if error.filename else fallback
+    try:
+        relative = error_path.relative_to(root)
+    except ValueError:
+        relative = error_path if not error_path.is_absolute() else pathlib.Path(error_path.name)
+    return ScanError(relative)
+
+
+def format_finding(relative: pathlib.PurePath, line_number: int, line: str) -> str:
+    return f"{relative.as_posix()}:{line_number}:{line.strip()}"
+
+
 def iter_scanned_files(root: pathlib.Path):
-    for directory, directories, filenames in os.walk(root, topdown=True, followlinks=False):
+    def on_walk_error(error: OSError) -> None:
+        raise scan_error_for(root, error, root)
+
+    for directory, directories, filenames in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+        onerror=on_walk_error,
+    ):
         directory_path = pathlib.Path(directory)
         relative_directory = directory_path.relative_to(root)
-        directories[:] = [
-            name
-            for name in sorted(directories)
-            if not (directory_path / name).is_symlink()
-            and not is_skipped_directory(relative_directory / name)
-        ]
+        retained_directories: list[str] = []
+        for name in sorted(directories):
+            relative = relative_directory / name
+            if is_skipped_directory(relative):
+                continue
+            path = directory_path / name
+            try:
+                if path.is_symlink():
+                    continue
+            except OSError as error:
+                raise scan_error_for(root, error, relative) from error
+            retained_directories.append(name)
+        directories[:] = retained_directories
         for filename in sorted(filenames):
             path = directory_path / filename
-            if path.is_symlink():
-                continue
             relative = path.relative_to(root)
+            try:
+                if path.is_symlink():
+                    continue
+            except OSError as error:
+                raise scan_error_for(root, error, relative) from error
             if is_scanned_file(relative):
                 yield path, relative
 
@@ -84,17 +125,24 @@ def find_forbidden_references(root: pathlib.Path) -> list[str]:
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
+        except UnicodeDecodeError:
+            # Invalid UTF-8 is intentionally outside the text-only scan surface.
             continue
+        except OSError as error:
+            raise ScanError(relative) from error
         for line_number, line in enumerate(lines, start=1):
             if any(pattern.search(line) for pattern in PATTERNS):
-                findings.append(f"{relative}:{line_number}:{line.strip()}")
+                findings.append(format_finding(relative, line_number, line))
     return findings
 
 
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parents[1]
-    findings = find_forbidden_references(root)
+    try:
+        findings = find_forbidden_references(root)
+    except ScanError as error:
+        print(error, file=sys.stderr)
+        return 2
     if findings:
         print("\n".join(findings))
         return 1
