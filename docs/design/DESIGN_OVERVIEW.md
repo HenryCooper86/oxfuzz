@@ -5,8 +5,8 @@ Status: **active**. Supersedes: none. Owner: oxfuzz core team.
 ## 1. Purpose
 
 oxfuzz is an AI fuzzing agent. It discovers fuzzing targets in a project,
-writes harnesses, drives fuzzing engines (AFL++, honggfuzz, libFuzzer,
-oss-fuzz/ClusterFuzzLite), triages crashes, and iterates on corpus/coverage --
+writes harnesses, drives fuzzing engines (AFL++, honggfuzz, libFuzzer, and
+syzkaller), triages crashes, and iterates on corpus/coverage --
 all under human-in-the-loop supervision.
 
 ## 2. Design Pillars
@@ -23,13 +23,13 @@ all under human-in-the-loop supervision.
 
 ## 3. Alignment Table
 
-| Concept | Owner Crate | Trait (hf-core) | Design Doc |
+| Concept | Owner Crate | Contract | Design Doc |
 | --- | --- | --- | --- |
 | LLM provider pool | hf-provider | `LlmProvider`, `ProviderPool` | (reuse y-agent) |
 | Target discovery | hf-discovery | `TargetCandidate`, `TargetInventory` | target-discovery-design.md |
 | Semgrep target enrichment | hf-discovery + hf-service | `SemgrepFinding`, `SemgrepTargetScore`, `SemgrepInventoryView` | target-discovery-design.md + service-orchestration-design.md |
 | Harness generation | hf-harness | `Harness`, `HarnessDraft` | harness-generation-design.md |
-| Engine integration | hf-engine | `FuzzEngine`, `FuzzRunHandle` | engine-integration-design.md |
+| Engine integration | hf-engine | `EngineAdapter`, `FuzzRunConfig`, `FuzzProgress` | engine-integration-design.md |
 | Automotive protocol contracts | hf-automotive | versioned DTO + `Validate` contract | automotive-protocol-fuzzing-design.md |
 | Crash triage | hf-crash | `Crash`, `CrashReport` | crash-triage-design.md |
 | Corpus management | hf-corpus | `Corpus`, `CorpusEntry` | corpus-coverage-design.md |
@@ -125,8 +125,8 @@ recurring schedules retain their existing scheduling path.
 2. Should `hf-runtime` support native sandbox (seccomp/pledge) in addition to
    Docker?
 3. How to share corpora across engines for the same target?
-4. ClusterFuzzLite integration: wrapper around its scripts, or native
-   reimplementation?
+4. How should syzkaller's kernel-campaign configuration coexist with the
+   userspace fuzzing policy?
 
 ## 6. Rejected Alternatives
 

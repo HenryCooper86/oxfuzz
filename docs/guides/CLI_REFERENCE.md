@@ -106,7 +106,7 @@ Binary Tool integration is outside this release's scope.
 | `serve --host 127.0.0.1 --port 8081` | Start the REST + SSE API (`hf-web`). Non-loopback hosts require `HF_WEB_TOKEN`. |
 | `tui <project>` | Browse the target inventory and copy accurate next-step commands. |
 
-Engines: `afl++`, `honggfuzz`, `libfuzzer`, `clusterfuzzlite`, `syzkaller`.
+Engines: `afl++`, `honggfuzz`, `libfuzzer`, `syzkaller`.
 
 The REST API exposes discovery, harness, user-space run start/status/cancel,
 corpus, triage, reporting, and management endpoints. Syzkaller remains a

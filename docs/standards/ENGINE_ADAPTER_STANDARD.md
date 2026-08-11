@@ -26,14 +26,20 @@ pub trait EngineAdapter: Send + Sync {
 Register a new engine by adding its `EngineKind` variant and a match arm in
 `hf-engine::registry::adapter_for`.
 
-## 2. Build Flags
+## 2. Engine Commands
 
-| Engine | Compiler wrapper | Link flags |
+| Engine | Build wrapper or input | Run entrypoint |
 | --- | --- | --- |
-| AFL++ | `afl-clang-fast` | `-fsanitize=fuzzer,address` for the generated `LLVMFuzzerTestOneInput` harness and AFLDriver |
-| honggfuzz | `hfuzz-cc` | `-lhfuzz` |
-| libFuzzer | `clang` | `-fsanitize=fuzzer` |
-| ClusterFuzzLite | project build script | oss-fuzz `compile` |
+| AFL++ | `afl-clang-fast` / `afl-clang-fast++` with `-fsanitize=fuzzer,address` for the generated `LLVMFuzzerTestOneInput` harness and AFLDriver | `afl-fuzz` |
+| honggfuzz | `hfuzz-cc` / `hfuzz-c++` with `-fsanitize=address` | `honggfuzz` |
+| libFuzzer | `clang` / `clang++` with `-fsanitize=fuzzer,address` | harness binary |
+| syzkaller | KCOV-enabled kernel build (`make CONFIG_KCOV=y CONFIG_DEBUG_INFO=y`) | `syz-manager -config=<manager.cfg>` |
+
+Syzkaller is the manager-config exception. It fuzzes syscall sequences in a
+managed VM rather than a generated single-function harness. The adapter's
+`binary` argument is the staged manager-config path, and `syz-manager` manages
+the campaign corpus and output through that configuration instead of its
+`corpus` and `out` arguments.
 
 ## 3. Run Args
 
@@ -53,8 +59,8 @@ the engine does not have:
 | --- | --- | --- |
 | AFL++ (>= 2.53c) | `afl-fuzz -s <seed>` | CLI flag before `--` |
 | libFuzzer | `-seed=N` (`0`/absent = random) | CLI flag |
-| ClusterFuzzLite | forwarded to libFuzzer as `-seed=N` | trailing fuzzer arg |
 | honggfuzz | none (RNG is seeded from arc4random//dev/urandom) | emit nothing |
+| syzkaller | manager-owned fuzzing state | emit no `FuzzRunConfig.seed` flag |
 
 A honggfuzz run with a recorded seed is therefore not RNG-deterministic; that
 is an engine limitation, not a license to fabricate flags.
@@ -77,9 +83,10 @@ helpers. Omitting `@@` selects AFL++'s stdin mode and is a contract violation.
 
 ## 4. Progress Streaming
 
-`FuzzRunHandle` exposes a stream of `FuzzProgress` events: `ExecsPerSec`,
-`EdgesCovered`, `CrashesFound`, `LogLine`. Adapters parse engine stdout/stderr
-into these events.
+`EngineRunner` forwards `FuzzProgress` events as a run executes and returns
+the final progress and coverage evidence. The events are `ExecsPerSec`,
+`EdgesCovered`, `CrashesFound`, and `LogLine`; adapters supply the command
+whose stdout/stderr the runner parses into those events.
 
 For AFL++, stdout/stderr parsing is live-log telemetry only. Persisted terminal
 statistics must be read from that run's exact `default/fuzzer_stats` file with
@@ -88,22 +95,28 @@ target-wide output directory or infer final AFL++ counters from UI text.
 
 ## 5. Crash Output
 
-Crash ingestion (`hf-crash::ingest`) sees only **regular files** placed
-**directly** in the directories below; it never descends into per-crash
-subdirectories and never follows symlinks. An adapter MUST therefore emit
-each crashing input as a flat file in its engine's location:
+For the userspace engines, crash ingestion (`hf-crash::ingest`) sees only
+**regular files** placed **directly** in the directories below; it never
+descends into per-crash subdirectories and never follows symlinks. An adapter
+MUST therefore emit each crashing input as a flat file in its engine's
+location:
 
 | Engine | Crash input location | Accepted names |
 | --- | --- | --- |
-| libFuzzer, ClusterFuzzLite | `<run_dir>/` | `crash-*`, `leak-*`, `timeout-*`, `oom-*` |
+| libFuzzer | `<run_dir>/` | `crash-*`, `leak-*`, `timeout-*`, `oom-*` |
 | honggfuzz | `<run_dir>/` (pass `--crashdir <run_dir>`) | `SIG<signal>.PC.<...>` |
 | AFL++ | `<run_dir>/crashes/` and `<run_dir>/<instance>/crashes/` (e.g. `default/crashes/`) | any regular file except `README.txt` |
+| syzkaller | manager-configured workdir | manager-produced crash evidence |
+
+Syzkaller is the manager-config exception: its manager owns the kernel-campaign
+workdir and crash evidence, so it does not use the userspace flat-artifact
+layout.
 
 A nested layout such as `<run_dir>/crashes/<crash_id>/{input,log.txt}` is NOT
 ingested: directories under the crash root are skipped (AFL++ instance
 directories are the one exception, and only their immediate `crashes/` child
-is scanned). An adapter that receives a per-crash directory layout from its
-engine MUST flatten the input files into the locations above.
+is scanned). A userspace adapter that receives a per-crash directory layout
+from its engine MUST flatten the input files into the locations above.
 
 Sanitizer/engine logs are optional siblings of the input file, matched by
 name convention (`log-<stem>.txt`, a stem-named `report-*`/`sanitizer-*`

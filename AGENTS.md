@@ -8,7 +8,7 @@ Scope: entire repository. All rules are mandatory.
 
 Goal: an autonomous agent that analyzes a target project, identifies functions
 worth fuzzing, writes fuzz harnesses, drives open-source fuzzing engines
-(AFL++, honggfuzz, libFuzzer, oss-fuzz/ClusterFuzzLite), triages crashes, and
+(AFL++, honggfuzz, libFuzzer, and syzkaller), triages crashes, and
 iterates on corpus and coverage -- all under human-in-the-loop supervision.
 
 Design pillars: async-first (P95 tool dispatch < 100ms) - model-agnostic -

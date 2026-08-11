@@ -9,8 +9,8 @@ tedious, repetitive parts of fuzzing:
 
 1. **Finding what to fuzz** in a target codebase.
 2. **Writing the harness** that exercises a chosen target.
-3. **Driving a fuzzing engine** (AFL++, honggfuzz, libFuzzer, oss-fuzz /
-   ClusterFuzzLite) under safe supervision.
+3. **Driving a fuzzing engine** (AFL++, honggfuzz, libFuzzer, and syzkaller)
+   under safe supervision.
 4. **Triaging crashes** and proposing reproducers / bug reports.
 5. **Iterating** on corpus and coverage to deepen the search.
 
@@ -65,8 +65,8 @@ authoring follows `docs/standards/HARNESS_STANDARD.md`.
 
 ### 3. Engine Integration (`hf-engine`)
 
-A single `FuzzEngine` trait fronts AFL++, honggfuzz, libFuzzer, and
-ClusterFuzzLite. The agent selects an engine per target and runs it under
+A single `EngineAdapter` trait fronts AFL++, honggfuzz, libFuzzer, and
+syzkaller. The agent selects an engine per target and runs it under
 configurable resource limits.
 
 ### 4. Crash Triage (`hf-crash`)

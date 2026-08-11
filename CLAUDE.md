@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`oxfuzz` is a Rust-first AI fuzzing agent: it discovers fuzz targets in a project, writes harnesses with an LLM, drives open-source fuzzing engines (AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller), triages crashes, and iterates on corpus/coverage — all under human-in-the-loop supervision and sandboxed execution.
+`oxfuzz` is a Rust-first AI fuzzing agent: it discovers fuzz targets in a project, writes harnesses with an LLM, drives open-source fuzzing engines (AFL++, honggfuzz, libFuzzer, and syzkaller), triages crashes, and iterates on corpus/coverage — all under human-in-the-loop supervision and sandboxed execution.
 
 **Read `AGENTS.md` first.** It is the mandatory engineering protocol (TDD, risk tiers, quality gates, safety rules) and overrides general habits. This file covers build/run mechanics and architecture; `AGENTS.md` covers process. Before implementing in a fuzzing-domain crate, read the matching doc in `docs/design/` and the relevant `docs/standards/` file — implementation must conform to the design.
 
