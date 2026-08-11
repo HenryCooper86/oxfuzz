@@ -2512,7 +2512,7 @@ async fn occurrence_inspection_preserves_safe_identity_for_malformed_rows() {
          VALUES
             ('occ-identifiable', 'schedule-identifiable', x'ff',
              '2026-07-30T00:00:00Z', 'completed', 'owner', NULL),
-            ('occ-undecodable', x'ff', 'exec-undecodable',
+            ('occ-undecodable', CAST(x'ff' AS TEXT), 'exec-undecodable',
              '2026-07-30T00:00:01Z', 'completed', 'owner', NULL)",
     )
     .execute(store.pool())

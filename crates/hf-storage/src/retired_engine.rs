@@ -112,7 +112,8 @@ fn canonical_schedule_ids(schedule_ids: &[String]) -> Result<Vec<String>, Storag
     let mut canonical = schedule_ids.to_vec();
     canonical.sort_unstable();
     canonical.dedup();
-    if canonical.len() > MAX_RETIREMENT_SCHEDULE_IDS
+    if canonical.is_empty()
+        || canonical.len() > MAX_RETIREMENT_SCHEDULE_IDS
         || canonical.iter().any(|id| {
             id.is_empty()
                 || id.len() > MAX_RETIREMENT_SCHEDULE_ID_BYTES
@@ -197,13 +198,22 @@ async fn has_active_schedule_history(
     transaction: &mut Transaction<'_, Sqlite>,
     schedule_ids: &[String],
 ) -> Result<bool, StorageError> {
-    if schedule_ids.is_empty() {
-        return Ok(false);
+    let mut active = QueryBuilder::<Sqlite>::new(
+        "SELECT EXISTS(SELECT 1 FROM schedule_executions
+         WHERE typeof(schedule_id) <> 'text' OR schedule_id IN (",
+    );
+    let mut execution_ids = active.separated(", ");
+    for schedule_id in schedule_ids {
+        execution_ids.push_bind(schedule_id);
     }
-    let mut active = QueryBuilder::<Sqlite>::new("SELECT EXISTS(SELECT 1 FROM schedule_executions");
-    push_schedule_id_filter(&mut active, schedule_ids);
+    execution_ids.push_unseparated(")");
     active.push(" UNION ALL SELECT 1 FROM schedule_occurrences");
-    push_schedule_id_filter(&mut active, schedule_ids);
+    active.push(" WHERE typeof(schedule_id) <> 'text' OR schedule_id IN (");
+    let mut occurrence_ids = active.separated(", ");
+    for schedule_id in schedule_ids {
+        occurrence_ids.push_bind(schedule_id);
+    }
+    occurrence_ids.push_unseparated(")");
     active.push(")");
     active
         .build_query_scalar()
@@ -255,6 +265,11 @@ impl Store {
         }
         let mut transaction = self.pool().begin().await?;
         let proofs = load_validated_proofs(&mut transaction).await?;
+        if has_non_text_schedule_history(&mut transaction).await? {
+            return Err(StorageError::InvalidData(
+                "schedule history contains a non-TEXT schedule ID".to_owned(),
+            ));
+        }
         if !proofs.is_empty() {
             let exact = proofs.len() == 1
                 && proofs[0].0 == operation_id
@@ -336,12 +351,44 @@ impl Store {
         Ok(has_proof)
     }
 
+    /// Return the permanent schedule identities bound by validated retirement proofs.
+    ///
+    /// # Errors
+    /// Returns an error if any proof or normalized tombstone is malformed.
+    pub async fn schedule_retirement_tombstone_ids(&self) -> Result<Vec<String>, StorageError> {
+        let mut transaction = self.pool().begin().await?;
+        let mut ids = load_validated_proofs(&mut transaction)
+            .await?
+            .into_iter()
+            .flat_map(|(_, _, ids)| ids)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        transaction.commit().await?;
+        Ok(ids)
+    }
+
     async fn archive_schedule_history(&self, schedule_ids: &[String]) -> Result<u64, StorageError> {
         let mut transaction = self.pool().begin().await?;
         let archived = archive_schedule_history_rows(&mut transaction, schedule_ids).await?;
         transaction.commit().await?;
         Ok(archived)
     }
+}
+
+async fn has_non_text_schedule_history(
+    transaction: &mut Transaction<'_, Sqlite>,
+) -> Result<bool, StorageError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM schedule_executions WHERE typeof(schedule_id) <> 'text'
+            UNION ALL
+            SELECT 1 FROM schedule_occurrences WHERE typeof(schedule_id) <> 'text'
+        )",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(StorageError::from)
 }
 
 async fn archive_schedule_history_rows(

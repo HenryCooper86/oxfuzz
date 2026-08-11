@@ -346,8 +346,10 @@ repository API for replaying or promoting this evidence.
 Primary key: `(record_kind, record_id)`. Index:
 `idx_retired_engine_records_archived_at(archived_at DESC, record_kind,
 record_id)`. The `retired_engine_records_no_update` and
-`retired_engine_records_no_delete` triggers reject mutation or deletion so the
-table remains an archive-only provenance boundary.
+`retired_engine_records_no_delete` triggers reject mutation or deletion. A
+forward trigger in migration 0025 also rejects an INSERT when the composite key
+already exists, so `REPLACE` and UPSERT cannot bypass the archive-only
+provenance boundary.
 
 ### `schedule_retirement_operations`
 
@@ -359,20 +361,23 @@ requires that no new active history exists for the bound schedule IDs.
 
 | column | SQLite declaration | notes |
 | --- | --- | --- |
-| `operation_id` | `TEXT NOT NULL PRIMARY KEY` | checked canonical UUID also bound by the file receipt and completion certificate |
+| `operation_id` | `TEXT NOT NULL PRIMARY KEY` | checked exact lowercase canonical UUID shape, also bound by the file receipt and completion certificate |
 | `plan_digest` | `TEXT NOT NULL` | checked lowercase SHA-256 of the operation ID and exact retirement plan |
-| `schedule_ids_json` | `TEXT NOT NULL` | bounded valid JSON array containing the sorted unique linked schedule IDs |
+| `schedule_ids_json` | `TEXT NOT NULL` | TEXT-only, bounded non-empty JSON array containing 1–4096 sorted unique linked schedule IDs; each ID is TEXT, 1–512 bytes, and contains no NUL |
 | `completed_at` | `TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` | transactional history-phase completion time |
 
 `schedule_retirement_schedule_ids` normalizes that manifest into immutable,
-bounded schedule-ID tombstones. A `BEFORE INSERT` conflict trigger prevents
-`REPLACE` and UPSERT from replacing an operation proof even when recursive
-SQLite triggers are disabled; UPDATE and DELETE triggers protect both tables.
-Insert/update triggers on `schedule_executions` and `schedule_occurrences`
-reject future rows linked to a proven-retired schedule ID. The evidence rows,
-active-row deletion, operation proof, and tombstones commit in one transaction;
-an exact retry revalidates the full proof and absence of linked active rows in
-its own transaction.
+bounded schedule-ID tombstones. `BEFORE INSERT` conflict triggers prevent
+`REPLACE` and UPSERT from replacing an operation proof or a tombstone through
+either its schedule-ID key or operation/ordinal key. Every tombstone must equal
+the parent JSON value at its exact ordinal; extra or mismatched ordinals fail.
+UPDATE and DELETE triggers protect both tables. Insert/update triggers on
+`schedule_executions` and `schedule_occurrences` reject non-TEXT schedule IDs
+and future rows linked to a proven-retired schedule ID. The archival transaction
+also rejects any pre-existing non-TEXT history ID before completion. The
+evidence rows, active-row deletion, operation proof, and tombstones commit in
+one transaction; an exact retry revalidates the full proof and absence of linked
+active rows in its own transaction.
 
 ### `schedule_retirement_schedule_ids`
 
@@ -381,7 +386,7 @@ The table is evidence-only and has no API that promotes a retired schedule.
 
 | column | SQLite declaration | notes |
 | --- | --- | --- |
-| `schedule_id` | `TEXT NOT NULL PRIMARY KEY` | bounded original schedule identifier; globally prevents a second retirement operation for the same identity |
+| `schedule_id` | `TEXT NOT NULL PRIMARY KEY` | TEXT-only bounded original schedule identifier without NUL; globally and permanently retires the schedule identity |
 | `operation_id` | `TEXT NOT NULL` | references `schedule_retirement_operations(operation_id)` |
 | `ordinal` | `INTEGER NOT NULL` | checked zero-based position in the operation's sorted unique ID manifest; unique with `operation_id` |
 
@@ -671,7 +676,7 @@ Index: `idx_guardrail_decisions_ts(decided_at DESC)`.
 | `0022_semgrep_enrichment.sql` | creates Semgrep operation history, normalized findings, and atomic target-score overlays |
 | `0023_schedule_occurrences.sql` | creates permanent schedule occurrence receipts with paired execution transitions and retention protection |
 | `0024_retired_engine_records.sql` | archives complete retired-engine records as immutable, non-executable evidence before typed deserialization |
-| `0025_schedule_retirement_operations.sql` | adds immutable operation-bound proofs committed with linked schedule-history retirement |
+| `0025_schedule_retirement_operations.sql` | adds shape-checked immutable operation proofs and exact normalized permanent-ID tombstones committed with linked schedule-history retirement; hardens retired archive and history insert/update immutability |
 
 ## 7. Read failure contract
 

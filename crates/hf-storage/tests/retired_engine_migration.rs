@@ -612,6 +612,10 @@ async fn operation_bound_schedule_history_archive_persists_an_idempotent_proof()
         .await
         .unwrap());
     assert!(store.has_schedule_retirement_history_proof().await.unwrap());
+    assert_eq!(
+        store.schedule_retirement_tombstone_ids().await.unwrap(),
+        ids
+    );
 
     let before = archive_rows(store.pool()).await;
     assert_eq!(
@@ -711,6 +715,52 @@ async fn operation_proof_rejects_every_sql_mutation_form() {
 }
 
 #[tokio::test]
+async fn migration_0025_prevents_retired_archive_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("immutable-archive.db"))
+        .await
+        .unwrap();
+    insert_conflicting_archive(
+        store.pool(),
+        "schedule_execution",
+        "execution-proof",
+        &serde_json::json!({"marker": "original"}),
+    )
+    .await;
+
+    let statements = [
+        "INSERT OR REPLACE INTO retired_engine_records
+            (record_kind, record_id, retired_engine, payload_json, migration_version)
+         VALUES ('schedule_execution', 'execution-proof', 'clusterfuzzlite',
+                 '{\"marker\":\"replacement\"}', 24)",
+        "INSERT INTO retired_engine_records
+            (record_kind, record_id, retired_engine, payload_json, migration_version)
+         VALUES ('schedule_execution', 'execution-proof', 'clusterfuzzlite',
+                 '{\"marker\":\"upsert\"}', 24)
+         ON CONFLICT(record_kind, record_id)
+         DO UPDATE SET payload_json = excluded.payload_json",
+    ];
+    for statement in statements {
+        let error = sqlx::query(statement)
+            .execute(store.pool())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("retired engine evidence is immutable"));
+    }
+
+    let payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM retired_engine_records
+         WHERE record_kind = 'schedule_execution' AND record_id = 'execution-proof'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(payload, r#"{"marker":"original"}"#);
+}
+
+#[tokio::test]
 async fn operation_proof_schema_rejects_invalid_shape_and_bounds() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::connect(directory.path().join("proof-shape.db"))
@@ -718,9 +768,14 @@ async fn operation_proof_schema_rejects_invalid_shape_and_bounds() {
         .unwrap();
     let invalid_rows = [
         format!("NULL, '{PLAN_DIGEST}', '[]'"),
+        format!("'{OPERATION_ID}', '{PLAN_DIGEST}', '[]'"),
         format!("'not-a-uuid', '{PLAN_DIGEST}', '[]'"),
+        format!("'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA', '{PLAN_DIGEST}', '[\"id\"]'"),
+        format!("'-1111111-1111-4111-8111-111111111111', '{PLAN_DIGEST}', '[\"id\"]'"),
         format!("'{OPERATION_ID}', 'short', '[]'"),
         format!("'{OPERATION_ID}', '{PLAN_DIGEST}', '{{}}'"),
+        format!("'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', CAST('[\"blob-manifest\"]' AS BLOB)"),
+        format!("'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', '[\"nul\\u0000id\"]'"),
         format!("'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', '[\"dup\",\"dup\"]'"),
         format!("'{SECOND_OPERATION_ID}', '{PLAN_DIGEST}', '[1]'"),
         format!(
@@ -738,6 +793,105 @@ async fn operation_proof_schema_rejects_invalid_shape_and_bounds() {
             "invalid proof row was accepted: {values}"
         );
     }
+}
+
+#[tokio::test]
+async fn operation_api_rejects_an_empty_manifest_without_any_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("empty-proof.db"))
+        .await
+        .unwrap();
+    insert_schedule_history(
+        store.pool(),
+        "active-execution",
+        "active-occurrence",
+        "active-schedule",
+        "active",
+    )
+    .await;
+    let before: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions),
+            (SELECT COUNT(*) FROM schedule_occurrences),
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let error = store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &[])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    let after: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions),
+            (SELECT COUNT(*) FROM schedule_occurrences),
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn operation_tombstones_reject_replacement_extra_and_mismatched_ordinals() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("tombstone-shape.db"))
+        .await
+        .unwrap();
+    let ids = vec!["schedule-a".to_owned(), "schedule-b".to_owned()];
+    store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap();
+
+    let replacement_statements = [
+        format!(
+            "INSERT OR REPLACE INTO schedule_retirement_schedule_ids
+                (schedule_id, operation_id, ordinal)
+             VALUES ('replacement', '{OPERATION_ID}', 0)"
+        ),
+        format!(
+            "INSERT INTO schedule_retirement_schedule_ids
+                (schedule_id, operation_id, ordinal)
+             VALUES ('replacement', '{OPERATION_ID}', 0)
+             ON CONFLICT(operation_id, ordinal)
+             DO UPDATE SET schedule_id = excluded.schedule_id"
+        ),
+        format!(
+            "INSERT INTO schedule_retirement_schedule_ids
+                (schedule_id, operation_id, ordinal)
+             VALUES ('schedule-a', '{SECOND_OPERATION_ID}', 0)
+             ON CONFLICT(schedule_id)
+             DO UPDATE SET operation_id = excluded.operation_id"
+        ),
+        format!(
+            "INSERT INTO schedule_retirement_schedule_ids
+                (schedule_id, operation_id, ordinal)
+             VALUES ('extra', '{OPERATION_ID}', 2)"
+        ),
+        format!(
+            "INSERT INTO schedule_retirement_schedule_ids
+                (schedule_id, operation_id, ordinal)
+             VALUES ('mismatch', '{OPERATION_ID}', 1)"
+        ),
+    ];
+    for statement in replacement_statements {
+        assert!(sqlx::query(&statement).execute(store.pool()).await.is_err());
+    }
+
+    assert!(store
+        .schedule_retirement_history_proven(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -796,6 +950,143 @@ async fn operation_tombstones_reject_late_inserts_and_schedule_id_updates() {
     .execute(store.pool())
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn operation_tombstone_triggers_reject_non_text_history_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("blob-history-triggers.db"))
+        .await
+        .unwrap();
+    insert_schedule_history(
+        store.pool(),
+        "active-execution",
+        "active-occurrence",
+        "active-schedule",
+        "active",
+    )
+    .await;
+
+    let statements = [
+        "INSERT INTO schedule_executions
+            (id, schedule_id, triggered_at, status, data_json)
+         VALUES ('blob-execution', X'7363686564756c65',
+                 '2026-08-11T00:00:00Z', 'pending', '{}')",
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id,
+             lease_expires_at)
+         VALUES ('blob-occurrence', X'7363686564756c65', 'unlinked',
+                 '2026-08-11T00:00:00Z', 'reserved', 'owner',
+                 '2026-08-11T00:10:00Z')",
+        "UPDATE schedule_executions SET schedule_id = X'7363686564756c65'
+         WHERE id = 'active-execution'",
+        "UPDATE schedule_occurrences SET schedule_id = X'7363686564756c65'
+         WHERE id = 'active-occurrence'",
+    ];
+    for statement in statements {
+        let error = sqlx::query(statement)
+            .execute(store.pool())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("schedule history ID must be TEXT"));
+    }
+}
+
+#[tokio::test]
+async fn operation_archive_rolls_back_when_preexisting_history_id_is_non_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("blob-history-archive.db"))
+        .await
+        .unwrap();
+    for trigger in [
+        "schedule_executions_reject_retired_schedule_insert",
+        "schedule_occurrences_reject_retired_schedule_insert",
+    ] {
+        sqlx::query(&format!("DROP TRIGGER {trigger}"))
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO schedule_executions
+            (id, schedule_id, triggered_at, status, data_json)
+         VALUES ('blob-execution', X'7363686564756c652d70726f6f66',
+                 '2026-08-11T00:00:00Z', 'pending', '{}')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id,
+             lease_expires_at)
+         VALUES ('blob-occurrence', X'7363686564756c652d70726f6f66',
+                 'blob-execution', '2026-08-11T00:00:00Z', 'reserved', 'owner',
+                 '2026-08-11T00:10:00Z')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let error = store
+        .archive_schedule_history_for_retired_engine_operation(
+            OPERATION_ID,
+            PLAN_DIGEST,
+            &["schedule-proof".to_owned()],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions),
+            (SELECT COUNT(*) FROM schedule_occurrences),
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn operation_retry_and_proof_reject_non_text_history_restored_after_completion() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("blob-history-retry.db"))
+        .await
+        .unwrap();
+    let ids = vec!["schedule-proof".to_owned()];
+    store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER schedule_executions_reject_retired_schedule_insert")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO schedule_executions
+            (id, schedule_id, triggered_at, status, data_json)
+         VALUES ('blob-execution', X'7363686564756c652d70726f6f66',
+                 '2026-08-11T00:00:00Z', 'pending', '{}')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let retry = store
+        .archive_schedule_history_for_retired_engine_operation(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await;
+    assert!(matches!(retry, Err(StorageError::InvalidData(_))));
+    assert!(!store
+        .schedule_retirement_history_proven(OPERATION_ID, PLAN_DIGEST, &ids)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

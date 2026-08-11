@@ -39,9 +39,9 @@ use crate::campaign_state::{
 };
 use crate::container::{PersistenceAvailability, SchedulableTarget, ServiceContainer};
 use crate::schedule_retirement::{
-    acquire_schedule_path_lease, current_generation, expected_written_generation, retire,
-    verify_written_generation, RetirementFaults, RetirementOutcome, RetirementStorage,
-    ScheduleGeneration,
+    acquire_schedule_path_lease, current_generation, expected_written_generation,
+    permanently_retired_error, retire, verify_written_generation, RetirementFaults,
+    RetirementOutcome, RetirementStorage, ScheduleGeneration,
 };
 #[cfg(test)]
 use crate::schedule_retirement::{
@@ -119,6 +119,7 @@ struct ScheduleFileStore {
     mutation_admission: AsyncMutex<()>,
     write_lock: AsyncMutex<()>,
     expected_generation: AsyncMutex<Option<ScheduleGeneration>>,
+    permanently_retired_ids: AsyncMutex<HashSet<String>>,
     quarantined_schedules: AsyncMutex<HashMap<String, Option<Schedule>>>,
     retirement_faults: RetirementFaults,
     #[cfg(test)]
@@ -142,6 +143,7 @@ impl ScheduleFileStore {
             mutation_admission: AsyncMutex::new(()),
             write_lock: AsyncMutex::new(()),
             expected_generation: AsyncMutex::new(None),
+            permanently_retired_ids: AsyncMutex::new(HashSet::new()),
             quarantined_schedules: AsyncMutex::new(HashMap::new()),
             retirement_faults: RetirementFaults::default(),
             #[cfg(test)]
@@ -178,6 +180,8 @@ impl ScheduleFileStore {
     ) -> Result<RetirementOutcome, CampaignSchedulerError> {
         let _admission = self.mutation_admission.lock().await;
         let outcome = retire(&self.path, storage, &self.retirement_faults).await?;
+        *self.permanently_retired_ids.lock().await =
+            outcome.permanently_retired_ids.iter().cloned().collect();
         *self.expected_generation.lock().await = Some(outcome.generation.clone());
         Ok(outcome)
     }
@@ -207,6 +211,7 @@ impl ScheduleFileStore {
         self.require_expected_generation().await?;
         let mut schedules = schedules.to_vec();
         self.restore_quarantined_schedules(&mut schedules).await;
+        self.reject_permanently_retired_state(&schedules).await?;
         let written = expected_written_generation(&self.path, &schedules)?;
         atomic_write_schedules(&self.path, &schedules)?;
         #[cfg(test)]
@@ -220,6 +225,7 @@ impl ScheduleFileStore {
         self.require_expected_generation().await?;
         let mut schedules = manager.list_schedules().await;
         self.restore_quarantined_schedules(&mut schedules).await;
+        self.reject_permanently_retired_state(&schedules).await?;
         let written = expected_written_generation(&self.path, &schedules)?;
         atomic_write_schedules(&self.path, &schedules)?;
         #[cfg(test)]
@@ -231,6 +237,8 @@ impl ScheduleFileStore {
         let _lease = acquire_schedule_path_lease(&self.path).await?;
         let _guard = self.write_lock.lock().await;
         self.require_expected_generation().await?;
+        self.reject_permanently_retired_state(std::slice::from_ref(schedule))
+            .await?;
         if self
             .quarantined_schedules
             .lock()
@@ -247,6 +255,51 @@ impl ScheduleFileStore {
         #[cfg(test)]
         self.pause_post_write_verification_for_test().await;
         self.accept_written_generation(written).await
+    }
+
+    async fn permanently_retired_intersection<'a>(
+        &self,
+        schedule_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let permanently_retired = self.permanently_retired_ids.lock().await;
+        let mut ids = schedule_ids
+            .into_iter()
+            .filter(|id| permanently_retired.contains(*id))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    async fn ensure_schedule_identity_active(
+        &self,
+        schedule_id: &str,
+    ) -> Result<(), CampaignSchedulerError> {
+        let ids = self
+            .permanently_retired_intersection(std::iter::once(schedule_id))
+            .await;
+        if ids.is_empty() {
+            Ok(())
+        } else {
+            Err(permanently_retired_error(&ids))
+        }
+    }
+
+    async fn reject_permanently_retired_state(
+        &self,
+        schedules: &[Schedule],
+    ) -> Result<(), StateFileError> {
+        let ids = self
+            .permanently_retired_intersection(schedules.iter().map(|schedule| schedule.id.as_str()))
+            .await;
+        if ids.is_empty() {
+            Ok(())
+        } else {
+            Err(StateFileError::PermanentlyRetiredSchedule {
+                schedule_ids: crate::schedule_retirement::bounded_schedule_ids(&ids),
+            })
+        }
     }
 
     async fn quarantine(&self, schedule_id: &str) -> Result<(), StateFileError> {
@@ -458,6 +511,10 @@ impl CampaignSchedulerPersistence {
     }
 
     async fn upsert(&self, ex: &ScheduleExecution) -> Result<(), PersistenceError> {
+        self.schedules
+            .ensure_schedule_identity_active(&ex.schedule_id)
+            .await
+            .map_err(|error| PersistenceError::new(error.to_string()))?;
         let Some(store) = &self.store else {
             return Ok(());
         };
@@ -1244,6 +1301,7 @@ struct FuzzCampaignDispatcher {
     state: Arc<CampaignStateStore>,
     gate: Arc<ConcurrencyGate>,
     notifier: NotifierSlot,
+    schedules: Arc<ScheduleFileStore>,
     /// Weak so the manager <-> dispatcher cycle does not leak; used to pause a
     /// campaign once its budget is spent.
     manager: Weak<SchedulerManager>,
@@ -1390,6 +1448,12 @@ impl WorkflowDispatcher for FuzzCampaignDispatcher {
         let params: CampaignParams =
             serde_json::from_value(parameter_values).map_err(|e| DispatchError::ParseError {
                 message: format!("campaign params: {e}"),
+            })?;
+        self.schedules
+            .ensure_schedule_identity_active(&params.schedule_id)
+            .await
+            .map_err(|error| DispatchError::ExecutionFailed {
+                message: error.to_string(),
             })?;
 
         // 1. Budget. Spent -> record one skip and pause, so it stops re-firing.
@@ -1620,11 +1684,12 @@ pub enum CampaignSchedulerError {
         schedule_ids: String,
         reason: String,
     },
-    /// Retired schedule input was introduced after one-time retirement completed.
+    /// A retired engine input or permanently retired schedule identity was restored.
     #[error(
-        "fuzzing engine '{engine}' has been retired; choose one of: afl++, honggfuzz, \
-         libfuzzer, syzkaller; active retired schedule IDs: {schedule_ids}; remove or replace \
-         these schedules in schedules.json, then restart"
+        "schedule identity is permanently retired because it belonged to fuzzing engine \
+         '{engine}'; choose a new schedule ID and one of: afl++, honggfuzz, libfuzzer, \
+         syzkaller; active permanently retired schedule IDs: {schedule_ids}; remove these \
+         schedules from schedules.json, then restart"
     )]
     RetiredScheduleRestore {
         engine: &'static str,
@@ -1834,6 +1899,7 @@ impl CampaignScheduler {
             state: Arc::clone(&state),
             gate: Arc::clone(&gate),
             notifier: Arc::clone(&notifier),
+            schedules: Arc::clone(&schedules),
             manager: Arc::downgrade(&manager),
         });
         manager.set_dispatcher(dispatcher).await;
@@ -2435,6 +2501,16 @@ impl CampaignScheduler {
         params.schedule_id.clone_from(&id);
         let schedule = Schedule::new(id, name, trigger, CAMPAIGN_KIND)
             .with_params(serde_json::to_value(&params).unwrap_or_default());
+        self.register_new_schedule(schedule).await
+    }
+
+    async fn register_new_schedule(
+        &self,
+        schedule: Schedule,
+    ) -> Result<Schedule, CampaignSchedulerError> {
+        self.schedules
+            .ensure_schedule_identity_active(&schedule.id)
+            .await?;
         self.manager.register(schedule.clone()).await;
         if let Err(error) = self.persist().await {
             self.manager.remove(&schedule.id).await;
@@ -2580,6 +2656,9 @@ impl CampaignScheduler {
         schedule_id: &str,
     ) -> Result<tokio::sync::MutexGuard<'_, ()>, CampaignSchedulerError> {
         let admission_guard = self.lock_schedule_mutation_admission().await;
+        self.schedules
+            .ensure_schedule_identity_active(schedule_id)
+            .await?;
         if self.schedules.is_quarantined(schedule_id).await {
             return Err(CampaignSchedulerError::OccurrenceJournal(
                 "schedule mutation is blocked by corrupt one-time occurrence evidence".to_owned(),
@@ -3346,9 +3425,10 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "fuzzing engine '{}' has been retired; choose one of: afl++, honggfuzz, \
-                     libfuzzer, syzkaller; active retired schedule IDs: {restored_id}; remove or \
-                     replace these schedules in schedules.json, then restart",
+                    "schedule identity is permanently retired because it belonged to fuzzing \
+                     engine '{}'; choose a new schedule ID and one of: afl++, honggfuzz, \
+                     libfuzzer, syzkaller; active permanently retired schedule IDs: \
+                     {restored_id}; remove these schedules from schedules.json, then restart",
                     hf_core::retired_engine::RETIRED_ENGINE_ID,
                 )
             );
@@ -3361,6 +3441,189 @@ mod tests {
             assert_eq!(std::fs::read(completion_path).unwrap(), completion_before);
             assert_eq!(retired_history_rows(store).await, history_before);
         }
+    }
+
+    #[tokio::test]
+    async fn completed_retirement_rejects_supported_schedule_reusing_a_retired_identity() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-permanent"));
+        fixture
+            .reserve_receipt(
+                "schedule-permanent",
+                "occ-permanent",
+                "exec-permanent",
+                OneTimeOccurrenceState::Reserved,
+            )
+            .await;
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+        fixture.push_schedule(active_campaign("schedule-permanent"));
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let archive_before = std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap();
+        let receipt_before =
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        let history_before = retired_history_rows(fixture.store.as_deref().unwrap()).await;
+
+        let error = fixture
+            .start()
+            .await
+            .err()
+            .expect("supported identity restore must fail closed");
+
+        assert!(matches!(
+            error,
+            CampaignSchedulerError::RetiredScheduleRestore { .. }
+        ));
+        assert!(error
+            .to_string()
+            .contains("schedule identity is permanently retired"));
+        assert!(error.to_string().contains("schedule-permanent"));
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_path(&fixture.schedules_path)).unwrap(),
+            archive_before
+        );
+        assert_eq!(
+            std::fs::read(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap(),
+            receipt_before
+        );
+        assert_eq!(
+            retired_history_rows(fixture.store.as_deref().unwrap()).await,
+            history_before
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_receipt_uses_database_tombstones_to_reject_supported_identity_restore() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-permanent"));
+        let repository = ScheduleFileStore::new(fixture.schedules_path.clone());
+        repository
+            .retire_engine_schedules(fixture.store.as_deref())
+            .await
+            .unwrap();
+        std::fs::remove_file(retired_schedule_retirement_path(&fixture.schedules_path)).unwrap();
+        std::fs::remove_file(retirement_completion_path(&fixture.schedules_path)).unwrap();
+        std::fs::remove_file(retired_schedule_path(&fixture.schedules_path)).unwrap();
+        fixture.push_schedule(active_campaign("schedule-permanent"));
+        let active_before = std::fs::read(&fixture.schedules_path).unwrap();
+
+        let error = fixture
+            .start()
+            .await
+            .err()
+            .expect("tombstoned identity restore must fail closed");
+
+        assert!(matches!(
+            error,
+            CampaignSchedulerError::RetiredScheduleRestore { .. }
+        ));
+        assert!(error
+            .to_string()
+            .contains("schedule identity is permanently retired"));
+        assert_eq!(
+            std::fs::read(&fixture.schedules_path).unwrap(),
+            active_before
+        );
+    }
+
+    #[tokio::test]
+    async fn post_start_permanent_identity_guard_blocks_create_update_persistence_and_dispatch() {
+        let fixture = scheduler_fixture_with_store().await;
+        fixture.push_schedule(retired_campaign("schedule-permanent"));
+        let scheduler = fixture.start().await.unwrap();
+        let file_before = std::fs::read(&fixture.schedules_path).unwrap();
+        let mut supported = active_campaign("schedule-permanent");
+        supported.enabled = false;
+
+        let create_error = scheduler
+            .register_new_schedule(supported.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            create_error,
+            CampaignSchedulerError::RetiredScheduleRestore { .. }
+        ));
+        assert!(scheduler
+            .manager
+            .get_schedule("schedule-permanent")
+            .await
+            .is_none());
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), file_before);
+
+        scheduler.manager.register(supported).await;
+        let update_error = scheduler
+            .try_set_enabled("schedule-permanent", true)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            update_error,
+            CampaignSchedulerError::RetiredScheduleRestore { .. }
+        ));
+        assert!(
+            !scheduler
+                .manager
+                .get_schedule("schedule-permanent")
+                .await
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(std::fs::read(&fixture.schedules_path).unwrap(), file_before);
+
+        let now = Utc::now();
+        let execution = ScheduleExecution {
+            execution_id: "blocked-execution".to_owned(),
+            schedule_id: "schedule-permanent".to_owned(),
+            triggered_at: now,
+            started_at: Some(now),
+            completed_at: None,
+            status: ExecutionStatus::Running,
+            workflow_execution_id: None,
+            request_summary: serde_json::Value::Null,
+            response_summary: serde_json::Value::Null,
+            error_message: None,
+        };
+        let persistence_error = scheduler
+            .occurrences
+            .record_execution(&execution)
+            .await
+            .unwrap_err();
+        assert!(persistence_error
+            .to_string()
+            .contains("schedule identity is permanently retired"));
+        let persisted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schedule_executions WHERE id = 'blocked-execution'",
+        )
+        .fetch_one(fixture.store.as_deref().unwrap().pool())
+        .await
+        .unwrap();
+        assert_eq!(persisted, 0);
+
+        let dispatcher = FuzzCampaignDispatcher {
+            container: ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None),
+            state: Arc::clone(&scheduler.state),
+            gate: Arc::clone(&scheduler.gate),
+            notifier: Arc::clone(&scheduler.notifier),
+            manager: Arc::downgrade(&scheduler.manager),
+            schedules: Arc::clone(&scheduler.schedules),
+        };
+        let mut params = fixture.params();
+        params.schedule_id = "schedule-permanent".to_owned();
+        let dispatch_error = dispatcher
+            .dispatch(CAMPAIGN_KIND, serde_json::to_value(params).unwrap())
+            .await
+            .unwrap_err();
+        assert!(dispatch_error
+            .to_string()
+            .contains("schedule identity is permanently retired"));
+
+        scheduler.stop().await;
     }
 
     #[tokio::test]
@@ -3397,7 +3660,7 @@ mod tests {
             .err()
             .expect("restore must fail closed");
         assert!(error.to_string().contains(
-            "active retired schedule IDs: schedule-a, schedule-m, schedule-u, schedule-z; remove or replace"
+            "active permanently retired schedule IDs: schedule-a, schedule-m, schedule-u, schedule-z; remove these schedules"
         ));
         assert_eq!(
             std::fs::read(&fixture.schedules_path).unwrap(),
@@ -3431,7 +3694,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         assert!(message.contains(&format!(
-            "active retired schedule IDs: {expected_ids} (+5 more);"
+            "active permanently retired schedule IDs: {expected_ids} (+5 more);"
         )));
         assert!(!message.contains("schedule-24"));
     }
@@ -5224,7 +5487,7 @@ mod tests {
             "INSERT INTO schedule_occurrences
                 (id, schedule_id, execution_id, triggered_at, state, owner_id, lease_expires_at)
              VALUES
-                ('occ-undecodable', x'ff', 'exec-undecodable',
+                ('occ-undecodable', CAST(x'ff' AS TEXT), 'exec-undecodable',
                  '2026-07-30T00:00:00Z', 'completed', 'owner', NULL)",
         )
         .execute(store.pool())
@@ -5309,7 +5572,7 @@ mod tests {
             .fetch_one(store.pool())
             .await
             .unwrap(),
-            ("blob".to_owned(), "FF".to_owned())
+            ("text".to_owned(), "FF".to_owned())
         );
         scheduler.stop().await;
     }
@@ -6095,6 +6358,19 @@ mod tests {
         let serialized = serde_json::to_string(&unavailable).unwrap();
         assert!(!serialized.contains("PRIVATE_PATH_MARKER"));
         assert!(!serialized.contains("OS_PRIVATE_MARKER"));
+
+        let permanent_identity =
+            CampaignSchedulerError::State(StateFileError::PermanentlyRetiredSchedule {
+                schedule_ids: "PRIVATE_ID_MARKER".to_owned(),
+            })
+            .into_public_recovery_error();
+        assert_eq!(
+            permanent_identity.code,
+            RecoveryPublicErrorCode::Unavailable
+        );
+        assert!(!serde_json::to_string(&permanent_identity)
+            .unwrap()
+            .contains("PRIVATE_ID_MARKER"));
 
         for detailed in [
             CampaignSchedulerError::RetiredScheduleArchive {

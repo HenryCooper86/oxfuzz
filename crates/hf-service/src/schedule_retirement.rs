@@ -114,6 +114,7 @@ pub(crate) struct ScheduleGeneration {
 
 pub(crate) struct RetirementOutcome {
     pub(crate) schedules: Vec<Schedule>,
+    pub(crate) permanently_retired_ids: Vec<String>,
     #[cfg(test)]
     pub(crate) retired_ids: Vec<String>,
     pub(crate) generation: ScheduleGeneration,
@@ -544,9 +545,9 @@ async fn retire_with_lease(
             }
             RetiredScheduleRetirementState::CompletionPending => {
                 let current_active = load_image(schedules_path)?;
-                let restored = retired_campaigns(&current_active.schedules);
-                if !restored.is_empty() {
-                    return Err(restored_error(&restored));
+                let prohibited = prohibited_active_ids(&current_active.schedules, &ids);
+                if !prohibited.is_empty() {
+                    return Err(permanently_retired_error(&prohibited));
                 }
                 require_image(
                     &current_active,
@@ -577,9 +578,9 @@ async fn retire_with_lease(
             RetiredScheduleRetirementState::Completed => {
                 let current_active = load_image(schedules_path)?;
                 validate_unique_ids(&current_active.schedules, "active schedule file")?;
-                let restored = retired_campaigns(&current_active.schedules);
-                if !restored.is_empty() {
-                    return Err(restored_error(&restored));
+                let prohibited = prohibited_active_ids(&current_active.schedules, &ids);
+                if !prohibited.is_empty() {
+                    return Err(permanently_retired_error(&prohibited));
                 }
                 require_archive_postimage(&archive_path, &receipt)?;
                 require_history_proof(storage, &receipt).await?;
@@ -587,6 +588,7 @@ async fn retire_with_lease(
                 let generation = current_active.generation();
                 return Ok(RetirementOutcome {
                     schedules: current_active.schedules,
+                    permanently_retired_ids: ids.clone(),
                     #[cfg(test)]
                     retired_ids: if already_completed { Vec::new() } else { ids },
                     generation,
@@ -617,9 +619,10 @@ async fn reconcile_completed_evidence(
     let active = load_image(schedules_path)?;
     validate_unique_ids(&active.schedules, "active schedule file")?;
     validate_schedule_bounds(&active.schedules)?;
-    let restored = retired_campaigns(&active.schedules);
-    if !restored.is_empty() {
-        return Err(restored_error(&restored));
+    let ids = receipt_ids(receipt);
+    let prohibited = prohibited_active_ids(&active.schedules, &ids);
+    if !prohibited.is_empty() {
+        return Err(permanently_retired_error(&prohibited));
     }
     require_archive_postimage(&retired_schedule_path(schedules_path), receipt)?;
     require_history_proof(storage, receipt).await?;
@@ -635,6 +638,7 @@ async fn reconcile_completed_evidence(
     Ok(Some(RetirementOutcome {
         generation: active.generation(),
         schedules: active.schedules,
+        permanently_retired_ids: ids,
         #[cfg(test)]
         retired_ids: Vec::new(),
         lease: None,
@@ -648,14 +652,37 @@ async fn reject_independent_evidence_without_receipt(
     active: &[Schedule],
 ) -> Result<(), CampaignSchedulerError> {
     let ids = retired_ids(active);
-    if archive.present || retirement_completion_path(schedules_path).exists() {
-        let restored = retired_campaigns(active);
-        if !restored.is_empty() {
-            return Err(restored_error(&restored));
-        }
+    let file_evidence = archive.present || retirement_completion_path(schedules_path).exists();
+    let mut permanent_ids = archive
+        .schedules
+        .iter()
+        .map(|schedule| schedule.id.clone())
+        .collect::<Vec<_>>();
+    let database_evidence = if let RetirementStorage::Available(store) = storage {
+        let mut tombstone_ids = store
+            .schedule_retirement_tombstone_ids()
+            .await
+            .map_err(|error| archive_error(&ids, error))?;
+        let present = !tombstone_ids.is_empty();
+        permanent_ids.append(&mut tombstone_ids);
+        present
+    } else {
+        false
+    };
+    let prohibited = prohibited_active_ids(active, &permanent_ids);
+    if (file_evidence || database_evidence) && !prohibited.is_empty() {
+        return Err(permanently_retired_error(&prohibited));
+    }
+    if file_evidence {
         return Err(receipt_error(
             &ids,
             "retirement evidence exists without its receipt",
+        ));
+    }
+    if database_evidence {
+        return Err(receipt_error(
+            &ids,
+            "database retirement evidence exists without its receipt",
         ));
     }
     if matches!(storage, RetirementStorage::Unavailable) {
@@ -663,22 +690,6 @@ async fn reject_independent_evidence_without_receipt(
             &ids,
             "linked schedule history storage is unavailable",
         ));
-    }
-    if let RetirementStorage::Available(store) = storage {
-        let has_proof = store
-            .has_schedule_retirement_history_proof()
-            .await
-            .map_err(|error| archive_error(&ids, error))?;
-        if has_proof {
-            let restored = retired_campaigns(active);
-            if !restored.is_empty() {
-                return Err(restored_error(&restored));
-            }
-            return Err(receipt_error(
-                &ids,
-                "database retirement evidence exists without its receipt",
-            ));
-        }
     }
     Ok(())
 }
@@ -841,11 +852,11 @@ fn require_active_preimage_or_restore(
 }
 
 fn active_third_state_error(current: &[Schedule], ids: &[String]) -> CampaignSchedulerError {
-    let restored = retired_campaigns(current);
-    if restored.is_empty() {
+    let prohibited = prohibited_active_ids(current, ids);
+    if prohibited.is_empty() {
         receipt_error(ids, "active schedule compare-and-swap failed")
     } else {
-        restored_error(&restored)
+        permanently_retired_error(&prohibited)
     }
 }
 
@@ -1408,6 +1419,23 @@ fn retired_ids(schedules: &[Schedule]) -> Vec<String> {
     ids
 }
 
+fn prohibited_active_ids(schedules: &[Schedule], permanently_retired: &[String]) -> Vec<String> {
+    let permanently_retired = permanently_retired
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut ids = schedules
+        .iter()
+        .filter(|schedule| {
+            is_retired_campaign(schedule) || permanently_retired.contains(schedule.id.as_str())
+        })
+        .map(|schedule| schedule.id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 fn is_retired_campaign(schedule: &Schedule) -> bool {
     schedule.workflow_id == crate::scheduler::CAMPAIGN_KIND
         && schedule
@@ -1417,10 +1445,10 @@ fn is_retired_campaign(schedule: &Schedule) -> bool {
             .is_some_and(hf_core::retired_engine::is_retired_engine_id)
 }
 
-fn restored_error(retired: &[Schedule]) -> CampaignSchedulerError {
+pub(crate) fn permanently_retired_error(ids: &[String]) -> CampaignSchedulerError {
     CampaignSchedulerError::RetiredScheduleRestore {
         engine: hf_core::retired_engine::RETIRED_ENGINE_ID,
-        schedule_ids: bounded_schedule_ids(&retired_ids(retired)),
+        schedule_ids: bounded_schedule_ids(ids),
     }
 }
 
