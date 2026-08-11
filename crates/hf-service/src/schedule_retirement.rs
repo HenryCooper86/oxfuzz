@@ -6,6 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use hf_scheduler::Schedule;
 use hf_storage::Store;
@@ -19,9 +20,12 @@ const RECEIPT_VERSION: u32 = 2;
 const COMPLETION_VERSION: u32 = 1;
 const MAX_RECEIPT_SCHEDULES: usize = 4_096;
 const MAX_RECEIPT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SCHEDULE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ERROR_IDS: usize = 20;
 const MAX_ERROR_ID_CHARS: usize = 128;
 const MAX_ERROR_DETAIL_CHARS: usize = 1_024;
+const SCHEDULE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const SCHEDULE_LOCK_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy)]
 pub(crate) enum RetirementStorage<'a> {
@@ -246,20 +250,22 @@ static PROCESS_PATH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mut
 pub(crate) async fn acquire_schedule_path_lease(
     schedules_path: &Path,
 ) -> Result<SchedulePathLease, StateFileError> {
+    acquire_schedule_path_lease_with_timeout(schedules_path, SCHEDULE_LOCK_TIMEOUT).await
+}
+
+async fn acquire_schedule_path_lease_with_timeout(
+    schedules_path: &Path,
+    timeout: Duration,
+) -> Result<SchedulePathLease, StateFileError> {
     let lock_path = schedule_lock_path(schedules_path);
-    let process_path = if lock_path.is_absolute() {
-        lock_path.clone()
-    } else {
-        std::env::current_dir().map_or_else(
-            |_| lock_path.clone(),
-            |directory| directory.join(&lock_path),
-        )
-    };
+    let process_path = absolute_lock_path(&lock_path);
+    let deadline = tokio::time::Instant::now() + timeout;
     let process_lock = {
         let mut locks = PROCESS_PATH_LOCKS
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(&process_path).and_then(Weak::upgrade) {
             lock
         } else {
@@ -268,46 +274,102 @@ pub(crate) async fn acquire_schedule_path_lease(
             lock
         }
     };
-    let process_guard = process_lock.lock_owned().await;
-    let task_path = lock_path.clone();
-    let file = tokio::task::spawn_blocking(move || {
-        let parent = task_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent).map_err(|source| StateFileError::Io {
-            operation: "create lock directory for",
-            path: task_path.clone(),
+    let process_guard = tokio::time::timeout_at(deadline, process_lock.lock_owned())
+        .await
+        .map_err(|_| lock_timeout_error(&lock_path))?;
+
+    let parent = lock_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| StateFileError::Io {
+        operation: "create lock directory for",
+        path: lock_path.clone(),
+        source,
+    })?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| StateFileError::Io {
+            operation: "open lock for",
+            path: lock_path.clone(),
             source,
         })?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&task_path)
-            .map_err(|source| StateFileError::Io {
-                operation: "open lock for",
-                path: task_path.clone(),
-                source,
-            })?;
-        fs2::FileExt::lock_exclusive(&file).map_err(|source| StateFileError::Io {
-            operation: "lock",
-            path: task_path,
-            source,
-        })?;
-        Ok(file)
-    })
-    .await
-    .map_err(|source| StateFileError::Io {
-        operation: "join lock task for",
-        path: lock_path,
-        source: std::io::Error::other(source.to_string()),
-    })??;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(lock_timeout_error(&lock_path));
+        }
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => break,
+            Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(lock_timeout_error(&lock_path));
+                }
+                tokio::time::sleep_until(
+                    deadline.min(tokio::time::Instant::now() + SCHEDULE_LOCK_POLL),
+                )
+                .await;
+            }
+            Err(source) => return Err(classify_lock_error(&lock_path, source)),
+        }
+    }
     Ok(SchedulePathLease {
         _process: process_guard,
         _file: file,
     })
+}
+
+fn absolute_lock_path(lock_path: &Path) -> PathBuf {
+    if lock_path.is_absolute() {
+        lock_path.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(
+            |_| lock_path.to_path_buf(),
+            |directory| directory.join(lock_path),
+        )
+    }
+}
+
+fn lock_timeout_error(path: &Path) -> StateFileError {
+    classify_lock_error(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out waiting for the schedule advisory lock",
+        ),
+    )
+}
+
+fn classify_lock_error(path: &Path, source: std::io::Error) -> StateFileError {
+    StateFileError::Io {
+        operation: "lock",
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn process_lock_strong_count(schedules_path: &Path) -> usize {
+    let path = absolute_lock_path(&schedule_lock_path(schedules_path));
+    PROCESS_PATH_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&path)
+        .map_or(0, Weak::strong_count)
+}
+
+#[cfg(test)]
+fn process_lock_registry_contains(schedules_path: &Path) -> bool {
+    let path = absolute_lock_path(&schedule_lock_path(schedules_path));
+    PROCESS_PATH_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&path)
 }
 
 pub(crate) async fn retire(
@@ -360,6 +422,19 @@ async fn retire_with_lease(
 
     loop {
         receipt = reload_expected_receipt(&receipt_path, &receipt)?;
+        if receipt.state != RetiredScheduleRetirementState::Completed {
+            if let Some(outcome) = reconcile_completed_evidence(
+                schedules_path,
+                storage,
+                &receipt_path,
+                &receipt,
+                faults,
+            )
+            .await?
+            {
+                return Ok(outcome);
+            }
+        }
         let ids = receipt_ids(&receipt);
         match receipt.state {
             RetiredScheduleRetirementState::ArchivePending => {
@@ -369,6 +444,11 @@ async fn retire_with_lease(
                     load_image(&archive_path).map_err(|error| archive_error(&ids, error))?;
                 validate_unique_ids(&current_archive.schedules, "retired schedule archive")?;
                 if image_matches(&current_archive, &receipt.plan.archive_pre)? {
+                    expected_written_generation(
+                        &archive_path,
+                        &receipt.plan.archive_post.schedules,
+                    )
+                    .map_err(|error| archive_error(&ids, error))?;
                     #[cfg(test)]
                     faults
                         .pause_at(ScheduleRetirementPausePoint::ArchiveWrite)
@@ -438,6 +518,11 @@ async fn retire_with_lease(
                             .pause_at(ScheduleRetirementPausePoint::ActiveRewrite)
                             .await;
                         faults.before_active_rewrite()?;
+                        expected_written_generation(
+                            schedules_path,
+                            &receipt.plan.active_post.schedules,
+                        )
+                        .map_err(|error| archive_error(&ids, error))?;
                         atomic_write_json(schedules_path, &receipt.plan.active_post.schedules)
                             .map_err(|error| archive_error(&ids, error))?;
                     }
@@ -512,6 +597,50 @@ async fn retire_with_lease(
     }
 }
 
+async fn reconcile_completed_evidence(
+    schedules_path: &Path,
+    storage: RetirementStorage<'_>,
+    receipt_path: &Path,
+    receipt: &RetiredScheduleRetirementReceipt,
+    faults: &RetirementFaults,
+) -> Result<Option<RetirementOutcome>, CampaignSchedulerError> {
+    let Some(certificate) = load_completion(&retirement_completion_path(schedules_path))? else {
+        return Ok(None);
+    };
+    if !same_json(&certificate, &completion_for(receipt))? {
+        return Err(receipt_error(
+            &receipt_ids(receipt),
+            "completion certificate conflicts with the receipt",
+        ));
+    }
+
+    let active = load_image(schedules_path)?;
+    validate_unique_ids(&active.schedules, "active schedule file")?;
+    validate_schedule_bounds(&active.schedules)?;
+    let restored = retired_campaigns(&active.schedules);
+    if !restored.is_empty() {
+        return Err(restored_error(&restored));
+    }
+    require_archive_postimage(&retired_schedule_path(schedules_path), receipt)?;
+    require_history_proof(storage, receipt).await?;
+
+    if receipt.state != RetiredScheduleRetirementState::Completed {
+        transition(
+            receipt_path,
+            receipt,
+            RetiredScheduleRetirementState::Completed,
+            faults,
+        )?;
+    }
+    Ok(Some(RetirementOutcome {
+        generation: active.generation(),
+        schedules: active.schedules,
+        #[cfg(test)]
+        retired_ids: Vec::new(),
+        lease: None,
+    }))
+}
+
 async fn reject_independent_evidence_without_receipt(
     schedules_path: &Path,
     archive: &ScheduleImage,
@@ -527,6 +656,12 @@ async fn reject_independent_evidence_without_receipt(
         return Err(receipt_error(
             &ids,
             "retirement evidence exists without its receipt",
+        ));
+    }
+    if matches!(storage, RetirementStorage::Unavailable) {
+        return Err(archive_error(
+            &ids,
+            "linked schedule history storage is unavailable",
         ));
     }
     if let RetirementStorage::Available(store) = storage {
@@ -637,7 +772,16 @@ async fn archive_history(
             &ids,
             "database-backed history proof is required",
         )),
-        (HistoryRequirement::NotConfigured | HistoryRequirement::NoRetiredSchedules, _) => Ok(()),
+        (HistoryRequirement::NotConfigured, RetirementStorage::NotConfigured)
+        | (HistoryRequirement::NoRetiredSchedules, _) => Ok(()),
+        (HistoryRequirement::NotConfigured, RetirementStorage::Available(_)) => Err(receipt_error(
+            &ids,
+            "database persistence was configured after the history waiver",
+        )),
+        (HistoryRequirement::NotConfigured, RetirementStorage::Unavailable) => Err(archive_error(
+            &ids,
+            "database persistence is configured but unavailable after the history waiver",
+        )),
     }
 }
 
@@ -670,7 +814,16 @@ async fn require_history_proof(
             &ids,
             "database-backed history proof is required",
         )),
-        (HistoryRequirement::NotConfigured | HistoryRequirement::NoRetiredSchedules, _) => Ok(()),
+        (HistoryRequirement::NotConfigured, RetirementStorage::NotConfigured)
+        | (HistoryRequirement::NoRetiredSchedules, _) => Ok(()),
+        (HistoryRequirement::NotConfigured, RetirementStorage::Available(_)) => Err(receipt_error(
+            &ids,
+            "database persistence was configured after the history waiver",
+        )),
+        (HistoryRequirement::NotConfigured, RetirementStorage::Unavailable) => Err(archive_error(
+            &ids,
+            "database persistence is configured but unavailable after the history waiver",
+        )),
     }
 }
 
@@ -731,8 +884,28 @@ fn persist_receipt(
     receipt: &RetiredScheduleRetirementReceipt,
     faults: &RetirementFaults,
 ) -> Result<(), CampaignSchedulerError> {
+    validate_receipt(receipt)?;
+    let bytes = pretty_bytes(receipt)?;
+    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+        return Err(receipt_error(
+            &receipt_ids(receipt),
+            "receipt state file exceeds size limit",
+        ));
+    }
     faults.before_receipt(receipt.state)?;
-    atomic_write_json(path, receipt).map_err(|error| receipt_error(&receipt_ids(receipt), error))
+    atomic_write_json(path, receipt)
+        .map_err(|error| receipt_error(&receipt_ids(receipt), error))?;
+    let written = load_receipt(path)?
+        .ok_or_else(|| receipt_error(&receipt_ids(receipt), "receipt write disappeared"))?;
+    validate_receipt(&written)?;
+    if same_json(&written, receipt)? {
+        Ok(())
+    } else {
+        Err(receipt_error(
+            &receipt_ids(receipt),
+            "receipt write verification failed",
+        ))
+    }
 }
 
 fn reload_expected_receipt(
@@ -755,7 +928,8 @@ fn reload_expected_receipt(
 fn load_receipt(
     path: &Path,
 ) -> Result<Option<RetiredScheduleRetirementReceipt>, CampaignSchedulerError> {
-    let bytes = read_bounded_optional(path).map_err(|error| receipt_error(&[], error))?;
+    let bytes = read_bounded_optional(path, MAX_RECEIPT_BYTES)
+        .map_err(|error| receipt_error(&[], error))?;
     bytes
         .map(|bytes| {
             serde_json::from_slice(&bytes)
@@ -771,7 +945,10 @@ fn validate_receipt(
     if receipt.version != RECEIPT_VERSION {
         return Err(receipt_error(&ids, "unsupported receipt version"));
     }
-    if uuid::Uuid::parse_str(&receipt.operation_id).is_err() {
+    if !matches!(
+        uuid::Uuid::parse_str(&receipt.operation_id),
+        Ok(operation_id) if operation_id.to_string() == receipt.operation_id
+    ) {
         return Err(receipt_error(&ids, "invalid operation identifier"));
     }
     for image in [
@@ -796,8 +973,94 @@ fn validate_receipt(
             ));
         }
     }
+    validate_plan_semantics(&receipt.plan, &ids)?;
     if operation_plan_digest(&receipt.operation_id, &receipt.plan)? != receipt.plan_digest {
         return Err(receipt_error(&ids, "receipt plan digest differs"));
+    }
+    Ok(())
+}
+
+fn validate_plan_semantics(
+    plan: &RetirementPlan,
+    ids: &[String],
+) -> Result<(), CampaignSchedulerError> {
+    let classified = retired_campaigns(&plan.active_pre.schedules);
+    if classified.len() != plan.retired.len() {
+        return Err(receipt_error(
+            ids,
+            "retired snapshots do not match the classified active preimage",
+        ));
+    }
+    for (schedule, snapshot) in classified.iter().zip(&plan.retired) {
+        if !same_json(schedule, &snapshot.schedule)? {
+            return Err(receipt_error(
+                ids,
+                "retired snapshots do not match the classified active preimage",
+            ));
+        }
+    }
+
+    let retired_ids = classified
+        .iter()
+        .map(|schedule| schedule.id.as_str())
+        .collect::<HashSet<_>>();
+    let expected_active = if classified.is_empty() {
+        plan.active_pre.clone()
+    } else {
+        generated_image(
+            plan.active_pre
+                .schedules
+                .iter()
+                .filter(|schedule| !retired_ids.contains(schedule.id.as_str()))
+                .cloned()
+                .collect(),
+        )?
+    };
+    if !image_matches(&expected_active, &plan.active_post)? {
+        return Err(receipt_error(
+            ids,
+            "active postimage is not the exact retired-schedule subtraction",
+        ));
+    }
+
+    let mut archive_schedules = plan.archive_pre.schedules.clone();
+    for retired in &classified {
+        match archive_schedules
+            .iter()
+            .find(|existing| existing.id == retired.id)
+        {
+            Some(existing) if same_json(existing, retired)? => {}
+            Some(_) => {
+                return Err(receipt_error(
+                    ids,
+                    "retired archive merge conflicts with existing evidence",
+                ));
+            }
+            None => archive_schedules.push(retired.clone()),
+        }
+    }
+    archive_schedules.sort_by(|left, right| left.id.cmp(&right.id));
+    let expected_archive = generated_image(archive_schedules)?;
+    if !image_matches(&expected_archive, &plan.archive_post)? {
+        return Err(receipt_error(
+            ids,
+            "archive postimage is not the exact conflict-checked merge",
+        ));
+    }
+
+    let history_matches = if classified.is_empty() {
+        plan.history == HistoryRequirement::NoRetiredSchedules
+    } else {
+        matches!(
+            plan.history,
+            HistoryRequirement::Database | HistoryRequirement::NotConfigured
+        )
+    };
+    if !history_matches {
+        return Err(receipt_error(
+            ids,
+            "history requirement is incompatible with the retired schedule set",
+        ));
     }
     Ok(())
 }
@@ -806,18 +1069,20 @@ fn validate_image(image: &ScheduleImage, ids: &[String]) -> Result<(), CampaignS
     if canonical_digest(&image.schedules)? != image.canonical_digest {
         return Err(receipt_error(ids, "schedule image digest differs"));
     }
+    if !is_sha256_digest(&image.byte_digest) {
+        return Err(receipt_error(ids, "schedule byte digest is invalid"));
+    }
     if !image.present && (!image.schedules.is_empty() || image.byte_digest != digest_bytes(&[])) {
         return Err(receipt_error(ids, "absent schedule image contains data"));
     }
-    if image.present {
-        let expected = pretty_bytes(&image.schedules)?;
-        if digest_bytes(&expected) != image.byte_digest
-            && image.byte_digest.len() != Sha256::output_size() * 2
-        {
-            return Err(receipt_error(ids, "schedule byte digest is invalid"));
-        }
-    }
     Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == Sha256::output_size() * 2
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn ensure_completion_certificate(
@@ -834,9 +1099,27 @@ fn ensure_completion_certificate(
             "completion certificate conflicts with the receipt",
         )),
         None => {
+            let bytes = pretty_bytes(&expected)?;
+            if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+                return Err(receipt_error(
+                    &receipt_ids(receipt),
+                    "completion certificate exceeds size limit",
+                ));
+            }
             faults.before_completion_certificate()?;
             atomic_write_json(&path, &expected)
-                .map_err(|error| receipt_error(&receipt_ids(receipt), error))
+                .map_err(|error| receipt_error(&receipt_ids(receipt), error))?;
+            let written = load_completion(&path)?.ok_or_else(|| {
+                receipt_error(&receipt_ids(receipt), "completion certificate disappeared")
+            })?;
+            if same_json(&written, &expected)? {
+                Ok(())
+            } else {
+                Err(receipt_error(
+                    &receipt_ids(receipt),
+                    "completion certificate write verification failed",
+                ))
+            }
         }
     }
 }
@@ -859,7 +1142,8 @@ fn require_completion_certificate(
 }
 
 fn load_completion(path: &Path) -> Result<Option<RetirementCompletion>, CampaignSchedulerError> {
-    let bytes = read_bounded_optional(path).map_err(|error| receipt_error(&[], error))?;
+    let bytes = read_bounded_optional(path, MAX_RECEIPT_BYTES)
+        .map_err(|error| receipt_error(&[], error))?;
     bytes
         .map(|bytes| {
             serde_json::from_slice::<RetirementCompletion>(&bytes)
@@ -879,7 +1163,7 @@ fn completion_for(receipt: &RetiredScheduleRetirementReceipt) -> RetirementCompl
     }
 }
 
-fn read_bounded_optional(path: &Path) -> Result<Option<Vec<u8>>, StateFileError> {
+fn read_bounded_optional(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, StateFileError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -892,14 +1176,14 @@ fn read_bounded_optional(path: &Path) -> Result<Option<Vec<u8>>, StateFileError>
         }
     };
     let mut bytes = Vec::new();
-    file.take(MAX_RECEIPT_BYTES + 1)
+    file.take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|source| StateFileError::Io {
             operation: "read",
             path: path.to_path_buf(),
             source,
         })?;
-    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(StateFileError::Io {
             operation: "read bounded",
             path: path.to_path_buf(),
@@ -913,8 +1197,8 @@ fn read_bounded_optional(path: &Path) -> Result<Option<Vec<u8>>, StateFileError>
 }
 
 fn load_image(path: &Path) -> Result<ScheduleImage, StateFileError> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
+    match read_bounded_optional(path, MAX_SCHEDULE_FILE_BYTES)? {
+        Some(bytes) => {
             let schedules = serde_json::from_slice::<Vec<Schedule>>(&bytes).map_err(|source| {
                 StateFileError::Decode {
                     path: path.to_path_buf(),
@@ -928,16 +1212,11 @@ fn load_image(path: &Path) -> Result<ScheduleImage, StateFileError> {
                 byte_digest: digest_bytes(&bytes),
             })
         }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(ScheduleImage {
+        None => Ok(ScheduleImage {
             present: false,
             schedules: Vec::new(),
             canonical_digest: canonical_digest_state(path, &Vec::<Schedule>::new())?,
             byte_digest: digest_bytes(&[]),
-        }),
-        Err(source) => Err(StateFileError::Io {
-            operation: "read",
-            path: path.to_path_buf(),
-            source,
         }),
     }
 }
@@ -1024,6 +1303,43 @@ impl ScheduleImage {
 
 pub(crate) fn current_generation(path: &Path) -> Result<ScheduleGeneration, StateFileError> {
     load_image(path).map(|image| image.generation())
+}
+
+pub(crate) fn expected_written_generation(
+    path: &Path,
+    schedules: &[Schedule],
+) -> Result<ScheduleGeneration, StateFileError> {
+    let bytes = serde_json::to_vec_pretty(schedules).map_err(|source| StateFileError::Encode {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if bytes.len() as u64 > MAX_SCHEDULE_FILE_BYTES {
+        return Err(StateFileError::Io {
+            operation: "serialize bounded",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "schedule state file exceeds size limit",
+            ),
+        });
+    }
+    Ok(ScheduleGeneration {
+        present: true,
+        byte_digest: digest_bytes(&bytes),
+    })
+}
+
+pub(crate) fn verify_written_generation(
+    path: &Path,
+    expected: &ScheduleGeneration,
+) -> Result<(), StateFileError> {
+    if current_generation(path)? == *expected {
+        Ok(())
+    } else {
+        Err(StateFileError::Conflict {
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 fn validate_unique_ids(
@@ -1185,6 +1501,9 @@ fn sibling_path(path: &Path, name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
     use hf_scheduler::TriggerConfig;
 
     use super::*;
@@ -1199,6 +1518,29 @@ mod tests {
         .with_params(serde_json::json!({
             "engine": hf_core::retired_engine::RETIRED_ENGINE_ID
         }))
+    }
+
+    fn supported_schedule(id: &str) -> Schedule {
+        Schedule::new(
+            id,
+            "supported",
+            TriggerConfig::Interval { interval_secs: 60 },
+            crate::scheduler::CAMPAIGN_KIND,
+        )
+        .with_params(serde_json::json!({ "engine": "libfuzzer" }))
+    }
+
+    fn rehash_image(image: &mut ScheduleImage) {
+        image.canonical_digest = canonical_digest(&image.schedules).unwrap();
+        image.byte_digest = if image.present {
+            digest_bytes(&pretty_bytes(&image.schedules).unwrap())
+        } else {
+            digest_bytes(&[])
+        };
+    }
+
+    fn rehash_receipt(receipt: &mut RetiredScheduleRetirementReceipt) {
+        receipt.plan_digest = operation_plan_digest(&receipt.operation_id, &receipt.plan).unwrap();
     }
 
     fn test_receipt() -> RetiredScheduleRetirementReceipt {
@@ -1235,5 +1577,254 @@ mod tests {
 
         assert!(detail.contains("identifier exceeds limit"));
         assert!(!detail.contains(&private_id));
+    }
+
+    #[test]
+    fn receipt_validation_rederives_every_semantic_plan_relationship() {
+        let active = generated_image(vec![
+            schedule("schedule-retired"),
+            supported_schedule("schedule-supported"),
+        ])
+        .unwrap();
+        let archive = ScheduleImage {
+            present: false,
+            schedules: Vec::new(),
+            canonical_digest: canonical_digest(&Vec::<Schedule>::new()).unwrap(),
+            byte_digest: digest_bytes(&[]),
+        };
+        let receipt = initial_receipt(&active, &archive, RetirementStorage::NotConfigured).unwrap();
+
+        let mut wrong_retired = receipt.clone();
+        wrong_retired.plan.retired[0].schedule = supported_schedule("schedule-supported");
+        wrong_retired.plan.retired[0].canonical_digest =
+            canonical_digest(&wrong_retired.plan.retired[0].schedule).unwrap();
+        rehash_receipt(&mut wrong_retired);
+
+        let mut wrong_active_post = receipt.clone();
+        wrong_active_post.plan.active_post.schedules =
+            wrong_active_post.plan.active_pre.schedules.clone();
+        rehash_image(&mut wrong_active_post.plan.active_post);
+        rehash_receipt(&mut wrong_active_post);
+
+        let mut wrong_archive_post = receipt.clone();
+        wrong_archive_post.plan.archive_post.schedules.clear();
+        rehash_image(&mut wrong_archive_post.plan.archive_post);
+        rehash_receipt(&mut wrong_archive_post);
+
+        let mut wrong_history = receipt;
+        wrong_history.plan.history = HistoryRequirement::NoRetiredSchedules;
+        rehash_receipt(&mut wrong_history);
+
+        for inconsistent in [
+            wrong_retired,
+            wrong_active_post,
+            wrong_archive_post,
+            wrong_history,
+        ] {
+            let error = validate_receipt(&inconsistent).unwrap_err();
+            assert!(error.to_string().contains("retirement receipt"));
+        }
+    }
+
+    #[test]
+    fn receipt_is_bounded_before_every_persist() {
+        let mut oversized = schedule("schedule-retired");
+        oversized.description = "x".repeat(6 * 1024 * 1024);
+        let active = generated_image(vec![oversized]).unwrap();
+        let archive = ScheduleImage {
+            present: false,
+            schedules: Vec::new(),
+            canonical_digest: canonical_digest(&Vec::<Schedule>::new()).unwrap(),
+            byte_digest: digest_bytes(&[]),
+        };
+        let receipt = initial_receipt(&active, &archive, RetirementStorage::NotConfigured).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt.json");
+
+        let error = persist_receipt(&path, &receipt, &RetirementFaults::default()).unwrap_err();
+
+        assert!(error.to_string().contains("size limit"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn schedule_input_is_bounded_before_json_decode() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("schedules.json");
+        std::fs::write(&path, vec![b' '; MAX_RECEIPT_BYTES as usize + 1]).unwrap();
+
+        let error = load_image(&path).unwrap_err();
+
+        assert!(error.to_string().contains("size limit"));
+    }
+
+    #[test]
+    fn unreleased_version_one_receipt_fails_closed_explicitly() {
+        let mut receipt = test_receipt();
+        receipt.version = 1;
+
+        let error = validate_receipt(&receipt).unwrap_err();
+
+        assert!(error.to_string().contains("unsupported receipt version"));
+    }
+
+    async fn wait_for_path(path: &Path) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("subprocess did not publish its lock condition");
+    }
+
+    #[tokio::test]
+    async fn subprocess_lock_holder() {
+        let Ok(schedule_path) = std::env::var("OXFUZZ_LOCK_HELPER_SCHEDULE") else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var("OXFUZZ_LOCK_HELPER_READY").unwrap());
+        let release = PathBuf::from(std::env::var("OXFUZZ_LOCK_HELPER_RELEASE").unwrap());
+        let _lease = acquire_schedule_path_lease_with_timeout(
+            Path::new(&schedule_path),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        std::fs::write(ready, b"ready").unwrap();
+        wait_for_path(&release).await;
+    }
+
+    fn spawn_lock_holder(
+        schedule_path: &Path,
+        ready: &Path,
+        release: &Path,
+    ) -> std::process::Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "schedule_retirement::tests::subprocess_lock_holder",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("OXFUZZ_LOCK_HELPER_SCHEDULE", schedule_path)
+            .env("OXFUZZ_LOCK_HELPER_READY", ready)
+            .env("OXFUZZ_LOCK_HELPER_RELEASE", release)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn subprocess_advisory_lock_excludes_and_releases_contenders() {
+        let directory = tempfile::tempdir().unwrap();
+        let schedule_path = directory.path().join("schedules.json");
+        let ready = directory.path().join("ready");
+        let release = directory.path().join("release");
+        let mut child = spawn_lock_holder(&schedule_path, &ready, &release);
+        wait_for_path(&ready).await;
+
+        let error =
+            acquire_schedule_path_lease_with_timeout(&schedule_path, Duration::from_millis(100))
+                .await
+                .err()
+                .expect("subprocess lock must exclude the contender");
+        assert!(matches!(
+            error,
+            StateFileError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::TimedOut
+        ));
+
+        std::fs::write(&release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
+        acquire_schedule_path_lease_with_timeout(&schedule_path, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn subprocess_advisory_lock_releases_after_forced_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let schedule_path = directory.path().join("schedules.json");
+        let ready = directory.path().join("ready");
+        let release = directory.path().join("release");
+        let mut child = spawn_lock_holder(&schedule_path, &ready, &release);
+        wait_for_path(&ready).await;
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        acquire_schedule_path_lease_with_timeout(&schedule_path, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_lock_wait_does_not_leave_a_background_waiter() {
+        let directory = tempfile::tempdir().unwrap();
+        let schedule_path = directory.path().join("schedules.json");
+        let lease = acquire_schedule_path_lease(&schedule_path).await.unwrap();
+        let task_path = schedule_path.clone();
+        let waiter = tokio::spawn(async move {
+            acquire_schedule_path_lease_with_timeout(&task_path, Duration::from_secs(5)).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while process_lock_strong_count(&schedule_path) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        waiter.abort();
+        let joined = waiter.await;
+        assert!(matches!(joined, Err(error) if error.is_cancelled()));
+        drop(lease);
+
+        acquire_schedule_path_lease_with_timeout(&schedule_path, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lock_registry_prunes_dead_path_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dead_paths = Vec::new();
+        for index in 0..8 {
+            let path = directory
+                .path()
+                .join(format!("workspace-{index}"))
+                .join("schedules.json");
+            drop(acquire_schedule_path_lease(&path).await.unwrap());
+            dead_paths.push(path);
+        }
+        let final_path = directory
+            .path()
+            .join("workspace-final")
+            .join("schedules.json");
+        let _lease = acquire_schedule_path_lease(&final_path).await.unwrap();
+
+        assert!(dead_paths
+            .iter()
+            .all(|path| !process_lock_registry_contains(path)));
+        assert!(process_lock_registry_contains(&final_path));
+    }
+
+    #[test]
+    fn unsupported_advisory_lock_error_is_preserved() {
+        let path = Path::new("schedules.json");
+        let error = classify_lock_error(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "advisory locks are unavailable",
+            ),
+        );
+
+        assert!(matches!(
+            error,
+            StateFileError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::Unsupported
+        ));
     }
 }
