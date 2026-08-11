@@ -53,10 +53,12 @@ enum Commands {
         /// Target symbol.
         #[arg(long)]
         target: String,
-        /// Function-harness engine (afl++, honggfuzz, libfuzzer).
+        /// Generated function harnesses support AFL++, honggfuzz, and
+        /// libFuzzer only.
         ///
-        /// Use the dedicated `run_syzkaller` kernel-campaign path for
-        /// syzkaller; function-harness generation is not supported.
+        /// Syzkaller kernel campaigns use the local desktop application's
+        /// dedicated kernel-campaign workflow with operator approval and
+        /// handoff.
         #[arg(long)]
         engine: String,
         /// Target language (c, cpp, rust, go, python). Defaults to c.
@@ -2910,10 +2912,15 @@ mod harness_help_tests {
             .expect("harness subcommand");
         let help = harness.render_long_help().to_string();
 
-        assert!(help.contains("afl++, honggfuzz, libfuzzer"), "{help}");
+        assert!(
+            help.contains("AFL++, honggfuzz, and libFuzzer only"),
+            "{help}"
+        );
         assert!(!help.contains("libfuzzer, syzkaller"), "{help}");
-        assert!(help.contains("run_syzkaller"), "{help}");
-        assert!(help.contains("kernel-campaign"), "{help}");
+        assert!(!help.contains("run_syzkaller"), "{help}");
+        assert!(help.contains("local desktop application"), "{help}");
+        assert!(help.contains("kernel-campaign workflow"), "{help}");
+        assert!(help.contains("operator approval"), "{help}");
     }
 }
 
