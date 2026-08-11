@@ -10,7 +10,7 @@
 | **Node 20.19+ or 22.12+ / npm** | Desktop app | Vite 7 requirement; CI uses Node 22 |
 | **Docker** | Yes | Mandatory boundary for harness builds, fuzz runs, and crash parsing |
 | **SQLite 3.35+** | Embedded | Bundled, no action needed |
-| **Fuzzing engines** | Bundled | AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, and syzkaller live in the sandbox image |
+| **Fuzzing engines** | Bundled | AFL++, honggfuzz, libFuzzer, and syzkaller live in the sandbox image |
 
 ### The CLI binary
 

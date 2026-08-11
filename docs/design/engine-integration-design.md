@@ -1,34 +1,47 @@
 # Engine Integration Design
 
-Status: **draft**. Owner: `hf-engine`. Standard: `ENGINE_ADAPTER_STANDARD.md`.
+Status: **active**. Owner: `hf-engine`. Standard: `ENGINE_ADAPTER_STANDARD.md`.
 
 ## 1. Goal
 
-Provide a single `FuzzEngine` trait that fronts AFL++, honggfuzz, libFuzzer,
-and ClusterFuzzLite so the agent can select and drive engines uniformly.
+Provide a single `EngineAdapter` contract for AFL++, honggfuzz, libFuzzer, and
+syzkaller. Adapters construct an engine command only; `EngineRunner` runs that
+command through `hf-runtime` and converts its output into shared progress and
+coverage evidence.
 
-## 2. FuzzEngine Trait
+## 2. EngineAdapter Contract
 
 ```rust
-#[async_trait]
-pub trait FuzzEngine: Send + Sync {
+pub trait EngineAdapter: Send + Sync {
     fn kind(&self) -> EngineKind;
-    fn supports(&self, lang: TargetLanguage, san: Sanitizer) -> bool;
-    async fn build(&self, harness: &Harness, rt: &dyn RuntimeAdapter) -> Result<BuildArtifact>;
-    async fn run(&self, cfg: &FuzzRunConfig, rt: &dyn RuntimeAdapter) -> Result<FuzzRunHandle>;
-    async fn minimize(&self, crash: &Crash, rt: &dyn RuntimeAdapter) -> Result<Crash>;
-    async fn coverage(&self, run: &FuzzRunHandle) -> Result<CoverageReport>;
+    fn build_run_args(
+        &self,
+        cfg: &FuzzRunConfig,
+        binary: &str,
+        corpus: &str,
+        out: &str,
+    ) -> Vec<String>;
 }
 ```
 
-## 3. Engines
+`hf-engine::registry::adapter_for` registers one adapter for every
+`EngineKind`. `hf-service` resolves the allowed-engine policy before it builds
+or runs a campaign; presentation layers do not select an adapter directly.
 
-| Engine | Kind | Build flags | Run binary |
+## 3. Supported Engines
+
+| Engine | `EngineKind` | Build wrapper or input | Run entrypoint |
 | --- | --- | --- | --- |
-| AFL++ | `AflPlusPlus` | `afl-cc` / `afl-clang-fast` | `afl-fuzz` |
-| honggfuzz | `Honggfuzz` | `hfuzz-cc` | `honggfuzz` |
-| libFuzzer | `LibFuzzer` | `-fsanitize=fuzzer` | harness binary itself |
-| ClusterFuzzLite | `ClusterFuzzLite` | oss-fuzz build scripts | `infra/helper.py` |
+| AFL++ | `AflPlusPlus` | `afl-clang-fast` / `afl-clang-fast++`, with the libFuzzer-compatible driver | `afl-fuzz` |
+| honggfuzz | `Honggfuzz` | `hfuzz-cc` / `hfuzz-c++` | `honggfuzz` |
+| libFuzzer | `LibFuzzer` | `clang` / `clang++` with `-fsanitize=fuzzer` | the harness binary |
+| syzkaller | `Syzkaller` | KCOV-enabled kernel build (`make CONFIG_KCOV=y CONFIG_DEBUG_INFO=y`) | `syz-manager -config=<manager.cfg>` |
+
+Syzkaller is the manager-config exception. It fuzzes syscall sequences against
+a kernel in a managed VM, not a generated single-function harness. For its
+adapter, `binary` is the staged `manager.cfg` path; `corpus` and `out` are
+managed by `syz-manager` through that configuration and are not forwarded on
+the command line.
 
 ## 4. FuzzRunConfig
 
@@ -43,6 +56,8 @@ pub struct FuzzRunConfig {
     pub sanitizer: Sanitizer,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
+    pub seed: Option<u64>,
+    pub replay_of: Option<Uuid>,
 }
 ```
 
@@ -62,14 +77,17 @@ operation-wide duration for coverage measurement.
 
 ## 5. Run Lifecycle
 
-1. `build` -- compile harness in sandbox -> `BuildArtifact` (binary path).
-2. `run` -- allocate a unique run directory, verify the persisted source and
-   binary digests, then launch the engine in a read-only sandbox workspace with
-   only that run's corpus/output mounts writable -> `FuzzRunHandle` streaming
-   progress (execs/sec, edges, crashes).
-3. On crash -> `hf-crash` ingests artifacts.
-4. `coverage` -- post-run coverage report for `hf-coverage`.
-5. `minimize` -- reduce a crash input.
+For the three userspace engines, `hf-harness` compiles a reviewed,
+smoke-qualified harness inside `hf-runtime`; `EngineRunner` then creates a
+run-scoped corpus/output workspace and invokes the selected adapter there.
+The runner streams shared `FuzzProgress` events, while `hf-crash` ingests
+run-owned artifacts and `hf-coverage` retains coverage evidence.
+
+For syzkaller, `hf-service` stages the manager configuration and kernel-campaign
+inputs in the managed workspace. `EngineRunner` invokes `syz-manager` through
+the syzkaller runtime profile. The manager owns the campaign corpus, workdir,
+and output through its configuration; it does not use the userspace harness
+lifecycle.
 
 Every consumer resolves output through the persisted run id. Target-wide flat
 output directories are legacy read-only fallbacks and are never launch targets
@@ -105,11 +123,10 @@ persisted AFL++ run statistics.
 ## 6. Automotive Protocol Sidecar Is Not an Engine
 
 The optional Scapy sidecar does not implement `EngineAdapter` and is not added
-to `EngineKind`. Engine adapters translate `FuzzRunConfig` into source-fuzzer
-arguments and report source coverage/crashes. Automotive capture decoding,
-field-aware mutation planning, replay, and protocol-state feedback use the
-versioned `hf-automotive` contract and a service-owned `hf-runtime`
-operation instead.
+to `EngineKind`. Engine adapters translate `FuzzRunConfig` into fuzzing
+arguments and report engine evidence. Automotive capture decoding, field-aware
+mutation planning, replay, and protocol-state feedback use the versioned
+`hf-automotive` contract and a service-owned `hf-runtime` operation instead.
 
 This separation prevents protocol state signatures from being mislabeled as
 edges or functions, prevents sidecar capability discovery from becoming engine
@@ -119,14 +136,15 @@ typed evidence rather than adapting one contract into the other.
 
 ## 7. Open Questions
 
-- Unified corpus format across engines, or per-engine directories?
+- Unified corpus format across userspace engines, or per-engine directories?
 - Should we support parallel multi-engine runs on the same target?
 
 ## 8. Tests
 
 - Unit: each adapter constructs the correct CLI args from a `FuzzRunConfig`.
-- Integration: a mocked engine `run` streams progress and emits a fake crash.
+- Integration: a mocked engine run streams progress and emits a fake crash.
 - Service contract: disabled engines and excessive durations fail before run
   reservation, while accepted runs persist the resolved resource limits.
-- Boundary contract: the Scapy sidecar remains absent from `EngineKind` and the
-  engine registry; its pure domain tests run in `hf-automotive`.
+- Boundary contract: syzkaller receives a manager config rather than a
+  generated userspace harness; the Scapy sidecar remains absent from
+  `EngineKind` and the engine registry.

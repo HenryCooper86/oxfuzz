@@ -4,7 +4,7 @@ Status legend: [x] done - [~] partial - [ ] not started.
 
 ## Phase 1: Foundation
 
-- [x] hf-core: `FuzzEngine`, `TargetCandidate`, `Harness`, `Crash`, `Corpus` traits.
+- [x] hf-core: `EngineKind`, `TargetCandidate`, `Harness`, `Crash`, `Corpus` types.
 - [~] hf-provider: LLM provider pool with multi-provider backends (OpenAI,
   Azure, Anthropic, Gemini, Ollama). Freeze/thaw failover + error classification
   ported from y-agent (rate-limit/auth/5xx no longer kills a campaign). Token
@@ -33,7 +33,7 @@ Status legend: [x] done - [~] partial - [ ] not started.
 - [x] hf-engine: AFL++ adapter.
 - [x] hf-engine: honggfuzz adapter.
 - [x] hf-engine: libFuzzer adapter.
-- [x] hf-engine: ClusterFuzzLite + Syzkaller adapters.
+- [x] hf-engine: syzkaller adapter.
 
 ## Phase 4: Crash & Corpus
 
@@ -143,7 +143,7 @@ Status legend: [x] done - [~] partial - [ ] not started.
   strengthened to full-record equality, and a workspace sweep confirmed no
   other timestamp path truncates. Remaining
   E2E arms: successful minimization through the full loop; UBSan /
-  ClusterFuzzLite / Syzkaller classification edges. The
+  syzkaller classification edges. The
   `lifecycle_and_recovery_events_include_required_structured_fields` race is
   fixed: it asserted a transition-event floor that the workers emit
   independently of the status reads it waited on, so runner contention could
@@ -191,7 +191,7 @@ fixed the following; open design decisions are listed at the end.
 - [x] Stack signatures strip unresolved-frame hex addresses, so dedup is
   ASLR-stable across processes.
 - [x] Batch knowledge indexing upserts per chunk id like the single-item path.
-- [x] Engine capabilities no longer advertise honggfuzz/ClusterFuzzLite crash
+- [x] Engine capabilities no longer advertise honggfuzz or syzkaller crash
   minimization (the minimizer only supports AFL++/libFuzzer).
 - [x] Duplicate C symbols merge call-graph edges/complexity in the scanner
   instead of silently overwriting; name-based persistence identity documented
