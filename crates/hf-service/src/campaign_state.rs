@@ -82,6 +82,9 @@ pub enum StateFileError {
         #[source]
         source: serde_json::Error,
     },
+    /// The file changed after this repository verified its startup snapshot.
+    #[error("state file changed concurrently: {path}")]
+    Conflict { path: PathBuf },
 }
 
 fn io_error(operation: &'static str, path: &Path, source: std::io::Error) -> StateFileError {
