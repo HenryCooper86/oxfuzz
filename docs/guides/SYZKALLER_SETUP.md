@@ -1,8 +1,8 @@
 # syzkaller Kernel-Fuzzing Setup
 
 This guide explains how to run a real syzkaller kernel-fuzzing campaign from
-oxfuzz. Unlike the in-process engines (libFuzzer, AFL++, honggfuzz,
-ClusterFuzzLite), syzkaller does not fuzz a single function through a generated
+oxfuzz. Unlike the three userspace engines (AFL++, honggfuzz, and libFuzzer),
+syzkaller does not fuzz a single function through a generated
 harness. It mutates sequences of system calls and executes them inside a managed
 qemu VM whose kernel is built with coverage instrumentation (KCOV). A campaign is
 driven by `syz-manager`, which needs three artifacts you provide:

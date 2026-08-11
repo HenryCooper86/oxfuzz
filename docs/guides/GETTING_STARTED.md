@@ -242,9 +242,9 @@ Plain-language definitions, in the order you are likely to meet them.
 - **Harness** -- a small piece of test code that takes a chunk of fuzz bytes and
   feeds it into the target function. oxfuzz writes this for you.
 - **Fuzzing engine** -- the actual tool that generates inputs and runs the target
-  millions of times. oxfuzz supports the standard ones: **libFuzzer**,
-  **AFL++**, and **honggfuzz** (plus advanced options like ClusterFuzzLite and
-  Syzkaller).
+  millions of times. oxfuzz supports **AFL++**, **honggfuzz**, **libFuzzer**,
+  and **syzkaller**. Syzkaller fuzzes a kernel rather than a generated
+  single-function harness.
 - **Corpus** -- the collection of example inputs the fuzzer keeps and mutates. A
   good starter corpus ("seed corpus") helps it find bugs faster.
 - **Coverage** -- how much of the program's code the fuzzer has actually

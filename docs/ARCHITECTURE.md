@@ -39,7 +39,7 @@ Core:                          hf-core            <- traits, types, contracts
 | `hf-guardrails` | Permission model, loop detection, risk scoring. |
 | `hf-discovery` | Target discovery: static analysis, semantic ranking, reachability. |
 | `hf-harness` | Harness generation, compile validation, smoke fuzz. |
-| `hf-engine` | `EngineAdapter` adapters: AFL++, honggfuzz, libFuzzer, ClusterFuzzLite, Syzkaller. |
+| `hf-engine` | `EngineAdapter` adapters: AFL++, honggfuzz, libFuzzer, and syzkaller. |
 | `hf-crash` | Crash ingestion, dedup, minimization, bug-report drafting. |
 | `hf-corpus` | Corpus management: seed, grow, prune, merge. |
 | `hf-coverage` | Coverage delta tracking, stagnation detection. |
