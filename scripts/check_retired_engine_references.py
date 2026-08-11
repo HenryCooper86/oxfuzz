@@ -82,40 +82,36 @@ def format_finding(relative: pathlib.PurePath, line_number: int, line: str) -> s
 
 
 def iter_scanned_files(root: pathlib.Path):
-    def on_walk_error(error: OSError) -> None:
-        raise scan_error_for(root, error, root)
-
-    for directory, directories, filenames in os.walk(
-        root,
-        topdown=True,
-        followlinks=False,
-        onerror=on_walk_error,
-    ):
-        directory_path = pathlib.Path(directory)
-        relative_directory = directory_path.relative_to(root)
-        retained_directories: list[str] = []
-        for name in sorted(directories):
-            relative = relative_directory / name
-            if is_skipped_directory(relative):
+    pending_directories = [(root, pathlib.Path("."))]
+    files: list[tuple[pathlib.Path, pathlib.Path]] = []
+    while pending_directories:
+        directory, relative_directory = pending_directories.pop()
+        try:
+            with os.scandir(directory) as entries:
+                sorted_entries = sorted(entries, key=lambda entry: entry.name)
+        except OSError as error:
+            raise scan_error_for(root, error, relative_directory) from error
+        child_directories: list[tuple[pathlib.Path, pathlib.Path]] = []
+        for entry in sorted_entries:
+            relative = relative_directory / entry.name
+            path = directory / entry.name
+            try:
+                is_directory = entry.is_dir(follow_symlinks=False)
+            except OSError as error:
+                raise scan_error_for(root, error, relative) from error
+            try:
+                is_symlink = entry.is_symlink()
+            except OSError as error:
+                raise scan_error_for(root, error, relative) from error
+            if is_symlink:
                 continue
-            path = directory_path / name
-            try:
-                if path.is_symlink():
-                    continue
-            except OSError as error:
-                raise scan_error_for(root, error, relative) from error
-            retained_directories.append(name)
-        directories[:] = retained_directories
-        for filename in sorted(filenames):
-            path = directory_path / filename
-            relative = path.relative_to(root)
-            try:
-                if path.is_symlink():
-                    continue
-            except OSError as error:
-                raise scan_error_for(root, error, relative) from error
-            if is_scanned_file(relative):
-                yield path, relative
+            if is_directory:
+                if not is_skipped_directory(relative):
+                    child_directories.append((path, relative))
+            elif is_scanned_file(relative):
+                files.append((path, relative))
+        pending_directories.extend(reversed(child_directories))
+    yield from sorted(files, key=lambda item: item[1].as_posix())
 
 
 def find_forbidden_references(root: pathlib.Path) -> list[str]:
