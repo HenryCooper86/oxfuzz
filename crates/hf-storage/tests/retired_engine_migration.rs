@@ -1,4 +1,4 @@
-use hf_storage::{StorageError, Store};
+use hf_storage::{validate_schedule_retirement_ids, StorageError, Store};
 
 const OPERATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const SECOND_OPERATION_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -616,6 +616,15 @@ async fn operation_bound_schedule_history_archive_persists_an_idempotent_proof()
         store.schedule_retirement_tombstone_ids().await.unwrap(),
         ids
     );
+    let proof = store
+        .schedule_retirement_history_proof()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proof.operation_id, OPERATION_ID);
+    assert_eq!(proof.plan_digest, PLAN_DIGEST);
+    assert_eq!(proof.schedule_ids, ids);
+    assert!(proof.history_archived);
 
     let before = archive_rows(store.pool()).await;
     assert_eq!(
@@ -771,6 +780,9 @@ async fn operation_proof_schema_rejects_invalid_shape_and_bounds() {
         format!("'{OPERATION_ID}', '{PLAN_DIGEST}', '[]'"),
         format!("'not-a-uuid', '{PLAN_DIGEST}', '[]'"),
         format!("'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA', '{PLAN_DIGEST}', '[\"id\"]'"),
+        format!("'00000000-0000-0000-0000-000000000000', '{PLAN_DIGEST}', '[\"id\"]'"),
+        format!("'11111111-1111-1111-8111-111111111111', '{PLAN_DIGEST}', '[\"id\"]'"),
+        format!("'0198b0d4-3f80-7ab8-9b22-acde48001122', '{PLAN_DIGEST}', '[\"id\"]'"),
         format!("'-1111111-1111-4111-8111-111111111111', '{PLAN_DIGEST}', '[\"id\"]'"),
         format!("'{OPERATION_ID}', 'short', '[]'"),
         format!("'{OPERATION_ID}', '{PLAN_DIGEST}', '{{}}'"),
@@ -839,6 +851,128 @@ async fn operation_api_rejects_an_empty_manifest_without_any_mutation() {
     .await
     .unwrap();
     assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn operation_api_rejects_duplicate_ids_without_any_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("duplicate-proof.db"))
+        .await
+        .unwrap();
+    insert_schedule_history(
+        store.pool(),
+        "active-execution",
+        "active-occurrence",
+        "active-schedule",
+        "active",
+    )
+    .await;
+    let before: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions),
+            (SELECT COUNT(*) FROM schedule_occurrences),
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let error = store
+        .archive_schedule_history_for_retired_engine_operation(
+            OPERATION_ID,
+            PLAN_DIGEST,
+            &["duplicate".to_owned(), "duplicate".to_owned()],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    let after: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions),
+            (SELECT COUNT(*) FROM schedule_occurrences),
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn retirement_proof_id_validator_enforces_the_exact_shared_domain() {
+    let exact_utf8_boundary = "é".repeat(256);
+    assert_eq!(
+        validate_schedule_retirement_ids(&[
+            "schedule-b".to_owned(),
+            exact_utf8_boundary.clone(),
+            "schedule-a".to_owned(),
+        ])
+        .unwrap(),
+        vec![
+            "schedule-a".to_owned(),
+            "schedule-b".to_owned(),
+            exact_utf8_boundary,
+        ]
+    );
+
+    for invalid in [
+        Vec::new(),
+        vec![String::new()],
+        vec!["nul\0id".to_owned()],
+        vec!["x".repeat(513)],
+        vec!["duplicate".to_owned(), "duplicate".to_owned()],
+        (0..=4_096).map(|index| format!("id-{index}")).collect(),
+    ] {
+        assert!(matches!(
+            validate_schedule_retirement_ids(&invalid),
+            Err(StorageError::InvalidData(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn operation_api_rejects_non_v4_or_noncanonical_ids_before_any_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("operation-id-domain.db"))
+        .await
+        .unwrap();
+    let invalid_operation_ids = [
+        "00000000-0000-0000-0000-000000000000",
+        "11111111-1111-1111-8111-111111111111",
+        "0198b0d4-3f80-7ab8-9b22-acde48001122",
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+    ];
+
+    for operation_id in invalid_operation_ids {
+        let error = store
+            .archive_schedule_history_for_retired_engine_operation(
+                operation_id,
+                PLAN_DIGEST,
+                &["schedule-proof".to_owned()],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, StorageError::InvalidData(_)),
+            "unexpected error for {operation_id}: {error}"
+        );
+    }
+
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM retired_engine_records),
+            (SELECT COUNT(*) FROM schedule_retirement_operations),
+            (SELECT COUNT(*) FROM schedule_retirement_schedule_ids)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(counts, (0, 0, 0));
 }
 
 #[tokio::test]
