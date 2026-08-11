@@ -20,11 +20,11 @@ function targetValue(selectionRepair: TargetContextValue["selectionRepair"]): Ta
     lang: "c",
     compiled: false,
     selectionRepair,
+    storageError: null,
     setTarget: () => undefined,
     setEngine: () => undefined,
     setLang: () => undefined,
     setCompiled: () => undefined,
-    reset: () => undefined,
   };
 }
 
@@ -79,6 +79,8 @@ describe("retired persisted target selection repair", () => {
 
     expect(alertText(html)).toBe(RETIRED_ERROR);
     expect(html).toContain("targetSelection.repairGuidance");
+    expect(html).toContain('id="target-selection-replacement-engine-label"');
+    expect(html).toContain('aria-labelledby="target-selection-replacement-engine-label"');
     expect(html).toMatch(/<button disabled=""[^>]*>common\.generate<\/button>/);
     expect(html).toMatch(/<button disabled=""[^>]*>harness\.compile<\/button>/);
     expect(html).toMatch(/<button disabled=""[^>]*>harness\.runSmokeTest<\/button>/);
@@ -93,6 +95,7 @@ describe("retired persisted target selection repair", () => {
 
     expect(alertText(html)).toBe(RETIRED_ERROR);
     expect(html).toContain("targetSelection.repairGuidance");
+    expect(html).toContain('aria-labelledby="target-selection-replacement-engine-label"');
     expect(html).toMatch(/<button disabled=""[^>]*>[\s\S]*?run\.runFuzzer<\/button>/);
     expect(runFuzzer).not.toHaveBeenCalled();
     expect(runSyzkaller).not.toHaveBeenCalled();
@@ -109,7 +112,8 @@ describe("retired persisted target selection repair", () => {
     );
 
     expect(alertText(html)).toBe("targetSelection.invalid");
-    expect(html).toContain("targetSelection.reset");
+    expect(html).toContain("targetSelection.replacementEngine");
+    expect(html).not.toContain("targetSelection.reset");
     expect(html).toMatch(/<button disabled=""[^>]*>[\s\S]*?run\.runFuzzer<\/button>/);
     expect(runFuzzer).not.toHaveBeenCalled();
     expect(runSyzkaller).not.toHaveBeenCalled();

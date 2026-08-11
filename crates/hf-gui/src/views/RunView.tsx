@@ -33,7 +33,7 @@ export function RunView({
     setEngine,
     compiled,
     selectionRepair,
-    reset,
+    storageError,
   } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
@@ -47,7 +47,8 @@ export function RunView({
   const engineOptions = fuzzingSettings
     ? enabledEngineOptions(fuzzingSettings, { includeSyzkaller: true })
     : [];
-  const engine = selectionRepair
+  const selectionBlocked = selectionRepair !== null || storageError !== null;
+  const engine = selectionBlocked
     ? selectedEngine
     : engineOptions.some((option) => option.value === selectedEngine)
       ? selectedEngine
@@ -62,7 +63,7 @@ export function RunView({
     let cancelled = false;
     // Resolve to [] when there's no project instead of setting state
     // synchronously in the effect body (which would cascade renders).
-    const load = project && !selectionRepair
+    const load = project && !selectionBlocked
       ? getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", { project })
       : Promise.resolve<HarnessReviewItem[]>([]);
     load
@@ -75,7 +76,7 @@ export function RunView({
     return () => {
       cancelled = true;
     };
-  }, [project, selectionRepair]);
+  }, [project, selectionBlocked]);
 
   // syzkaller (kernel fuzzing) campaign artifacts.
   const [kernelImage, setKernelImage] = useState("");
@@ -104,7 +105,7 @@ export function RunView({
   const [harnessApproved, setHarnessApproved] = useState(compiled);
   useEffect(() => {
     // syzkaller has no harness binary; the badge is hidden for it anyway.
-    if (selectionRepair || isSyz) return;
+    if (selectionBlocked || isSyz) return;
     let cancelled = false;
     Promise.all([
       getTransport().invoke<{ harness_built: boolean }>("artifact_summary", { project: project ?? "", target: target ?? "" }),
@@ -129,7 +130,7 @@ export function RunView({
     return () => {
       cancelled = true;
     };
-  }, [project, target, engine, isSyz, selectionRepair, summary]);
+  }, [project, target, engine, isSyz, selectionBlocked, summary]);
 
   async function browse() {
     const path = await pickFolder();
@@ -140,7 +141,7 @@ export function RunView({
   }
 
   async function run() {
-    if (selectionRepair) return;
+    if (selectionBlocked) return;
     const policy = fuzzingSettings;
     if (!policy) return;
     if (!project) return;
@@ -197,12 +198,12 @@ export function RunView({
           error={fuzzingPolicyError}
         />
       )}
-      {selectionRepair && (
+      {selectionBlocked && (
         <TargetSelectionRepairNotice
           repair={selectionRepair}
+          storageError={storageError}
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
-          onReset={reset}
         />
       )}
 
@@ -260,7 +261,7 @@ export function RunView({
         <div className="flex flex-col gap-1">
           <Label>{t("run.engine")}</Label>
           <Select
-            value={selectionRepair ? "" : engine}
+            value={selectionBlocked ? "" : engine}
             onChange={setEngine}
             options={engineOptions}
           />
@@ -313,7 +314,7 @@ export function RunView({
           variant="primary"
           className="self-start"
           onClick={run}
-          disabled={selectionRepair !== null || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
+          disabled={selectionBlocked || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
           loading={running}
         >
           {!running && <Play size={14} />}

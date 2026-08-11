@@ -81,14 +81,15 @@ export function HarnessView({
     setLang,
     setCompiled,
     selectionRepair,
-    reset,
+    storageError,
   } = useTarget();
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   const fuzzingEnabled = fuzzingActionsEnabled(fuzzingSettings);
   const engineOptions = fuzzingSettings
     ? enabledEngineOptions(fuzzingSettings, { language: lang })
     : [];
-  const engine = selectionRepair
+  const selectionBlocked = selectionRepair !== null || storageError !== null;
+  const engine = selectionBlocked
     ? selectedEngine
     : engineOptions.some((option) => option.value === selectedEngine)
       ? selectedEngine
@@ -128,7 +129,7 @@ export function HarnessView({
 
   // Auto-run discover when project is set.
   useEffect(() => {
-    if (!project || selectionRepair) return;
+    if (!project || selectionBlocked) return;
     let cancelled = false;
     getTransport().invoke<TargetInventory>("discover", { project, lang })
       .then((inv) => {
@@ -144,7 +145,7 @@ export function HarnessView({
         if (!cancelled) setDiscoverError(String(e));
       });
     return () => { cancelled = true; };
-  }, [project, lang, selectionRepair, setSelectedTarget]);
+  }, [project, lang, selectionBlocked, setSelectedTarget]);
 
   // Hydrate any harness already persisted for the selected target so a harness
   // built elsewhere (e.g. in the Fuzzing Workflow) is visible here too. The
@@ -153,7 +154,7 @@ export function HarnessView({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (selectionRepair || !project || !selectedTarget) {
+      if (selectionBlocked || !project || !selectedTarget) {
         if (!cancelled) setExisting(null);
         return;
       }
@@ -184,10 +185,10 @@ export function HarnessView({
       }
     })();
     return () => { cancelled = true; };
-  }, [project, selectedTarget, harness, selectionRepair, setCompiled, markDone]);
+  }, [project, selectedTarget, harness, selectionBlocked, setCompiled, markDone]);
 
   async function generateHarness(target: string): Promise<HarnessResult | null> {
-    if (!fuzzingSettings || selectionRepair) return null;
+    if (!fuzzingSettings || selectionBlocked) return null;
     const prior = harness?.source ?? null;
     setHarnessStatus("loading");
     setHarnessError(null);
@@ -223,7 +224,7 @@ export function HarnessView({
   // just produced without waiting for the `harness` state to settle (the old
   // setTimeout read a stale null and silently skipped compilation).
   async function compileHarness(source?: string): Promise<boolean> {
-    if (!fuzzingSettings || selectionRepair) return false;
+    if (!fuzzingSettings || selectionBlocked) return false;
     const src = source ?? harness?.source;
     if (!src) return false;
     setCompileStatus("loading");
@@ -247,7 +248,7 @@ export function HarnessView({
   }
 
   async function smokeHarness(): Promise<boolean> {
-    if (!fuzzingSettings || selectionRepair) return false;
+    if (!fuzzingSettings || selectionBlocked) return false;
     setSmokeStatus("loading");
     setPromotionStatus("idle");
     setPromotionResult(null);
@@ -272,7 +273,7 @@ export function HarnessView({
   }
 
   async function promoteHarness(): Promise<boolean> {
-    if (!fuzzingSettings || selectionRepair) return false;
+    if (!fuzzingSettings || selectionBlocked) return false;
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote", {
@@ -293,7 +294,7 @@ export function HarnessView({
   }
 
   async function promoteWithFindings(): Promise<boolean> {
-    if (!fuzzingSettings || selectionRepair) return false;
+    if (!fuzzingSettings || selectionBlocked) return false;
     setPromotionStatus("loading");
     try {
       const result = await getTransport().invoke<PromotionResult>("harness_promote_with_findings", {
@@ -313,7 +314,7 @@ export function HarnessView({
   }
 
   async function generateSeeds() {
-    if (!fuzzingSettings || selectionRepair) return;
+    if (!fuzzingSettings || selectionBlocked) return;
     setSeedStatus("loading");
     setSeedError(null);
     try {
@@ -328,7 +329,7 @@ export function HarnessView({
   }
 
   async function runAll() {
-    if (selectionRepair || !selectedTarget) return;
+    if (selectionBlocked || !selectedTarget) return;
     const built = await generateHarness(selectedTarget);
     if (!built) return; // harness draft failed; don't proceed to compile/seed
     const compiled = await compileHarness(built.source);
@@ -352,12 +353,12 @@ export function HarnessView({
           error={fuzzingPolicyError}
         />
       )}
-      {selectionRepair && (
+      {selectionBlocked && (
         <TargetSelectionRepairNotice
           repair={selectionRepair}
+          storageError={storageError}
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
-          onReset={reset}
         />
       )}
       {!embedded && (
@@ -454,7 +455,7 @@ export function HarnessView({
           <div className="flex flex-col gap-1 w-40">
             <label className="text-xs text-text-muted uppercase" style={{ fontWeight: 600, letterSpacing: "0.05em" }}>{t("harness.engine")}</label>
             <Select
-              value={selectionRepair ? "" : engine}
+              value={selectionBlocked ? "" : engine}
               onChange={(v) => setEngine(v)}
               options={engineOptions}
             />
@@ -465,6 +466,7 @@ export function HarnessView({
               value={lang}
               onChange={(v) => {
                 setLang(v);
+                if (selectionBlocked) return;
                 const supported = fuzzingSettings
                   ? enabledEngineOptions(fuzzingSettings, { language: v })
                   : [];
@@ -484,7 +486,7 @@ export function HarnessView({
           <Button
             variant="primary"
             onClick={runAll}
-            disabled={selectionRepair !== null || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading"}
+            disabled={selectionBlocked || !selectedTarget || engineOptions.length === 0 || harnessStatus === "loading"}
             title={t("harness.buildSmokeTitle")}
           >
             <Sparkles size={14} />
@@ -506,7 +508,7 @@ export function HarnessView({
             status={harnessStatus}
             actionLabel={t("common.generate")}
             actionClick={() => generateHarness(selectedTarget)}
-            disabled={selectionRepair !== null || !fuzzingEnabled}
+            disabled={selectionBlocked || !fuzzingEnabled}
           >
             {harness && (
               <div className="mt-2">
@@ -566,7 +568,7 @@ export function HarnessView({
             status={compileStatus}
             actionLabel={t("harness.compile")}
             actionClick={() => compileHarness()}
-            disabled={selectionRepair !== null || !fuzzingSettings || !harness}
+            disabled={selectionBlocked || !fuzzingSettings || !harness}
           >
             {compileResult && (
               <div className="mt-2 flex items-center gap-2 text-xs">
@@ -591,7 +593,7 @@ export function HarnessView({
             status={smokeStatus}
             actionLabel={t("harness.runSmokeTest")}
             actionClick={smokeHarness}
-            disabled={selectionRepair !== null || !fuzzingSettings || (compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
+            disabled={selectionBlocked || !fuzzingSettings || (compileStatus !== "done" && (harness !== null || (existing?.status !== "Compiled" && existing?.status !== "SmokePassed")))}
           >
             {smokeResult && (
               <div className="mt-2 text-xs">
@@ -636,7 +638,7 @@ export function HarnessView({
             actionLabel={smokeCrashed ? t("harness.approveWithFindings") : t("harness.approveForCampaigns")}
             actionClick={smokeCrashed ? promoteWithFindings : promoteHarness}
             disabled={
-              selectionRepair !== null ||
+              selectionBlocked ||
               !fuzzingSettings ||
               promotionStatus === "done" ||
               (smokeCrashed ? false : !cleanApprovable)
@@ -674,7 +676,7 @@ export function HarnessView({
             status={seedStatus}
             actionLabel={t("harness.generateSeeds")}
             actionClick={generateSeeds}
-            disabled={selectionRepair !== null || !fuzzingSettings}
+            disabled={selectionBlocked || !fuzzingSettings}
           >
             {seeds && (
               <div className="mt-2">
