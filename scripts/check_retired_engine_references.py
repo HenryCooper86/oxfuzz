@@ -134,8 +134,11 @@ def decode_ascii_escapes(source: str) -> DecodedSource:
             offset += 1
             continue
         codepoint = int(next(value for value in match.groups() if value is not None), 16)
-        character = chr(codepoint)
-        if character.isascii() and character.isalpha():
+        if (
+            ord("A") <= codepoint <= ord("Z")
+            or ord("a") <= codepoint <= ord("z")
+        ):
+            character = chr(codepoint)
             escaped_offsets.add(len(decoded))
             decoded.append(character)
             source_offsets.append(offset)
