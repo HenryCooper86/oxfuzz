@@ -18,7 +18,15 @@ interface FuzzingTabProps {
 
 export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
   const { t } = useI18n();
-  const settings = normalizeFuzzingSettings(value);
+  const normalized = normalizeFuzzingSettings(value);
+  if (normalized.error !== null) {
+    return (
+      <div role="alert" className="text-text-secondary" style={{ fontSize: "13px" }}>
+        {t("settings.fuzzing.retiredEngineConfig")}
+      </div>
+    );
+  }
+  const { settings } = normalized;
   const enabled = new Set(settings.enabled_engines);
 
   function update(next: FuzzingSettings) {
