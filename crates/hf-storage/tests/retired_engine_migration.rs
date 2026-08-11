@@ -270,9 +270,8 @@ async fn reconnect_rejects_retired_rows_restored_after_migration() {
     insert_run(&pool, "run-late", &legacy_serde_engine_name()).await;
     pool.close().await;
 
-    let error = match Store::connect(&path).await {
-        Err(error) => error,
-        Ok(_) => panic!("retired active row must fail startup"),
+    let Err(error) = Store::connect(&path).await else {
+        panic!("retired active row must fail startup");
     };
     assert!(matches!(error, StorageError::InvalidData(_)));
     assert!(error.to_string().contains("has been retired"));
