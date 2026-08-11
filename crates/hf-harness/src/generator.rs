@@ -670,10 +670,7 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
         config,
         duration_secs,
     )?;
-    if matches!(
-        harness.engine,
-        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
-    ) {
+    if matches!(harness.engine, EngineKind::LibFuzzer) {
         cmd.push(format!(
             "-artifact_prefix={}/",
             out_container.trim_end_matches('/')
@@ -723,16 +720,13 @@ pub async fn smoke_fuzz_in_paths_with_config_and_sandbox_image(
     // killed at the sandbox cap) must NOT be promoted just because the log
     // contains "inited"/"done".
     //
-    // libFuzzer/ClusterFuzzLite emit a parseable `exec/s: N`, so require
-    // `execs > 0` for them (closing the INITED-then-hang loophole). AFL++ and
+    // libFuzzer emits a parseable `exec/s: N`, so require `execs > 0` for it
+    // (closing the INITED-then-hang loophole). AFL++ and
     // honggfuzz print engine-specific status whose rate `parse_execs_per_sec`
     // may not capture, so keep the lenient throughput-marker check for them
     // rather than risk rejecting a genuinely-running smoke.
     let lower = combined.to_ascii_lowercase();
-    let ran = if matches!(
-        harness.engine,
-        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite
-    ) {
+    let ran = if matches!(harness.engine, EngineKind::LibFuzzer) {
         execs > 0.0 || crashes > 0
     } else {
         execs > 0.0
@@ -811,8 +805,8 @@ fn validate_smoke_config(
 
 /// Build the engine-appropriate smoke-fuzz command.
 ///
-/// libFuzzer and `ClusterFuzzLite` compile a libFuzzer-style binary that is run
-/// directly; AFL++ and honggfuzz are driven through their own fuzzer processes
+/// libFuzzer compiles a libFuzzer-style binary that is run directly; AFL++ and
+/// honggfuzz are driven through their own fuzzer processes
 /// (reusing the real `hf-engine` adapter argument builders so smoke matches the
 /// production run). Syzkaller has no userspace-harness smoke run.
 ///
@@ -828,7 +822,7 @@ fn smoke_command(
     duration_secs: u64,
 ) -> Result<Vec<String>, ClassifiedError> {
     match engine {
-        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => Ok(vec![
+        EngineKind::LibFuzzer => Ok(vec![
             binary.to_owned(),
             format!("-max_total_time={duration_secs}"),
         ]),
@@ -901,7 +895,7 @@ pub fn build_command(engine: EngineKind, lang: TargetLanguage, output_name: &str
     // source-level harness repair can fix.
     let is_cpp = lang == TargetLanguage::Cpp;
     match engine {
-        EngineKind::LibFuzzer | EngineKind::ClusterFuzzLite => BuildCommand {
+        EngineKind::LibFuzzer => BuildCommand {
             compiler: if is_cpp { "clang++" } else { "clang" }.to_owned(),
             args: vec![
                 "-fsanitize=fuzzer".to_owned(),
@@ -1592,22 +1586,6 @@ Iterations : 12345
         let config = smoke_command_config(EngineKind::LibFuzzer, SMOKE_SECS);
         let cmd = smoke_command(
             EngineKind::LibFuzzer,
-            "/work/fuzz",
-            "/work/corpus",
-            "/work/out",
-            &config,
-            SMOKE_SECS,
-        )
-        .unwrap();
-        assert_eq!(cmd, vec!["/work/fuzz", "-max_total_time=60"]);
-    }
-
-    #[test]
-    fn smoke_command_clusterfuzzlite_uses_libfuzzer_binary_smoke() {
-        // CFL compiles a libFuzzer-style binary, so its smoke is a direct run.
-        let config = smoke_command_config(EngineKind::ClusterFuzzLite, SMOKE_SECS);
-        let cmd = smoke_command(
-            EngineKind::ClusterFuzzLite,
             "/work/fuzz",
             "/work/corpus",
             "/work/out",

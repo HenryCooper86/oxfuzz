@@ -58,7 +58,7 @@ impl TargetLanguage {
     }
 
     /// Whether a target in this language compiles to a libFuzzer binary, so the
-    /// libFuzzer / `ClusterFuzzLite` engines can drive it.
+    /// libFuzzer can drive it.
     #[must_use]
     pub const fn libfuzzer_compatible(self) -> bool {
         matches!(self, Self::C | Self::Cpp | Self::Rust)
@@ -78,7 +78,7 @@ pub trait LanguageBackend {
     /// The generated harness source filename (e.g. `harness.c`).
     fn harness_filename(&self) -> &'static str;
     /// Whether a target in this language compiles to a libFuzzer binary, so the
-    /// libFuzzer / `ClusterFuzzLite` engines can drive it.
+    /// libFuzzer can drive it.
     fn libfuzzer_compatible(&self) -> bool;
 }
 

@@ -89,9 +89,6 @@ fn libfuzzer_accepts_only_known_artifact_prefixes() {
         .collect();
 
     assert_eq!(names, ["crash-a", "leak-b", "oom-d", "timeout-c"]);
-
-    let cluster = ingest(&dir, EngineKind::ClusterFuzzLite);
-    assert_eq!(cluster.crashes.len(), 4);
 }
 
 #[test]

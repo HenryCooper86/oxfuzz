@@ -258,30 +258,6 @@ async fn runner_returns_error_on_nonzero_exit() {
 }
 
 #[tokio::test]
-async fn runner_clusterfuzzlite_dispatches() {
-    let rt = MockRuntime {
-        exit_code: 0,
-        stdout: "cov: 100\nDONE\n".to_owned(),
-        termination: CommandTermination::Completed,
-    };
-    let runner = EngineRunner::new();
-    let result = runner
-        .run(
-            EngineKind::ClusterFuzzLite,
-            &run_config(EngineKind::ClusterFuzzLite, 60),
-            "/work/fuzz_bin",
-            "/work/corpus",
-            "/work/out",
-            &rt,
-            &PathBuf::from("/work"),
-        )
-        .await
-        .expect("ClusterFuzzLite should now be supported");
-    assert!(!result.progress.is_empty());
-    assert_eq!(result.coverage.edges, 100);
-}
-
-#[tokio::test]
 async fn runner_rejects_a_sandbox_timeout_even_with_clean_output() {
     let rt = MockRuntime {
         exit_code: 0,

@@ -912,7 +912,40 @@ async fn system_status_returns_json_flags() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["docker"].is_boolean());
     assert!(json["sandbox_image"].is_boolean());
-    assert!(json["libfuzzer"].is_boolean());
+    assert!(json.get("clusterfuzzlite").is_none());
+    for key in ["libfuzzer", "aflplusplus", "honggfuzz", "syzkaller"] {
+        assert!(json[key].is_boolean(), "{key}");
+    }
+}
+
+#[tokio::test]
+async fn retired_engine_is_rejected_with_actionable_api_error() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let retired_engine_id = ["cluster", "fuzz", "lite"].concat();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/harness/promote")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project": "/project",
+                        "target": "parse",
+                        "engine": retired_engine_id,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("has been retired"));
 }
 
 #[tokio::test]

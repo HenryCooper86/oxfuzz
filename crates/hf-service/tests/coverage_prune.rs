@@ -18,7 +18,7 @@ fn isolate_workspace() {
             config.join("oxfuzz.toml"),
             r#"
 [fuzzing]
-enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "clusterfuzzlite", "syzkaller"]
+enabled_engines = ["libfuzzer", "afl++", "honggfuzz", "syzkaller"]
 default_engine = "libfuzzer"
 default_duration_secs = 60
 
