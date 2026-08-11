@@ -25,7 +25,7 @@ const TOOL_USAGE: &[(&str, &str)] = &[
     ),
     (
         "harness",
-        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz", "lang": "c"} -> draft, compile, and smoke-test a function harness; a human must promote it. For syzkaller, use the dedicated run_syzkaller kernel campaign path; function-harness generation is not supported"#,
+        r#"- harness {"target": "<symbol>", "engine": "libfuzzer|afl++|honggfuzz", "lang": "c"} -> draft, compile, and smoke-test a function harness; a human must promote it. Generated function harnesses support AFL++, honggfuzz, and libFuzzer only. Syzkaller kernel campaigns use the local desktop application's dedicated kernel-campaign workflow. This agent has no syzkaller tool; hand the request back to the operator for approval and execution"#,
     ),
     (
         "refine",
@@ -217,7 +217,16 @@ mod tests {
         let catalog = catalog_for(&["harness".to_owned()]);
         assert!(catalog.contains("libfuzzer|afl++|honggfuzz"), "{catalog}");
         assert!(!catalog.contains("honggfuzz|syzkaller"), "{catalog}");
-        assert!(catalog.contains("run_syzkaller"), "{catalog}");
-        assert!(catalog.contains("kernel campaign"), "{catalog}");
+        assert!(
+            catalog.contains("AFL++, honggfuzz, and libFuzzer only"),
+            "{catalog}"
+        );
+        assert!(!catalog.contains("run_syzkaller"), "{catalog}");
+        assert!(catalog.contains("local desktop application"), "{catalog}");
+        assert!(catalog.contains("no syzkaller tool"), "{catalog}");
+        assert!(
+            catalog.contains("hand the request back to the operator"),
+            "{catalog}"
+        );
     }
 }
