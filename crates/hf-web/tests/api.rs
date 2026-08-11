@@ -257,16 +257,16 @@ async fn campaign_advice_returns_a_read_only_evidence_backed_proposal() {
     let (status, json) = post_json(
         "/campaign/advice",
         serde_json::json!({
-            "current_engine": "LibFuzzer",
-            "enabled_engines": ["LibFuzzer", "AflPlusPlus"],
+            "current_engine": "libfuzzer",
+            "enabled_engines": ["libfuzzer", "afl++"],
             "engine_rates": [
-                {"engine": "LibFuzzer", "usd_per_hour": 1.0},
-                {"engine": "AflPlusPlus", "usd_per_hour": 1.0}
+                {"engine": "libfuzzer", "usd_per_hour": 1.0},
+                {"engine": "afl++", "usd_per_hour": 1.0}
             ],
             "observations": [{
                 "run_id": "00000000-0000-0000-0000-000000000001",
                 "sequence": 1,
-                "engine": "LibFuzzer",
+                "engine": "libfuzzer",
                 "duration_secs": 3600,
                 "new_edges": 0,
                 "crashes": 0,
@@ -284,11 +284,116 @@ async fn campaign_advice_returns_a_read_only_evidence_backed_proposal() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["action"]["kind"], "switch_engine");
-    assert_eq!(json["action"]["to"], "AflPlusPlus");
+    assert_eq!(json["action"]["to"], "afl++");
     assert_eq!(json["requires_human_approval"], true);
     assert!(json["evidence"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
+}
+
+fn single_engine_advice_request(engine: &str) -> serde_json::Value {
+    serde_json::json!({
+        "current_engine": engine,
+        "enabled_engines": [engine],
+        "engine_rates": [{"engine": engine, "usd_per_hour": 1.0}],
+        "observations": [],
+        "budget": {
+            "max_total_cost_usd": 10.0,
+            "min_edges_per_dollar": 1.0,
+            "plateau_runs": 1
+        }
+    })
+}
+
+#[tokio::test]
+async fn campaign_advice_rest_boundary_uses_canonical_engine_ids() {
+    for canonical in ["libfuzzer", "afl++", "honggfuzz", "syzkaller"] {
+        let (status, json) =
+            post_json("/campaign/advice", single_engine_advice_request(canonical)).await;
+        assert_eq!(status, StatusCode::OK, "{canonical}: {json}");
+        assert_eq!(json["action"]["engine"], canonical);
+    }
+}
+
+#[tokio::test]
+async fn campaign_advice_rest_boundary_accepts_historical_active_names() {
+    for (historical, canonical) in [
+        ("LibFuzzer", "libfuzzer"),
+        ("AflPlusPlus", "afl++"),
+        ("Honggfuzz", "honggfuzz"),
+        ("Syzkaller", "syzkaller"),
+    ] {
+        let (status, json) =
+            post_json("/campaign/advice", single_engine_advice_request(historical)).await;
+        assert_eq!(status, StatusCode::OK, "{historical}: {json}");
+        assert_eq!(json["action"]["engine"], canonical);
+    }
+}
+
+#[tokio::test]
+async fn campaign_advice_rest_boundary_preserves_engine_parse_errors() {
+    allow_open_dev_mode();
+    let app = hf_web::router::build();
+    let retired_values = [
+        ["cluster", "fuzz", "lite"].concat(),
+        ["c", "f", "l"].concat(),
+        ["c", "f", "lite"].concat(),
+        format!(" {} ", ["Cluster", "Fuzz", "Lite"].concat()),
+    ];
+
+    for value in retired_values {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/campaign/advice")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(single_engine_advice_request(&value).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let expected = format!(
+            "fuzzing engine '{}' has been retired; choose one of: \
+             afl++, honggfuzz, libfuzzer, syzkaller",
+            value.trim()
+        );
+        assert_eq!(body["error"], expected);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/campaign/advice")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    single_engine_advice_request("not-an-engine").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body["error"],
+        "unknown fuzzing engine 'not-an-engine' (expected one of: \
+         afl++, honggfuzz, libfuzzer, syzkaller)"
+    );
 }
 
 #[tokio::test]
