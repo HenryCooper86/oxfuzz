@@ -129,6 +129,196 @@ async fn archive_rows(pool: &sqlx::SqlitePool) -> Vec<(String, String, String, S
     .unwrap()
 }
 
+const ASCII_TRIMMED_RETIRED_ID: &str = "\tCFL\n";
+const UNICODE_TRIMMED_RETIRED_ID: &str = "\u{2003}CFLITE\u{3000}";
+
+#[derive(Clone, Copy, Debug)]
+enum RetiredRecordShape {
+    RunColumn,
+    RunJson,
+    HarnessColumn,
+    HarnessJson,
+    ScheduleJson,
+}
+
+impl RetiredRecordShape {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RunColumn => "run-column",
+            Self::RunJson => "run-json",
+            Self::HarnessColumn => "harness-column",
+            Self::HarnessJson => "harness-json",
+            Self::ScheduleJson => "schedule-json",
+        }
+    }
+
+    fn record_kind(self) -> &'static str {
+        match self {
+            Self::RunColumn | Self::RunJson => "run",
+            Self::HarnessColumn | Self::HarnessJson => "harness",
+            Self::ScheduleJson => "schedule_execution",
+        }
+    }
+}
+
+const RETIRED_RECORD_SHAPES: [RetiredRecordShape; 5] = [
+    RetiredRecordShape::RunColumn,
+    RetiredRecordShape::RunJson,
+    RetiredRecordShape::HarnessColumn,
+    RetiredRecordShape::HarnessJson,
+    RetiredRecordShape::ScheduleJson,
+];
+
+async fn insert_retired_shape(
+    pool: &sqlx::SqlitePool,
+    shape: RetiredRecordShape,
+    id: &str,
+    engine: &str,
+) {
+    match shape {
+        RetiredRecordShape::RunColumn => insert_run(pool, id, engine).await,
+        RetiredRecordShape::RunJson => {
+            insert_run(pool, id, "LibFuzzer").await;
+            let config_json = serde_json::json!({ "engine": engine }).to_string();
+            sqlx::query("UPDATE runs SET config_json = ?1 WHERE id = ?2")
+                .bind(config_json)
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        RetiredRecordShape::HarnessColumn | RetiredRecordShape::HarnessJson => {
+            let column_engine = if matches!(shape, RetiredRecordShape::HarnessColumn) {
+                engine
+            } else {
+                "LibFuzzer"
+            };
+            let json_engine = if matches!(shape, RetiredRecordShape::HarnessJson) {
+                engine
+            } else {
+                "LibFuzzer"
+            };
+            let data_json = serde_json::json!({ "id": id, "engine": json_engine }).to_string();
+            sqlx::query(
+                "INSERT INTO harnesses
+                    (id, target_id, engine, source, status, smoke_run_json, data_json)
+                 VALUES (?1, ?2, ?3, 'source', 'draft', NULL, ?4)",
+            )
+            .bind(id)
+            .bind(format!("target-{id}"))
+            .bind(column_engine)
+            .bind(data_json)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        RetiredRecordShape::ScheduleJson => {
+            let schedule_id = format!("orphan-{id}");
+            let data_json = serde_json::json!({
+                "execution_id": id,
+                "schedule_id": schedule_id,
+                "triggered_at": "2026-08-11T00:00:00Z",
+                "status": "pending",
+                "request_summary": {
+                    "parameter_values": { "engine": engine }
+                }
+            })
+            .to_string();
+            sqlx::query(
+                "INSERT INTO schedule_executions
+                    (id, schedule_id, triggered_at, status, data_json)
+                 VALUES (?1, ?2, '2026-08-11T00:00:00Z', 'pending', ?3)",
+            )
+            .bind(id)
+            .bind(&schedule_id)
+            .bind(data_json)
+            .execute(pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO schedule_occurrences
+                    (id, schedule_id, execution_id, triggered_at, state, owner_id,
+                     lease_expires_at, recovery_detail, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, '2026-08-11T00:00:00Z', 'reserved', 'owner',
+                         '2026-08-11T00:10:00Z', NULL,
+                         '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z')",
+            )
+            .bind(format!("occurrence-{id}"))
+            .bind(schedule_id)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+}
+
+async fn insert_schedule_history(
+    pool: &sqlx::SqlitePool,
+    execution_id: &str,
+    occurrence_id: &str,
+    schedule_id: &str,
+    marker: &str,
+) {
+    let data_json = serde_json::json!({
+        "execution_id": execution_id,
+        "schedule_id": schedule_id,
+        "triggered_at": "2026-08-11T00:00:00Z",
+        "status": "pending",
+        "request_summary": {
+            "parameter_values": { "engine": "libfuzzer" }
+        },
+        "marker": marker
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO schedule_executions
+            (id, schedule_id, triggered_at, status, data_json)
+         VALUES (?1, ?2, '2026-08-11T00:00:00Z', 'pending', ?3)",
+    )
+    .bind(execution_id)
+    .bind(schedule_id)
+    .bind(data_json)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO schedule_occurrences
+            (id, schedule_id, execution_id, triggered_at, state, owner_id,
+             lease_expires_at, recovery_detail, created_at, updated_at)
+         VALUES (?1, ?2, ?3, '2026-08-11T00:00:00Z', 'reserved', 'owner',
+                 '2026-08-11T00:10:00Z', ?4,
+                 '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z')",
+    )
+    .bind(occurrence_id)
+    .bind(schedule_id)
+    .bind(execution_id)
+    .bind(marker)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_conflicting_archive(
+    pool: &sqlx::SqlitePool,
+    record_kind: &str,
+    record_id: &str,
+    payload: &serde_json::Value,
+) {
+    sqlx::query(
+        "INSERT INTO retired_engine_records
+            (record_kind, record_id, retired_engine, payload_json, migration_version)
+         VALUES (?1, ?2, ?3, ?4, 24)",
+    )
+    .bind(record_kind)
+    .bind(record_id)
+    .bind(legacy_serde_engine_name().to_ascii_lowercase())
+    .bind(payload.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn migration_0024_archives_complete_retired_graph_without_relabelling() {
     let directory = tempfile::tempdir().unwrap();
@@ -376,4 +566,209 @@ async fn archive_schedule_history_archives_bound_deduplicated_schedule_ids() {
     .await
     .unwrap();
     assert_eq!(active, 0);
+
+    let before_retry = archive_rows(store.pool()).await;
+    let retry_count = store
+        .archive_schedule_history_for_retired_engine(&[
+            "schedule-a".to_owned(),
+            "schedule-b".to_owned(),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(retry_count, 0);
+    assert_eq!(archive_rows(store.pool()).await, before_retry);
+}
+
+#[tokio::test]
+async fn migration_0024_archives_every_rust_trimmed_identifier_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("whitespace-migration.db");
+    let pool = pre_0024_pool(&path).await;
+
+    let whitespace_cases = [
+        ("ascii", ASCII_TRIMMED_RETIRED_ID),
+        ("unicode", UNICODE_TRIMMED_RETIRED_ID),
+    ];
+    let mut expected = Vec::new();
+    for shape in RETIRED_RECORD_SHAPES {
+        for (case, engine) in whitespace_cases {
+            let id = format!("{}-{case}", shape.label());
+            insert_retired_shape(&pool, shape, &id, engine).await;
+            expected.push((shape.record_kind().to_owned(), id.clone()));
+            if matches!(shape, RetiredRecordShape::ScheduleJson) {
+                expected.push(("schedule_occurrence".to_owned(), format!("occurrence-{id}")));
+            }
+        }
+    }
+
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let identities: Vec<(String, String)> = sqlx::query_as(
+        "SELECT record_kind, record_id FROM retired_engine_records
+         ORDER BY record_kind, record_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    expected.sort();
+    assert_eq!(identities, expected);
+
+    let direct_payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM retired_engine_records
+         WHERE record_kind = 'run' AND record_id = 'run-column-ascii'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let direct_payload: serde_json::Value = serde_json::from_str(&direct_payload).unwrap();
+    assert_eq!(direct_payload["engine"], ASCII_TRIMMED_RETIRED_ID);
+
+    let embedded_payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM retired_engine_records
+         WHERE record_kind = 'run' AND record_id = 'run-json-unicode'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let embedded_payload: serde_json::Value = serde_json::from_str(&embedded_payload).unwrap();
+    let config: serde_json::Value =
+        serde_json::from_str(embedded_payload["config_json"].as_str().unwrap()).unwrap();
+    assert_eq!(config["engine"], UNICODE_TRIMMED_RETIRED_ID);
+
+    let active: i64 = sqlx::query_scalar(
+        "SELECT
+            (SELECT COUNT(*) FROM runs) +
+            (SELECT COUNT(*) FROM harnesses) +
+            (SELECT COUNT(*) FROM schedule_executions) +
+            (SELECT COUNT(*) FROM schedule_occurrences)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 0);
+}
+
+#[tokio::test]
+async fn reconnect_rejects_every_restored_rust_trimmed_identifier_shape() {
+    let whitespace_cases = [
+        ("ascii", ASCII_TRIMMED_RETIRED_ID),
+        ("unicode", UNICODE_TRIMMED_RETIRED_ID),
+    ];
+    for shape in RETIRED_RECORD_SHAPES {
+        for (case, engine) in whitespace_cases {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory
+                .path()
+                .join(format!("{}-{case}.db", shape.label()));
+            let pool = pre_0024_pool(&path).await;
+            sqlx::migrate!().run(&pool).await.unwrap();
+            let id = format!("late-{}-{case}", shape.label());
+            insert_retired_shape(&pool, shape, &id, engine).await;
+            pool.close().await;
+
+            let Err(error) = Store::connect(&path).await else {
+                panic!("restored {shape:?} {case} identifier must fail startup");
+            };
+            assert!(matches!(error, StorageError::InvalidData(_)));
+            assert!(error.to_string().contains("has been retired"));
+            assert!(error.to_string().contains(&id), "{shape:?} {case}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn execution_archive_collision_rolls_back_without_discarding_active_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("execution-collision.db"))
+        .await
+        .unwrap();
+    insert_schedule_history(
+        store.pool(),
+        "execution-collision",
+        "occurrence-new",
+        "schedule-collision",
+        "active",
+    )
+    .await;
+    insert_conflicting_archive(
+        store.pool(),
+        "schedule_execution",
+        "execution-collision",
+        &serde_json::json!({
+            "id": "execution-collision",
+            "schedule_id": "schedule-archived",
+            "triggered_at": "2026-08-10T00:00:00Z",
+            "status": "completed",
+            "data_json": "{\"marker\":\"archived\"}"
+        }),
+    )
+    .await;
+    let before = archive_rows(store.pool()).await;
+
+    let error = store
+        .archive_schedule_history_for_retired_engine(&["schedule-collision".to_owned()])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Db(_)));
+    assert_eq!(archive_rows(store.pool()).await, before);
+    let active: i64 = sqlx::query_scalar(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions WHERE id = 'execution-collision') +
+            (SELECT COUNT(*) FROM schedule_occurrences WHERE id = 'occurrence-new')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(active, 2);
+}
+
+#[tokio::test]
+async fn occurrence_archive_collision_rolls_back_without_discarding_active_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("occurrence-collision.db"))
+        .await
+        .unwrap();
+    insert_schedule_history(
+        store.pool(),
+        "execution-new",
+        "occurrence-collision",
+        "schedule-collision",
+        "active",
+    )
+    .await;
+    insert_conflicting_archive(
+        store.pool(),
+        "schedule_occurrence",
+        "occurrence-collision",
+        &serde_json::json!({
+            "id": "occurrence-collision",
+            "schedule_id": "schedule-archived",
+            "execution_id": "execution-archived",
+            "triggered_at": "2026-08-10T00:00:00Z",
+            "state": "completed",
+            "owner_id": "archived-owner",
+            "lease_expires_at": null,
+            "recovery_detail": "archived",
+            "created_at": "2026-08-10T00:00:00Z",
+            "updated_at": "2026-08-10T00:01:00Z"
+        }),
+    )
+    .await;
+    let before = archive_rows(store.pool()).await;
+
+    let error = store
+        .archive_schedule_history_for_retired_engine(&["schedule-collision".to_owned()])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::Db(_)));
+    assert_eq!(archive_rows(store.pool()).await, before);
+    let active: i64 = sqlx::query_scalar(
+        "SELECT
+            (SELECT COUNT(*) FROM schedule_executions WHERE id = 'execution-new') +
+            (SELECT COUNT(*) FROM schedule_occurrences WHERE id = 'occurrence-collision')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(active, 2);
 }
