@@ -13,6 +13,7 @@ import type { HarnessReviewItem, ViewType } from "../types";
 import { useFuzzingSettings } from "../hooks/useFuzzingSettings";
 import { enabledEngineOptions } from "../lib/fuzzingSettings";
 import { FuzzingPolicyNotice } from "../components/FuzzingPolicyNotice";
+import { TargetSelectionRepairNotice } from "../components/TargetSelectionRepairNotice";
 
 export function RunView({
   embedded = false,
@@ -25,7 +26,15 @@ export function RunView({
   const { activeProject, setActiveProject } = useProject();
   const { markDone, markSkipped } = usePipeline();
   const { sandboxArch } = usePrefs();
-  const { target: sharedTarget, engine: sharedEngine, compiled } = useTarget();
+  const {
+    target,
+    setTarget,
+    engine: selectedEngine,
+    setEngine,
+    compiled,
+    selectionRepair,
+    reset,
+  } = useTarget();
   // Run output (log/stats/summary/running) lives in a shared, always-mounted
   // context, so a run keeps streaming and is preserved when you navigate away.
   const { log, stats: liveStats, summary, running, cancelling, runFuzzer, runSyzkaller, cancelRun } = useRunOutput();
@@ -33,17 +42,17 @@ export function RunView({
   // Embedded in the workflow, the project comes from the workflow's gate.
   const [localProject, setLocalProject] = useState(activeProject);
   const project = embedded ? activeProject : localProject;
-  const [target, setTarget] = useState(sharedTarget || "");
-  const [selectedEngine, setSelectedEngine] = useState(sharedEngine || "libfuzzer");
   const [durationOverride, setDurationOverride] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const engineOptions = fuzzingSettings
     ? enabledEngineOptions(fuzzingSettings, { includeSyzkaller: true })
     : [];
-  const engine = engineOptions.some((option) => option.value === selectedEngine)
+  const engine = selectionRepair
     ? selectedEngine
-    : (engineOptions.find((option) => option.value === fuzzingSettings?.default_engine)
-      ?? engineOptions[0])?.value ?? selectedEngine;
+    : engineOptions.some((option) => option.value === selectedEngine)
+      ? selectedEngine
+      : (engineOptions.find((option) => option.value === fuzzingSettings?.default_engine)
+        ?? engineOptions[0])?.value ?? selectedEngine;
   const duration = durationOverride ?? (fuzzingSettings ? String(fuzzingSettings.default_duration_secs) : "");
 
   // Suggest the project's harnessed targets so the standalone Run view isn't a
@@ -53,7 +62,7 @@ export function RunView({
     let cancelled = false;
     // Resolve to [] when there's no project instead of setting state
     // synchronously in the effect body (which would cascade renders).
-    const load = project
+    const load = project && !selectionRepair
       ? getTransport().invoke<HarnessReviewItem[]>("harness_review_queue", { project })
       : Promise.resolve<HarnessReviewItem[]>([]);
     load
@@ -66,7 +75,7 @@ export function RunView({
     return () => {
       cancelled = true;
     };
-  }, [project]);
+  }, [project, selectionRepair]);
 
   // syzkaller (kernel fuzzing) campaign artifacts.
   const [kernelImage, setKernelImage] = useState("");
@@ -77,10 +86,8 @@ export function RunView({
 
   const isSyz = engine === "syzkaller";
 
-  // Note: target/engine initialize from the shared context on mount (the
-  // Harness -> Run handoff). Because switching views unmounts this component,
-  // a fresh mount always picks up the latest shared values without a syncing
-  // effect.
+  // Target and engine are sourced directly from the shared validated context,
+  // so Harness and Run cannot disagree about a persisted repair state.
 
   // Keep the live log pinned to the latest line as progress streams in.
   useEffect(() => {
@@ -97,7 +104,7 @@ export function RunView({
   const [harnessApproved, setHarnessApproved] = useState(compiled);
   useEffect(() => {
     // syzkaller has no harness binary; the badge is hidden for it anyway.
-    if (isSyz) return;
+    if (selectionRepair || isSyz) return;
     let cancelled = false;
     Promise.all([
       getTransport().invoke<{ harness_built: boolean }>("artifact_summary", { project: project ?? "", target: target ?? "" }),
@@ -122,7 +129,7 @@ export function RunView({
     return () => {
       cancelled = true;
     };
-  }, [project, target, engine, isSyz, summary]);
+  }, [project, target, engine, isSyz, selectionRepair, summary]);
 
   async function browse() {
     const path = await pickFolder();
@@ -133,6 +140,7 @@ export function RunView({
   }
 
   async function run() {
+    if (selectionRepair) return;
     const policy = fuzzingSettings;
     if (!policy) return;
     if (!project) return;
@@ -187,6 +195,14 @@ export function RunView({
         <FuzzingPolicyNotice
           state={fuzzingPolicyLoaded ? "unavailable" : "loading"}
           error={fuzzingPolicyError}
+        />
+      )}
+      {selectionRepair && (
+        <TargetSelectionRepairNotice
+          repair={selectionRepair}
+          engineOptions={engineOptions}
+          onSelectEngine={setEngine}
+          onReset={reset}
         />
       )}
 
@@ -244,8 +260,8 @@ export function RunView({
         <div className="flex flex-col gap-1">
           <Label>{t("run.engine")}</Label>
           <Select
-            value={engine}
-            onChange={setSelectedEngine}
+            value={selectionRepair ? "" : engine}
+            onChange={setEngine}
             options={engineOptions}
           />
         </div>
@@ -297,7 +313,7 @@ export function RunView({
           variant="primary"
           className="self-start"
           onClick={run}
-          disabled={!fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
+          disabled={selectionRepair !== null || !fuzzingSettings || running || !project || (!isSyz && (!target || !harnessBuilt || !harnessApproved))}
           loading={running}
         >
           {!running && <Play size={14} />}
