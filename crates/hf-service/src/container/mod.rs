@@ -378,6 +378,13 @@ pub fn repo_root() -> Option<PathBuf> {
 // ServiceContainer
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistenceAvailability {
+    NotConfigured,
+    Available,
+    Unavailable,
+}
+
 /// All wired application services, constructed from a runtime + optional
 /// provider pool.
 ///
@@ -392,6 +399,7 @@ pub struct ServiceContainer {
     /// without a restart.
     provider_pool: Arc<std::sync::RwLock<Option<Arc<dyn ProviderPool>>>>,
     store: Option<Arc<Store>>,
+    persistence_availability: PersistenceAvailability,
     session_manager: Option<Arc<hf_session::SessionManager>>,
     checkpoint_manager: Option<Arc<hf_session::ChatCheckpointManager>>,
     guardrails: Guardrails,

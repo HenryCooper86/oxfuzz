@@ -580,6 +580,97 @@ async fn archive_schedule_history_archives_bound_deduplicated_schedule_ids() {
 }
 
 #[tokio::test]
+async fn operation_bound_schedule_history_archive_persists_an_idempotent_proof() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("operation-proof.db"))
+        .await
+        .unwrap();
+    insert_schedule_history(
+        store.pool(),
+        "execution-proof",
+        "occurrence-proof",
+        "schedule-proof",
+        "active",
+    )
+    .await;
+    let ids = vec!["schedule-proof".to_owned()];
+
+    assert_eq!(
+        store
+            .archive_schedule_history_for_retired_engine_operation(
+                "operation-proof",
+                "plan-proof",
+                &ids,
+            )
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(store
+        .schedule_retirement_history_proven("operation-proof", "plan-proof", &ids)
+        .await
+        .unwrap());
+    assert!(store.has_schedule_retirement_history_proof().await.unwrap());
+
+    let before = archive_rows(store.pool()).await;
+    assert_eq!(
+        store
+            .archive_schedule_history_for_retired_engine_operation(
+                "operation-proof",
+                "plan-proof",
+                &ids,
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(archive_rows(store.pool()).await, before);
+
+    insert_schedule_history(
+        store.pool(),
+        "execution-late",
+        "occurrence-late",
+        "schedule-proof",
+        "late",
+    )
+    .await;
+    assert!(!store
+        .schedule_retirement_history_proven("operation-proof", "plan-proof", &ids)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn operation_bound_schedule_history_proof_rejects_divergent_reuse() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::connect(directory.path().join("operation-proof-conflict.db"))
+        .await
+        .unwrap();
+    let ids = vec!["schedule-proof".to_owned()];
+    store
+        .archive_schedule_history_for_retired_engine_operation(
+            "operation-proof",
+            "plan-proof",
+            &ids,
+        )
+        .await
+        .unwrap();
+    let before = archive_rows(store.pool()).await;
+
+    let error = store
+        .archive_schedule_history_for_retired_engine_operation(
+            "operation-proof",
+            "different-plan",
+            &ids,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InvalidData(_)));
+    assert_eq!(archive_rows(store.pool()).await, before);
+}
+
+#[tokio::test]
 async fn migration_0024_archives_every_rust_trimmed_identifier_shape() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("whitespace-migration.db");

@@ -20,7 +20,7 @@ use super::workspace::initialize_workspace_root;
 use super::workspace::{configured_workspace_root, project_workspace_dir, workspace_root};
 use super::{
     build_cost_map, build_session_managers, provider_pool_from_config, provider_pool_from_env,
-    runtime_from_env, ServiceContainer,
+    runtime_from_env, PersistenceAvailability, ServiceContainer,
 };
 
 impl ServiceContainer {
@@ -34,6 +34,7 @@ impl ServiceContainer {
             runtime,
             provider_pool: Arc::new(std::sync::RwLock::new(provider_pool)),
             store: None,
+            persistence_availability: PersistenceAvailability::NotConfigured,
             session_manager: None,
             checkpoint_manager: None,
             guardrails: Guardrails::permissive(),
@@ -74,6 +75,7 @@ impl ServiceContainer {
         self.session_manager = Some(sessions);
         self.checkpoint_manager = Some(checkpoints);
         self.store = Some(store);
+        self.persistence_availability = PersistenceAvailability::Available;
         self
     }
 
@@ -200,11 +202,11 @@ impl ServiceContainer {
             .then(provider_pool_from_config)
             .flatten()
             .or_else(provider_pool_from_env);
-        let store = match Store::connect_from_env().await {
-            Ok(s) => Some(Arc::new(s)),
+        let (store, persistence_availability) = match Store::connect_from_env().await {
+            Ok(s) => (Some(Arc::new(s)), PersistenceAvailability::Available),
             Err(e) => {
                 tracing::warn!("persistence disabled: {e}");
-                None
+                (None, PersistenceAvailability::Unavailable)
             }
         };
         #[cfg(feature = "semgrep-enrichment")]
@@ -292,6 +294,7 @@ impl ServiceContainer {
             runtime,
             provider_pool,
             store,
+            persistence_availability,
             session_manager,
             guardrails: Guardrails::from_env(),
             checkpoint_manager,
@@ -319,6 +322,17 @@ impl ServiceContainer {
     #[must_use]
     pub fn store(&self) -> Option<&Arc<Store>> {
         self.store.as_ref()
+    }
+
+    pub(crate) const fn persistence_availability(&self) -> PersistenceAvailability {
+        self.persistence_availability
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_unavailable_store_for_test(mut self) -> Self {
+        self.store = None;
+        self.persistence_availability = PersistenceAvailability::Unavailable;
+        self
     }
 
     /// Clear all learned knowledge across every project: discovered targets and

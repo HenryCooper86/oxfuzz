@@ -38,6 +38,7 @@ pub mod report_export;
 pub mod report_store;
 pub mod repro;
 pub mod sarif;
+mod schedule_retirement;
 pub mod scheduler;
 #[cfg(feature = "semgrep-enrichment")]
 pub mod semgrep;
