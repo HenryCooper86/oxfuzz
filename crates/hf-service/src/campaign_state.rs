@@ -85,6 +85,9 @@ pub enum StateFileError {
     /// The file changed after this repository verified its startup snapshot.
     #[error("state file changed concurrently: {path}")]
     Conflict { path: PathBuf },
+    /// A schedule definition attempted to reuse an identity retired as evidence.
+    #[error("schedule identity is permanently retired: {schedule_ids}; choose a new schedule ID")]
+    PermanentlyRetiredSchedule { schedule_ids: String },
 }
 
 fn io_error(operation: &'static str, path: &Path, source: std::io::Error) -> StateFileError {
