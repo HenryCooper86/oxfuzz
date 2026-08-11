@@ -70,7 +70,7 @@ export function HarnessView({
   stepPrefix?: string;
 }) {
   const { t } = useI18n();
-  const { activeProject } = useProject();
+  const { activeProject, setActiveProject } = useProject();
   const { markDone } = usePipeline();
   const {
     target: selectedTarget,
@@ -82,6 +82,8 @@ export function HarnessView({
     setCompiled,
     selectionRepair,
     storageError,
+    reset,
+    retryStorage,
   } = useTarget();
   const { settings: fuzzingSettings, loaded: fuzzingPolicyLoaded, error: fuzzingPolicyError } = useFuzzingSettings();
   const fuzzingEnabled = fuzzingActionsEnabled(fuzzingSettings);
@@ -357,8 +359,12 @@ export function HarnessView({
         <TargetSelectionRepairNotice
           repair={selectionRepair}
           storageError={storageError}
+          activeProject={activeProject}
           engineOptions={engineOptions}
           onSelectEngine={setEngine}
+          onSwitchProject={setActiveProject}
+          onReset={reset}
+          onRetryStorage={retryStorage}
         />
       )}
       {!embedded && (

@@ -11,13 +11,21 @@ export interface TargetContextValue {
   setEngine: (engine: string) => void;
   setLang: (language: string) => void;
   setCompiled: (compiled: boolean) => void;
+  reset: () => void;
+  retryStorage: () => void;
 }
 
 export type TargetState = Pick<TargetContextValue, "target" | "engine" | "lang" | "compiled">;
 
-export type TargetSelectionRepair =
+export type TargetSelectionIssue =
   | { kind: "retired_engine"; value: string }
   | { kind: "invalid_selection"; reason: "malformed_payload" | "invalid_shape" | "unknown_engine" };
+
+/** A persisted repair plus the project that is authorized to resolve it. */
+export interface TargetSelectionRepair {
+  projectKey: string | null;
+  issue: TargetSelectionIssue;
+}
 
 export interface TargetStorageError {
   operation: "read" | "write";
@@ -43,6 +51,8 @@ export function useTarget(): TargetContextValue {
       setEngine: () => {},
       setLang: () => {},
       setCompiled: () => {},
+      reset: () => {},
+      retryStorage: () => {},
     }
   );
 }
