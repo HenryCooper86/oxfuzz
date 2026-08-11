@@ -144,6 +144,15 @@ A crash after either archive is created but before active-file replacement is sa
 
 Retired schedule definitions are never automatically converted, enabled, or dispatched. The retired archive is evidence only.
 
+A retired file-schedule ID is a permanent identity tombstone, not only an
+engine-specific marker. After the one-time retirement is proven, an active,
+created, updated, persisted, or dispatched schedule that reuses that ID fails
+closed even if it names a supported engine. Recovery requires a new schedule
+ID; changing the engine does not revive the retired identity. The service
+checks the receipt and normalized database tombstones before registration and
+dispatch so a persistence rejection cannot be logged and then followed by
+execution.
+
 All service instances that share `schedules.json` participate in the same
 advisory-lock protocol. Online edits by older binaries, editors, scripts, or
 other processes that ignore that lock are unsupported: stop every service
@@ -153,7 +162,7 @@ not claim atomic compare-and-swap against non-cooperating writers.
 
 ### 8.3 Unsupported legacy input after migration
 
-Any retired record or schedule introduced after the migration, such as by restoring an old configuration or replacing a state file, fails closed with the retirement error. It is not silently ignored when doing so could make the operator believe work was scheduled or replayed.
+Any retired record or schedule introduced after the migration, such as by restoring an old configuration or replacing a state file, fails closed with the retirement error. Reusing a permanently retired schedule ID with a supported engine also fails with recovery guidance to choose a new identity. It is not silently ignored when doing so could make the operator believe work was scheduled or replayed.
 
 Receipt version 1 and the intermediate proof layouts were never distributed.
 Receipt version 2, completion certificates, and migration 0025 therefore ship
