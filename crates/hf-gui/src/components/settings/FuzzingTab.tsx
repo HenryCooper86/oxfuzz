@@ -3,6 +3,7 @@ import { SettingsGroup, SettingsItem } from "../ui/SettingsGroup";
 import { useI18n } from "../../i18nContext";
 import {
   FUZZING_ENGINE_OPTIONS,
+  formatRetiredEngineError,
   normalizeFuzzingSettings,
   patchFuzzingSettings,
   type FuzzingEngineId,
@@ -22,7 +23,7 @@ export function FuzzingTab({ value, onChange }: FuzzingTabProps) {
   if (normalized.error !== null) {
     return (
       <div role="alert" className="text-text-secondary" style={{ fontSize: "13px" }}>
-        {t("settings.fuzzing.retiredEngineConfig")}
+        {formatRetiredEngineError(normalized.error.value)} {t("settings.fuzzing.retiredEngineConfig")}
       </div>
     );
   }
