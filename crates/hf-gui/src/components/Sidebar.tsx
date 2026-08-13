@@ -3,6 +3,7 @@ import { useProject } from "../providers/project";
 import { useTarget } from "../providers/target";
 import { useI18n } from "../i18nContext";
 import { useDefectDojo } from "../lib";
+import { APP_VERSION } from "../lib/appVersion";
 import { Bot, BookOpen, Bug, Boxes, CarFront, Crosshair, Database, FileCode, FileText, FolderOpen, History, LayoutDashboard, LifeBuoy, MessageSquare, Play, Plus, Puzzle, ScrollText, Settings, ShieldCheck, Workflow, X, Zap } from "lucide-react";
 
 interface SidebarProps {
@@ -331,7 +332,7 @@ export function Sidebar({ activeView, onNavigate, onNewTarget, onSelectTarget }:
           <span>
             Press <kbd style={{ padding: "0 3px", border: "1px solid var(--border)", borderRadius: 3 }}>⌘K</kbd> to search
           </span>
-          <span>oxfuzz v0.1.0</span>
+          <span>oxfuzz v{APP_VERSION}</span>
         </div>
       </div>
     </nav>

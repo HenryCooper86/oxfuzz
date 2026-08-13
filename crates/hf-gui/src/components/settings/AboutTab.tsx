@@ -13,8 +13,7 @@ import {
 } from "../../lib/projectLinks";
 import type { SystemStatus } from "../../types";
 import { Crosshair, Github, BookOpen, ClipboardCheck } from "lucide-react";
-
-const APP_VERSION = "0.1.0";
+import { APP_VERSION } from "../../lib/appVersion";
 
 /** Build a Markdown environment report from the live system status, for pasting
  * into a bug report. Deliberately plain text (no emoji) per project convention. */
