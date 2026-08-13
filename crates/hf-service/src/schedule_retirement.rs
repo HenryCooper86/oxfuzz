@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -317,9 +317,14 @@ async fn acquire_schedule_path_lease_with_timeout(
         if tokio::time::Instant::now() >= deadline {
             return Err(lock_timeout_error(&lock_path));
         }
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        // std reports contention as the typed `WouldBlock` variant on every
+        // platform, mapping Windows ERROR_LOCK_VIOLATION itself. fs2 returned
+        // that raw code as an io::Error whose kind matched nothing portable, so
+        // contention fell through to the failure arm and the lock gave up
+        // immediately instead of waiting out the timeout.
+        match file.try_lock() {
             Ok(()) => break,
-            Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(TryLockError::WouldBlock) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(lock_timeout_error(&lock_path));
                 }
@@ -328,7 +333,9 @@ async fn acquire_schedule_path_lease_with_timeout(
                 )
                 .await;
             }
-            Err(source) => return Err(classify_lock_error(&lock_path, source)),
+            Err(TryLockError::Error(source)) => {
+                return Err(classify_lock_error(&lock_path, source))
+            }
         }
     }
     Ok(SchedulePathLease {
@@ -1856,16 +1863,28 @@ mod tests {
         let mut child = spawn_lock_holder(&schedule_path, &ready, &release);
         wait_for_path(&ready).await;
 
-        let error =
-            acquire_schedule_path_lease_with_timeout(&schedule_path, Duration::from_millis(100))
-                .await
-                .err()
-                .expect("subprocess lock must exclude the contender");
+        let contended_timeout = Duration::from_millis(100);
+        let started = std::time::Instant::now();
+        let error = acquire_schedule_path_lease_with_timeout(&schedule_path, contended_timeout)
+            .await
+            .err()
+            .expect("subprocess lock must exclude the contender");
+        let waited = started.elapsed();
         assert!(matches!(
             error,
             StateFileError::Io { source, .. }
                 if source.kind() == std::io::ErrorKind::TimedOut
         ));
+        // A held lock is contention, not failure: the contender must poll until
+        // its deadline rather than give up on the first refusal. Asserting only
+        // the error kind would still pass if the lock returned TimedOut
+        // instantly, which is exactly how this failed on Windows -- fs2 reported
+        // ERROR_LOCK_VIOLATION, no portable ErrorKind matched it, and the wait
+        // was skipped entirely. Slack absorbs coarse timer granularity.
+        assert!(
+            waited >= contended_timeout.mul_f32(0.8),
+            "contended lease returned after {waited:?}, expected to wait about {contended_timeout:?}"
+        );
 
         std::fs::write(&release, b"release").unwrap();
         assert!(child.wait().unwrap().success());
