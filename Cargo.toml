@@ -62,7 +62,6 @@ tracing-appender = "0.2"
 
 # Identifiers
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-fs2 = "0.4"
 
 # Hashing / Crypto
 sha2 = "0.10"
