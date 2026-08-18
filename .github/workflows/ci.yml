@@ -43,6 +43,11 @@ jobs:
       - name: Script tests
         run: scripts/tests/gates.sh script-tests
 
+      # Same reasoning: no toolchain, instant, and a stale translation should
+      # not be discovered after a full workspace build.
+      - name: Translation pairing
+        run: scripts/tests/gates.sh translation-pairing
+
       # No toolchain action on purpose: rust-toolchain.toml pins 1.94.0, and an
       # action that installs a channel would silently override the pin. rustup
       # is preinstalled on the runner and provisions the pinned toolchain here.
