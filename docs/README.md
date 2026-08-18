@@ -57,6 +57,7 @@ update and review the design before changing production behavior.
 ## Engineering standards
 
 - [Test Strategy](standards/TEST_STRATEGY.md)
+- [Defensive Patterns](standards/DEFENSIVE_PATTERNS.md)
 - [Engineering Standards](standards/ENGINEERING_STANDARDS.md)
 - [Database Schema](standards/DATABASE_SCHEMA.md)
 - [Agent Autonomy](standards/AGENT_AUTONOMY.md)

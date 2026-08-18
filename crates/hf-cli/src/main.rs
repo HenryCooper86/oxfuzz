@@ -267,6 +267,22 @@ enum Commands {
         #[arg(long, default_value = "8081")]
         port: u16,
     },
+    /// Authorize a running server to act on work restored after a restart.
+    ///
+    /// A scheduler starts disarmed on every process start: recovery restores
+    /// what it was doing, and missed occurrences a catch-up or backfill policy
+    /// would replay are held rather than fired. This releases them.
+    Arm {
+        /// Base URL of the running oxfuzz server.
+        #[arg(long, default_value = "http://127.0.0.1:8081")]
+        url: String,
+        /// Withdraw authorization instead of granting it.
+        #[arg(long, conflicts_with = "status")]
+        off: bool,
+        /// Report whether the server is armed, changing nothing.
+        #[arg(long)]
+        status: bool,
+    },
     /// Launch the TUI (terminal user interface).
     Tui {
         /// Project root path.
@@ -598,6 +614,49 @@ fn provider_status_lines(statuses: &[hf_service::ProviderStatus]) -> Vec<String>
             )
         })
         .collect()
+}
+
+/// Arm, disarm, or report the arming state of a running server.
+///
+/// Thin by design: the decision and its consequences live in the scheduler;
+/// this only carries the operator's answer to it over the same HTTP surface
+/// the GUI uses.
+async fn cmd_arm(url: &str, off: bool, status: bool) -> anyhow::Result<()> {
+    let endpoint = format!("{}/schedule/arm", url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let request = if status {
+        client.get(&endpoint)
+    } else if off {
+        client.delete(&endpoint)
+    } else {
+        client.post(&endpoint)
+    };
+    // Non-loopback binds require a token; send it when one is configured so the
+    // command works against the same server the operator started.
+    let request = match std::env::var("HF_WEB_TOKEN") {
+        Ok(token) if !token.is_empty() => request.bearer_auth(token),
+        _ => request,
+    };
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("could not reach {endpoint}: {error}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("{endpoint} returned {}", response.status());
+    }
+    let body: serde_json::Value = response.json().await?;
+    let armed = body.get("armed").and_then(serde_json::Value::as_bool);
+
+    match armed {
+        Some(true) => println!("armed: restored work may run"),
+        Some(false) if status || off => println!("disarmed: restored work is held"),
+        Some(false) => {
+            println!("disarmed: the server reports no scheduler, so there is nothing to arm");
+        }
+        None => println!("{body}"),
+    }
+    Ok(())
 }
 
 async fn cmd_doctor(json: bool) -> anyhow::Result<()> {
@@ -2329,6 +2388,7 @@ async fn main() -> anyhow::Result<()> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, app).await?;
         }
+        Commands::Arm { url, off, status } => cmd_arm(&url, off, status).await?,
         Commands::Tui { project } => {
             tui::Tui::run(&project).await?;
         }

@@ -77,6 +77,15 @@ pub trait AgentBackend: Send + Sync {
 
     /// Root containing user-editable agent definitions.
     fn agents_dir(&self) -> PathBuf;
+
+    /// Root under which oversized tool results are spilled, when the backend
+    /// has somewhere durable to put them.
+    ///
+    /// `None` keeps the lossy inline cap, which is what a backend without
+    /// persistent storage (a test harness, an ephemeral session) wants.
+    fn spill_root(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Default routing tags when an agent specifies none.
@@ -113,6 +122,10 @@ pub struct Agent {
     /// iteration (L5). The injection channel for background-task notices, todo
     /// nudges, and user interjections.
     reminders: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Overflow store for oversized tool results, built on first use from the
+    /// backend's root. A store that cannot be created is reported once and then
+    /// treated as absent, which degrades to the previous inline cap.
+    spill: std::sync::OnceLock<Option<Arc<hf_spill::SpillStore>>>,
 }
 
 /// Maximum delegation depth: the orchestrator (0) may spawn specialists (1);
@@ -180,6 +193,7 @@ impl Agent {
             definition,
             max_iterations,
             registry: OnceCell::new(),
+            spill: std::sync::OnceLock::new(),
             delegation_depth: 0,
             reminders: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -224,6 +238,30 @@ impl Agent {
     pub fn with_max_iterations(mut self, n: usize) -> Self {
         self.max_iterations = n.max(1);
         self
+    }
+
+    /// The spill store, built once from the backend's root.
+    ///
+    /// A backend that offers no root, or a root that cannot be created, yields
+    /// `None` and the loop falls back to capping results inline. That is the
+    /// same best-effort stance the save path takes: spilling never turns a
+    /// working turn into a failed one.
+    fn spill_store(&self) -> Option<Arc<hf_spill::SpillStore>> {
+        self.spill
+            .get_or_init(|| {
+                let root = self.backend.spill_root()?;
+                match hf_spill::SpillStore::new(root) {
+                    Ok(store) => Some(Arc::new(store)),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "could not open the spill store; oversized tool results stay capped"
+                        );
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 
     fn system_prompt(&self) -> String {
@@ -543,7 +581,12 @@ impl Agent {
             // single oversized result (L3 Part 2) so no one tool result can blow
             // the budget on the iteration it arrives; the age-based prune handles
             // it further as it ages.
-            let bounded = hf_context::cap_fresh_tool_result(&result).unwrap_or(result);
+            let bounded = bound_fresh_result(
+                &tool,
+                result,
+                self.spill_store().as_deref(),
+                &self.definition.id,
+            );
             messages.push(Message::new(Role::Assistant, content));
             messages.push(Message::new(
                 Role::Tool,
@@ -693,6 +736,58 @@ impl Agent {
         ));
         rebuilt.extend_from_slice(&messages[tail_start..]);
         *messages = rebuilt;
+    }
+}
+
+/// The read tool, excluded from spilling.
+///
+/// Spilling its output would hand the model a file it can read, whose result is
+/// itself oversized and would spill again: a read -> spill -> read loop that
+/// makes progress only in disk usage.
+const FILE_READ_TOOL: &str = "FileRead";
+
+/// Bound one fresh tool result to the context budget, preserving the full text
+/// on disk when a spill store is available.
+///
+/// Without a store this is exactly the previous behaviour -- a lossy head/tail
+/// cap. With one, the same head and tail are kept but the discarded middle
+/// survives at a locator named in the replacement, so the model can be pointed
+/// at it and the artifact stays as retained evidence.
+///
+/// A save failure keeps the capped inline copy. Spilling is an optimization,
+/// and turning a tool call that succeeded into one that failed because its
+/// transcript could not be written would be failing worse than not spilling.
+fn bound_fresh_result(
+    tool: &str,
+    result: String,
+    spill: Option<&hf_spill::SpillStore>,
+    owner: &str,
+) -> String {
+    let Some(capped) = hf_context::cap_fresh_tool_result(&result) else {
+        return result;
+    };
+    if tool == FILE_READ_TOOL {
+        return capped;
+    }
+    let Some(store) = spill else {
+        return capped;
+    };
+
+    match store.save_text(owner, tool, &result) {
+        Ok(spilled) => hf_spill::preview_replacing(
+            &result,
+            hf_context::MAX_FRESH_TOOL_RESULT_CHARS,
+            &spilled.retrieval_hint,
+        )
+        .unwrap_or(capped),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                tool,
+                "could not spill an oversized tool result; keeping the capped inline copy"
+            );
+            capped
+        }
     }
 }
 
@@ -950,6 +1045,113 @@ mod completion_tests {
         assert!(
             completion_reminder(Some(&r), false, MAX_COMPLETION_RECOVERIES).is_none(),
             "budget spent -> accept the answer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod spill_tests {
+    use super::{bound_fresh_result, FILE_READ_TOOL};
+    use hf_spill::SpillStore;
+
+    fn oversized() -> String {
+        // Comfortably past the fresh-result cap, with a marker at each end so a
+        // preview can be told apart from a truncation.
+        format!(
+            "HEAD{}TAIL",
+            "a".repeat(hf_context::MAX_FRESH_TOOL_RESULT_CHARS * 2)
+        )
+    }
+
+    fn store(dir: &std::path::Path) -> SpillStore {
+        SpillStore::new(dir.join("spill")).expect("store")
+    }
+
+    #[test]
+    fn a_result_within_the_cap_is_passed_through_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let result = "small enough".to_owned();
+        assert_eq!(
+            bound_fresh_result("Grep", result.clone(), Some(&store), "agent"),
+            result
+        );
+    }
+
+    #[test]
+    fn an_oversized_result_is_replaced_by_a_preview_naming_its_locator() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let bounded = bound_fresh_result("Grep", oversized(), Some(&store), "agent");
+
+        assert!(bounded.len() <= hf_context::MAX_FRESH_TOOL_RESULT_CHARS);
+        assert!(bounded.starts_with("HEAD"), "preview lost its head");
+        assert!(
+            bounded.trim_end().ends_with("TAIL"),
+            "preview lost its tail"
+        );
+        assert!(
+            bounded.contains("spill"),
+            "the replacement must say where the full output went: {bounded}"
+        );
+    }
+
+    #[test]
+    fn the_full_result_survives_at_the_locator() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let original = oversized();
+        let bounded = bound_fresh_result("Grep", original.clone(), Some(&store), "agent");
+
+        // Recover the path from the notice and confirm nothing was lost.
+        let start = bounded.find("at ").expect("notice names a path") + 3;
+        let path = bounded[start..]
+            .split(" ...")
+            .next()
+            .expect("path is delimited");
+        assert_eq!(std::fs::read_to_string(path.trim()).unwrap(), original);
+    }
+
+    #[test]
+    fn the_read_tool_is_never_spilled() {
+        // Spilling FileRead's output would let the model read the spill file and
+        // spill that in turn: a read -> spill -> read loop.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let bounded = bound_fresh_result(FILE_READ_TOOL, oversized(), Some(&store), "agent");
+
+        assert!(
+            !bounded.contains("spill"),
+            "FileRead output must not be spilled"
+        );
+        assert!(bounded.len() <= oversized().len(), "still capped");
+    }
+
+    #[test]
+    fn a_spill_failure_keeps_the_capped_result_rather_than_failing_worse() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        // Replace the store root with a file so no session directory can be
+        // created under it; save_text now fails for every call.
+        std::fs::remove_dir_all(dir.path().join("spill")).unwrap();
+        std::fs::write(dir.path().join("spill"), b"not a directory").unwrap();
+
+        let bounded = bound_fresh_result("Grep", oversized(), Some(&store), "agent");
+
+        assert!(
+            !bounded.is_empty(),
+            "a save failure must not lose the result"
+        );
+        assert!(bounded.len() <= oversized().len());
+        assert!(bounded.contains("omitted") || bounded.contains("trimmed"));
+    }
+
+    #[test]
+    fn without_a_store_the_previous_capping_behaviour_is_unchanged() {
+        let bounded = bound_fresh_result("Grep", oversized(), None, "agent");
+        assert_eq!(
+            bounded,
+            hf_context::cap_fresh_tool_result(&oversized()).unwrap()
         );
     }
 }

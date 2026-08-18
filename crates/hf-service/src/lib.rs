@@ -71,7 +71,7 @@ pub use hf_core::types::{Message, ProviderId, Role, SessionId};
 pub use hf_guardrails::{Action, ApprovalGate, GuardrailPolicy, Guardrails};
 pub use hf_runtime::{
     can_run_platform, docker_cli_present, docker_daemon_ready, host_platform, norm_platform,
-    platform_short, sandbox_image_arch, sandbox_image_present,
+    platform_short, sandbox_image_arch, sandbox_image_present, scrubbed_command,
 };
 pub use hf_skills::{SkillDefinition, SkillRegistry, TrustTier};
 

@@ -269,7 +269,7 @@ impl CompactionEngine {
         for chunk in messages.chunks(segment_size) {
             let prompt = build_segment_prompt(chunk, segments.len() + 1);
             let segment_summary = self
-                .call_with_retry(llm, &prompt)
+                .call_with_retry(llm, &prompt, chunk)
                 .await
                 .unwrap_or_else(|| truncate_fallback(chunk));
             segments.push(segment_summary);
@@ -319,7 +319,7 @@ impl CompactionEngine {
         } else {
             let summarize_strs: Vec<String> = to_summarize.iter().map(|s| (*s).clone()).collect();
             let prompt = build_summarize_prompt(&summarize_strs);
-            self.call_with_retry(llm, &prompt)
+            self.call_with_retry(llm, &prompt, &summarize_strs)
                 .await
                 .unwrap_or_else(|| truncate_fallback(&summarize_strs))
         };
@@ -353,7 +353,7 @@ impl CompactionEngine {
         prompt: &str,
         original_messages: &[String],
     ) -> String {
-        let result = self.call_with_retry(llm, prompt).await;
+        let result = self.call_with_retry(llm, prompt, original_messages).await;
 
         match result {
             Some(summary) => {
@@ -370,11 +370,40 @@ impl CompactionEngine {
         }
     }
 
-    /// Call LLM with retry logic.
-    async fn call_with_retry(&self, llm: &dyn CompactionLlm, prompt: &str) -> Option<String> {
+    /// Call the LLM with retry, rejecting any candidate that does not shrink
+    /// `source`.
+    ///
+    /// A summary at or above the token cost of what it replaces is not a
+    /// summary: accepting one spends a model call to make the conversation
+    /// larger, and the caller would then swap real history for a more expensive
+    /// paraphrase of it. The comparison is remeasured through the same token
+    /// meter the caller uses for its budget, so the check and the pressure it
+    /// relieves cannot disagree.
+    ///
+    /// Returning `None` after the bound is the loud failure: the caller's
+    /// contract turns it into an empty summary, which means "keep the raw
+    /// messages".
+    async fn call_with_retry(
+        &self,
+        llm: &dyn CompactionLlm,
+        prompt: &str,
+        source: &[String],
+    ) -> Option<String> {
+        let source_tokens: u32 = source.iter().map(|m| estimate_tokens(m)).sum();
+
         for attempt in 0..self.config.max_retries {
             match llm.summarize(prompt).await {
                 Ok(summary) if !summary.trim().is_empty() => {
+                    let summary_tokens = estimate_tokens(&summary);
+                    if summary_tokens >= source_tokens {
+                        tracing::warn!(
+                            attempt,
+                            summary_tokens,
+                            source_tokens,
+                            "compaction summary did not shrink its source; retrying"
+                        );
+                        continue;
+                    }
                     tracing::debug!(attempt, "compaction LLM call succeeded");
                     return Some(summary);
                 }
@@ -387,9 +416,10 @@ impl CompactionEngine {
             }
         }
 
-        tracing::warn!(
+        tracing::error!(
             max_retries = self.config.max_retries,
-            "all compaction LLM retries exhausted; falling back to truncation"
+            source_tokens,
+            "compaction produced no summary that shrinks its source; keeping raw messages"
         );
         None
     }
@@ -542,6 +572,9 @@ fn score_importance(message: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
 
     // Mock LLM for testing.
@@ -714,8 +747,95 @@ mod tests {
         };
         let engine = CompactionEngine::with_config(config);
 
-        let result = engine.call_with_retry(&llm, "test").await;
+        let result = engine
+            .call_with_retry(&llm, "test", &["some source text".to_owned()])
+            .await;
         assert!(result.is_none());
+    }
+
+    // Counts calls so a retry bound can be asserted rather than inferred.
+    struct CountingLlm {
+        response: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CompactionLlm for CountingLlm {
+        async fn summarize(&self, _prompt: &str) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+    }
+
+    fn source_messages() -> Vec<String> {
+        (0..4)
+            .map(|i| format!("message {i} carrying a modest amount of content"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_does_not_shrink_its_source_is_rejected() {
+        // A "summary" at or above the cost of what it replaces is not a summary.
+        // Accepting one spends a model call to make the conversation bigger.
+        let messages = source_messages();
+        let bloated = messages.join(" ").repeat(3);
+        let engine = CompactionEngine::with_llm(
+            CompactionConfig::default(),
+            Box::new(MockLlm {
+                response: bloated,
+                should_fail: false,
+            }),
+        );
+
+        let result = engine.compact_async_with_retain(&messages, 0).await;
+
+        // Empty is the established "keep the raw messages" signal; see
+        // call_with_retry_and_validate.
+        assert!(
+            result.summary.is_empty(),
+            "a summary larger than its source was accepted: {:?}",
+            result.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_shrinks_its_source_is_accepted() {
+        let messages = source_messages();
+        let engine = CompactionEngine::with_llm(
+            CompactionConfig::default(),
+            Box::new(MockLlm {
+                response: "four messages about content".to_owned(),
+                should_fail: false,
+            }),
+        );
+
+        let result = engine.compact_async_with_retain(&messages, 0).await;
+
+        assert_eq!(result.summary, "four messages about content");
+    }
+
+    #[tokio::test]
+    async fn a_non_shrinking_summary_is_retried_to_the_bound_then_abandoned() {
+        let messages = source_messages();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let llm = CountingLlm {
+            response: messages.join(" ").repeat(3),
+            calls: Arc::clone(&calls),
+        };
+        let config = CompactionConfig {
+            max_retries: 2,
+            ..CompactionConfig::default()
+        };
+        let engine = CompactionEngine::with_llm(config, Box::new(llm));
+
+        let result = engine.compact_async_with_retain(&messages, 0).await;
+
+        assert!(result.summary.is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a non-shrinking summary must be retried to the bound, not accepted or retried forever"
+        );
     }
 
     /// Score importance function works.

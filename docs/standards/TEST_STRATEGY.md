@@ -39,9 +39,10 @@ Run in order before declaring a task done:
 5. `cargo test --workspace`
 6. `cargo doc --workspace --no-deps`
 7. `cargo deny check`
-8. `npm --prefix crates/hf-gui test`
-9. `npm --prefix crates/hf-gui run build`
-10. `npm --prefix crates/hf-gui run lint`
+8. `scripts/verify_translation_pairing.py`
+9. `npm --prefix crates/hf-gui test`
+10. `npm --prefix crates/hf-gui run build`
+11. `npm --prefix crates/hf-gui run lint`
 
 All `cargo test` invocations use the repository error-output filter documented
 in `AGENTS.md`. The workspace test suite includes an explicit sandbox and
