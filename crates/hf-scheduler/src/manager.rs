@@ -289,6 +289,9 @@ impl RuntimeState {
 /// Owns the `ScheduleStore`, `ScheduleExecutor`, and runs an async trigger loop
 /// that evaluates all active schedules on each tick.
 pub struct SchedulerManager {
+    /// Authorization to act on work restored by recovery. Disarmed on every
+    /// process start, because a restart is not a decision to resume.
+    arm: crate::arming::ArmSignal,
     store: Arc<Mutex<ScheduleStore>>,
     executor: Arc<Mutex<ScheduleExecutor>>,
     /// Execution history store.
@@ -332,6 +335,7 @@ impl SchedulerManager {
     pub fn new(config: SchedulerConfig) -> Self {
         let execution_slots = Arc::new(Semaphore::new(config.max_concurrent_executions.max(1)));
         Self {
+            arm: crate::arming::ArmSignal::default(),
             store: Arc::new(Mutex::new(ScheduleStore::new())),
             executor: Arc::new(Mutex::new(ScheduleExecutor::new())),
             execution_store: Arc::new(Mutex::new(ExecutionStore::with_retention(
@@ -718,8 +722,10 @@ impl SchedulerManager {
 
         let recovery_shutdown = shutdown.clone();
         let recovery_tx = tx.clone();
+        let recovery_arm = self.arm.clone();
         let recovery_handle = tokio::spawn(async move {
-            Self::submit_recovery(recovery_plan, recovery_tx, recovery_shutdown).await;
+            Self::submit_recovery(recovery_plan, recovery_tx, recovery_shutdown, recovery_arm)
+                .await;
         });
 
         let store = self.store.clone();
@@ -771,7 +777,20 @@ impl SchedulerManager {
         plan: recovery::RecoveryPlan,
         tx: TriggerSender,
         shutdown: Arc<Notify>,
+        arm: crate::arming::ArmSignal,
     ) {
+        // Recovery restored what this scheduler was doing. Acting on it needs a
+        // fresh decision, so the plan is held here rather than discarded: an
+        // operator who arms the scheduler gets the missed occurrences, and one
+        // who never does gets none of them.
+        let released = tokio::select! {
+            () = shutdown.notified() => false,
+            () = arm.wait_until_armed() => true,
+        };
+        if !released {
+            return;
+        }
+
         for batch in plan.batches {
             let mut fired_at = batch.first_fire;
             let mut remaining = batch.count;
@@ -794,6 +813,25 @@ impl SchedulerManager {
                 }
             }
         }
+    }
+
+    /// Authorize restored work to run, releasing any recovery held since start.
+    ///
+    /// This is the fresh decision a restart deliberately does not make on the
+    /// operator's behalf. Calling it twice is harmless.
+    pub fn arm(&self) {
+        self.arm.arm();
+    }
+
+    /// Withdraw authorization. Recovery not yet released stays held.
+    pub fn disarm(&self) {
+        self.arm.disarm();
+    }
+
+    /// Whether restored work is currently authorized to run.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        self.arm.is_armed()
     }
 
     /// Internal executor consumer loop.
@@ -3028,7 +3066,7 @@ mod tests {
         })
     }
 
-    fn interval_schedule(id: &str) -> Schedule {
+    pub(super) fn interval_schedule(id: &str) -> Schedule {
         Schedule::new(
             id,
             id,
@@ -3680,6 +3718,8 @@ mod tests {
         manager.set_dispatcher(dispatcher.clone()).await;
         manager.register(due_one_time("once")).await;
         manager.register(interval_schedule("recurring")).await;
+        // Restored work needs an armed scheduler; this test intends it to run.
+        manager.arm();
         manager.start(Duration::from_millis(10)).await;
         assert!(matches!(
             wait_for_one_time_status(&manager, "once").await,
@@ -3702,6 +3742,8 @@ mod tests {
                     .with_params(serde_json::json!({"value": "{{ unknown.value }}"})),
             )
             .await;
+        // Restored work needs an armed scheduler; this test intends it to run.
+        manager.arm();
         manager.start(Duration::from_millis(10)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         manager.stop().await;
@@ -4525,6 +4567,8 @@ mod tests {
         ))
         .await;
 
+        // Restored work needs an armed scheduler; this test intends it to run.
+        mgr.arm();
         mgr.start(Duration::from_mins(1)).await;
         dispatcher.wait_for(5).await;
         mgr.stop().await;
@@ -4556,6 +4600,8 @@ mod tests {
             .await;
         }
 
+        // Restored work needs an armed scheduler; this test intends it to run.
+        mgr.arm();
         mgr.start(Duration::from_mins(1)).await;
         dispatcher.wait_for(3).await;
         mgr.stop().await;
@@ -5200,6 +5246,8 @@ mod tests {
         ))
         .await;
 
+        // Restored work needs an armed scheduler; this test intends it to run.
+        mgr.arm();
         mgr.start(Duration::from_mins(1)).await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while dispatcher.calls.load(Ordering::SeqCst) < 1 {
@@ -5221,5 +5269,116 @@ mod tests {
             .error_message
             .as_deref()
             .is_some_and(|message| message.contains("stopped")));
+    }
+}
+
+#[cfg(test)]
+mod arming_tests {
+    use super::tests::interval_schedule;
+    use super::SchedulerManager;
+    use crate::arming::ArmSignal;
+    use crate::recovery::{RecoveryBatch, RecoveryPlan};
+    use chrono::Utc;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::sync::Notify;
+
+    fn plan_with_one_batch() -> RecoveryPlan {
+        let schedule = interval_schedule("missed");
+        let mut plan = RecoveryPlan::default();
+        plan.batches
+            .push(RecoveryBatch::single(&schedule, Utc::now()));
+        plan
+    }
+
+    #[tokio::test]
+    async fn restored_work_is_held_until_the_scheduler_is_armed() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let arm = ArmSignal::default();
+        let shutdown = Arc::new(Notify::new());
+        let handle = tokio::spawn(SchedulerManager::submit_recovery(
+            plan_with_one_batch(),
+            tx,
+            Arc::clone(&shutdown),
+            arm.clone(),
+        ));
+
+        // Restarting the process is not consent to resume: nothing fires.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "a missed occurrence fired without the scheduler being armed"
+        );
+
+        arm.arm();
+
+        let trigger = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("arming did not release the held recovery")
+            .expect("a trigger");
+        assert!(trigger.is_recovery);
+        handle.await.expect("producer finished");
+    }
+
+    #[tokio::test]
+    async fn an_already_armed_scheduler_submits_without_waiting() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let arm = ArmSignal::default();
+        arm.arm();
+        let shutdown = Arc::new(Notify::new());
+        tokio::spawn(SchedulerManager::submit_recovery(
+            plan_with_one_batch(),
+            tx,
+            shutdown,
+            arm,
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("armed recovery did not submit")
+                .is_some(),
+            "an armed scheduler must submit its restored work"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutting_down_while_disarmed_fires_nothing() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let arm = ArmSignal::default();
+        let shutdown = Arc::new(Notify::new());
+        let handle = tokio::spawn(SchedulerManager::submit_recovery(
+            plan_with_one_batch(),
+            tx,
+            Arc::clone(&shutdown),
+            arm,
+        ));
+
+        // Notify repeatedly: the producer may not have reached its wait yet.
+        let notifier = tokio::spawn(async move {
+            for _ in 0..100 {
+                shutdown.notify_waiters();
+                tokio::task::yield_now().await;
+            }
+        });
+        handle.await.expect("producer exits on shutdown");
+        notifier.abort();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "work was submitted during shutdown of a disarmed scheduler"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_manager_is_disarmed() {
+        let manager = SchedulerManager::new(crate::config::SchedulerConfig::default());
+        assert!(!manager.is_armed());
+        manager.arm();
+        assert!(manager.is_armed());
+        manager.disarm();
+        assert!(!manager.is_armed());
     }
 }

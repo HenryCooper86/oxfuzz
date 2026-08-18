@@ -14,6 +14,7 @@
 //! resolution chaining schema defaults, static schedule overrides, and
 //! trigger-time expressions (see [`params`]).
 
+pub mod arming;
 pub mod config;
 pub mod cron;
 pub mod dispatcher;
