@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority. After
+# editing either side, bring the other along, then re-record with:
+#   scripts/verify_translation_pairing.py --write README.md
+# Re-recording is the reviewable act of confirming consistency, which is why it
+# names the pair rather than sweeping the repository.
+README.md: 440994343d14b52949272bbf0abe8b48475e6757
+README.zh.md: 3d3f44a0721653b2aab2f6a151c9427697fa386f

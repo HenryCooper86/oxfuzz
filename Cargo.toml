@@ -9,6 +9,7 @@ members = [
     "crates/hf-skills",
     "crates/hf-prompt",
     "crates/hf-storage",
+    "crates/hf-spill",
     "crates/hf-runtime",
     "crates/hf-scheduler",
     "crates/hf-knowledge",
@@ -148,6 +149,7 @@ hf-storage = { path = "crates/hf-storage" }
 hf-runtime = { path = "crates/hf-runtime" }
 hf-scheduler = { path = "crates/hf-scheduler" }
 hf-knowledge = { path = "crates/hf-knowledge" }
+hf-spill = { path = "crates/hf-spill" }
 hf-diagnostics = { path = "crates/hf-diagnostics" }
 hf-guardrails = { path = "crates/hf-guardrails" }
 hf-discovery = { path = "crates/hf-discovery" }

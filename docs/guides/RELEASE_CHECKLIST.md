@@ -14,7 +14,10 @@ identity class, and artifact checksums in the release evidence.
   `crates/hf-gui/package.json`, and
   `crates/hf-gui/src-tauri/tauri.conf.json`.
 - Review user-facing changes, known limitations, dependency/license changes,
-  migrations, and configuration compatibility.
+  migrations, and configuration compatibility. `CHANGELOG.md`'s Unreleased
+  section is where these accumulate as they land; move it under the new version
+  heading as part of the release commit, and treat an empty section as a
+  question rather than an answer.
 - Confirm no secret, local `.env`, runtime database, corpus, crash artifact, or
   customer target source is staged.
 

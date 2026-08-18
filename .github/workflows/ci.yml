@@ -43,6 +43,11 @@ jobs:
       - name: Script tests
         run: scripts/tests/gates.sh script-tests
 
+      # Same reasoning: no toolchain, instant, and a stale translation should
+      # not be discovered after a full workspace build.
+      - name: Translation pairing
+        run: scripts/tests/gates.sh translation-pairing
+
       # No toolchain action on purpose: rust-toolchain.toml pins 1.94.0, and an
       # action that installs a channel would silently override the pin. rustup
       # is preinstalled on the runner and provisions the pinned toolchain here.
@@ -137,3 +142,30 @@ jobs:
 
       - name: Deny
         run: scripts/tests/gates.sh deny
+
+  # Branch protection requires this one check instead of each job above. A
+  # matrix job's check name is built from its label, so requiring those by name
+  # silently drops a required check the moment a label changes; requiring one
+  # aggregate does not.
+  #
+  # `if: always()` is load-bearing. Without it, a failed dependency SKIPS this
+  # job, and GitHub counts a skipped required check as passing -- the gate would
+  # report green for exactly the pipelines it exists to stop.
+  gates-passed:
+    name: All gates passed
+    runs-on: ubuntu-latest
+    needs: [rust, cross-platform, frontend, supply-chain]
+    if: always()
+    steps:
+      - name: Fail if any gate did not succeed
+        # `contains` over the whole needs context catches failure, cancellation,
+        # and skipped alike: only an all-success set is allowed through.
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure')
+                 || contains(needs.*.result, 'cancelled')
+                 || contains(needs.*.result, 'skipped') }}" = "true" ]; then
+            echo "One or more gate jobs did not succeed:"
+            echo '${{ toJSON(needs) }}'
+            exit 1
+          fi
+          echo "All gate jobs succeeded."

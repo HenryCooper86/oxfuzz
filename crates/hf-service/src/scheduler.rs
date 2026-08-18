@@ -2684,6 +2684,29 @@ impl CampaignScheduler {
         self.schedules.replace_from_manager(&self.manager).await
     }
 
+    /// Authorize work restored by recovery to run.
+    ///
+    /// A scheduler starts disarmed on every process start, so missed
+    /// occurrences a `CatchUp` or `Backfill` policy would replay are held
+    /// rather than fired. This is the explicit decision that releases them: a
+    /// restart restores what the scheduler was doing, and an operator says
+    /// whether it should carry on. Idempotent.
+    pub fn arm(&self) {
+        self.manager.arm();
+    }
+
+    /// Withdraw authorization. Recovery not yet released stays held; campaigns
+    /// already running are unaffected.
+    pub fn disarm(&self) {
+        self.manager.disarm();
+    }
+
+    /// Whether restored work is currently authorized to run.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        self.manager.is_armed()
+    }
+
     /// Stop trigger production and cancel all active campaign tasks.
     pub async fn stop(&self) {
         self.manager.stop().await;
@@ -5442,6 +5465,9 @@ mod tests {
         fixture.write_due_one_time("once");
         fixture.write_interval("recurring");
         let scheduler = fixture.start().await.unwrap();
+        // Recurring recovery is held until armed; this test is about one-time
+        // occurrences being blocked while recurring ones still run.
+        scheduler.arm();
 
         assert!(scheduler.manager.is_running());
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -5638,6 +5664,9 @@ mod tests {
         .unwrap();
 
         let scheduler = fixture.start().await.unwrap();
+        // Recurring recovery is held until armed; this test is about one-time
+        // occurrences being blocked while recurring ones still run.
+        scheduler.arm();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(matches!(
             scheduler

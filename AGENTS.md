@@ -59,6 +59,14 @@ oxfuzz/
 - **2.10 No Inline Lint Suppression** -- Never add `#[allow(clippy::...)]`, `#[allow(rustc_lint)]`, or `// eslint-disable` to source code by default. Fix the lint, refactor the code, or move the rule adjustment to the owning config with a comment explaining why. The sole Rust exception is `#[allow(dead_code)]` on struct fields/variants kept for API completeness.
 - **2.11 Modular & Concise Code** -- Code should be modular and concise, with logic broken into reusable components or functions. Minimize duplication through abstraction and ensure loose coupling by managing dependencies carefully.
 - **2.12 Fuzzing Safety First** -- Every harness build and fuzzer invocation must go through `hf-runtime` sandboxing. Engine binaries are not trusted. Generated harness source is reviewed by an LLM triage step AND approved by a human before execution. Crash artifacts are parsed in a sandbox; untrusted inputs never touch the host filesystem outside the workspace.
+- **2.13 Model-Visible Implies Logged** -- Anything that reaches a provider request must be reconstructable from persisted state. A new model-visible input requires a new persisted record, not an ad-hoc field on a struct in memory.
+- **2.14 Trust the Type System at Typed, Same-Process Boundaries** -- Do not add runtime validation, fallback behavior, or hostile-input tests solely for values the Rust type already guarantees. Validate at the boundaries that actually admit foreign data: config and CLI parsing, provider and tool JSON, durable/file formats, sandbox and process boundaries, and the REST/IPC wire.
+- **2.15 Explicit Defaults at Crate Boundaries** -- Defaulting is an explicit `resolve(request) -> Spec` step in the owning implementation, never a hidden `unwrap_or_default()` inside the operation. A `DEFAULT_*` constant or a test hook is not configurability: a deployment-varying choice is a validated config field.
+- **2.16 Misconfiguration Fails Loud** -- Fail at load when the problem is self-contained, otherwise at the earliest resolvable point. Never silently skip a missing referent, and never accept a setting the owning component does not read.
+- **2.17 Swallowed Errors Are Named** -- Every `let _ = ...`, `.ok()`, and `unwrap_or_default()` on a fallible call carries a comment naming what is being swallowed and why nothing else can reach it. Keep the fallible expression to one call.
+- **2.18 Prefer Symmetry for Parallel Values** -- Unexplained asymmetry between two things that should be parallel usually signals a missed extraction. One meaning gets one home; two consumers of that meaning derive it from that home rather than restating it.
+- **2.19 Enforce a Decision in the Operation That Makes It** -- Schema omission, prompt filtering, facades, wrappers, and listener order are not enforcement when a direct or alternate caller can bypass them. Test every denial through the executor that actually runs the action.
+- **2.20 Tests Describe Behavior, Not Correctness** -- A passing test is evidence of behavior, not proof of correctness. When behavior is genuinely obsolete, change it together with its tests and explain why in the commit.
 
 ## 3) Risk Tiers
 
@@ -113,7 +121,7 @@ cargo test [args] 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^
 
 ## 5) Key References
 
-- `DESIGN_RULE.md` -- Design doc standards, playbooks, validation checklist
+- `docs/standards/DEFENSIVE_PATTERNS.md` -- Bug-class rules for lifecycle, concurrency, subprocess, sandbox, and teardown code
 - `docs/standards/TEST_STRATEGY.md` -- TDD methodology, pyramid, quality gates
 - `docs/standards/ENGINEERING_STANDARDS.md` -- Rust coding standards
 - `docs/standards/DATABASE_SCHEMA.md` -- SQLite schema
@@ -126,3 +134,19 @@ cargo test [args] 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^
 ## 6) Formatting Constraints
 
 - **No emoji anywhere.**
+- **Word choice** -- Before writing `contract`, `boundary`, or `shape`, ask whether a more exact term names the subject: write `trait method`, `JSON validation`, or `public API` instead. No metaphors. Do not comment on facts that are obvious from the code.
+
+## 7) TODO Tiers
+
+Three markers with release semantics, so a grep answers "what blocks a tag":
+
+- `FIXME` -- blocks a release. A known defect on a shipped path.
+- `TODO` -- soon. Planned work with a named owner or issue.
+- `XXX` -- someday. An idea recorded so it is not rediscovered.
+
+## 8) Pre-1.0 Stance
+
+**Remove this section at the first 1.0 release.** oxfuzz has no external
+consumers pinned to its internal APIs. Prefer the correct foundation over a
+compatibility shim: rename, repackage, or re-layer freely, and update every
+reference in the same change.

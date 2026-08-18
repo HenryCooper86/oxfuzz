@@ -234,3 +234,165 @@ async fn permissive_allows_everything() {
             .await
     );
 }
+
+// ---------------------------------------------------------------------------
+// Monotonic guards (study item 1.4)
+//
+// The property under test is that no extension point can re-permit what the
+// safety layer denied. Every assertion goes through `authorize`, the operation
+// that makes the decision -- not through the policy or the gate in isolation,
+// because a facade that agrees with the executor proves nothing about callers
+// that bypass it.
+// ---------------------------------------------------------------------------
+
+struct DenyEverything(&'static str);
+
+impl hf_guardrails::DenyGuard for DenyEverything {
+    fn deny_reason(&self, _action: &Action) -> Option<String> {
+        Some(self.0.to_owned())
+    }
+}
+
+struct Abstain;
+
+impl hf_guardrails::DenyGuard for Abstain {
+    fn deny_reason(&self, _action: &Action) -> Option<String> {
+        None
+    }
+}
+
+struct AlwaysAsk;
+
+impl hf_guardrails::Advisor for AlwaysAsk {
+    fn advise(&self, _action: &Action) -> hf_guardrails::Advice {
+        hf_guardrails::Advice::RequireApproval {
+            reason: "advisor asked".to_owned(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_guard_denies_what_the_policy_would_have_allowed() {
+    let g = Guardrails::permissive().with_guard(std::sync::Arc::new(DenyEverything("nope")));
+    // Discover is low risk and auto-allowed by every policy.
+    assert!(
+        g.authorize(Action::Discover).await.is_err(),
+        "a guard must be able to deny an action the policy allows"
+    );
+}
+
+#[tokio::test]
+async fn a_guard_outranks_an_approval_that_was_granted() {
+    // The monotonicity property: the gate said yes, and it does not matter.
+    let g = Guardrails::new(GuardrailPolicy::default(), std::sync::Arc::new(AutoApprove))
+        .with_guard(std::sync::Arc::new(DenyEverything("denied after approval")));
+    let outcome = g.authorize(run_fuzzer()).await;
+    assert!(
+        outcome.is_err(),
+        "an approved action must still be deniable by a guard"
+    );
+    assert!(outcome
+        .unwrap_err()
+        .to_string()
+        .contains("denied after approval"));
+}
+
+#[tokio::test]
+async fn guard_registration_order_cannot_turn_a_denial_into_permission() {
+    let deny_first = Guardrails::permissive()
+        .with_guard(std::sync::Arc::new(DenyEverything("denied")))
+        .with_guard(std::sync::Arc::new(Abstain));
+    let deny_last = Guardrails::permissive()
+        .with_guard(std::sync::Arc::new(Abstain))
+        .with_guard(std::sync::Arc::new(DenyEverything("denied")));
+
+    assert!(deny_first.authorize(Action::Discover).await.is_err());
+    assert!(
+        deny_last.authorize(Action::Discover).await.is_err(),
+        "an abstaining guard registered first must not absorb a later denial"
+    );
+}
+
+#[tokio::test]
+async fn an_advisor_can_require_approval_the_policy_would_have_skipped() {
+    // Permissive policy auto-allows Discover. An advisor asks for consent, and
+    // the gate declines, so the action is denied: the advisor tightened.
+    let g = Guardrails::new(GuardrailPolicy::permissive(), std::sync::Arc::new(DenyAll))
+        .with_advisor(std::sync::Arc::new(AlwaysAsk));
+    assert!(
+        g.authorize(Action::Discover).await.is_err(),
+        "an advisor must be able to add a prompt the policy would have skipped"
+    );
+}
+
+#[tokio::test]
+async fn an_advisor_cannot_loosen_a_policy_denial() {
+    // The advisor's only vocabulary is "abstain" or "ask", so there is no way
+    // to express permission; a Critical action stays denied.
+    let g = Guardrails::new(GuardrailPolicy::default(), std::sync::Arc::new(AutoApprove))
+        .with_advisor(std::sync::Arc::new(AlwaysAsk));
+    assert!(
+        g.authorize(Action::ShellExec {
+            command: "id".to_owned(),
+        })
+        .await
+        .is_err(),
+        "no advice may re-permit a policy denial"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Disarm on recovery (study item 1.5)
+// ---------------------------------------------------------------------------
+
+fn armed_guardrails(state: &hf_core::armed::ArmedState) -> Guardrails {
+    Guardrails::new(
+        GuardrailPolicy::permissive(),
+        std::sync::Arc::new(AutoApprove),
+    )
+    .with_guard(std::sync::Arc::new(hf_guardrails::DisarmedGuard::new(
+        state.clone(),
+    )))
+}
+
+#[tokio::test]
+async fn a_disarmed_process_may_not_run_a_fuzzer() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    // Permissive policy, auto-approving gate: the only thing standing between
+    // a restored campaign and execution is the armed state.
+    assert!(
+        g.authorize(run_fuzzer()).await.is_err(),
+        "a fresh process must not resume a campaign without being armed"
+    );
+}
+
+#[tokio::test]
+async fn a_disarmed_process_may_still_inspect() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    // Restoring what the system was doing is the point; only acting is gated.
+    assert!(g.authorize(Action::Discover).await.is_ok());
+    assert!(g.authorize(Action::Triage).await.is_ok());
+}
+
+#[tokio::test]
+async fn arming_lets_the_restored_campaign_proceed() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    state.arm();
+    assert!(g.authorize(run_fuzzer()).await.is_ok());
+}
+
+#[tokio::test]
+async fn disarming_stops_a_campaign_that_was_previously_authorized() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    state.arm();
+    assert!(g.authorize(run_fuzzer()).await.is_ok());
+    state.disarm();
+    assert!(
+        g.authorize(run_fuzzer()).await.is_err(),
+        "withdrawing authorization must take effect immediately"
+    );
+}

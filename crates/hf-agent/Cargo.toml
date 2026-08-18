@@ -8,6 +8,7 @@ description = "Agent loop, delegation, sub-agent pools"
 [dependencies]
 hf-core = { workspace = true }
 hf-context = { workspace = true }
+hf-spill = { workspace = true }
 hf-prompt = { workspace = true }
 hf-tools = { workspace = true }
 hf-guardrails = { workspace = true }

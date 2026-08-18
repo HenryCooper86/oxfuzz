@@ -6,8 +6,8 @@ the two cannot drift from the single source of truth.
 
 | Host | File | Gates | Purpose |
 | --- | --- | --- | --- |
-| GitHub Actions | `.github/workflows/ci.yml` | all ten | public repository |
-| GitLab CI | `.gitlab-ci.yml` | all ten | current OrbStack origin |
+| GitHub Actions | `.github/workflows/ci.yml` | all eleven | public repository |
+| GitLab CI | `.gitlab-ci.yml` | all eleven | current OrbStack origin |
 
 `scripts/tests/gates.sh` is authoritative. Run it locally before pushing:
 
@@ -16,16 +16,35 @@ scripts/tests/gates.sh            # every gate, in AGENTS.md 4.5 order
 scripts/tests/gates.sh clippy test  # only the named gates
 ```
 
-The ten gates: `fmt`, `clippy`, `check`, `check-no-default-features`, `test`,
-`doc`, `deny`, `script-tests`, `frontend-test`, `frontend-lint`.
+The eleven gates: `fmt`, `clippy`, `check`, `check-no-default-features`,
+`test`, `doc`, `deny`, `script-tests`, `translation-pairing`, `frontend-test`,
+`frontend-lint`.
+
+`translation-pairing` needs only a Python interpreter -- not even git -- so it
+runs beside `script-tests` rather than behind the Rust gates. A documentation
+change should not wait on a workspace build to learn that its counterpart is
+stale. On GitLab it rides in the `script-tests` job for the same reason: the
+Rust image has no `python3`.
 
 ## GitHub Actions
 
-`ci.yml` runs on every push and pull request, Linux only, in three parallel
-jobs (Rust gates, frontend gates, dependency policy). It needs no secrets.
-Cross-platform coverage is not CI's job: the workspace is platform-agnostic, and
-the property that actually ships is the four desktop bundles, which
-`release.yml` builds on tag.
+`ci.yml` runs on every push and pull request in four parallel jobs: Rust gates
+and frontend gates and dependency policy on Linux, plus a `cross-platform`
+matrix that runs `check` and `test` on macOS and Windows. It needs no secrets.
+Going cross-platform surfaced five real bugs on the first run of each new
+platform, so compile-and-test truth is gated everywhere the desktop app ships;
+style gates stay Linux-only, and `release.yml` builds the four bundles on tag.
+
+A fifth job, `gates-passed`, aggregates the other four and is the single check
+branch protection should require. Two reasons it exists rather than requiring
+each job by name:
+
+- A matrix job's check name is derived from its label, so a required check
+  pinned to `macOS tests` disappears the moment the label changes.
+- `gates-passed` carries `if: always()`. Without it a failed dependency would
+  *skip* the aggregate, and GitHub counts a skipped required check as passing --
+  the gate would report green for exactly the pipelines it exists to stop. The
+  step fails on `failure`, `cancelled`, and `skipped` alike.
 
 `release.yml` builds the Tauri desktop app for macOS (Apple silicon and Intel),
 Linux, and Windows when a `v*` tag is pushed, then publishes them as one GitHub

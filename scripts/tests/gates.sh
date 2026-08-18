@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ALL_GATES=(fmt clippy check check-no-default-features test doc deny script-tests frontend-test frontend-lint)
+ALL_GATES=(fmt clippy check check-no-default-features test doc deny script-tests translation-pairing frontend-test frontend-lint)
 
 # Output noise that hides real results in a workspace this size.
 TEST_NOISE='^\s*Compiling\|^\s*Running\|^\s*Downloading\|^\s*Downloaded\|^\s*Blocking\|^\s*Finished\|^\s*Doc-tests\|^running\|^test \|^$'
@@ -79,6 +79,13 @@ gate_script_tests() {
     --start-directory scripts/tests \
     --top-level-directory scripts/tests \
     --pattern 'test_*.py'
+}
+
+gate_translation_pairing() {
+  # Needs no toolchain and finishes instantly, so it runs beside script-tests
+  # rather than behind the Rust gates: a documentation-only change should not
+  # wait on a workspace build to learn that its counterpart is stale.
+  python3 scripts/verify_translation_pairing.py
 }
 
 gate_frontend_test() {
