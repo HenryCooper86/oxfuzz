@@ -500,8 +500,8 @@ impl AgentBackend for ServiceContainer {
     /// artifacts are oxfuzz's own bookkeeping, and a project tree is not ours
     /// to litter.
     ///
-    /// Nothing prunes this directory yet. Retention is a follow-on, and until
-    /// it lands the store grows with every oversized result.
+    /// The store bounds itself: see `hf_spill::Retention`, whose default keeps
+    /// the directory near 256 MiB by evicting the oldest artifacts on write.
     fn spill_root(&self) -> Option<PathBuf> {
         Some(crate::init::user_app_dir().join("spill"))
     }

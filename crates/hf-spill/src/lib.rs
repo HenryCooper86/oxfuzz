@@ -54,9 +54,71 @@ pub struct Spilled {
     pub retrieval_hint: String,
 }
 
+/// How much the store keeps before it starts evicting.
+#[derive(Debug, Clone, Copy)]
+pub struct Retention {
+    /// Target total size of the store, in bytes.
+    ///
+    /// A target rather than a guarantee: the artifact just written is never
+    /// evicted, so a single artifact larger than the whole budget is kept. The
+    /// alternative -- writing it and immediately deleting it -- would hand the
+    /// caller a locator pointing at nothing.
+    pub max_total_bytes: u64,
+}
+
+/// 256 MiB. Spill artifacts are large by nature (`llvm-cov` reports, corpus
+/// listings), so a journal-sized budget would evict the previous artifact on
+/// almost every save and make the store useless. Large enough to hold a real
+/// working set, small enough that an unattended machine does not fill up.
+const DEFAULT_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+/// One artifact on disk, as the eviction decision sees it.
+#[derive(Debug, Clone)]
+struct Entry {
+    path: PathBuf,
+    bytes: u64,
+    modified: std::time::SystemTime,
+}
+
+/// Which artifacts to remove so the store fits `max_total_bytes`, oldest first.
+///
+/// Pure, so the ordering is testable without depending on how fast the
+/// filesystem's clock ticks. `keep` is never returned: it is the artifact whose
+/// locator the caller is about to hand out.
+fn evictions(mut entries: Vec<Entry>, max_total_bytes: u64, keep: &Path) -> Vec<PathBuf> {
+    let mut total: u64 = entries.iter().map(|entry| entry.bytes).sum();
+    if total <= max_total_bytes {
+        return Vec::new();
+    }
+
+    entries.sort_by(|a, b| a.modified.cmp(&b.modified));
+
+    let mut evicted = Vec::new();
+    for entry in entries {
+        if total <= max_total_bytes {
+            break;
+        }
+        if entry.path == keep {
+            continue;
+        }
+        total = total.saturating_sub(entry.bytes);
+        evicted.push(entry.path);
+    }
+    evicted
+}
+
 /// A private on-disk store for spilled artifacts.
 pub struct SpillStore {
     root: PathBuf,
+    retention: Retention,
 }
 
 impl SpillStore {
@@ -65,8 +127,16 @@ impl SpillStore {
     /// # Errors
     /// Returns [`SpillError::Io`] if the root cannot be created.
     pub fn new(root: PathBuf) -> Result<Self, SpillError> {
+        Self::with_retention(root, Retention::default())
+    }
+
+    /// Create (or adopt) a store with an explicit retention budget.
+    ///
+    /// # Errors
+    /// Returns [`SpillError::Io`] if the root cannot be created.
+    pub fn with_retention(root: PathBuf, retention: Retention) -> Result<Self, SpillError> {
         create_private_dir(&root)?;
-        Ok(Self { root })
+        Ok(Self { root, retention })
     }
 
     /// The store's root directory.
@@ -100,12 +170,69 @@ impl SpillStore {
             safe_name(suggested_name)
         ));
         write_private_new(&path, content.as_bytes())?;
+        self.sweep(&path);
 
         Ok(Spilled {
             bytes: content.len(),
             retrieval_hint: format!("at {}", path.display()),
             locator: path,
         })
+    }
+}
+
+impl SpillStore {
+    /// Bring the store back within its budget, keeping `just_written`.
+    ///
+    /// Best-effort and deliberately silent about individual failures: the save
+    /// already succeeded and its locator is about to be returned, so a failed
+    /// cleanup must not turn that into an error. A store that cannot be swept
+    /// grows, which is worse than tidy but better than losing the artifact.
+    fn sweep(&self, just_written: &Path) {
+        let entries = collect_entries(&self.root);
+        for path in evictions(entries, self.retention.max_total_bytes, just_written) {
+            if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(%error, path = %path.display(), "could not evict a spilled artifact");
+            }
+        }
+        prune_empty_dirs(&self.root);
+    }
+}
+
+/// Every artifact under `root`, with the size and age eviction needs.
+///
+/// Unreadable entries are skipped rather than failing the walk: a file being
+/// written by another process is not a reason to abandon the sweep.
+fn collect_entries(root: &Path) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    let Ok(dir) = fs::read_dir(root) else {
+        return entries;
+    };
+    for item in dir.flatten() {
+        let path = item.path();
+        if path.is_dir() {
+            entries.extend(collect_entries(&path));
+        } else if let Ok(meta) = item.metadata() {
+            entries.push(Entry {
+                bytes: meta.len(),
+                modified: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                path,
+            });
+        }
+    }
+    entries
+}
+
+/// Remove owner directories left empty by eviction, so the root does not
+/// accumulate one directory per session forever.
+fn prune_empty_dirs(root: &Path) {
+    let Ok(dir) = fs::read_dir(root) else {
+        return;
+    };
+    for item in dir.flatten() {
+        let path = item.path();
+        if path.is_dir() && fs::read_dir(&path).is_ok_and(|mut d| d.next().is_none()) {
+            let _ = fs::remove_dir(&path);
+        }
     }
 }
 
@@ -317,6 +444,119 @@ mod tests {
             .mode();
         assert_eq!(root_mode & 0o777, 0o700, "spill root must be private");
         assert_eq!(file_mode & 0o777, 0o600, "spilled artifact must be private");
+    }
+
+    // -- retention ---------------------------------------------------------
+
+    fn entry(path: &str, bytes: u64, age_secs: u64) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            bytes,
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 - age_secs),
+        }
+    }
+
+    #[test]
+    fn a_store_within_budget_evicts_nothing() {
+        let entries = vec![entry("a", 10, 30), entry("b", 10, 20)];
+        assert!(evictions(entries, 100, Path::new("b")).is_empty());
+    }
+
+    #[test]
+    fn the_oldest_artifacts_are_evicted_until_the_store_fits() {
+        // 60 bytes against a 25-byte budget: the two oldest go, the rest stay.
+        let entries = vec![
+            entry("oldest", 20, 300),
+            entry("older", 20, 200),
+            entry("newest", 20, 100),
+        ];
+        let evicted = evictions(entries, 25, Path::new("newest"));
+        assert_eq!(
+            evicted,
+            vec![PathBuf::from("oldest"), PathBuf::from("older")]
+        );
+    }
+
+    #[test]
+    fn the_artifact_just_written_is_never_evicted() {
+        // Its locator was just handed to the model; deleting it would leave a
+        // notice pointing at nothing.
+        let entries = vec![entry("old", 10, 300), entry("just-written", 500, 0)];
+        let evicted = evictions(entries, 20, Path::new("just-written"));
+        assert_eq!(evicted, vec![PathBuf::from("old")]);
+    }
+
+    #[test]
+    fn an_artifact_larger_than_the_whole_budget_still_survives() {
+        // The budget is a target, not a guarantee: one oversized artifact is
+        // kept rather than written and immediately deleted.
+        let entries = vec![entry("huge", 5_000, 0)];
+        assert!(evictions(entries, 100, Path::new("huge")).is_empty());
+    }
+
+    #[test]
+    fn saving_past_the_budget_evicts_older_artifacts_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SpillStore::with_retention(
+            dir.path().join("spill"),
+            Retention {
+                max_total_bytes: 4_000,
+            },
+        )
+        .expect("store");
+
+        let mut last = None;
+        for i in 0..8 {
+            last = Some(
+                store
+                    .save_text("s", "out.txt", &"x".repeat(1_000))
+                    .expect("save")
+                    .locator,
+            );
+            assert!(
+                total_bytes_under(store.root()) <= 5_000,
+                "store grew past its budget on save {i}"
+            );
+        }
+
+        let last = last.expect("at least one save");
+        assert!(last.exists(), "the newest artifact was evicted");
+    }
+
+    #[test]
+    fn retention_applies_across_owners() {
+        // Two sessions sharing one root must not each get the full budget.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SpillStore::with_retention(
+            dir.path().join("spill"),
+            Retention {
+                max_total_bytes: 3_000,
+            },
+        )
+        .expect("store");
+
+        for i in 0..6 {
+            store
+                .save_text(&format!("session-{i}"), "out.txt", &"y".repeat(1_000))
+                .expect("save");
+        }
+        assert!(total_bytes_under(store.root()) <= 4_000);
+    }
+
+    fn total_bytes_under(root: &Path) -> u64 {
+        let mut total = 0;
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                total += total_bytes_under(&path);
+            } else if let Ok(meta) = std::fs::metadata(&path) {
+                total += meta.len();
+            }
+        }
+        total
     }
 
     // -- preview sizing ----------------------------------------------------
