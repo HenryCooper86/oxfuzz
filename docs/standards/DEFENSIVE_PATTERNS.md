@@ -102,18 +102,31 @@ not forward the host environment, so a generated harness or a fuzzer running
 inside the sandbox never sees `HF_PROVIDER_API_KEY`. Keep it that way: the
 container environment is an allow-list, never a passthrough.
 
-**Open gap.** Host-side helper processes do inherit everything. Nothing in the
-workspace calls `Command::env_clear`, so the `docker` CLI, `git` in the
-workbench, `pandoc` in report export, and the Scapy sidecar all start with the
-full parent environment. These are trusted binaries, which is why this is a gap
-and not an incident, but the blast radius of a bug or a compromised tool in that
-set is every secret the process holds.
+**Host-side helpers were the gap, and it is closed.** They inherit everything by
+default, so the `docker` CLI, `git` in the workbench, `pandoc` in report export,
+and the DefectDojo lifecycle commands all used to start with the full parent
+environment. Trusted binaries, which is why this was a gap and not an incident,
+but the blast radius of a bug or a compromised tool in that set is every secret
+the process holds.
 
-New spawn sites clear the environment and add back what they need. Where a full
-clear is impractical, drop every variable whose name matches `KEY`, `SECRET`,
-`TOKEN`, or `PASSWORD` (case-insensitive) plus the `HF_` prefix, then merge
-deliberately-forwarded values on top; `PATH`, `HOME`, locale, and proxy settings
-survive.
+`hf-runtime::process_env` is the one home for the rule. `scrubbed_command` and
+`scrubbed_tokio_command` build a command whose environment is the parent's minus
+every variable whose name matches `KEY`, `SECRET`, `TOKEN`, or `PASSWORD`
+(case-insensitively), plus the `HF_` prefix so a nested oxfuzz cannot silently
+adopt its parent's workspace root or provider routing. `PATH`, `HOME`, locale,
+and proxy settings survive: a helper that cannot find its own binary is not
+safer, only broken. The match is deliberately broad -- `MONKEY` contains `KEY`
+and is dropped -- because a false positive drops a variable a child did not need
+while a false negative leaks a credential.
+
+Every host-side spawn goes through one of those two constructors. Constructing a
+`Command` directly anywhere outside `process_env` and outside a test module is
+the defect this rule names, and the two constructors exist as a pair precisely
+so that an async call site has no reason to hand-roll the rule and drift from
+it. A caller that genuinely needs a credential forwards it explicitly with
+`Command::env` afterwards, which keeps the exception visible at the call site
+and greppable across the workspace. Presentation crates reach the constructor
+through `hf-service`'s re-export rather than depending on `hf-runtime` directly.
 
 Temp, corpus, crash, and spill directories use a private (0700) root, random
 names, and exclusive owner-only creation. Predictable, world-readable paths
