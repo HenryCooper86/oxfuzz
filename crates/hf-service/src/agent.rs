@@ -494,6 +494,17 @@ impl AgentBackend for ServiceContainer {
     fn agents_dir(&self) -> PathBuf {
         agent_definitions_dir()
     }
+
+    /// Oversized tool results spill beside the run journal, in the app's
+    /// private state directory rather than under the user's project: the
+    /// artifacts are oxfuzz's own bookkeeping, and a project tree is not ours
+    /// to litter.
+    ///
+    /// The store bounds itself: see `hf_spill::Retention`, whose default keeps
+    /// the directory near 256 MiB by evicting the oldest artifacts on write.
+    fn spill_root(&self) -> Option<PathBuf> {
+        Some(crate::init::user_app_dir().join("spill"))
+    }
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ClassifiedError> {

@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use hf_core::error::ClassifiedError;
 
@@ -334,7 +334,7 @@ fn tool_on_path(tool: &str) -> bool {
     // Resolve against well-known install dirs, not just the (possibly stripped)
     // PATH: a Finder-launched `.app` does not inherit the shell PATH, so bare
     // `pandoc`/`xelatex` would otherwise be invisible even when installed.
-    Command::new(hf_runtime::resolve_bin(tool))
+    hf_runtime::scrubbed_command(hf_runtime::resolve_bin(tool))
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -353,7 +353,7 @@ fn pandoc_convert(
                 .to_owned(),
         ));
     }
-    let mut cmd = Command::new(hf_runtime::resolve_bin("pandoc"));
+    let mut cmd = hf_runtime::scrubbed_command(hf_runtime::resolve_bin("pandoc"));
     cmd.arg("-f")
         .arg("gfm")
         .arg("--standalone")
