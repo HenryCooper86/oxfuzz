@@ -44,7 +44,7 @@ enum RecoveryCadence {
 }
 
 impl RecoveryBatch {
-    fn single(schedule: &Schedule, at: DateTime<Utc>) -> Self {
+    pub(crate) fn single(schedule: &Schedule, at: DateTime<Utc>) -> Self {
         Self {
             schedule_id: schedule.id.clone(),
             first_fire: at,
