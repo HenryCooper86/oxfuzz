@@ -103,6 +103,7 @@ struct TestBackend {
     tool_result: Option<String>,
     usage: Mutex<Vec<hf_core::types::TokenUsage>>,
     agents_dir: std::path::PathBuf,
+    spill_root: Option<std::path::PathBuf>,
 }
 
 impl TestBackend {
@@ -113,6 +114,7 @@ impl TestBackend {
             tool_result: None,
             usage: Mutex::new(Vec::new()),
             agents_dir: std::path::PathBuf::from("config/agents"),
+            spill_root: None,
         })
     }
 
@@ -123,6 +125,22 @@ impl TestBackend {
             tool_result: Some(tool_result),
             usage: Mutex::new(Vec::new()),
             agents_dir: std::path::PathBuf::from("config/agents"),
+            spill_root: None,
+        })
+    }
+
+    fn spilling(
+        pool: Arc<dyn ProviderPool>,
+        tool_result: String,
+        spill_root: std::path::PathBuf,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            pool: Some(pool),
+            approve: true,
+            tool_result: Some(tool_result),
+            usage: Mutex::new(Vec::new()),
+            agents_dir: std::path::PathBuf::from("config/agents"),
+            spill_root: Some(spill_root),
         })
     }
 
@@ -133,6 +151,7 @@ impl TestBackend {
             tool_result: None,
             usage: Mutex::new(Vec::new()),
             agents_dir: std::path::PathBuf::from("config/agents"),
+            spill_root: None,
         })
     }
 
@@ -143,6 +162,7 @@ impl TestBackend {
             tool_result: None,
             usage: Mutex::new(Vec::new()),
             agents_dir,
+            spill_root: None,
         })
     }
 }
@@ -195,6 +215,10 @@ impl AgentBackend for TestBackend {
 
     fn agents_dir(&self) -> std::path::PathBuf {
         self.agents_dir.clone()
+    }
+
+    fn spill_root(&self) -> Option<std::path::PathBuf> {
+        self.spill_root.clone()
     }
 }
 
@@ -895,4 +919,70 @@ async fn a_completion_requirement_nudges_a_premature_final_until_the_tool_is_cal
             .any(|m| m.content.contains("REMINDER: call harness"))),
         "the completion reminder must have been injected"
     );
+}
+
+#[tokio::test]
+async fn an_oversized_tool_result_is_spilled_and_replaced_by_a_locator() {
+    // End to end through the loop, not through the helper: the wiring is what
+    // is under test, and a helper that works while nothing calls it is not a
+    // feature.
+    let pool = Arc::new(ScriptedPool::new(vec![
+        r#"{"tool":"discover","args":{}}"#,
+        r#"{"final":"done"}"#,
+    ]));
+    let captured = Arc::clone(&pool);
+    let provider: Arc<dyn ProviderPool> = pool;
+    let dir = tempfile::tempdir().unwrap();
+
+    let full_result = format!("SPILL_HEAD{}SPILL_TAIL", "r".repeat(200_000));
+    let backend = TestBackend::spilling(provider, full_result.clone(), dir.path().join("spill"));
+    let agent = Agent::new(backend, Some(std::env::temp_dir()));
+    let sink = CollectingSink::new();
+
+    let answer = agent.run_turn(Vec::new(), "go", &sink).await.unwrap();
+    assert_eq!(answer, "done");
+
+    // The full artifact is on disk somewhere under the store root.
+    let spilled: Vec<std::path::PathBuf> = walk_files(&dir.path().join("spill"));
+    assert_eq!(spilled.len(), 1, "expected exactly one spilled artifact");
+    assert_eq!(
+        std::fs::read_to_string(&spilled[0]).unwrap(),
+        full_result,
+        "the spilled artifact must be the untruncated result"
+    );
+
+    // What the model saw is bounded and points at that artifact.
+    let requests = captured.requests.lock().await;
+    let feedback = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.content.contains("result of discover"))
+        .expect("tool result feedback");
+    assert!(
+        feedback.content.len() < full_result.len() / 10,
+        "the oversized result reached the model nearly whole"
+    );
+    assert!(feedback.content.contains("SPILL_HEAD"));
+    assert!(feedback.content.contains("SPILL_TAIL"));
+    assert!(
+        feedback.content.contains("bytes omitted"),
+        "the replacement must say what happened: {}",
+        feedback.content
+    );
+}
+
+fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walk_files(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
 }
