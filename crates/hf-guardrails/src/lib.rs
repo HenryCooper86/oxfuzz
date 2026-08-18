@@ -39,6 +39,51 @@ pub enum Decision {
     },
 }
 
+/// What an [`Advisor`] may ask for.
+///
+/// There is deliberately no `Allow` variant. An advisor sits on the extensible
+/// half of the pipeline, where registration order is not controlled by the
+/// safety layer, so its vocabulary is limited to abstaining or asking for
+/// consent. Loosening is not expressible, which means it cannot be reached by
+/// accident, by a future extension, or by agent-role text that talks its way
+/// into the chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Advice {
+    /// No opinion; defer to the policy.
+    Abstain,
+    /// Require human consent even where the policy would auto-allow.
+    RequireApproval {
+        /// Why consent is being asked for.
+        reason: String,
+    },
+}
+
+/// An extension consulted before the policy, able only to tighten.
+///
+/// Advisors run first and in registration order. The first one to ask for
+/// approval wins, and no later advisor can withdraw the request: see [`Advice`]
+/// for why the type has no way to say "allow".
+pub trait Advisor: Send + Sync {
+    /// Advise on `action`.
+    fn advise(&self, action: &Action) -> Advice;
+}
+
+/// A monotonic, deny-only guard, consulted last.
+///
+/// This is the non-bypassable half of the pipeline. A guard returns a denial
+/// reason or nothing, so no guard, and no ordering of guards, can turn a denial
+/// back into permission -- the property is carried by the return type rather
+/// than by review discipline. Guards run *after* approval resolution, so an
+/// action a human just approved can still be denied here.
+///
+/// For a system whose central promise is that a generated harness never runs on
+/// the host without consent (AGENTS.md 2.5, 2.12), that ordering is the point:
+/// consent is a necessary condition for execution, never a sufficient one.
+pub trait DenyGuard: Send + Sync {
+    /// Return why `action` must not proceed, or `None` to abstain.
+    fn deny_reason(&self, action: &Action) -> Option<String>;
+}
+
 /// A policy mapping risk tiers to allow / approve / deny.
 #[derive(Debug, Clone, Copy)]
 pub struct GuardrailPolicy {
@@ -121,13 +166,37 @@ impl From<GuardrailError> for hf_core::error::ClassifiedError {
 pub struct Guardrails {
     policy: GuardrailPolicy,
     gate: Arc<dyn ApprovalGate>,
+    advisors: Vec<Arc<dyn Advisor>>,
+    guards: Vec<Arc<dyn DenyGuard>>,
 }
 
 impl Guardrails {
     /// Construct guardrails from a policy and an approval gate.
     #[must_use]
     pub fn new(policy: GuardrailPolicy, gate: Arc<dyn ApprovalGate>) -> Self {
-        Self { policy, gate }
+        Self {
+            policy,
+            gate,
+            advisors: Vec::new(),
+            guards: Vec::new(),
+        }
+    }
+
+    /// Register an [`Advisor`], consulted before the policy. Tighten-only.
+    #[must_use]
+    pub fn with_advisor(mut self, advisor: Arc<dyn Advisor>) -> Self {
+        self.advisors.push(advisor);
+        self
+    }
+
+    /// Register a [`DenyGuard`], consulted after approval resolution.
+    ///
+    /// Registration order selects which reason is reported when several guards
+    /// would deny; it cannot affect *whether* the action is denied.
+    #[must_use]
+    pub fn with_guard(mut self, guard: Arc<dyn DenyGuard>) -> Self {
+        self.guards.push(guard);
+        self
     }
 
     /// A permissive engine that auto-approves with audit logging. The default
@@ -184,21 +253,65 @@ impl Guardrails {
     /// Returns [`GuardrailError::Denied`] if policy denies the action or the
     /// approval gate declines it.
     pub async fn authorize(&self, action: Action) -> Result<(), GuardrailError> {
-        match self.policy.evaluate(&action) {
-            Decision::Allow => {
-                tracing::debug!(action = %action.label(), "guardrail allowed");
-                Ok(())
-            }
-            Decision::Deny { reason } => Err(GuardrailError::Denied(reason)),
-            Decision::RequireApproval { reason, .. } => {
-                if self.gate.request_approval(&action, &reason).await {
-                    Ok(())
-                } else {
-                    Err(GuardrailError::Denied(format!(
-                        "approval declined: {reason}"
-                    )))
-                }
-            }
+        // Phase 1: the extensible advisory chain. It may add a prompt; by the
+        // shape of `Advice` it cannot remove one.
+        let advised = self.first_advice(&action);
+
+        // Phase 2: policy evaluation and approval resolution. `?` here means a
+        // denial short-circuits, which is why phase 3 only ever narrows.
+        self.resolve_policy(&action, advised).await?;
+
+        // Phase 3: monotonic guards, last and unconditional over everything
+        // that survived. Nothing after this point can restore permission.
+        if let Some(reason) = self.first_guard_denial(&action) {
+            tracing::warn!(action = %action.label(), %reason, "guard denied");
+            return Err(GuardrailError::Denied(reason));
+        }
+
+        tracing::debug!(action = %action.label(), "guardrail allowed");
+        Ok(())
+    }
+
+    /// The first advisor asking for consent, if any.
+    fn first_advice(&self, action: &Action) -> Option<String> {
+        self.advisors
+            .iter()
+            .find_map(|advisor| match advisor.advise(action) {
+                Advice::RequireApproval { reason } => Some(reason),
+                Advice::Abstain => None,
+            })
+    }
+
+    /// The first guard that denies `action`, if any.
+    fn first_guard_denial(&self, action: &Action) -> Option<String> {
+        self.guards
+            .iter()
+            .find_map(|guard| guard.deny_reason(action))
+    }
+
+    /// Policy evaluation plus approval resolution, honouring an advisor's
+    /// request for consent on an otherwise auto-allowed action.
+    async fn resolve_policy(
+        &self,
+        action: &Action,
+        advised: Option<String>,
+    ) -> Result<(), GuardrailError> {
+        let reason = match self.policy.evaluate(action) {
+            Decision::Deny { reason } => return Err(GuardrailError::Denied(reason)),
+            Decision::RequireApproval { reason, .. } => reason,
+            // The policy would auto-allow; an advisor may still have asked.
+            Decision::Allow => match advised {
+                Some(reason) => reason,
+                None => return Ok(()),
+            },
+        };
+
+        if self.gate.request_approval(action, &reason).await {
+            Ok(())
+        } else {
+            Err(GuardrailError::Denied(format!(
+                "approval declined: {reason}"
+            )))
         }
     }
 }
