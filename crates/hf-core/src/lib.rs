@@ -24,6 +24,7 @@
 //! | [`coverage`] | `CoverageReport` | corpus-coverage-design.md |
 
 pub mod agent;
+pub mod armed;
 pub mod checkpoint;
 pub mod corpus;
 pub mod coverage;
