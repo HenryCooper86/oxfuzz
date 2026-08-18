@@ -72,6 +72,9 @@ script-tests:
   image: python:3.12-slim
   script:
     - scripts/tests/gates.sh script-tests
+    # Rides here rather than with rust: the Rust image has no python3, and this
+    # gate needs nothing but an interpreter -- not even git.
+    - scripts/tests/gates.sh translation-pairing
 
 supply-chain:
   stage: gate
