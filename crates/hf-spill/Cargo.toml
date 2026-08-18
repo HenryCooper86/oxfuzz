@@ -1,0 +1,18 @@
+[package]
+name = "hf-spill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Overflow store for oversized tool and engine output"
+
+[dependencies]
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
