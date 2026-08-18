@@ -82,6 +82,21 @@ pub fn scrubbed_command<S: AsRef<OsStr>>(program: S) -> Command {
     command
 }
 
+/// A [`tokio::process::Command`] that starts from the scrubbed parent
+/// environment.
+///
+/// The async spawn sites in `docker.rs` need tokio's `Command`, which
+/// [`scrubbed_command`] cannot produce. Spelling the two calls out at those
+/// sites instead would put the rule in three places and let them drift; this
+/// keeps every host-side spawn a single greppable constructor call.
+#[must_use]
+pub fn scrubbed_tokio_command<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    command.env_clear();
+    command.envs(scrubbed_parent_env());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,7 +115,12 @@ mod tests {
 
     #[test]
     fn matches_regardless_of_case() {
-        for name in ["github_token", "AwsSecretAccessKey", "db_password", "api_key"] {
+        for name in [
+            "github_token",
+            "AwsSecretAccessKey",
+            "db_password",
+            "api_key",
+        ] {
             assert!(is_sensitive_name(name), "{name} should be dropped");
         }
     }
@@ -115,8 +135,17 @@ mod tests {
     #[test]
     fn keeps_what_a_helper_needs_to_function() {
         for name in [
-            "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "SSH_AUTH_SOCK",
-            "HTTPS_PROXY", "NO_PROXY", "DOCKER_HOST", "DOCKER_CONFIG",
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TMPDIR",
+            "TERM",
+            "SSH_AUTH_SOCK",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "DOCKER_HOST",
+            "DOCKER_CONFIG",
         ] {
             assert!(!is_sensitive_name(name), "{name} should survive");
         }
@@ -139,7 +168,10 @@ mod tests {
             ("GITHUB_TOKEN", "ghp_should_not_survive"),
         ]));
         assert_eq!(scrubbed.get("PATH").map(String::as_str), Some("/usr/bin"));
-        assert_eq!(scrubbed.get("HOME").map(String::as_str), Some("/home/oxfuzz"));
+        assert_eq!(
+            scrubbed.get("HOME").map(String::as_str),
+            Some("/home/oxfuzz")
+        );
         assert!(!scrubbed.contains_key("HF_PROVIDER_API_KEY"));
         assert!(!scrubbed.contains_key("GITHUB_TOKEN"));
         assert_eq!(scrubbed.len(), 2);
@@ -154,7 +186,9 @@ mod tests {
             ("PATH", "/usr/bin"),
         ]));
         assert!(
-            !scrubbed.values().any(|value| value.contains("sk-live-secret")),
+            !scrubbed
+                .values()
+                .any(|value| value.contains("sk-live-secret")),
             "a scrubbed value reappeared under another name"
         );
     }
@@ -172,5 +206,40 @@ mod tests {
     #[test]
     fn an_empty_environment_scrubs_to_an_empty_environment() {
         assert!(scrub(Vec::new()).is_empty());
+    }
+
+    /// The variables a command sets explicitly on its child.
+    ///
+    /// `env_clear`'s effect is deliberately not asserted anywhere below: std
+    /// exposes the overrides through `get_envs` but not the cleared flag, and
+    /// the only ways to observe it are to mutate this process's environment or
+    /// to assume it holds a sensitive variable. The tests therefore pin what is
+    /// observable -- that both constructors seed the scrubbed parent
+    /// environment, and that they cannot drift apart.
+    fn explicit_env(command: &Command) -> BTreeMap<String, String> {
+        command
+            .get_envs()
+            .filter_map(|(name, value)| {
+                Some((name.to_str()?.to_owned(), value?.to_str()?.to_owned()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_std_constructor_starts_from_the_scrubbed_parent_environment() {
+        assert_eq!(
+            explicit_env(&scrubbed_command("true")),
+            scrubbed_parent_env()
+        );
+    }
+
+    #[test]
+    fn the_tokio_constructor_agrees_with_the_std_one() {
+        // Both spawn sites in docker.rs need tokio's Command. The rule has one
+        // home, so the two constructors must not be able to drift apart.
+        assert_eq!(
+            explicit_env(scrubbed_tokio_command("true").as_std()),
+            explicit_env(&scrubbed_command("true"))
+        );
     }
 }
