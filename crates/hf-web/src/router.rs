@@ -476,6 +476,10 @@ pub fn build_with_state_and_security(mut state: AppState, security: WebSecurityC
         .route("/schedule", get(schedule_list).post(schedule_create))
         .route("/schedule/recovery", get(schedule_recovery_list))
         .route(
+            "/schedule/arm",
+            get(schedule_arm_get).post(schedule_arm).delete(schedule_disarm),
+        )
+        .route(
             "/schedule/recovery/{occurrence_id}/acknowledge",
             post(schedule_recovery_acknowledge),
         )
@@ -2307,6 +2311,33 @@ async fn schedule_create(
         .map_err(scheduler_api_error)?;
     let views = scheduler.list_views().await.map_err(scheduler_api_error)?;
     Ok(Json(public_value(views)))
+}
+
+/// Whether restored work is authorized to run in this process.
+async fn schedule_arm_get(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let armed = state.scheduler.as_ref().is_some_and(|s| s.is_armed());
+    Json(serde_json::json!({ "armed": armed }))
+}
+
+/// Release recovery held since start.
+///
+/// A scheduler comes up disarmed on every process start: a restart restores
+/// what it was doing without deciding to carry on. This is that decision.
+async fn schedule_arm(State(state): State<AppState>) -> Json<serde_json::Value> {
+    if let Some(scheduler) = &state.scheduler {
+        scheduler.arm();
+    }
+    let armed = state.scheduler.as_ref().is_some_and(|s| s.is_armed());
+    Json(serde_json::json!({ "armed": armed }))
+}
+
+/// Withdraw authorization; recovery not yet released stays held.
+async fn schedule_disarm(State(state): State<AppState>) -> Json<serde_json::Value> {
+    if let Some(scheduler) = &state.scheduler {
+        scheduler.disarm();
+    }
+    let armed = state.scheduler.as_ref().is_some_and(|s| s.is_armed());
+    Json(serde_json::json!({ "armed": armed }))
 }
 
 async fn schedule_concurrency_get(State(state): State<AppState>) -> Json<usize> {
