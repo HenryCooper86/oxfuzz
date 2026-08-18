@@ -188,7 +188,11 @@ fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<std
 #[must_use]
 pub fn docker_daemon_ready() -> bool {
     run_bounded(
-        crate::process_env::scrubbed_command(docker_bin()).args(["info", "--format", "{{.ServerVersion}}"]),
+        crate::process_env::scrubbed_command(docker_bin()).args([
+            "info",
+            "--format",
+            "{{.ServerVersion}}",
+        ]),
         DOCKER_PROBE_TIMEOUT,
     )
     .is_some_and(|o| o.status.success())
