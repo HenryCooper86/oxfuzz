@@ -2267,6 +2267,7 @@ dependencies = [
  "hf-guardrails",
  "hf-prompt",
  "hf-skills",
+ "hf-spill",
  "hf-tools",
  "serde",
  "serde_json",
@@ -2669,6 +2670,17 @@ dependencies = [
  "thiserror 2.0.19",
  "toml 0.8.2",
  "tracing",
+]
+
+[[package]]
+name = "hf-spill"
+version = "0.2.1"
+dependencies = [
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

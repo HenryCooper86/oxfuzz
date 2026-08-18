@@ -23,5 +23,5 @@ pub use compaction::{
 };
 pub use simple::{
     assemble, cap_fresh_tool_result, estimate_tokens, prune_tool_results_by_age, total_tokens,
-    DEFAULT_BUDGET_TOKENS,
+    DEFAULT_BUDGET_TOKENS, MAX_FRESH_TOOL_RESULT_CHARS,
 };
