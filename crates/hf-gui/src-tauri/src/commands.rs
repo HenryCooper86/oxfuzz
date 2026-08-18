@@ -30,7 +30,7 @@ fn start_docker_daemon() {
     #[cfg(target_os = "macos")]
     {
         for app_name in ["OrbStack", "Docker"] {
-            let started = std::process::Command::new("open")
+            let started = hf_service::scrubbed_command("open")
                 .args(["-ga", app_name])
                 .status()
                 .is_ok_and(|s| s.success());
@@ -45,7 +45,7 @@ fn start_docker_daemon() {
             ["--user", "start", "docker"].as_slice(),
             ["start", "docker"].as_slice(),
         ] {
-            let started = std::process::Command::new("systemctl")
+            let started = hf_service::scrubbed_command("systemctl")
                 .args(args)
                 .status()
                 .is_ok_and(|s| s.success());
