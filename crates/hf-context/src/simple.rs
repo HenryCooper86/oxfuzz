@@ -168,6 +168,33 @@ mod tests {
     }
 
     #[test]
+    fn caps_an_oversized_multibyte_result_without_splitting_a_character() {
+        // Every char here is three bytes, so no head or tail boundary the
+        // implementation picks lands on a byte boundary. Byte slicing panics on
+        // this input; `chars()` does not. It is not a hypothetical shape --
+        // ASan traces and source snippets are not guaranteed ASCII.
+        let content = "\u{65e5}".repeat(MAX_FRESH_TOOL_RESULT_CHARS + 1_000);
+
+        let capped = cap_fresh_tool_result(&content).expect("oversized input must be capped");
+
+        assert!(capped.starts_with(&"\u{65e5}".repeat(64)));
+        assert!(capped.ends_with(&"\u{65e5}".repeat(64)));
+        assert!(capped.chars().count() < content.chars().count());
+    }
+
+    #[test]
+    fn soft_trims_a_multibyte_result_without_splitting_a_character() {
+        let mut content = "\u{e9}".repeat(SOFT_TRIM_KEEP_CHARS * 2 + 500);
+        let original_chars = content.chars().count();
+
+        soft_trim_in_place(&mut content);
+
+        assert!(content.contains("chars trimmed"));
+        assert!(content.chars().count() < original_chars);
+        assert!(content.starts_with(&"\u{e9}".repeat(64)));
+    }
+
+    #[test]
     fn keeps_recent_tool_results_then_trims_then_clears_older_ones() {
         let big = "x".repeat(4000);
         let mut msgs = vec![Message::system("s"), Message::user("go")];
