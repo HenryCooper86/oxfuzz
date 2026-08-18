@@ -331,7 +331,7 @@ fn syz_kvm_usable(platform: &str) -> bool {
 /// # Errors
 /// Returns `ClassifiedError::Internal` if the `docker build` command fails.
 pub fn build_sandbox_image(root: &Path, platform: &str) -> Result<(), ClassifiedError> {
-    let status = std::process::Command::new(hf_runtime::docker_bin())
+    let status = hf_runtime::scrubbed_command(hf_runtime::docker_bin())
         .current_dir(root)
         .args([
             "build",
