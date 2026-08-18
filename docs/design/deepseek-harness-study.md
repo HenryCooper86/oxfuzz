@@ -102,8 +102,30 @@ worth a design doc; Tier 3 are speculative.
 
 This is the single most transferable artifact in the repo. It is framed as
 "hard-won bug-class rules: each pattern below is a class of defect that actually
-shipped or nearly shipped here." Four of the seven land directly on oxfuzz's
-threat surface:
+shipped or nearly shipped here."
+
+**Correction to an earlier draft.** That draft asserted four of the seven name
+defects oxfuzz can produce today. Reading the source shows oxfuzz already
+implements three of them and that one does not transfer to Rust at all:
+
+- Rule 1 is **already established**: `hf-runtime` returns an explicit
+  `Completed | TimedOut | Cancelled` terminal outcome and `runtime-design.md`
+  section 5 states exit status is authoritative only for `Completed`;
+  `hf-engine::runner` branches on it before reading `exit_code`.
+- Rule 6 is **already established for the container**, which is the path that
+  matters -- see 1.2 below.
+- Rule 7 is a **Node.js hazard that does not exist in Rust**: `fs.rmSync`
+  recursion can descend through a junction, but `std::fs::remove_dir_all` does
+  not follow symlinks and walks with `openat` on Unix.
+- Rule 8's path discipline is **already established** in `hf-runtime`, which
+  canonicalizes, validates missing paths through the nearest existing parent,
+  and fails closed on traversal and symlink escape.
+
+The document is still worth adopting, with the framing inverted: for rules
+oxfuzz already satisfies it names the established pattern that new code must
+stay consistent with, and it isolates the two genuine gaps (denial versus
+runner-failure classification, and host-side environment inheritance) instead of
+burying them in rules that are already met. The rules that transfer unchanged:
 
 - **Rule 1 -- report orthogonal outcomes independently.** "A process can time out
   AND exit 0 (trapped signal). Surface `timedOut`, `signal`, `exitCode` each on
@@ -136,7 +158,7 @@ Recommended action: write the oxfuzz version with Rust-idiomatic examples, then
 audit `hf-runtime/src/docker.rs`, `hf-engine`, and `hf-corpus` against rules 1,
 4, 6, 7 as the first application.
 
-#### 1.2 Scrub secrets from every spawned process environment
+#### 1.2 Clear the environment for host-side spawned processes
 
 **Source:** `packages/subprocess/subprocess/src/index.ts:44`:
 
@@ -147,21 +169,31 @@ export function scrubbedParentEnv(): Record<string, string> { /* drop matches + 
 ```
 
 One definition, shared by `subprocess-local` **and** the MCP stdio transport.
-`PATH`/`HOME`/locale/proxy survive; explicit caller env merges *after* the scrub
-so a deliberately forwarded credential still works.
 
-**Target:** `hf-runtime` (Docker `--env` construction) and any `hf-engine`
-adapter that spawns a process.
-**Impact: high. Effort: hours.**
+**Target:** the host-side `Command` sites in `hf-service` and `hf-runtime`.
+**Impact: medium. Effort: hours.**
 
-oxfuzz's own `docs/standards/TOOL_CALL_PROTOCOL.md` section 4 already admits the
-gap: *"The registry does not yet provide a general secret-redaction guarantee, so
-executable tools must not return credentials or other service secrets."* That is
-a discipline rule where a mechanism is cheap. The specific oxfuzz hazard is
-sharper than dsh's: `HF_PROVIDER_API_KEY` sitting in the environment of a process
-that runs **attacker-influenced target code**, whose stdout is then fed back into
-an LLM prompt. A single `env`-dumping crash handler exfiltrates the key into the
-model context and the transcript. Do this one first.
+**Correction to an earlier draft of this study.** I first ranked this as the
+single highest-value item on the grounds that `HF_PROVIDER_API_KEY` sits in the
+environment of a process running attacker-influenced target code. Reading
+`crates/hf-runtime/src/docker.rs:285-297` shows that is not true, and the
+architecture is already right where it counts: the container environment is
+built from an empty default map plus explicitly configured `--env=K=V` flags,
+and Docker does not forward the host environment. A generated harness or a
+fuzzer running inside the sandbox never sees the provider key. The container
+environment is an allow-list, not a passthrough.
+
+The real gap is narrower. Nothing in the workspace calls `Command::env_clear`,
+so every **host-side** helper inherits the full parent environment: the `docker`
+CLI itself, `git` in `hf-service::workbench`, `pandoc` in
+`hf-service::report_export`, and the Scapy sidecar. Those are trusted binaries,
+which is why this is a gap rather than an incident -- but the blast radius of a
+bug or a supply-chain compromise in that set is every secret the process holds,
+and closing it is a few lines per spawn site.
+
+`docs/standards/TOOL_CALL_PROTOCOL.md` section 4 already records the adjacent
+discipline rule ("the registry does not yet provide a general secret-redaction
+guarantee"). This makes part of it mechanical.
 
 #### 1.3 Adopt "spill" for oversized tool and engine output
 
@@ -844,13 +876,18 @@ and the file listings of `crates/{hf-agent,hf-session,hf-context,hf-guardrails,h
   (no read-side FS boundary, approval not content-bound, no secret redaction,
   `node:vm` is not a security boundary, `code-runtime` isolation is "a label...
   not a security claim"), that limitation is reported here as they state it.
-- Claims about oxfuzz internals come from its docs plus crate/file listings. Two
-  recommendations (2.2 root unification, 2.3 runner-vs-denial classification)
-  are inferred from directory structure -- `hf-runtime/src/docker.rs`,
-  `hf-runtime/tests/workspace_boundary.rs`, and `hf-tools`' documented project-
-  root confinement -- and should be checked against the actual implementations
-  before the design docs are written; it is possible one or both are already
-  unified.
+- Claims about oxfuzz internals in the first draft came from its docs plus
+  crate and file listings, not from its source. Reading the source afterwards
+  falsified three of them, all in the same direction: oxfuzz is more hardened
+  than the listings suggested. The corrections are recorded inline in 1.1 and
+  1.2 rather than silently edited away, because the pattern is the lesson --
+  a directory listing supports a claim about what exists, never a claim about
+  what a codebase fails to do.
+- Item 2.2 (root unification) is narrower than first stated: `hf-runtime`
+  already owns a canonical, fail-closed workspace boundary
+  (`runtime-design.md` section 2). The open question is only whether
+  `hf-tools`' project-root confinement derives its roots from the same place,
+  which the design document should establish before any code moves.
 - `oxfuzz/CLAUDE.md` and `oxfuzz/AGENTS.md` are intentionally different documents
   (mechanics vs protocol, with CLAUDE.md pointing at AGENTS.md first), unlike
   dsh where `CLAUDE.md` is a symlink to `AGENTS.md`. They do overlap on
