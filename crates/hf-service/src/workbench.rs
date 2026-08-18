@@ -925,7 +925,7 @@ fn gitlab_project_url(project: &Path) -> Option<String> {
     }
 
     let project_arg = project.to_string_lossy().to_string();
-    let output = std::process::Command::new("git")
+    let output = hf_runtime::scrubbed_command("git")
         .args(["-C", project_arg.as_str(), "remote", "get-url", "origin"])
         .output()
         .ok()?;
