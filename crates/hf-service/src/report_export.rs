@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use hf_core::error::ClassifiedError;
 

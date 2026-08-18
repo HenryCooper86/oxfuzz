@@ -21,7 +21,6 @@
 //! failure is reported, never fatal.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use hf_core::error::ClassifiedError;

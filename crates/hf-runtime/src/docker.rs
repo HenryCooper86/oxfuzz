@@ -654,7 +654,6 @@ impl DockerRuntime {
     ) -> Result<CommandResult, ClassifiedError> {
         use std::process::Stdio;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::process::Command;
 
         enum Stop {
             Completed,
@@ -663,12 +662,8 @@ impl DockerRuntime {
             Failed(String),
         }
 
-        // tokio's Command, so `scrubbed_command` (which returns std's) does not
-        // apply; the two calls below are what it does. See process_env.
-        let mut docker = Command::new(crate::docker_bin());
+        let mut docker = crate::process_env::scrubbed_tokio_command(crate::docker_bin());
         docker
-            .env_clear()
-            .envs(crate::process_env::scrubbed_parent_env())
             .args(args)
             .stdin(if stdin.is_some() {
                 Stdio::piped()
@@ -785,24 +780,21 @@ impl DockerRuntime {
                 )
             }
             Stop::TimedOut | Stop::Cancelled | Stop::Failed(_) => {
-                let kill = tokio::time::timeout(
-                    CONTAINER_TEARDOWN_TIMEOUT,
-                    crate::process_env::scrubbed_command(crate::docker_bin())
-                        .arg("kill")
-                        .arg(container_name)
-                        .output(),
-                )
-                .await
-                .map_err(|_| {
-                    ClassifiedError::Sandbox(format!(
-                        "timed out killing stopped container {container_name}"
-                    ))
-                })?
-                .map_err(|e| {
-                    ClassifiedError::Sandbox(format!(
-                        "failed to kill stopped container {container_name}: {e}"
-                    ))
-                })?;
+                let mut kill_command =
+                    crate::process_env::scrubbed_tokio_command(crate::docker_bin());
+                kill_command.arg("kill").arg(container_name);
+                let kill = tokio::time::timeout(CONTAINER_TEARDOWN_TIMEOUT, kill_command.output())
+                    .await
+                    .map_err(|_| {
+                        ClassifiedError::Sandbox(format!(
+                            "timed out killing stopped container {container_name}"
+                        ))
+                    })?
+                    .map_err(|e| {
+                        ClassifiedError::Sandbox(format!(
+                            "failed to kill stopped container {container_name}: {e}"
+                        ))
+                    })?;
                 if !kill.status.success() && child.try_wait().ok().flatten().is_none() {
                     return Err(ClassifiedError::Sandbox(format!(
                         "failed to kill stopped container {container_name}: {}",

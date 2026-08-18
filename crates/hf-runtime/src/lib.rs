@@ -18,6 +18,6 @@ pub use config::{
     sandbox_image_arch, sandbox_image_present, RuntimeConfig, SandboxEngines, SANDBOX_IMAGE,
 };
 pub use process_env::{
-    is_sensitive_name, scrub, scrubbed_command, scrubbed_parent_env, HARNESS_NAME_PREFIX,
-    SENSITIVE_NAME_FRAGMENTS,
+    is_sensitive_name, scrub, scrubbed_command, scrubbed_parent_env, scrubbed_tokio_command,
+    HARNESS_NAME_PREFIX, SENSITIVE_NAME_FRAGMENTS,
 };
