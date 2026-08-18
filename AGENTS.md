@@ -114,6 +114,7 @@ cargo test [args] 2>&1 | grep -v '^\s*Compiling\|^\s*Running\|^\s*Downloading\|^
 ## 5) Key References
 
 - `DESIGN_RULE.md` -- Design doc standards, playbooks, validation checklist
+- `docs/standards/DEFENSIVE_PATTERNS.md` -- Bug-class rules for lifecycle, concurrency, subprocess, sandbox, and teardown code
 - `docs/standards/TEST_STRATEGY.md` -- TDD methodology, pyramid, quality gates
 - `docs/standards/ENGINEERING_STANDARDS.md` -- Rust coding standards
 - `docs/standards/DATABASE_SCHEMA.md` -- SQLite schema
