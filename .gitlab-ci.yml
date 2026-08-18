@@ -67,13 +67,26 @@ frontend:
 
 script-tests:
   stage: gate
-  # Its own job rather than riding along with rust: the Rust image has no
-  # python3, and installing one there would cost more than this job does.
-  image: python:3.12-slim
+  # These tests are written in Python, but their dependencies are not. The
+  # retired-engine scanner enumerates tracked files with `git ls-files`, and one
+  # test compiles and runs real Rust, JavaScript, and Python fixtures to prove
+  # the detector works against sources that actually execute. The job therefore
+  # needs git, rustc, and node as well as an interpreter.
+  #
+  # It ran on python:3.12-slim, which supplied only the interpreter, so ten of
+  # these tests errored on every pipeline -- main's included -- for as long as
+  # this job has existed. Note that the runner's helper image performs the
+  # clone, so a job image holding a .git directory is no evidence it has git.
+  # GitHub never caught this because ubuntu-latest ships all four.
+  #
+  # Starting from the Rust image and adding two small interpreters is cheaper
+  # than adding a Rust toolchain to a Python one.
+  image: rust:1.94
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq python3 nodejs
   script:
     - scripts/tests/gates.sh script-tests
-    # Rides here rather than with rust: the Rust image has no python3, and this
-    # gate needs nothing but an interpreter -- not even git.
     - scripts/tests/gates.sh translation-pairing
 
 supply-chain:
