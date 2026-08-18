@@ -84,6 +84,54 @@ pub trait DenyGuard: Send + Sync {
     fn deny_reason(&self, action: &Action) -> Option<String>;
 }
 
+/// Denies acting while the process is disarmed.
+///
+/// A restored run, a missed schedule occurrence, or a checkpoint tells the
+/// system *what* it was doing. Whether to carry on doing it is a separate
+/// question, and after a restart the answer is "not until someone says so":
+/// see [`ArmedState`](hf_core::armed::ArmedState), which is never persisted.
+///
+/// The threshold reuses the existing risk tiering rather than naming a second
+/// list of dangerous actions, so the two cannot drift apart. Below it,
+/// inspection still works while disarmed -- restoring state is the point, and a
+/// recovered campaign a user cannot look at is not safer, only useless.
+pub struct DisarmedGuard {
+    armed: hf_core::armed::ArmedState,
+    arm_required_above: RiskTier,
+}
+
+impl DisarmedGuard {
+    /// A guard over `armed` requiring authorization for anything above
+    /// [`RiskTier::Medium`], which is the same line the default policy draws
+    /// between acting and inspecting.
+    #[must_use]
+    pub fn new(armed: hf_core::armed::ArmedState) -> Self {
+        Self {
+            armed,
+            arm_required_above: RiskTier::Medium,
+        }
+    }
+
+    /// Move the line this guard draws.
+    #[must_use]
+    pub fn requiring_arm_above(mut self, tier: RiskTier) -> Self {
+        self.arm_required_above = tier;
+        self
+    }
+}
+
+impl DenyGuard for DisarmedGuard {
+    fn deny_reason(&self, action: &Action) -> Option<String> {
+        if self.armed.is_armed() || action.risk() <= self.arm_required_above {
+            return None;
+        }
+        Some(format!(
+            "'{}' requires a freshly armed session: restored work does not resume on its own",
+            action.label()
+        ))
+    }
+}
+
 /// A policy mapping risk tiers to allow / approve / deny.
 #[derive(Debug, Clone, Copy)]
 pub struct GuardrailPolicy {

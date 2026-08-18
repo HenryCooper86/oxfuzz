@@ -340,3 +340,59 @@ async fn an_advisor_cannot_loosen_a_policy_denial() {
         "no advice may re-permit a policy denial"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Disarm on recovery (study item 1.5)
+// ---------------------------------------------------------------------------
+
+fn armed_guardrails(state: &hf_core::armed::ArmedState) -> Guardrails {
+    Guardrails::new(
+        GuardrailPolicy::permissive(),
+        std::sync::Arc::new(AutoApprove),
+    )
+    .with_guard(std::sync::Arc::new(hf_guardrails::DisarmedGuard::new(
+        state.clone(),
+    )))
+}
+
+#[tokio::test]
+async fn a_disarmed_process_may_not_run_a_fuzzer() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    // Permissive policy, auto-approving gate: the only thing standing between
+    // a restored campaign and execution is the armed state.
+    assert!(
+        g.authorize(run_fuzzer()).await.is_err(),
+        "a fresh process must not resume a campaign without being armed"
+    );
+}
+
+#[tokio::test]
+async fn a_disarmed_process_may_still_inspect() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    // Restoring what the system was doing is the point; only acting is gated.
+    assert!(g.authorize(Action::Discover).await.is_ok());
+    assert!(g.authorize(Action::Triage).await.is_ok());
+}
+
+#[tokio::test]
+async fn arming_lets_the_restored_campaign_proceed() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    state.arm();
+    assert!(g.authorize(run_fuzzer()).await.is_ok());
+}
+
+#[tokio::test]
+async fn disarming_stops_a_campaign_that_was_previously_authorized() {
+    let state = hf_core::armed::ArmedState::new();
+    let g = armed_guardrails(&state);
+    state.arm();
+    assert!(g.authorize(run_fuzzer()).await.is_ok());
+    state.disarm();
+    assert!(
+        g.authorize(run_fuzzer()).await.is_err(),
+        "withdrawing authorization must take effect immediately"
+    );
+}
