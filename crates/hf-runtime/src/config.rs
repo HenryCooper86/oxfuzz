@@ -47,7 +47,7 @@ impl Default for RuntimeConfig {
 
 /// Check whether a binary exists and responds to `--version`.
 fn which(bin: &str) -> bool {
-    std::process::Command::new(bin)
+    crate::process_env::scrubbed_command(bin)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -188,7 +188,7 @@ fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<std
 #[must_use]
 pub fn docker_daemon_ready() -> bool {
     run_bounded(
-        std::process::Command::new(docker_bin()).args(["info", "--format", "{{.ServerVersion}}"]),
+        crate::process_env::scrubbed_command(docker_bin()).args(["info", "--format", "{{.ServerVersion}}"]),
         DOCKER_PROBE_TIMEOUT,
     )
     .is_some_and(|o| o.status.success())
@@ -207,7 +207,7 @@ pub fn sandbox_image_present() -> bool {
 #[must_use]
 pub fn image_present(image: &str) -> bool {
     run_bounded(
-        std::process::Command::new(docker_bin()).args(["image", "inspect", image]),
+        crate::process_env::scrubbed_command(docker_bin()).args(["image", "inspect", image]),
         DOCKER_PROBE_TIMEOUT,
     )
     .is_some_and(|o| o.status.success())
@@ -218,7 +218,7 @@ pub fn image_present(image: &str) -> bool {
 #[must_use]
 pub fn sandbox_image_arch() -> Option<String> {
     let out = run_bounded(
-        std::process::Command::new(docker_bin()).args([
+        crate::process_env::scrubbed_command(docker_bin()).args([
             "image",
             "inspect",
             "--format",
@@ -264,7 +264,7 @@ impl SandboxEngines {
 /// name for immutable provenance.
 pub(crate) fn image_id(image: &str) -> Option<String> {
     let out = run_bounded(
-        std::process::Command::new(docker_bin())
+        crate::process_env::scrubbed_command(docker_bin())
             .args(["image", "inspect", "--format", "{{.Id}}", image]),
         DOCKER_PROBE_TIMEOUT,
     )?;
@@ -304,7 +304,7 @@ fn engines_from_probe_output(found: &str) -> SandboxEngines {
 /// image. All-false if the run fails.
 fn probe_sandbox_engines() -> SandboxEngines {
     let out = run_bounded(
-        std::process::Command::new(docker_bin()).args([
+        crate::process_env::scrubbed_command(docker_bin()).args([
             "run",
             "--rm",
             "--entrypoint",

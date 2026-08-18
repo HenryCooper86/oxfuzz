@@ -178,7 +178,7 @@ fn spec_from_config(project: &str, files: &[String]) -> Option<ComposeSpec> {
 /// Uses [`hf_runtime::docker_bin`] rather than bare `docker`: a Finder-launched
 /// `.app` inherits a stripped `PATH` that does not include Docker's install dir.
 fn docker(args: &[&str]) -> Option<String> {
-    let out = Command::new(hf_runtime::docker_bin())
+    let out = hf_runtime::scrubbed_command(hf_runtime::docker_bin())
         .args(args)
         .output()
         .ok()?;
@@ -419,7 +419,7 @@ pub async fn stop() -> Result<DefectDojoStatus, ClassifiedError> {
     let args = compose_args(&spec, &["stop"]);
     let spec_dir = spec.dir.clone();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(hf_runtime::docker_bin())
+        hf_runtime::scrubbed_command(hf_runtime::docker_bin())
             .args(&args)
             .current_dir(&spec_dir)
             .output()
@@ -460,7 +460,7 @@ async fn compose_up(spec: &ComposeSpec, port: u16) -> Result<(), ClassifiedError
     let args = compose_args(spec, &["up", "-d"]);
     let dir = spec.dir.clone();
     let out = tokio::task::spawn_blocking(move || {
-        Command::new(hf_runtime::docker_bin())
+        hf_runtime::scrubbed_command(hf_runtime::docker_bin())
             .args(&args)
             .current_dir(&dir)
             .env("DD_PORT", port.to_string())
