@@ -99,6 +99,43 @@ Each is independently valuable and none forecloses the full change.
    an end record last, so a crash leaves a detectable orphan rather than a
    false success. Applies to harness build, smoke fuzz, campaign, and triage
    with no event-log dependency at all.
+
+   **Resolved 2026-08-19: no schema change, and most of this is already done.**
+   The question left open was whether brackets belong in the database, since
+   `sessions.last_compaction` and `sessions.compaction_count` exist and nothing
+   writes them. They are the wrong shape and should stay unused by this work: a
+   counter is written *after* the fact, so it records exactly the false success
+   a bracket exists to prevent. Making them bracket-shaped means adding an
+   in-progress column plus a startup sweep, which is a second implementation of
+   something the codebase already has.
+
+   The substrate is the file-backed journal. oxfuzz has it twice --
+   `hf-service::recovery::RunJournal` and
+   `hf-service::semgrep_recovery::SemgrepJournal` -- both appending an open
+   record before the work and a close record after, both surfacing
+   open-without-close at startup. A third substrate would be a third thing to
+   reconcile during recovery.
+
+   Against that, of the four operations named above:
+
+   - **Smoke fuzz** and **fuzz runs** are bracketed (`container/harness.rs`,
+     `container/run.rs`), and `container/lifecycle.rs` reconciles the orphans to
+     `Failed` on the next launch.
+   - **Semgrep operations** are bracketed by their own journal.
+   - **Harness build** and **triage** persist no in-progress state at all: they
+     read, compute, and return. A crash leaves nothing claiming to be running,
+     so there is no orphan to detect and a bracket around them would be
+     ceremony rather than safety. Do not add one.
+   - **Campaign executions** are the open question. A crashed campaign's *run*
+     row is reconciled, but no startup sweep for a `ScheduleExecution` left in
+     `Running` was found. Confirm before building anything; that, and not
+     compaction, is where remaining value would be.
+
+   Compaction, the operation the upstream pattern is named for, is the worst
+   candidate here rather than the first: `hf-agent::maybe_compact` holds an
+   in-memory `Vec<Message>` with no storage handle and no session id, so
+   bracketing it means threading identity through the agent loop before there is
+   anything to record.
 3. **Log compaction decisions.** Record what was hidden and why, even while
    compaction still mutates the message vector. This is most of the audit value
    for a fraction of the work.
