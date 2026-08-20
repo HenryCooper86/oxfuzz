@@ -12,30 +12,37 @@ use uuid::Uuid;
 
 use super::crash_inputs::is_regular_file;
 
-/// Reduce an untrusted `target` to a path that cannot escape its parent
-/// directory. Keeps only `Normal` components (so `..`, absolute roots, and
-/// Windows prefixes are discarded) and falls back to `default` when nothing
-/// safe remains.
+/// Reduce an untrusted `target` to the single directory component that names
+/// its workspace.
+///
+/// The target string is foreign data at the service boundary (`--target`, the
+/// REST wire, the desktop IPC), and the documented `file.c::symbol` syntax plus
+/// C++ qualified names routinely carry `/`, `:`, `<`, and `>`. Returning a
+/// multi-component path from those would nest one target's workspace inside
+/// another's (target `a/corpus` landing in target `a`'s corpus directory) and
+/// would produce NTFS-illegal names on a Windows host, so the result is always
+/// one portable component. Shares [`target_artifact_stem`] with
+/// [`harness_binary_name`] so a workspace and the binary inside it are named by
+/// the same rule: plain identifiers -- everything the scanners emit -- are kept
+/// verbatim, and anything else is folded to `[A-Za-z0-9_-]` plus a hash of the
+/// original that keeps distinct targets apart.
 pub(super) fn sanitize_target(target: &str) -> PathBuf {
-    use std::path::Component;
-    let safe: PathBuf = Path::new(target)
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(part) => Some(part),
-            _ => None,
-        })
-        .collect();
-    if safe.as_os_str().is_empty() {
-        PathBuf::from("default")
-    } else {
-        safe
-    }
+    PathBuf::from(target_artifact_stem(target))
 }
 
 /// Stable single-component stem for target-derived artifact filenames.
+///
+/// Injective up to the appended hash: the hash is added whenever the stem is
+/// not the target verbatim, *including* when it is truncated, so two targets
+/// sharing the retained prefix never collapse onto one name.
 fn target_artifact_stem(target: &str) -> String {
     use sha2::{Digest, Sha256};
 
+    /// Retained prefix length; the hash disambiguates anything cut here.
+    const MAX_STEM_CHARS: usize = 64;
+
+    // Every mapped character is ASCII, so the byte truncation below always
+    // lands on a character boundary.
     let mut safe: String = target
         .chars()
         .map(|character| {
@@ -46,11 +53,11 @@ fn target_artifact_stem(target: &str) -> String {
             }
         })
         .collect();
-    let changed = safe != target || safe.is_empty() || safe.len() > 80;
+    let changed = safe != target || safe.is_empty() || safe.len() > MAX_STEM_CHARS;
     if safe.is_empty() {
         safe.push_str("default");
     }
-    safe.truncate(64);
+    safe.truncate(MAX_STEM_CHARS);
     if changed {
         let digest = format!("{:x}", Sha256::digest(target.as_bytes()));
         safe.push('-');
@@ -460,6 +467,98 @@ mod harness_binary_name_tests {
             super::harness_binary_name("parse_entry"),
             "fuzz_parse_entry"
         );
+    }
+
+    /// The stem truncates at 64 characters, so every target longer than that
+    /// must carry the disambiguating hash. Without it two targets sharing a
+    /// 64-character prefix name one artifact -- and, since the stem also names
+    /// the workspace directory, one workspace.
+    #[test]
+    fn stem_disambiguates_targets_sharing_a_truncated_prefix() {
+        let prefix = "a".repeat(64);
+        let first = format!("{prefix}_variant_one");
+        let second = format!("{prefix}_variant_two");
+        assert_ne!(
+            super::harness_binary_name(&first),
+            super::harness_binary_name(&second),
+        );
+    }
+}
+
+#[cfg(test)]
+mod sanitize_target_tests {
+    use std::path::Path;
+
+    /// A target string is foreign data at the service boundary (`--target`,
+    /// REST, GUI), and its sanitized form names a workspace directory. One
+    /// portable component keeps two targets from sharing a workspace and keeps
+    /// the path legal on a Windows host.
+    #[test]
+    fn sanitize_target_is_one_portable_component() {
+        for target in [
+            "../../outside",
+            "/etc/passwd",
+            "ns::Parser::read",
+            "src/parser.c::parse_header",
+            "std::vector<int>::push_back",
+            "a/corpus",
+            "",
+        ] {
+            let sanitized = super::sanitize_target(target);
+            let rendered = sanitized.to_string_lossy().into_owned();
+            assert_eq!(
+                Path::new(&sanitized).components().count(),
+                1,
+                "{target} -> {rendered}"
+            );
+            assert!(
+                rendered
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')),
+                "{target} -> {rendered}"
+            );
+        }
+    }
+
+    /// Distinct targets never share a workspace directory, including the pairs
+    /// that only differ in characters the sanitizer replaces.
+    #[test]
+    fn sanitize_target_separates_distinct_targets() {
+        for (first, second) in [
+            ("a/corpus", "a_corpus"),
+            ("ns::read", "ns__read"),
+            ("mod::parse", "mod/parse"),
+        ] {
+            assert_ne!(
+                super::sanitize_target(first),
+                super::sanitize_target(second),
+                "{first} vs {second}"
+            );
+        }
+    }
+
+    /// Every symbol the scanners actually emit is a plain identifier, so the
+    /// existing on-disk workspace name is preserved byte for byte.
+    #[test]
+    fn sanitize_target_preserves_plain_identifiers() {
+        for target in ["parse_value", "parse_entry", "Parser.read", "fuzz-me"] {
+            let expected = target.replace('.', "_");
+            let sanitized = super::sanitize_target(target);
+            if target == expected {
+                assert_eq!(sanitized, Path::new(target), "{target}");
+            }
+        }
+    }
+
+    /// An empty target still yields a usable component, and it is not the one
+    /// a target literally named `default` gets -- the two are different
+    /// targets and must not share a workspace.
+    #[test]
+    fn sanitize_target_keeps_the_empty_target_distinct() {
+        let empty = super::sanitize_target("");
+        assert_eq!(Path::new(&empty).components().count(), 1);
+        assert!(empty.to_string_lossy().starts_with("default"));
+        assert_ne!(empty, super::sanitize_target("default"));
     }
 }
 
