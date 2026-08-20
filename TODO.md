@@ -5,10 +5,11 @@ Status legend: [x] done - [~] partial - [ ] not started.
 ## Phase 1: Foundation
 
 - [x] hf-core: `EngineKind`, `TargetCandidate`, `Harness`, `Crash`, `Corpus` types.
-- [~] hf-provider: LLM provider pool with multi-provider backends (OpenAI,
+- [x] hf-provider: LLM provider pool with multi-provider backends (OpenAI,
   Azure, Anthropic, Gemini, Ollama). Freeze/thaw failover + error classification
   ported from y-agent (rate-limit/auth/5xx no longer kills a campaign). Token
-  streaming not yet ported.
+  streaming is implemented on all five backends and on `ProviderPool`; only the
+  cosmetic agent `Token` event is unwired (see the streaming entry below).
 - [x] hf-storage: SQLite schema for runs, targets, harnesses, crashes, corpora.
 - [x] hf-runtime: Docker sandbox adapter for isolated builds and fuzz runs.
 - [x] hf-cli: `init`, `discover`, `harness`, `run`, `triage` subcommands (a thin
@@ -16,8 +17,9 @@ Status legend: [x] done - [~] partial - [ ] not started.
 
 ## Phase 2: Discovery & Harness
 
-- [x] hf-discovery: project scanner for C/C++ (Tree-sitter) + lexical Rust
-  scanner. Go/Python scanners not yet implemented.
+- [x] hf-discovery: project scanner for C/C++ (Tree-sitter) + lexical Rust, Go,
+  and Python scanners (`scan_go`/`scan_python`, dispatched from `scan()`; Go
+  methods are named `Receiver.name` and Python methods `Class.name`).
 - [x] hf-harness: Rust cargo-fuzz backend (`cargo_fuzz` module: project
   scaffold + `cargo fuzz build`; language-aware `build_command`; `try_compile`
   Rust branch stages the crate via `copy_project_sources` and produces a
@@ -149,11 +151,14 @@ Status legend: [x] done - [~] partial - [ ] not started.
   independently of the status reads it waited on, so runner contention could
   beat it; it now polls for the transitions with a timeout (0/10 on native
   Linux, 8/8 locally).
-- [ ] Windows workspace naming: `workspace_dir` embeds the target symbol in a
-  directory name, so a C++ target (`ns::Class::method`) would create an
-  NTFS-illegal path on a Windows host. Not hit by CI (the test is pure path
-  arithmetic and fuzzing runs in a Linux sandbox), but it blocks a native
-  Windows host workspace.
+- [x] Windows workspace naming: `workspace_dir` embedded the raw target symbol
+  in a directory name, so a C++ target (`ns::Class::method`) or the documented
+  `file.c::symbol` syntax produced an NTFS-illegal path on a Windows host, and a
+  target containing `/` nested one target's workspace inside another's. Fixed by
+  routing `sanitize_target` through the same `target_artifact_stem` that already
+  named harness binaries: a workspace is now always one `[A-Za-z0-9_-]`
+  component, hashed when the target is not that verbatim. Plain identifiers --
+  everything the scanners emit -- keep their existing directory name.
 - [ ] Event schedules whose action is a campaign re-trigger themselves: a
   campaign emits `run.completed` when its run phase ends, so an
   `event: run.completed` schedule fires again while its own execution is still
