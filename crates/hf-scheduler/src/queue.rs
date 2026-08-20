@@ -18,11 +18,6 @@ pub fn trigger_queue() -> (TriggerSender, TriggerReceiver) {
     mpsc::channel(DEFAULT_QUEUE_CAPACITY)
 }
 
-/// Create a trigger queue with a custom capacity.
-pub fn trigger_queue_with_capacity(capacity: usize) -> (TriggerSender, TriggerReceiver) {
-    mpsc::channel(capacity)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
