@@ -1018,11 +1018,41 @@ mod workspace_tests {
     }
 
     #[test]
-    fn cpp_style_target_is_preserved() {
-        // C++ symbols contain `::`; that is filesystem-safe and must survive.
+    fn qualified_target_becomes_one_portable_component() {
+        // A C++ symbol carries `::`, and the documented `file.c::symbol` target
+        // syntax carries `::` and `/`. Neither may reach the filesystem raw:
+        // `:` is illegal in an NTFS name, and a `/` would nest one target's
+        // workspace inside another's. Each resolves to exactly one directory
+        // below the project base, and distinct targets stay distinct.
         let project = Path::new("/home/user/myproj");
-        let ws = workspace_dir(project, "ns::Class::method");
-        assert_eq!(ws, base(project).join("ns::Class::method"));
+        let qualified = workspace_dir(project, "ns::Class::method");
+        let file_scoped = workspace_dir(project, "src/parser.c::parse_header");
+
+        for ws in [&qualified, &file_scoped] {
+            let leaf = ws
+                .strip_prefix(base(project))
+                .expect("workspace is below the project base");
+            assert_eq!(leaf.components().count(), 1, "{}", ws.display());
+            assert!(
+                leaf.to_string_lossy()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')),
+                "{}",
+                ws.display()
+            );
+        }
+        assert_ne!(qualified, file_scoped);
+    }
+
+    #[test]
+    fn plain_identifier_target_keeps_its_directory_name() {
+        // Every symbol the scanners emit is a plain identifier, so sanitizing
+        // must leave existing on-disk workspaces exactly where they were.
+        let project = Path::new("/home/user/myproj");
+        assert_eq!(
+            workspace_dir(project, "parse_json"),
+            base(project).join("parse_json")
+        );
     }
 
     #[test]
@@ -1056,13 +1086,25 @@ mod workspace_tests {
     }
 
     #[test]
-    fn empty_or_all_traversal_target_falls_back() {
+    fn degenerate_targets_fall_back_without_colliding() {
+        // An empty target, a pure-traversal target, and a target literally
+        // named `default` are three different targets. Each needs a usable
+        // directory, and none may share one with the others.
         let project = Path::new("/home/user/myproj");
-        assert_eq!(workspace_dir(project, ""), base(project).join("default"));
-        assert_eq!(
-            workspace_dir(project, "../.."),
-            base(project).join("default")
-        );
+        let empty = workspace_dir(project, "");
+        let traversal = workspace_dir(project, "../..");
+        let literal = workspace_dir(project, "default");
+
+        for ws in [&empty, &traversal, &literal] {
+            let leaf = ws
+                .strip_prefix(base(project))
+                .expect("workspace is below the project base");
+            assert_eq!(leaf.components().count(), 1, "{}", ws.display());
+        }
+        assert_eq!(literal, base(project).join("default"));
+        assert_ne!(empty, traversal);
+        assert_ne!(empty, literal);
+        assert_ne!(traversal, literal);
     }
 
     #[test]
