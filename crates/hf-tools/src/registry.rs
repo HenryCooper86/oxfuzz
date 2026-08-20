@@ -97,15 +97,6 @@ impl ToolRegistryImpl {
         inner.definitions.get(name).cloned()
     }
 
-    /// Remove a tool from the registry by name.
-    pub async fn unregister_tool(&self, name: &ToolName) -> bool {
-        let mut inner = self.inner.write().await;
-        let had = inner.definitions.remove(name).is_some();
-        inner.tools.remove(name);
-        inner.index.remove(name);
-        had
-    }
-
     /// Search for tools by keywords in name/description and optional category.
     ///
     /// The query is split on whitespace, commas, or semicolons into individual
@@ -160,17 +151,6 @@ impl ToolRegistryImpl {
     /// Whether the registry is empty.
     pub async fn is_empty(&self) -> bool {
         self.inner.read().await.tools.is_empty()
-    }
-
-    /// Get all registered tool definitions.
-    pub async fn get_all_definitions(&self) -> Vec<ToolDefinition> {
-        self.inner
-            .read()
-            .await
-            .definitions
-            .values()
-            .cloned()
-            .collect()
     }
 }
 

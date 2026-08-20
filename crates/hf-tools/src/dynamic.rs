@@ -6,7 +6,6 @@
 //! HTTP-API calls, or composite pipelines. They are always sandboxed
 //! and run through the same validation/middleware pipeline as built-in tools.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -513,11 +512,6 @@ impl Tool for DynamicToolAdapter {
 // ---------------------------------------------------------------------------
 // Helper: build an Arc<dyn Tool> from a DynamicToolDef
 // ---------------------------------------------------------------------------
-
-/// Convert a `DynamicToolDef` into an `Arc<dyn Tool>`.
-pub fn make_dynamic_tool(def: DynamicToolDef) -> Arc<dyn Tool> {
-    Arc::new(DynamicToolAdapter::new(def))
-}
 
 #[cfg(test)]
 mod tests {

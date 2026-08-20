@@ -4,8 +4,7 @@ use hf_core::provider::{
     ChatRequest, ChatResponse, FinishReason, ProviderCapability, ProviderMetadata, ProviderType,
     ToolCallingMode,
 };
-use hf_core::session::{CreateSessionOptions, SessionType};
-use hf_core::types::{Message, ProviderId, Role, SessionId, TokenUsage, WorkflowId};
+use hf_core::types::{Message, ProviderId, Role, TokenUsage};
 
 /// Create a user message with the given content.
 #[must_use]
@@ -94,29 +93,6 @@ pub fn make_provider_metadata(name: &str) -> ProviderMetadata {
         cost_per_1k_output: 0.002,
         tool_calling_mode: ToolCallingMode::default(),
     }
-}
-
-/// Create session options for a main session.
-#[must_use]
-pub fn make_session_options(title: &str) -> CreateSessionOptions {
-    CreateSessionOptions {
-        parent_id: None,
-        session_type: SessionType::Main,
-        agent_id: None,
-        title: Some(title.into()),
-    }
-}
-
-/// Create a new random `SessionId`.
-#[must_use]
-pub fn make_session_id() -> SessionId {
-    SessionId::new()
-}
-
-/// Create a new random `WorkflowId`.
-#[must_use]
-pub fn make_workflow_id() -> WorkflowId {
-    WorkflowId::new()
 }
 
 #[cfg(test)]

@@ -395,11 +395,6 @@ impl SchedulerManager {
         );
     }
 
-    /// Clear a schedule-local one-time status without weakening a global block.
-    pub async fn clear_one_time_status(&self, schedule_id: &str) {
-        self.one_time_status.lock().await.remove(schedule_id);
-    }
-
     /// Return the global one-time journal block reason, if present.
     pub async fn one_time_block_reason(&self) -> Option<String> {
         self.one_time_global_block.lock().await.clone()
@@ -526,12 +521,6 @@ impl SchedulerManager {
             .into_iter()
             .cloned()
             .collect()
-    }
-
-    /// Get a single execution record by ID.
-    pub async fn get_execution(&self, execution_id: &str) -> Option<ScheduleExecution> {
-        let exec_store = self.execution_store.lock().await;
-        exec_store.get(execution_id).cloned()
     }
 
     /// Get a reference to the execution store for direct access.
