@@ -111,13 +111,6 @@ impl DisarmedGuard {
             arm_required_above: RiskTier::Medium,
         }
     }
-
-    /// Move the line this guard draws.
-    #[must_use]
-    pub fn requiring_arm_above(mut self, tier: RiskTier) -> Self {
-        self.arm_required_above = tier;
-        self
-    }
 }
 
 impl DenyGuard for DisarmedGuard {

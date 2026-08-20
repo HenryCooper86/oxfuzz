@@ -60,19 +60,6 @@ impl IntraTurnPruner {
         }
     }
 
-    /// Create from configuration with extra heuristic patterns.
-    pub fn from_config_with_patterns(
-        config: &IntraTurnPruningConfig,
-        extra_patterns: Vec<String>,
-    ) -> Self {
-        Self {
-            enabled: config.enabled,
-            min_iteration: config.min_iteration,
-            token_threshold: config.token_threshold,
-            extra_patterns,
-        }
-    }
-
     /// Prune failed tool call branches from working history in-place.
     ///
     /// Returns a report with pruning stats. Does not modify `new_messages`
