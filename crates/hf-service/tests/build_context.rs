@@ -13,12 +13,31 @@ fn test_container() -> ServiceContainer {
     ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None)
 }
 
-fn write_database(project: &std::path::Path, arguments: &str) {
-    let db = format!(
-        r#"[{{"directory":"{root}","file":"{root}/a.c","arguments":{arguments}}}]"#,
-        root = project.display()
-    );
-    std::fs::write(project.join("compile_commands.json"), db).unwrap();
+/// Write a one-entry compile database whose recorded command is `arguments`.
+///
+/// Built with `serde_json` rather than string interpolation: a Windows
+/// temporary directory is `C:\\Users\\...`, and those separators are invalid
+/// JSON escapes when pasted into a string literal.
+fn write_database_at(path: &std::path::Path, project: &std::path::Path, arguments: &[String]) {
+    let document = serde_json::json!([{
+        "directory": project,
+        "file": project.join("a.c"),
+        "arguments": arguments,
+    }]);
+    std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+}
+
+fn write_database(project: &std::path::Path, arguments: &[String]) {
+    write_database_at(&project.join("compile_commands.json"), project, arguments);
+}
+
+/// `-I<project>/include`, spelled the way the host spells paths.
+fn include_flag(project: &std::path::Path) -> String {
+    format!("-I{}", project.join("include").display())
+}
+
+fn owned(arguments: &[&str]) -> Vec<String> {
+    arguments.iter().map(|value| (*value).to_owned()).collect()
 }
 
 #[test]
@@ -35,13 +54,10 @@ fn a_compile_database_yields_include_dirs_and_defines() {
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("include")).unwrap();
     std::fs::write(project.path().join("a.c"), "int a(void){return 0;}").unwrap();
-    write_database(
-        project.path(),
-        &format!(
-            r#"["cc","-I{root}/include","-DA=1","-std=c11","-c","{root}/a.c"]"#,
-            root = project.path().display()
-        ),
-    );
+    let mut arguments = owned(&["cc"]);
+    arguments.push(include_flag(project.path()));
+    arguments.extend(owned(&["-DA=1", "-std=c11", "-c", "a.c"]));
+    write_database(project.path(), &arguments);
 
     let ctx = test_container()
         .resolve_build_context(project.path())
@@ -59,12 +75,14 @@ fn a_database_in_the_build_subdirectory_is_found() {
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("build")).unwrap();
     std::fs::create_dir_all(project.path().join("include")).unwrap();
-    let db = format!(
-        r#"[{{"directory":"{root}","file":"{root}/a.c",
-              "arguments":["cc","-I{root}/include","-c","{root}/a.c"]}}]"#,
-        root = project.path().display()
+    let mut arguments = owned(&["cc"]);
+    arguments.push(include_flag(project.path()));
+    arguments.extend(owned(&["-c", "a.c"]));
+    write_database_at(
+        &project.path().join("build/compile_commands.json"),
+        project.path(),
+        &arguments,
     );
-    std::fs::write(project.path().join("build/compile_commands.json"), db).unwrap();
 
     let ctx = test_container()
         .resolve_build_context(project.path())
@@ -91,13 +109,17 @@ fn a_database_yielding_nothing_usable_resolves_to_none() {
     // nothing for the compiler or the prompt to use, so callers see the same
     // thing they would for a project with no database.
     let project = tempfile::tempdir().unwrap();
-    write_database(project.path(), r#"["cc","-Wall","-O2","-c","a.c"]"#);
+    write_database(project.path(), &owned(&["cc", "-Wall", "-O2", "-c", "a.c"]));
     assert!(test_container()
         .resolve_build_context(project.path())
         .unwrap()
         .is_none());
 }
 
+// Unix-only: the assertion is about refusing a symlink, so it is meaningless
+// where the test cannot create one. Gating the whole test rather than the setup
+// keeps it from passing vacuously on Windows.
+#[cfg(unix)]
 #[test]
 fn a_symlinked_compile_database_is_refused() {
     // The database is read from inside an untrusted project; a symlink there
@@ -106,7 +128,6 @@ fn a_symlinked_compile_database_is_refused() {
     let outside = tempfile::tempdir().unwrap();
     let target = outside.path().join("elsewhere.json");
     std::fs::write(&target, "[]").unwrap();
-    #[cfg(unix)]
     std::os::unix::fs::symlink(&target, project.path().join("compile_commands.json")).unwrap();
 
     assert!(test_container()

@@ -1026,12 +1026,25 @@ mod build_context_wiring_tests {
     fn a_compile_database_reaches_the_harness_build_command() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join("include")).unwrap();
-        let db = format!(
-            r#"[{{"directory":"{root}","file":"{root}/a.c",
-                  "arguments":["cc","-I{root}/include","-DA=1","-c","{root}/a.c"]}}]"#,
-            root = project.path().display()
-        );
-        std::fs::write(project.path().join("compile_commands.json"), db).unwrap();
+        // Built with serde_json rather than string interpolation: a Windows
+        // temporary directory is `C:\Users\...`, and those separators are
+        // invalid JSON escapes when pasted into a string literal.
+        let document = serde_json::json!([{
+            "directory": project.path(),
+            "file": project.path().join("a.c"),
+            "arguments": [
+                "cc".to_owned(),
+                format!("-I{}", project.path().join("include").display()),
+                "-DA=1".to_owned(),
+                "-c".to_owned(),
+                "a.c".to_owned(),
+            ],
+        }]);
+        std::fs::write(
+            project.path().join("compile_commands.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
         let container = ServiceContainer::new(Arc::new(hf_runtime::StubRuntime), None);
 
         let flags = project_compile_flags(&container, project.path()).unwrap();
